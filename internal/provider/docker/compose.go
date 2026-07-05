@@ -29,7 +29,6 @@ type StartRequest struct {
 
 type ComposeConfig struct {
 	ComposeFile          string
-	ComposeProject       string
 	Service              string
 	JITConfigEnvironment string
 }
@@ -143,7 +142,7 @@ func (provider ComposeProvider) Validate(ctx context.Context) error {
 }
 
 func (provider ComposeProvider) baseArgs() []string {
-	return []string{"compose", "-f", provider.Config.ComposeFile, "-p", provider.Config.ComposeProject}
+	return []string{"compose", "-f", provider.Config.ComposeFile}
 }
 
 type dockerContainer struct {

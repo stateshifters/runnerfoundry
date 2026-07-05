@@ -40,7 +40,6 @@ type ScaleSetConfig struct {
 
 type DockerConfig struct {
 	ComposeFile          string `yaml:"compose_file"`
-	ComposeProject       string `yaml:"compose_project"`
 	Service              string `yaml:"service"`
 	JITConfigEnvironment string `yaml:"env_jit_config_name"`
 }
@@ -119,9 +118,6 @@ func (scaleSet *ScaleSetConfig) validateProvider() error {
 	case "docker":
 		if scaleSet.Docker.ComposeFile == "" {
 			return errors.New("docker.compose_file is required")
-		}
-		if scaleSet.Docker.ComposeProject == "" {
-			return errors.New("docker.compose_project is required")
 		}
 		if scaleSet.Docker.Service == "" {
 			return errors.New("docker.service is required")

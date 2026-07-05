@@ -23,7 +23,6 @@ scale_sets:
     provider: docker
     docker:
       compose_file: ./compose.yaml
-      compose_project: github-scaler
       service: runner
       env_jit_config_name: RUNNER_JIT_CONFIG
 
@@ -52,7 +51,7 @@ Docker runner configuration is Compose-owned. Put images, env files, volumes, la
 For each runner, `github-scaler` runs:
 
 ```text
-docker compose -f <compose_file> -p <compose_project> run --detach --rm --name <runner> --label github-scaler.scale-set=<name> --label github-scaler.runner=<runner> --env <jit_env>=<jit_config> <service>
+docker compose -f <compose_file> run --detach --rm --name <runner> --label github-scaler.scale-set=<name> --label github-scaler.runner=<runner> --env <jit_env>=<jit_config> <service>
 ```
 
 `env_jit_config_name` defaults to `RUNNER_JIT_CONFIG`. The service image must consume that value and start the Github runner with the JIT config. The official Github runner image expects `ACTIONS_RUNNER_INPUT_JITCONFIG`; see [examples/docker-runner](examples/docker-runner). The runner process should exit after its assigned job; `--rm` lets Docker remove the container.

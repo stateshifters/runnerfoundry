@@ -1,7 +1,6 @@
 services:
   runner:
-    build:
-      context: .
+    image: ghcr.io/actions/actions-runner:latest
     user: runner
     working_dir: /home/runner
     command: ["/home/runner/run.sh"]

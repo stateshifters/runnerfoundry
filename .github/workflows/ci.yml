@@ -1,0 +1,50 @@
+name: Verify and Release
+
+permissions:
+  issues: write
+  checks: write
+  contents: write
+  pull-requests: write
+
+on:
+  - push
+  - pull_request
+
+env:
+  LEFTHOOK: 0
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Check coverage
+        run: make coverage
+
+      - name: Race tests
+        run: make test-race
+
+      - name: Use Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: "🧵 Install semantic release"
+        run: npm i --location=global @meza/mezas-conventional-changelog semantic-release semantic-release-discord-notifier conventional-changelog-conventionalcommits @semantic-release/github @semantic-release/changelog @semantic-release/exec semantic-release-export-data semantic-release-discord
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: npx semantic-release

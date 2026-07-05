@@ -137,7 +137,6 @@ func buildReconciler(ctx context.Context, scaleSetConfig config.ScaleSetConfig, 
 				CommandRunner: dockerprovider.ExecCommandRunner{},
 				Config: dockerprovider.ComposeConfig{
 					ComposeFile:          scaleSetConfig.Docker.ComposeFile,
-					ComposeProject:       scaleSetConfig.Docker.ComposeProject,
 					Service:              scaleSetConfig.Docker.Service,
 					JITConfigEnvironment: scaleSetConfig.Docker.JITConfigEnvironment,
 				},

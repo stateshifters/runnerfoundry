@@ -32,7 +32,6 @@ scale_sets:
     provider: docker
     docker:
       compose_file: ` + composePath + `
-      compose_project: scaler
       service: runner
   - name: vm-set
     runner_group: default
@@ -68,14 +67,12 @@ scale_sets:
     provider: docker
     docker:
       compose_file: compose.yaml
-      compose_project: scaler
       service: runner
   - name: repeated
     max_runners: 1
     provider: docker
     docker:
       compose_file: compose.yaml
-      compose_project: scaler
       service: runner
 `
 	_, err := Load(strings.NewReader(configText))
@@ -96,9 +93,8 @@ func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 		"missing scale set name":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - max_runners: 1\n    provider: docker\n",
 		"negative max runners":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: -1\n    provider: docker\n",
 		"unsupported provider":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: podman\n",
-		"missing docker compose file":     "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      compose_project: scaler\n      service: runner\n",
-		"missing docker compose project":  "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      compose_file: compose.yaml\n      service: runner\n",
-		"missing docker service":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      compose_file: compose.yaml\n      compose_project: scaler\n",
+		"missing docker compose file":     "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      service: runner\n",
+		"missing docker service":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      compose_file: compose.yaml\n",
 		"missing libvirt connection":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: libvirt\n    libvirt:\n      domain_xml_template: domain.xml\n",
 		"missing libvirt domain template": "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: libvirt\n    libvirt:\n      connection_uri: qemu:///system\n",
 		"unknown field":                   "unknown: true\n",

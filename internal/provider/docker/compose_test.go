@@ -13,7 +13,6 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 		CommandRunner: commandRunner,
 		Config: ComposeConfig{
 			ComposeFile:          "compose.yaml",
-			ComposeProject:       "github-scaler",
 			Service:              "runner",
 			JITConfigEnvironment: "RUNNER_JIT_CONFIG",
 		},
@@ -28,7 +27,7 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 		t.Fatalf("expected start success, got %v", err)
 	}
 	expected := []string{
-		"compose", "-f", "compose.yaml", "-p", "github-scaler",
+		"compose", "-f", "compose.yaml",
 		"run", "--detach", "--rm", "--name", "linux-1",
 		"--label", "github-scaler.scale-set=linux",
 		"--label", "github-scaler.runner=linux-1",
@@ -51,9 +50,8 @@ func TestListClassifiesRunningAndCompletedComposeContainers(t *testing.T) {
 	provider := ComposeProvider{
 		CommandRunner: commandRunner,
 		Config: ComposeConfig{
-			ComposeFile:    "compose.yaml",
-			ComposeProject: "github-scaler",
-			Service:        "runner",
+			ComposeFile: "compose.yaml",
+			Service:     "runner",
 		},
 	}
 
@@ -149,9 +147,8 @@ func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
 	provider := ComposeProvider{
 		CommandRunner: &recordingCommandRunner{output: "runner\n"},
 		Config: ComposeConfig{
-			ComposeFile:    "compose.yaml",
-			ComposeProject: "github-scaler",
-			Service:        "runner",
+			ComposeFile: "compose.yaml",
+			Service:     "runner",
 		},
 	}
 	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "abc", RunnerName: "runner"}); err != nil {
