@@ -28,6 +28,7 @@ type scaleSetManager interface {
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
 	UpdateRunnerScaleSet(ctx context.Context, runnerScaleSetID int, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
+	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
 }
 
 type scaleSetRunnerClient interface {
@@ -118,7 +119,7 @@ func runScaleSet(
 	if err != nil {
 		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
-	return startScaleSetLifecycle(ctx, logger, scaleSetConfig, messageClient, reconciler, scaleSets.PollRetryDelay), nil
+	return startScaleSetLifecycle(ctx, logger, scaleSetConfig, client, runnerScaleSet, messageClient, reconciler, scaleSets.PollRetryDelay), nil
 }
 
 func prepareScaleSetSession(
@@ -161,6 +162,8 @@ func startScaleSetLifecycle(
 	ctx context.Context,
 	logger *slog.Logger,
 	scaleSetConfig config.ScaleSetConfig,
+	client scaleSetManager,
+	runnerScaleSet *upstream.RunnerScaleSet,
 	messageClient scaleSetMessageClient,
 	reconciler scaler.Reconciler,
 	retryDelay time.Duration,
@@ -170,8 +173,21 @@ func startScaleSetLifecycle(
 	return scaleSetLifecycle{
 		StopPolling: stopPolling,
 		Drain:       reconciler.Drain,
-		Shutdown:    messageClient.Close,
+		Shutdown: func(ctx context.Context) error {
+			return shutdownScaleSet(ctx, messageClient, client, runnerScaleSet)
+		},
 	}
+}
+
+func shutdownScaleSet(
+	ctx context.Context,
+	messageClient scaleSetMessageClient,
+	client scaleSetManager,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) error {
+	closeErr := messageClient.Close(ctx)
+	deleteErr := client.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID)
+	return errors.Join(closeErr, deleteErr)
 }
 
 func ensureRunnerScaleSet(
@@ -276,6 +292,9 @@ func pollUntilShutdown(
 ) {
 	for ctx.Err() == nil {
 		if err := poller.PollOnce(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			logger.Error("poll failed", slog.String("scaleSet", scaleSetName), slog.String("error", err.Error()))
 			time.Sleep(retryDelay)
 		}

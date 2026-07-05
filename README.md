@@ -96,7 +96,7 @@ After editing the config or environment file, reload the service:
 sudo systemctl reload github-scaler
 ```
 
-Reload stops old-config polling first, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, reads the config once, and starts the new config. Watch progress with:
+Reload stops old-config polling first, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, reads the config once, and starts the new config. Watch progress with:
 
 ```sh
 journalctl -u github-scaler -f
@@ -222,7 +222,7 @@ For each scale set, the daemon:
 
 The daemon stores no local database. All restart recovery comes from Github statistics plus provider-visible Docker labels/names and libvirt metadata.
 
-On shutdown, the daemon closes each Github scale-set message session before exiting. This releases the active broker session held by the host and allows systemd restarts to create a fresh session without waiting for Github to expire the old one.
+On shutdown, the daemon closes each Github scale-set message session and unregisters each configured Github runner scale set before exiting. A stopped daemon should not leave managed runner scale sets registered. `prune: true` remains useful as crash recovery for stale scale sets left by older versions or hard process termination.
 
 ## Development & Contributing
 

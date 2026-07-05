@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -143,6 +144,9 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 	if !messageClient.closed {
 		t.Fatal("expected message session to close")
 	}
+	if len(client.deletedScaleSetIDs) != 1 || client.deletedScaleSetIDs[0] != 20 {
+		t.Fatalf("expected scale set deletion, got %#v", client.deletedScaleSetIDs)
+	}
 	if capturedScaleSetID != 20 {
 		t.Fatalf("expected scale set ID 20, got %d", capturedScaleSetID)
 	}
@@ -192,6 +196,19 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 	waitForPoll(t, messageClient)
 	if client.createdScaleSetRequest.Name != "linux" {
 		t.Fatalf("expected created scale set request, got %#v", client.createdScaleSetRequest)
+	}
+}
+
+func TestScaleSetShutdownReportsCloseAndDeleteFailures(t *testing.T) {
+	client := &fakeScaleSetClient{deleteScaleSetErr: errors.New("delete failed")}
+	messageClient := scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}}
+
+	err := shutdownScaleSet(context.Background(), messageClient, client, &upstream.RunnerScaleSet{ID: 20})
+	if err == nil || !strings.Contains(err.Error(), "close message session") || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("expected joined close and delete errors, got %v", err)
+	}
+	if len(client.deletedScaleSetIDs) != 0 {
+		t.Fatalf("expected failed delete not to record success, got %#v", client.deletedScaleSetIDs)
 	}
 }
 
@@ -427,11 +444,33 @@ func TestRunnerHostnameFallsBackWhenHostNameFails(t *testing.T) {
 
 func TestPollUntilShutdownHandlesPollErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	pollCount := 0
 	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
 		getMessageErr: errors.New("poll failed"),
-		onGetMessage:  cancel,
+		onGetMessage: func() {
+			pollCount++
+			if pollCount > 1 {
+				cancel()
+			}
+		},
 	}, Handler: scaleSetHandler{}}
 	pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Nanosecond)
+}
+
+func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: context.Canceled,
+		onGetMessage:  cancel,
+	}, Handler: scaleSetHandler{}}
+
+	pollUntilShutdown(ctx, logger, "linux", poller, time.Nanosecond)
+
+	if logs.Len() != 0 {
+		t.Fatalf("expected no shutdown cancellation log, got %q", logs.String())
+	}
 }
 
 func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {
