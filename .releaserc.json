@@ -47,8 +47,8 @@
       {
         "assets": [
           {
-            "path": "dist/github-scaler-linux-amd64-${nextRelease.version}.zip",
-            "label": "GitHub Scaler v${nextRelease.version} for Linux"
+            "path": "dist/github-scaler_${nextRelease.version}_amd64.deb",
+            "label": "GitHub Scaler v${nextRelease.version} Debian package"
           }
         ]
       }

@@ -43,7 +43,44 @@ Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT 
 
 ## Install as a Daemon
 
-Install the Linux binary somewhere on `PATH` for system services:
+Install the Debian package on Ubuntu or Debian hosts:
+
+```sh
+sudo apt install ./github-scaler_1.0.0_amd64.deb
+```
+
+The package installs:
+
+- `/usr/bin/github-scaler`
+- `/lib/systemd/system/github-scaler.service`
+- `/etc/github-scaler/config.yaml`
+- `/etc/github-scaler/github-scaler.env`
+
+Package installation creates the `github-scaler` service user and reloads systemd units. It does not enable or start the daemon because the config and token must be set first.
+
+If the configured providers require host group access, add the service user to those groups before starting the daemon:
+
+```sh
+sudo usermod -aG docker github-scaler
+sudo usermod -aG libvirt github-scaler
+```
+
+Edit `/etc/github-scaler/config.yaml` and `/etc/github-scaler/github-scaler.env`, then enable the service:
+
+```sh
+sudo systemctl enable --now github-scaler
+sudo systemctl status github-scaler
+```
+
+Inspect logs with:
+
+```sh
+journalctl -u github-scaler -f
+```
+
+### Manual Install
+
+For local builds, install the Linux binary somewhere on `PATH` for system services:
 
 ```sh
 sudo install -m 0755 github-scaler /usr/local/bin/github-scaler

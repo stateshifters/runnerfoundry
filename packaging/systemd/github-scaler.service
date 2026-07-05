@@ -1,0 +1,17 @@
+[Unit]
+Description=GitHub runner scale-set scaler
+After=network-online.target docker.service libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=github-scaler
+Group=github-scaler
+EnvironmentFile=/etc/github-scaler/github-scaler.env
+ExecStart=/usr/bin/github-scaler --config /etc/github-scaler/config.yaml
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

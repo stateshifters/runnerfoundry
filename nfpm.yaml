@@ -1,0 +1,45 @@
+name: github-scaler
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: utils
+priority: optional
+maintainer: Meza <meza@users.noreply.github.com>
+description: GitHub Actions runner scale-set scaler
+vendor: meza
+homepage: https://github.com/meza/github-scaler
+license: MIT
+
+contents:
+  - src: build/linux/amd64/github-scaler
+    dst: /usr/bin/github-scaler
+    file_info:
+      mode: 0755
+  - src: packaging/systemd/github-scaler.service
+    dst: /lib/systemd/system/github-scaler.service
+    file_info:
+      mode: 0644
+  - src: packaging/config/config.yaml
+    dst: /etc/github-scaler/config.yaml
+    type: config
+    file_info:
+      mode: 0640
+  - src: packaging/config/github-scaler.env
+    dst: /etc/github-scaler/github-scaler.env
+    type: config
+    file_info:
+      mode: 0640
+  - src: build/metadata/THIRD_PARTY_NOTICES.txt
+    dst: /usr/share/doc/github-scaler/THIRD_PARTY_NOTICES.txt
+    file_info:
+      mode: 0644
+  - src: build/metadata/github-scaler-sbom.json
+    dst: /usr/share/doc/github-scaler/github-scaler-sbom.json
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh

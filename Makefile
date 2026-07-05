@@ -6,8 +6,9 @@ METADATA_DIR := $(BUILD_DIR)/metadata
 NOTICES_FILE := $(METADATA_DIR)/THIRD_PARTY_NOTICES.txt
 SBOM_FILE := $(METADATA_DIR)/github-scaler-sbom.json
 VERSION ?= dev
+NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 
-.PHONY: fmt-check vet test test-race coverage build notices sbom dist prepare clean
+.PHONY: fmt-check vet test test-race coverage build notices sbom package-deb prepare clean
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
@@ -69,24 +70,21 @@ else
 	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -licenses -json -output "$(SBOM_FILE)"
 endif
 
-dist: notices sbom
+package-deb: build notices sbom
 ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(DIST_DIR)' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$(DIST_DIR)/metadata' | Out-Null; Copy-Item '$(NOTICES_FILE)' '$(DIST_DIR)/metadata/'; Copy-Item '$(SBOM_FILE)' '$(DIST_DIR)/metadata/'; Copy-Item '$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)' '$(DIST_DIR)/'; tar -a -cf '$(DIST_DIR)/$(APP_NAME)-linux-amd64-$(VERSION).zip' -C '$(DIST_DIR)' '$(EXECUTABLE_NAME)' 'metadata'"
+	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(DIST_DIR)' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; $$env:VERSION='$(VERSION)'; $(NFPM) package --packager deb --config nfpm.yaml --target '$(DIST_DIR)'"
 else
 	rm -rf "$(DIST_DIR)"
-	mkdir -p "$(DIST_DIR)/metadata"
-	cp "$(NOTICES_FILE)" "$(DIST_DIR)/metadata/"
-	cp "$(SBOM_FILE)" "$(DIST_DIR)/metadata/"
-	cd "$(BUILD_DIR)/linux/amd64" && zip -q -9 "../../../$(DIST_DIR)/$(APP_NAME)-linux-amd64-$(VERSION).zip" "$(EXECUTABLE_NAME)"
+	mkdir -p "$(DIST_DIR)"
+	VERSION="$(VERSION)" $(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
 endif
 
 prepare:
-	$(MAKE) build VERSION="$(VERSION)"
-	$(MAKE) dist VERSION="$(VERSION)"
+	$(MAKE) package-deb VERSION="$(VERSION)"
 
 clean:
 ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(BUILD_DIR)','$(DIST_DIR)' -ErrorAction SilentlyContinue; Remove-Item -Force coverage,coverage.out -ErrorAction SilentlyContinue"
+	powershell -NoProfile -Command "foreach ($$path in '$(BUILD_DIR)','$(DIST_DIR)','coverage','coverage.out') { if (Test-Path -LiteralPath $$path) { Remove-Item -Recurse -Force -LiteralPath $$path } }"
 else
 	rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" coverage coverage.out
 endif
