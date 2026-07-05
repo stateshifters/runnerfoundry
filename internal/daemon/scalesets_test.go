@@ -343,84 +343,11 @@ func TestEnsureRunnerScaleSetReturnsExistingOrCreatesNew(t *testing.T) {
 
 func TestEnsureRunnerScaleSetUsesConfiguredLabels(t *testing.T) {
 	client := &fakeScaleSetClient{createdScaleSet: &upstream.RunnerScaleSet{ID: 2}}
-	_, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{
-		Name:   "linux",
-		Labels: []string{"self-hosted", "linux", "x64"},
-	})
+	_, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{Name: "linux"})
 	if err != nil {
 		t.Fatalf("expected create success, got %v", err)
 	}
-	assertScaleSetLabels(t, client.createdScaleSetRequest.Labels, []string{"self-hosted", "linux", "x64"})
-}
-
-func TestEnsureRunnerScaleSetUpdatesExistingLabels(t *testing.T) {
-	client := &fakeScaleSetClient{
-		runnerScaleSet: &upstream.RunnerScaleSet{
-			ID:     1,
-			Name:   "linux",
-			Labels: []upstream.Label{{Name: "stale", Type: "System"}},
-		},
-		updatedScaleSet: &upstream.RunnerScaleSet{ID: 1, Name: "linux"},
-	}
-	_, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{
-		Name:   "linux",
-		Labels: []string{"self-hosted", "linux"},
-	})
-	if err != nil {
-		t.Fatalf("expected update success, got %v", err)
-	}
-	assertScaleSetLabels(t, client.updatedScaleSetRequest.Labels, []string{"self-hosted", "linux"})
-}
-
-func TestEnsureRunnerScaleSetKeepsMatchingExistingLabels(t *testing.T) {
-	client := &fakeScaleSetClient{
-		runnerScaleSet: &upstream.RunnerScaleSet{
-			ID:     1,
-			Name:   "linux",
-			Labels: []upstream.Label{{Name: "self-hosted", Type: "System"}, {Name: "linux", Type: "System"}},
-		},
-	}
-	scaleSet, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{
-		Name:   "linux",
-		Labels: []string{"self-hosted", "linux"},
-	})
-	if err != nil {
-		t.Fatalf("expected existing success, got %v", err)
-	}
-	if scaleSet.ID != 1 {
-		t.Fatalf("expected existing scale set, got %#v", scaleSet)
-	}
-	if client.updatedScaleSetRequest != nil {
-		t.Fatalf("expected no label update, got %#v", client.updatedScaleSetRequest)
-	}
-}
-
-func TestEnsureRunnerScaleSetSurfacesLabelUpdateFailure(t *testing.T) {
-	client := &fakeScaleSetClient{
-		runnerScaleSet: &upstream.RunnerScaleSet{
-			ID:     1,
-			Name:   "linux",
-			Labels: []upstream.Label{{Name: "stale", Type: "System"}},
-		},
-		updateScaleSetErr: errors.New("update failed"),
-	}
-	_, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{
-		Name:   "linux",
-		Labels: []string{"self-hosted", "linux"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "update runner scale set") {
-		t.Fatalf("expected update error, got %v", err)
-	}
-}
-
-func TestScaleSetLabelsEqualDetectsMismatches(t *testing.T) {
-	leftLabels := []upstream.Label{{Name: "linux", Type: "System"}}
-	if scaleSetLabelsEqual(leftLabels, []upstream.Label{{Name: "windows", Type: "System"}}) {
-		t.Fatal("expected label name mismatch")
-	}
-	if scaleSetLabelsEqual(leftLabels, []upstream.Label{{Name: "linux", Type: "Custom"}}) {
-		t.Fatal("expected label type mismatch")
-	}
+	assertScaleSetLabels(t, client.createdScaleSetRequest.Labels, []string{"linux"})
 }
 
 func TestRunnerHostnameReturnsHostName(t *testing.T) {
@@ -556,9 +483,6 @@ type fakeScaleSetClient struct {
 	createdScaleSet        *upstream.RunnerScaleSet
 	createdScaleSetRequest *upstream.RunnerScaleSet
 	createScaleSetErr      error
-	updatedScaleSet        *upstream.RunnerScaleSet
-	updatedScaleSetRequest *upstream.RunnerScaleSet
-	updateScaleSetErr      error
 	deletedScaleSetIDs     []int
 	deleteScaleSetErr      error
 	messageClient          scaleSetMessageClient
@@ -598,21 +522,6 @@ func (client *fakeScaleSetClient) CreateRunnerScaleSet(
 		return nil, client.createScaleSetErr
 	}
 	return client.createdScaleSet, nil
-}
-
-func (client *fakeScaleSetClient) UpdateRunnerScaleSet(
-	ctx context.Context,
-	runnerScaleSetID int,
-	runnerScaleSet *upstream.RunnerScaleSet,
-) (*upstream.RunnerScaleSet, error) {
-	client.updatedScaleSetRequest = runnerScaleSet
-	if client.updateScaleSetErr != nil {
-		return nil, client.updateScaleSetErr
-	}
-	if client.updatedScaleSet == nil {
-		return runnerScaleSet, nil
-	}
-	return client.updatedScaleSet, nil
 }
 
 func (client *fakeScaleSetClient) DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error {

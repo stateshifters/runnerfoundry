@@ -27,7 +27,6 @@ type scaleSetManager interface {
 	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
-	UpdateRunnerScaleSet(ctx context.Context, runnerScaleSetID int, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
 	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
 }
 
@@ -201,12 +200,15 @@ func ensureRunnerScaleSet(
 		return nil, fmt.Errorf("get runner scale set %q: %w", scaleSetConfig.Name, err)
 	}
 	if runnerScaleSet != nil {
-		return updateRunnerScaleSetLabels(ctx, client, runnerScaleSet, configuredScaleSetLabels(scaleSetConfig))
+		return runnerScaleSet, nil
 	}
 	runnerScaleSet, err = client.CreateRunnerScaleSet(ctx, &upstream.RunnerScaleSet{
 		Name:          scaleSetConfig.Name,
 		RunnerGroupID: runnerGroupID,
-		Labels:        configuredScaleSetLabels(scaleSetConfig),
+		Labels: []upstream.Label{{
+			Name: scaleSetConfig.Name,
+			Type: "System",
+		}},
 		RunnerSetting: upstream.RunnerSetting{
 			DisableUpdate: true,
 		},
@@ -215,48 +217,6 @@ func ensureRunnerScaleSet(
 		return nil, fmt.Errorf("create runner scale set %q: %w", scaleSetConfig.Name, err)
 	}
 	return runnerScaleSet, nil
-}
-
-func updateRunnerScaleSetLabels(
-	ctx context.Context,
-	client scaleSetManager,
-	runnerScaleSet *upstream.RunnerScaleSet,
-	labels []upstream.Label,
-) (*upstream.RunnerScaleSet, error) {
-	if scaleSetLabelsEqual(runnerScaleSet.Labels, labels) {
-		return runnerScaleSet, nil
-	}
-	updatedScaleSet := *runnerScaleSet
-	updatedScaleSet.Labels = labels
-	updatedRunnerScaleSet, err := client.UpdateRunnerScaleSet(ctx, runnerScaleSet.ID, &updatedScaleSet)
-	if err != nil {
-		return nil, fmt.Errorf("update runner scale set %q labels: %w", runnerScaleSet.Name, err)
-	}
-	return updatedRunnerScaleSet, nil
-}
-
-func configuredScaleSetLabels(scaleSetConfig config.ScaleSetConfig) []upstream.Label {
-	labelNames := scaleSetConfig.Labels
-	if len(labelNames) == 0 {
-		labelNames = []string{scaleSetConfig.Name}
-	}
-	labels := make([]upstream.Label, len(labelNames))
-	for labelIndex, labelName := range labelNames {
-		labels[labelIndex] = upstream.Label{Name: labelName, Type: "System"}
-	}
-	return labels
-}
-
-func scaleSetLabelsEqual(leftLabels []upstream.Label, rightLabels []upstream.Label) bool {
-	if len(leftLabels) != len(rightLabels) {
-		return false
-	}
-	for labelIndex := range leftLabels {
-		if leftLabels[labelIndex].Name != rightLabels[labelIndex].Name || leftLabels[labelIndex].Type != rightLabels[labelIndex].Type {
-			return false
-		}
-	}
-	return true
 }
 
 func runnerHostname() string {

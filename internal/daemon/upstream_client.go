@@ -63,18 +63,6 @@ func (client upstreamScaleSetClient) CreateRunnerScaleSet(
 	return createdScaleSet, nil
 }
 
-func (client upstreamScaleSetClient) UpdateRunnerScaleSet(
-	ctx context.Context,
-	runnerScaleSetID int,
-	runnerScaleSet *upstream.RunnerScaleSet,
-) (*upstream.RunnerScaleSet, error) {
-	updatedScaleSet, err := client.Client.UpdateRunnerScaleSet(ctx, runnerScaleSetID, runnerScaleSet)
-	if err != nil {
-		return nil, fmt.Errorf("update runner scale set: %w", err)
-	}
-	return updatedScaleSet, nil
-}
-
 func (client upstreamScaleSetClient) ListRunnerScaleSets(
 	ctx context.Context,
 	runnerGroupID int,

@@ -22,10 +22,6 @@ scale_sets:
     repositories:
       - https://github.com/OWNER/REPO_A
       - https://github.com/OWNER/REPO_B
-    labels:
-      - self-hosted
-      - linux
-      - x64
     runner_group: default
     max_runners: 2
     docker:
@@ -51,7 +47,7 @@ Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT 
 
 Each scale set lists the repositories it serves. A single configured scale set such as `linux-docker` can drive multiple repositories that need the same self-hosted runner pool. Github still gets one runner scale set per repository target; the daemon qualifies local Docker/libvirt ownership internally so provider state does not collide between repositories.
 
-`scale_sets[].labels` configures the Github runner scale-set labels used by workflow `runs-on` matching. If omitted, the scale-set name is used as the only label. Do not set runner matching labels through Docker Compose environment variables such as `LABELS`; the runner is started from Github JIT config after the job has already matched the scale set.
+Github runner scale sets are routed by their scale-set name. Use the configured `scale_sets[].name` value in workflow `runs-on`; do not configure runner matching labels through Docker Compose environment variables such as `LABELS`.
 
 Set `prune: true` only when `github-scaler` owns every runner scale set in the configured repositories and runner groups. When enabled, startup deletes Github runner scale sets in those repository/group targets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 

@@ -40,14 +40,6 @@ func (client coverageScaleSetClient) CreateRunnerScaleSet(
 	return nil, errors.New("coverage client has no GitHub transport")
 }
 
-func (client coverageScaleSetClient) UpdateRunnerScaleSet(
-	ctx context.Context,
-	runnerScaleSetID int,
-	runnerScaleSet *upstream.RunnerScaleSet,
-) (*upstream.RunnerScaleSet, error) {
-	return nil, errors.New("coverage client has no GitHub transport")
-}
-
 func (client coverageScaleSetClient) ListRunnerScaleSets(
 	ctx context.Context,
 	runnerGroupID int,

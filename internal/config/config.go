@@ -30,7 +30,6 @@ type LogConfig struct {
 type ScaleSetConfig struct {
 	Name         string         `yaml:"name"`
 	Repositories []string       `yaml:"repositories"`
-	Labels       []string       `yaml:"labels"`
 	RunnerGroup  string         `yaml:"runner_group"`
 	MaxRunners   int            `yaml:"max_runners"`
 	Docker       *DockerConfig  `yaml:"docker"`
@@ -102,9 +101,6 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	if err := scaleSet.validateRepositories(); err != nil {
 		return err
 	}
-	if err := scaleSet.validateLabels(); err != nil {
-		return err
-	}
 	if scaleSet.RunnerGroup == "" {
 		scaleSet.RunnerGroup = "default"
 	}
@@ -136,20 +132,6 @@ func (scaleSet *ScaleSetConfig) validateRepositories() error {
 		if strings.TrimSpace(repositoryURL) == "" {
 			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
 		}
-	}
-	return nil
-}
-
-func (scaleSet *ScaleSetConfig) validateLabels() error {
-	seenLabels := map[string]bool{}
-	for labelIndex, labelName := range scaleSet.Labels {
-		if strings.TrimSpace(labelName) == "" {
-			return fmt.Errorf("scale set %q labels[%d] must not be empty", scaleSet.Name, labelIndex)
-		}
-		if seenLabels[labelName] {
-			return fmt.Errorf("scale set %q duplicate label %q", scaleSet.Name, labelName)
-		}
-		seenLabels[labelName] = true
 	}
 	return nil
 }

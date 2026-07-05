@@ -785,14 +785,6 @@ func (client fakeNonPruningScaleSetClient) CreateRunnerScaleSet(
 	return runnerScaleSet, nil
 }
 
-func (client fakeNonPruningScaleSetClient) UpdateRunnerScaleSet(
-	ctx context.Context,
-	runnerScaleSetID int,
-	runnerScaleSet *upstream.RunnerScaleSet,
-) (*upstream.RunnerScaleSet, error) {
-	return runnerScaleSet, nil
-}
-
 func (client fakeNonPruningScaleSetClient) DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error {
 	return nil
 }

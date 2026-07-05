@@ -30,10 +30,6 @@ scale_sets:
     repositories:
       - https://github.com/meza/repo-a
       - https://github.com/meza/repo-b
-    labels:
-      - self-hosted
-      - linux
-      - x64
     max_runners: 2
     docker:
       compose_file: ` + composePath + `
@@ -53,9 +49,6 @@ scale_sets:
 	}
 	if loadedConfig.ScaleSets[0].Repositories[1] != "https://github.com/meza/repo-b" {
 		t.Fatalf("expected repositories to load, got %#v", loadedConfig.ScaleSets[0].Repositories)
-	}
-	if strings.Join(loadedConfig.ScaleSets[0].Labels, ",") != "self-hosted,linux,x64" {
-		t.Fatalf("expected labels to load, got %#v", loadedConfig.ScaleSets[0].Labels)
 	}
 	if !loadedConfig.Prune {
 		t.Fatal("expected prune to load")
@@ -125,8 +118,7 @@ func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 		"missing scale set name": baseConfig("  - repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
 		"missing repositories":   baseConfig(validScaleSet("bad", "")),
 		"empty repository":       baseConfig(validScaleSet("bad", "    repositories:\n      - ''\n")),
-		"empty label":            baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - ''\n")),
-		"duplicate label":        baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - linux\n      - linux\n")),
+		"scale set labels":       baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - linux\n")),
 		"negative max runners": baseConfig(`
   - name: bad
     repositories:
