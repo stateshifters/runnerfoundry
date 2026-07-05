@@ -37,6 +37,7 @@ type scaleSetRunnerClient interface {
 		setting *upstream.RunnerScaleSetJitRunnerSetting,
 		runnerScaleSetID int,
 	) (*upstream.RunnerScaleSetJitRunnerConfig, error)
+	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
 type scaleSetPruneClient interface {
@@ -278,12 +279,32 @@ type scalesetJITGenerator struct {
 	ScaleSetID int
 }
 
-func (generator scalesetJITGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
+func (generator scalesetJITGenerator) Generate(ctx context.Context, runnerName string) (scaler.JITRunnerConfig, error) {
 	jitConfig, err := generator.Client.GenerateJitRunnerConfig(ctx, &upstream.RunnerScaleSetJitRunnerSetting{
 		Name: runnerName,
 	}, generator.ScaleSetID)
 	if err != nil {
-		return "", fmt.Errorf("generate jit runner config: %w", err)
+		return scaler.JITRunnerConfig{}, fmt.Errorf("generate jit runner config: %w", err)
 	}
-	return jitConfig.EncodedJITConfig, nil
+	return scaler.JITRunnerConfig{
+		Runner:    jitRunnerReference(jitConfig.Runner),
+		JITConfig: jitConfig.EncodedJITConfig,
+	}, nil
+}
+
+func (generator scalesetJITGenerator) Remove(ctx context.Context, runner scaler.JITRunner) error {
+	if runner.ID == 0 {
+		return nil
+	}
+	if err := generator.Client.RemoveRunner(ctx, runner.ID); err != nil {
+		return fmt.Errorf("remove jit runner %q: %w", runner.Name, err)
+	}
+	return nil
+}
+
+func jitRunnerReference(runner *upstream.RunnerReference) scaler.JITRunner {
+	if runner == nil {
+		return scaler.JITRunner{}
+	}
+	return scaler.JITRunner{ID: int64(runner.ID), Name: runner.Name}
 }

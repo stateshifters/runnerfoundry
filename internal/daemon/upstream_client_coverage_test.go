@@ -44,4 +44,7 @@ func TestCoverageScaleSetClientMethodsReturnBoundaryErrors(t *testing.T) {
 	if _, err := client.GenerateJitRunnerConfig(context.Background(), &upstream.RunnerScaleSetJitRunnerSetting{}, 1); err == nil {
 		t.Fatal("expected jit error")
 	}
+	if err := client.RemoveRunner(context.Background(), 1); err == nil {
+		t.Fatal("expected remove runner error")
+	}
 }

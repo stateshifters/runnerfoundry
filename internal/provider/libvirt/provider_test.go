@@ -105,7 +105,7 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	}
 }
 
-func TestDestroyUndefinesCompletedDomain(t *testing.T) {
+func TestDestroyUndefinesCompletedDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
 

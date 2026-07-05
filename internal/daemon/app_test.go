@@ -805,6 +805,10 @@ func (client fakeNonPruningScaleSetClient) GenerateJitRunnerConfig(
 	return &upstream.RunnerScaleSetJitRunnerConfig{}, nil
 }
 
+func (client fakeNonPruningScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
+	return nil
+}
+
 func TestRunUsesProductionRuntime(t *testing.T) {
 	if err := Run(context.Background(), Options{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}); err == nil {
 		t.Fatal("expected missing config error")

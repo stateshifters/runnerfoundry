@@ -66,3 +66,7 @@ func (client coverageScaleSetClient) GenerateJitRunnerConfig(
 ) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
 	return nil, errors.New("coverage client has no GitHub transport")
 }
+
+func (client coverageScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
+	return errors.New("coverage client has no GitHub transport")
+}

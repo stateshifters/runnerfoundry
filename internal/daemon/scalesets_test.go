@@ -435,13 +435,19 @@ func TestScaleSetHandlerSurfacesReconcileFailure(t *testing.T) {
 }
 
 func TestJITGeneratorUsesScaleSetClient(t *testing.T) {
-	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{jitConfig: "encoded"}, ScaleSetID: 12}
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{
+		jitConfig: "encoded",
+		jitRunner: &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+	}, ScaleSetID: 12}
 	jitConfig, err := generator.Generate(context.Background(), "linux-1")
 	if err != nil {
 		t.Fatalf("expected jit success, got %v", err)
 	}
-	if jitConfig != "encoded" {
-		t.Fatalf("expected encoded jit, got %q", jitConfig)
+	if jitConfig.JITConfig != "encoded" {
+		t.Fatalf("expected encoded jit, got %q", jitConfig.JITConfig)
+	}
+	if jitConfig.Runner.ID != 99 || jitConfig.Runner.Name != "linux-1" {
+		t.Fatalf("expected runner reference, got %#v", jitConfig.Runner)
 	}
 }
 
@@ -449,6 +455,46 @@ func TestJITGeneratorSurfacesClientFailure(t *testing.T) {
 	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{jitErr: errors.New("jit failed")}}
 	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
 		t.Fatal("expected jit error")
+	}
+}
+
+func TestJITGeneratorHandlesMissingRunnerReference(t *testing.T) {
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{jitConfig: "encoded"}, ScaleSetID: 12}
+	jitConfig, err := generator.Generate(context.Background(), "linux-1")
+	if err != nil {
+		t.Fatalf("expected jit success, got %v", err)
+	}
+	if jitConfig.Runner.ID != 0 || jitConfig.Runner.Name != "" {
+		t.Fatalf("expected empty runner reference, got %#v", jitConfig.Runner)
+	}
+}
+
+func TestJITGeneratorRemovesGeneratedRunner(t *testing.T) {
+	client := &fakeScaleSetClient{}
+	generator := scalesetJITGenerator{Client: client}
+	if err := generator.Remove(context.Background(), scaler.JITRunner{ID: 99, Name: "linux-1"}); err != nil {
+		t.Fatalf("expected remove success, got %v", err)
+	}
+	if len(client.removedRunnerIDs) != 1 || client.removedRunnerIDs[0] != 99 {
+		t.Fatalf("expected runner removal, got %#v", client.removedRunnerIDs)
+	}
+}
+
+func TestJITGeneratorIgnoresMissingRunnerReference(t *testing.T) {
+	client := &fakeScaleSetClient{}
+	generator := scalesetJITGenerator{Client: client}
+	if err := generator.Remove(context.Background(), scaler.JITRunner{}); err != nil {
+		t.Fatalf("expected missing runner reference success, got %v", err)
+	}
+	if len(client.removedRunnerIDs) != 0 {
+		t.Fatalf("expected no runner removal, got %#v", client.removedRunnerIDs)
+	}
+}
+
+func TestJITGeneratorSurfacesRemoveFailure(t *testing.T) {
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{removeRunnerErr: errors.New("remove failed")}}
+	if err := generator.Remove(context.Background(), scaler.JITRunner{ID: 99, Name: "linux-1"}); err == nil {
+		t.Fatal("expected remove error")
 	}
 }
 
@@ -489,7 +535,10 @@ type fakeScaleSetClient struct {
 	messageRunnerName      string
 	messageSessionErr      error
 	jitConfig              string
+	jitRunner              *upstream.RunnerReference
 	jitErr                 error
+	removedRunnerIDs       []int64
+	removeRunnerErr        error
 }
 
 func (client *fakeScaleSetClient) GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error) {
@@ -552,7 +601,18 @@ func (client *fakeScaleSetClient) GenerateJitRunnerConfig(
 	if client.jitErr != nil {
 		return nil, client.jitErr
 	}
-	return &upstream.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: client.jitConfig}, nil
+	return &upstream.RunnerScaleSetJitRunnerConfig{
+		Runner:           client.jitRunner,
+		EncodedJITConfig: client.jitConfig,
+	}, nil
+}
+
+func (client *fakeScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
+	if client.removeRunnerErr != nil {
+		return client.removeRunnerErr
+	}
+	client.removedRunnerIDs = append(client.removedRunnerIDs, runnerID)
+	return nil
 }
 
 type fakeMessageClient struct {
@@ -626,6 +686,10 @@ func (provider *fakeScalerProvider) Destroy(ctx context.Context, instance scaler
 
 type fakeJITConfigGenerator struct{}
 
-func (generator fakeJITConfigGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
-	return "jit", nil
+func (generator fakeJITConfigGenerator) Generate(ctx context.Context, runnerName string) (scaler.JITRunnerConfig, error) {
+	return scaler.JITRunnerConfig{JITConfig: "jit"}, nil
+}
+
+func (generator fakeJITConfigGenerator) Remove(ctx context.Context, runner scaler.JITRunner) error {
+	return nil
 }

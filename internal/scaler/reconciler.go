@@ -31,7 +31,18 @@ type Provider interface {
 }
 
 type JITConfigGenerator interface {
-	Generate(ctx context.Context, runnerName string) (string, error)
+	Generate(ctx context.Context, runnerName string) (JITRunnerConfig, error)
+	Remove(ctx context.Context, runner JITRunner) error
+}
+
+type JITRunnerConfig struct {
+	Runner    JITRunner
+	JITConfig string
+}
+
+type JITRunner struct {
+	ID   int64
+	Name string
 }
 
 type ScaleSetRuntime struct {
@@ -114,8 +125,11 @@ func (reconciler Reconciler) startMissingRunners(ctx context.Context, runningCou
 		if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
 			ScaleSetName: reconciler.ScaleSet.Name,
 			RunnerName:   runnerName,
-			JITConfig:    jitConfig,
+			JITConfig:    jitConfig.JITConfig,
 		}); err != nil {
+			if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner); removeErr != nil {
+				return fmt.Errorf("start runner %q: %w; remove github runner: %w", runnerName, err, removeErr)
+			}
 			return fmt.Errorf("start runner %q: %w", runnerName, err)
 		}
 	}

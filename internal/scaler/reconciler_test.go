@@ -3,6 +3,7 @@ package scaler
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -182,6 +183,36 @@ func TestReconcilerSurfacesProviderFailures(t *testing.T) {
 	}
 }
 
+func TestReconcilerRemovesJITRunnerAfterProviderStartFailure(t *testing.T) {
+	jitConfigs := &recordingJITGenerator{}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name:       "set",
+		MaxRunners: 1,
+		Provider:   failingProvider{failure: "start"},
+		JITConfig:  jitConfigs,
+	}}
+	if _, err := reconciler.Reconcile(context.Background(), 1); err == nil {
+		t.Fatal("expected provider failure")
+	}
+	if len(jitConfigs.removed) != 1 || jitConfigs.removed[0].Name != "set-1" {
+		t.Fatalf("expected generated runner removed, got %#v", jitConfigs.removed)
+	}
+}
+
+func TestReconcilerReportsJITRunnerCleanupFailure(t *testing.T) {
+	jitConfigs := &recordingJITGenerator{removeErr: errors.New("remove failed")}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name:       "set",
+		MaxRunners: 1,
+		Provider:   failingProvider{failure: "start"},
+		JITConfig:  jitConfigs,
+	}}
+	_, err := reconciler.Reconcile(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "remove github runner") {
+		t.Fatalf("expected cleanup failure, got %v", err)
+	}
+}
+
 type recordingProvider struct {
 	instances []RunnerInstance
 	created   []RunnerStartRequest
@@ -203,18 +234,35 @@ func (provider *recordingProvider) Destroy(ctx context.Context, instance RunnerI
 }
 
 type recordingJITGenerator struct {
-	names []string
+	names     []string
+	removed   []JITRunner
+	removeErr error
 }
 
-func (generator *recordingJITGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
+func (generator *recordingJITGenerator) Generate(ctx context.Context, runnerName string) (JITRunnerConfig, error) {
 	generator.names = append(generator.names, runnerName)
-	return "jit-" + runnerName, nil
+	return JITRunnerConfig{
+		Runner:    JITRunner{ID: int64(len(generator.names)), Name: runnerName},
+		JITConfig: "jit-" + runnerName,
+	}, nil
+}
+
+func (generator *recordingJITGenerator) Remove(ctx context.Context, runner JITRunner) error {
+	if generator.removeErr != nil {
+		return generator.removeErr
+	}
+	generator.removed = append(generator.removed, runner)
+	return nil
 }
 
 type failingJITGenerator struct{}
 
-func (generator failingJITGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
-	return "", errors.New("jit failed")
+func (generator failingJITGenerator) Generate(ctx context.Context, runnerName string) (JITRunnerConfig, error) {
+	return JITRunnerConfig{}, errors.New("jit failed")
+}
+
+func (generator failingJITGenerator) Remove(ctx context.Context, runner JITRunner) error {
+	return nil
 }
 
 type failingProvider struct {

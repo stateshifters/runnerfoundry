@@ -104,3 +104,10 @@ func (client upstreamScaleSetClient) GenerateJitRunnerConfig(
 	}
 	return jitConfig, nil
 }
+
+func (client upstreamScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
+	if err := client.Client.RemoveRunner(ctx, runnerID); err != nil {
+		return fmt.Errorf("remove runner: %w", err)
+	}
+	return nil
+}
