@@ -1,0 +1,107 @@
+package scaler
+
+import (
+	"context"
+	"fmt"
+)
+
+type RunnerState string
+
+const (
+	RunnerStateRunning   RunnerState = "running"
+	RunnerStateCompleted RunnerState = "completed"
+)
+
+type RunnerInstance struct {
+	ID         string
+	RunnerName string
+	State      RunnerState
+}
+
+type RunnerStartRequest struct {
+	ScaleSetName string
+	RunnerName   string
+	JITConfig    string
+}
+
+type Provider interface {
+	List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error)
+	Start(ctx context.Context, request RunnerStartRequest) error
+	Destroy(ctx context.Context, instance RunnerInstance) error
+}
+
+type JITConfigGenerator interface {
+	Generate(ctx context.Context, runnerName string) (string, error)
+}
+
+type ScaleSetRuntime struct {
+	Name       string
+	MaxRunners int
+	Provider   Provider
+	JITConfig  JITConfigGenerator
+}
+
+type Reconciler struct {
+	ScaleSet ScaleSetRuntime
+}
+
+func DesiredRunnerCount(assignedJobs int, maxRunners int) int {
+	if assignedJobs < 0 {
+		return 0
+	}
+	if assignedJobs > maxRunners {
+		return maxRunners
+	}
+	return assignedJobs
+}
+
+func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (int, error) {
+	desiredCount := DesiredRunnerCount(assignedJobs, reconciler.ScaleSet.MaxRunners)
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return 0, fmt.Errorf("list runner instances: %w", err)
+	}
+	runningCount := 0
+	usedRunnerNames := map[string]bool{}
+	for _, instance := range instances {
+		if instance.RunnerName != "" {
+			usedRunnerNames[instance.RunnerName] = true
+		}
+		if instance.State == RunnerStateCompleted {
+			if err := reconciler.ScaleSet.Provider.Destroy(ctx, instance); err != nil {
+				return 0, fmt.Errorf("destroy completed runner %q: %w", instance.RunnerName, err)
+			}
+			continue
+		}
+		if instance.State == RunnerStateRunning {
+			runningCount++
+		}
+	}
+	nextRunnerIndex := 1
+	for runnerIndex := runningCount; runnerIndex < desiredCount; runnerIndex++ {
+		runnerName := reconciler.nextRunnerName(usedRunnerNames, &nextRunnerIndex)
+		jitConfig, err := reconciler.ScaleSet.JITConfig.Generate(ctx, runnerName)
+		if err != nil {
+			return 0, fmt.Errorf("generate jit config for %q: %w", runnerName, err)
+		}
+		if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
+			ScaleSetName: reconciler.ScaleSet.Name,
+			RunnerName:   runnerName,
+			JITConfig:    jitConfig,
+		}); err != nil {
+			return 0, fmt.Errorf("start runner %q: %w", runnerName, err)
+		}
+	}
+	return desiredCount, nil
+}
+
+func (reconciler Reconciler) nextRunnerName(usedRunnerNames map[string]bool, nextRunnerIndex *int) string {
+	for {
+		runnerName := fmt.Sprintf("%s-%d", reconciler.ScaleSet.Name, *nextRunnerIndex)
+		(*nextRunnerIndex)++
+		if !usedRunnerNames[runnerName] {
+			usedRunnerNames[runnerName] = true
+			return runnerName
+		}
+	}
+}

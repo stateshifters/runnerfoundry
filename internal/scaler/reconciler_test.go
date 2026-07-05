@@ -1,0 +1,191 @@
+package scaler
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestDesiredRunnerCountCapsAssignedJobsAtMaximumCapacity(t *testing.T) {
+	if got := DesiredRunnerCount(7, 3); got != 3 {
+		t.Fatalf("expected cap at 3, got %d", got)
+	}
+	if got := DesiredRunnerCount(-2, 3); got != 0 {
+		t.Fatalf("expected negative demand to become zero, got %d", got)
+	}
+}
+
+func TestReconcilerCreatesOnlyMissingRunnersAndCleansCompleted(t *testing.T) {
+	provider := &recordingProvider{
+		instances: []RunnerInstance{
+			{ID: "running", RunnerName: "running", State: RunnerStateRunning},
+			{ID: "completed", RunnerName: "completed", State: RunnerStateCompleted},
+		},
+	}
+	jitConfigs := &recordingJITGenerator{}
+	reconciler := Reconciler{
+		ScaleSet: ScaleSetRuntime{
+			Name:       "docker-set",
+			MaxRunners: 3,
+			Provider:   provider,
+			JITConfig:  jitConfigs,
+		},
+	}
+
+	createdCount, err := reconciler.Reconcile(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("expected reconcile success, got %v", err)
+	}
+	if createdCount != 3 {
+		t.Fatalf("expected desired count 3, got %d", createdCount)
+	}
+	if len(provider.destroyed) != 1 || provider.destroyed[0] != "completed" {
+		t.Fatalf("expected completed runner destroyed, got %#v", provider.destroyed)
+	}
+	if len(provider.created) != 2 {
+		t.Fatalf("expected two created runners, got %#v", provider.created)
+	}
+	if len(jitConfigs.names) != 2 {
+		t.Fatalf("expected two jit configs, got %#v", jitConfigs.names)
+	}
+}
+
+func TestReconcilerDoesNotDuplicateRecoveredRunnerNames(t *testing.T) {
+	provider := &recordingProvider{
+		instances: []RunnerInstance{
+			{ID: "existing", RunnerName: "docker-set-2", State: RunnerStateRunning},
+		},
+	}
+	jitConfigs := &recordingJITGenerator{}
+	reconciler := Reconciler{
+		ScaleSet: ScaleSetRuntime{
+			Name:       "docker-set",
+			MaxRunners: 2,
+			Provider:   provider,
+			JITConfig:  jitConfigs,
+		},
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), 2); err != nil {
+		t.Fatalf("expected reconcile success, got %v", err)
+	}
+	if len(provider.created) != 1 {
+		t.Fatalf("expected one created runner, got %#v", provider.created)
+	}
+	if provider.created[0].RunnerName != "docker-set-1" {
+		t.Fatalf("expected recovered name to be skipped, got %#v", provider.created)
+	}
+}
+
+func TestReconcilerStopsWhenJITGenerationFails(t *testing.T) {
+	provider := &recordingProvider{}
+	reconciler := Reconciler{
+		ScaleSet: ScaleSetRuntime{
+			Name:       "docker-set",
+			MaxRunners: 1,
+			Provider:   provider,
+			JITConfig:  failingJITGenerator{},
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), 1)
+	if err == nil {
+		t.Fatal("expected jit generation failure")
+	}
+	if len(provider.created) != 0 {
+		t.Fatalf("expected no runner creation, got %#v", provider.created)
+	}
+}
+
+func TestReconcilerSurfacesProviderFailures(t *testing.T) {
+	tests := map[string]struct {
+		provider Provider
+	}{
+		"list": {
+			provider: failingProvider{failure: "list"},
+		},
+		"destroy": {
+			provider: failingProvider{
+				failure:   "destroy",
+				instances: []RunnerInstance{{ID: "done", RunnerName: "done", State: RunnerStateCompleted}},
+			},
+		},
+		"start": {
+			provider: failingProvider{failure: "start"},
+		},
+	}
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+				Name:       "set",
+				MaxRunners: 1,
+				Provider:   testCase.provider,
+				JITConfig:  &recordingJITGenerator{},
+			}}
+			if _, err := reconciler.Reconcile(context.Background(), 1); err == nil {
+				t.Fatal("expected provider failure")
+			}
+		})
+	}
+}
+
+type recordingProvider struct {
+	instances []RunnerInstance
+	created   []RunnerStartRequest
+	destroyed []string
+}
+
+func (provider *recordingProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
+	return append([]RunnerInstance(nil), provider.instances...), nil
+}
+
+func (provider *recordingProvider) Start(ctx context.Context, request RunnerStartRequest) error {
+	provider.created = append(provider.created, request)
+	return nil
+}
+
+func (provider *recordingProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
+	provider.destroyed = append(provider.destroyed, instance.ID)
+	return nil
+}
+
+type recordingJITGenerator struct {
+	names []string
+}
+
+func (generator *recordingJITGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
+	generator.names = append(generator.names, runnerName)
+	return "jit-" + runnerName, nil
+}
+
+type failingJITGenerator struct{}
+
+func (generator failingJITGenerator) Generate(ctx context.Context, runnerName string) (string, error) {
+	return "", errors.New("jit failed")
+}
+
+type failingProvider struct {
+	failure   string
+	instances []RunnerInstance
+}
+
+func (provider failingProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
+	if provider.failure == "list" {
+		return nil, errors.New("list failed")
+	}
+	return append([]RunnerInstance(nil), provider.instances...), nil
+}
+
+func (provider failingProvider) Start(ctx context.Context, request RunnerStartRequest) error {
+	if provider.failure == "start" {
+		return errors.New("start failed")
+	}
+	return nil
+}
+
+func (provider failingProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
+	if provider.failure == "destroy" {
+		return errors.New("destroy failed")
+	}
+	return nil
+}

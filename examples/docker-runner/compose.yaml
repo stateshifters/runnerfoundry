@@ -1,0 +1,7 @@
+services:
+  runner:
+    build:
+      context: .
+    user: runner
+    working_dir: /home/runner
+    command: ["/home/runner/run.sh"]

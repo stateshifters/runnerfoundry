@@ -54,3 +54,19 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 - Receiver names should be descriptive and derived from the type (for example, `client *Client`). Avoid single-letter receivers.
 - Avoid single-letter identifiers except `t`, `err`, `cfg`, `cmd`, and `ctx` in narrow scopes.
 - Go source filenames must be lowercase. Use `snake_case` for multiword names.
+
+
+## Verification
+
+V1 code must maintain 100% Go test coverage.
+
+```sh
+go test ./...
+go test -race ./...
+go test ./... -coverprofile=coverage
+go tool cover -func=coverage
+go vet ./...
+gofmt -l $(find . -name '*.go')
+```
+
+The coverage total must report `100.0%`.
