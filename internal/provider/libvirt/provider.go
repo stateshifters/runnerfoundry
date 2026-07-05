@@ -88,28 +88,38 @@ func (provider Provider) List(ctx context.Context, scaleSetName string) ([]Runne
 		if domainName == "" {
 			continue
 		}
-		domainXML, err := provider.runVirsh(ctx, "dumpxml", domainName)
+		instance, owned, err := provider.instanceForDomain(ctx, domainName, scaleSetName)
 		if err != nil {
-			return nil, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
+			return nil, err
 		}
-		if metadataValue(domainXML, "github-scaler.scale-set") != scaleSetName {
-			continue
+		if owned {
+			instances = append(instances, instance)
 		}
-		domainState, err := provider.runVirsh(ctx, "domstate", domainName)
-		if err != nil {
-			return nil, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
-		}
-		runnerName := metadataValue(domainXML, "github-scaler.runner")
-		if runnerName == "" {
-			runnerName = domainName
-		}
-		instances = append(instances, RunnerInstance{
-			ID:         domainName,
-			RunnerName: runnerName,
-			State:      libvirtState(domainState),
-		})
 	}
 	return instances, nil
+}
+
+func (provider Provider) instanceForDomain(ctx context.Context, domainName string, scaleSetName string) (RunnerInstance, bool, error) {
+	domainXML, err := provider.runVirsh(ctx, "dumpxml", domainName)
+	if err != nil {
+		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
+	}
+	if metadataValue(domainXML, "github-scaler.scale-set") != scaleSetName {
+		return RunnerInstance{}, false, nil
+	}
+	domainState, err := provider.runVirsh(ctx, "domstate", domainName)
+	if err != nil {
+		return RunnerInstance{}, false, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
+	}
+	runnerName := metadataValue(domainXML, "github-scaler.runner")
+	if runnerName == "" {
+		runnerName = domainName
+	}
+	return RunnerInstance{
+		ID:         domainName,
+		RunnerName: runnerName,
+		State:      libvirtState(domainState),
+	}, true, nil
 }
 
 func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) error {
@@ -134,26 +144,38 @@ func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read libvirt XML template: %w", err)
 	}
-	return libvirtxml.DomainTemplate{XML: string(templateBytes)}.Render(libvirtxml.RenderRequest{
+	renderedXML, err := libvirtxml.DomainTemplate{XML: string(templateBytes)}.Render(libvirtxml.RenderRequest{
 		ScaleSetName: request.ScaleSetName,
 		RunnerName:   request.RunnerName,
 		JITConfig:    request.JITConfig,
 	})
+	if err != nil {
+		return "", fmt.Errorf("render libvirt XML template: %w", err)
+	}
+	return renderedXML, nil
 }
 
 func (provider Provider) runVirsh(ctx context.Context, args ...string) (string, error) {
-	return provider.CommandRunner.Run(ctx, Command{
+	output, err := provider.CommandRunner.Run(ctx, Command{
 		Name: "virsh",
 		Args: append([]string{"-c", provider.Config.ConnectionURI}, args...),
 	})
+	if err != nil {
+		return "", fmt.Errorf("run virsh %q: %w", strings.Join(args, " "), err)
+	}
+	return output, nil
 }
 
 func (provider Provider) runVirshWithStdin(ctx context.Context, stdin string, args ...string) (string, error) {
-	return provider.CommandRunner.Run(ctx, Command{
+	output, err := provider.CommandRunner.Run(ctx, Command{
 		Name:  "virsh",
 		Args:  append([]string{"-c", provider.Config.ConnectionURI}, args...),
 		Stdin: stdin,
 	})
+	if err != nil {
+		return "", fmt.Errorf("run virsh %q: %w", strings.Join(args, " "), err)
+	}
+	return output, nil
 }
 
 func metadataValue(domainXML string, key string) string {

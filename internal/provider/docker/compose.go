@@ -84,20 +84,9 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 	if err != nil {
 		return nil, fmt.Errorf("list compose runners: %w", err)
 	}
-	var containers []dockerContainer
-	trimmedOutput := strings.TrimSpace(output)
-	if strings.HasPrefix(trimmedOutput, "[") {
-		if err := json.Unmarshal([]byte(trimmedOutput), &containers); err != nil {
-			return nil, fmt.Errorf("decode docker ps json: %w", err)
-		}
-	} else if trimmedOutput != "" {
-		for _, line := range strings.Split(trimmedOutput, "\n") {
-			var container dockerContainer
-			if err := json.Unmarshal([]byte(line), &container); err != nil {
-				return nil, fmt.Errorf("decode docker ps json line: %w", err)
-			}
-			containers = append(containers, container)
-		}
+	containers, err := decodeDockerContainers(output)
+	if err != nil {
+		return nil, err
 	}
 	instances := make([]RunnerInstance, 0, len(containers))
 	for _, container := range containers {
@@ -143,6 +132,28 @@ func (provider ComposeProvider) Validate(ctx context.Context) error {
 
 func (provider ComposeProvider) baseArgs() []string {
 	return []string{"compose", "-f", provider.Config.ComposeFile}
+}
+
+func decodeDockerContainers(output string) ([]dockerContainer, error) {
+	var containers []dockerContainer
+	trimmedOutput := strings.TrimSpace(output)
+	if strings.HasPrefix(trimmedOutput, "[") {
+		if err := json.Unmarshal([]byte(trimmedOutput), &containers); err != nil {
+			return nil, fmt.Errorf("decode docker ps json: %w", err)
+		}
+		return containers, nil
+	}
+	if trimmedOutput == "" {
+		return containers, nil
+	}
+	for _, line := range strings.Split(trimmedOutput, "\n") {
+		var container dockerContainer
+		if err := json.Unmarshal([]byte(line), &container); err != nil {
+			return nil, fmt.Errorf("decode docker ps json line: %w", err)
+		}
+		containers = append(containers, container)
+	}
+	return containers, nil
 }
 
 type dockerContainer struct {

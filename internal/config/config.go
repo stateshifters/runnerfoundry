@@ -89,22 +89,29 @@ func (loadedConfig *Config) validateScaleSets() error {
 	seenNames := map[string]bool{}
 	for scaleSetIndex := range loadedConfig.ScaleSets {
 		scaleSet := &loadedConfig.ScaleSets[scaleSetIndex]
-		if scaleSet.Name == "" {
-			return errors.New("scale_sets[].name is required")
+		if err := scaleSet.validate(seenNames); err != nil {
+			return err
 		}
-		if seenNames[scaleSet.Name] {
-			return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
-		}
-		seenNames[scaleSet.Name] = true
-		if scaleSet.RunnerGroup == "" {
-			scaleSet.RunnerGroup = "default"
-		}
-		if scaleSet.MaxRunners < 0 {
-			return fmt.Errorf("scale set %q max_runners must be non-negative", scaleSet.Name)
-		}
-		if err := scaleSet.validateProvider(); err != nil {
-			return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
-		}
+	}
+	return nil
+}
+
+func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
+	if scaleSet.Name == "" {
+		return errors.New("scale_sets[].name is required")
+	}
+	if seenNames[scaleSet.Name] {
+		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	}
+	seenNames[scaleSet.Name] = true
+	if scaleSet.RunnerGroup == "" {
+		scaleSet.RunnerGroup = "default"
+	}
+	if scaleSet.MaxRunners < 0 {
+		return fmt.Errorf("scale set %q max_runners must be non-negative", scaleSet.Name)
+	}
+	if err := scaleSet.validateProvider(); err != nil {
+		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
 	}
 	return nil
 }

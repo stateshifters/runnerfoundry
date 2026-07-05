@@ -142,24 +142,28 @@ func TestProviderSurfacesFailures(t *testing.T) {
 	invalidTemplate := writeTemplate(t, `<domain><name>broken</domain>`)
 	tests := map[string]func(t *testing.T){
 		"start missing template": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: filepath.Join(t.TempDir(), "missing")}}
 			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
 				t.Fatal("expected missing template error")
 			}
 		},
 		"start invalid template": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: invalidTemplate}}
 			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
 				t.Fatal("expected invalid template error")
 			}
 		},
 		"start define command": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: validTemplate}}
 			if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
 				t.Fatal("expected define error")
 			}
 		},
 		"start command": func(t *testing.T) {
+			t.Helper()
 			commandRunner := &recordingCommandRunner{failOnCall: 2}
 			provider := Provider{CommandRunner: commandRunner, Config: Config{DomainXMLTemplate: validTemplate}}
 			if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
@@ -167,12 +171,14 @@ func TestProviderSurfacesFailures(t *testing.T) {
 			}
 		},
 		"list command": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}}
 			if _, err := provider.List(context.Background(), "set"); err == nil {
 				t.Fatal("expected list command error")
 			}
 		},
 		"dump command": func(t *testing.T) {
+			t.Helper()
 			commandRunner := &recordingCommandRunner{outputs: []string{"runner\n"}, failOnCall: 2}
 			provider := Provider{CommandRunner: commandRunner}
 			if _, err := provider.List(context.Background(), "set"); err == nil {
@@ -180,6 +186,7 @@ func TestProviderSurfacesFailures(t *testing.T) {
 			}
 		},
 		"state command": func(t *testing.T) {
+			t.Helper()
 			commandRunner := &recordingCommandRunner{
 				outputs:    []string{"runner\n", `<domain><metadata><github-scaler.scale-set>set</github-scaler.scale-set></metadata></domain>`},
 				failOnCall: 3,
@@ -190,18 +197,21 @@ func TestProviderSurfacesFailures(t *testing.T) {
 			}
 		},
 		"destroy command": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}}
 			if err := provider.Destroy(context.Background(), RunnerInstance{}); err == nil {
 				t.Fatal("expected destroy command error")
 			}
 		},
 		"validate template": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: invalidTemplate}}
 			if err := provider.Validate(context.Background()); err == nil {
 				t.Fatal("expected validation template error")
 			}
 		},
 		"validate connection": func(t *testing.T) {
+			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: validTemplate}}
 			if err := provider.Validate(context.Background()); err == nil {
 				t.Fatal("expected validation connection error")

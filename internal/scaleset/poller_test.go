@@ -89,6 +89,7 @@ type recordingMessageClient struct {
 
 func (client *recordingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
 	if len(client.messages) == 0 {
+		//nolint:nilnil // nil message with nil error is the upstream no-message contract.
 		return nil, nil
 	}
 	message := client.messages[0]

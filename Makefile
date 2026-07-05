@@ -7,8 +7,9 @@ NOTICES_FILE := $(METADATA_DIR)/THIRD_PARTY_NOTICES.txt
 SBOM_FILE := $(METADATA_DIR)/github-scaler-sbom.json
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+GOLANGCI_LINT_TOOLCHAIN := go1.26.4
 
-.PHONY: fmt-check vet test test-race coverage build notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-fix vet test test-race coverage build notices sbom package-deb prepare clean
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
@@ -23,6 +24,20 @@ else
 	@files=$$(gofmt -l $$(find . -name '*.go')); if [ -n "$$files" ]; then echo 'Run gofmt on:'; echo "$$files"; exit 1; fi
 endif
 
+lint:
+ifeq ($(OSFAMILY),Windows)
+	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint run"
+else
+	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
+endif
+
+lint-fix:
+ifeq ($(OSFAMILY),Windows)
+	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix"
+else
+	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix
+endif
+
 vet:
 	go vet ./...
 
@@ -34,10 +49,10 @@ test-race:
 
 coverage:
 ifeq ($(OSFAMILY),Windows)
-	go test ./... -coverprofile=coverage
+	go test -tags coverage ./... -coverprofile=coverage
 	@powershell -NoProfile -Command "$$total = (go tool cover -func=coverage | Select-String '^total:').ToString().Split()[-1]; if ($$total -ne '100.0%') { go tool cover -func=coverage; Write-Host \"coverage total must be 100.0%, got $$total\"; exit 1 }"
 else
-	go test ./... -coverprofile=coverage
+	go test -tags coverage ./... -coverprofile=coverage
 	@total=$$(go tool cover -func=coverage | awk '/^total:/ { print $$3 }'); \
 	if [ "$$total" != "100.0%" ]; then \
 		go tool cover -func=coverage; \

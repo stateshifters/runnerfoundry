@@ -61,6 +61,17 @@ func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (i
 	if err != nil {
 		return 0, fmt.Errorf("list runner instances: %w", err)
 	}
+	runningCount, usedRunnerNames, err := reconciler.cleanupCompletedRunners(ctx, instances)
+	if err != nil {
+		return 0, err
+	}
+	if err := reconciler.startMissingRunners(ctx, runningCount, desiredCount, usedRunnerNames); err != nil {
+		return 0, err
+	}
+	return desiredCount, nil
+}
+
+func (reconciler Reconciler) cleanupCompletedRunners(ctx context.Context, instances []RunnerInstance) (int, map[string]bool, error) {
 	runningCount := 0
 	usedRunnerNames := map[string]bool{}
 	for _, instance := range instances {
@@ -69,7 +80,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (i
 		}
 		if instance.State == RunnerStateCompleted {
 			if err := reconciler.ScaleSet.Provider.Destroy(ctx, instance); err != nil {
-				return 0, fmt.Errorf("destroy completed runner %q: %w", instance.RunnerName, err)
+				return 0, nil, fmt.Errorf("destroy completed runner %q: %w", instance.RunnerName, err)
 			}
 			continue
 		}
@@ -77,22 +88,26 @@ func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (i
 			runningCount++
 		}
 	}
+	return runningCount, usedRunnerNames, nil
+}
+
+func (reconciler Reconciler) startMissingRunners(ctx context.Context, runningCount int, desiredCount int, usedRunnerNames map[string]bool) error {
 	nextRunnerIndex := 1
 	for runnerIndex := runningCount; runnerIndex < desiredCount; runnerIndex++ {
 		runnerName := reconciler.nextRunnerName(usedRunnerNames, &nextRunnerIndex)
 		jitConfig, err := reconciler.ScaleSet.JITConfig.Generate(ctx, runnerName)
 		if err != nil {
-			return 0, fmt.Errorf("generate jit config for %q: %w", runnerName, err)
+			return fmt.Errorf("generate jit config for %q: %w", runnerName, err)
 		}
 		if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
 			ScaleSetName: reconciler.ScaleSet.Name,
 			RunnerName:   runnerName,
 			JITConfig:    jitConfig,
 		}); err != nil {
-			return 0, fmt.Errorf("start runner %q: %w", runnerName, err)
+			return fmt.Errorf("start runner %q: %w", runnerName, err)
 		}
 	}
-	return desiredCount, nil
+	return nil
 }
 
 func (reconciler Reconciler) nextRunnerName(usedRunnerNames map[string]bool, nextRunnerIndex *int) string {

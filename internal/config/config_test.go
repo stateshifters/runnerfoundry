@@ -117,8 +117,8 @@ func TestTokenReadsEnvironmentAndTokenFile(t *testing.T) {
 	}
 
 	tokenPath := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenPath, []byte("file-token\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(tokenPath, []byte("file-token\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	fileConfig := Config{GitHub: GitHubConfig{TokenFile: tokenPath}}
 	token, err = fileConfig.Token()
