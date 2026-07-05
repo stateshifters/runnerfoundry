@@ -13,6 +13,7 @@ import (
 type Config struct {
 	GitHub    GitHubConfig     `yaml:"github"`
 	Log       LogConfig        `yaml:"log"`
+	Prune     bool             `yaml:"prune"`
 	ScaleSets []ScaleSetConfig `yaml:"scale_sets"`
 }
 

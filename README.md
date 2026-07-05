@@ -15,6 +15,8 @@ github:
 log:
   format: text
 
+prune: true
+
 scale_sets:
   - name: linux-docker
     repositories:
@@ -44,6 +46,8 @@ Github authentication is PAT-only in V1. Use exactly one of:
 Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT configs, queue tokens, or generated runtime config containing secrets.
 
 Each scale set lists the repositories it serves. A single configured scale set such as `linux-docker` can drive multiple repositories that need the same self-hosted runner pool. Github still gets one runner scale set per repository target; the daemon qualifies local Docker/libvirt ownership internally so provider state does not collide between repositories.
+
+Set `prune: true` only when `github-scaler` owns every runner scale set in the configured repositories and runner groups. When enabled, startup deletes Github runner scale sets in those repository/group targets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 
 `log.format` accepts `text` or `json`.
 
@@ -195,6 +199,8 @@ For each scale set, the daemon:
 - acknowledges Github messages only after local handling succeeds
 
 The daemon stores no local database. All restart recovery comes from Github statistics plus provider-visible Docker labels/names and libvirt metadata.
+
+On shutdown, the daemon closes each Github scale-set message session before exiting. This releases the active broker session held by the host and allows systemd restarts to create a fresh session without waiting for Github to expire the old one.
 
 ## Development & Contributing
 

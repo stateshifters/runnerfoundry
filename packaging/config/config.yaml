@@ -4,4 +4,6 @@ github:
 log:
   format: text
 
+prune: false
+
 scale_sets: []

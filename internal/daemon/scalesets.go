@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,8 +30,19 @@ type scaleSetClient interface {
 	) (*upstream.RunnerScaleSetJitRunnerConfig, error)
 }
 
+type scaleSetPruneClient interface {
+	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
+	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
+	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
+}
+
 type scaleSetMessageClient struct {
-	Client scalesetpoller.MessageClient
+	Client messageSessionClient
+}
+
+type messageSessionClient interface {
+	scalesetpoller.MessageClient
+	Close(ctx context.Context) error
 }
 
 func (client scaleSetMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
@@ -44,6 +56,13 @@ func (client scaleSetMessageClient) GetMessage(ctx context.Context, lastMessageI
 func (client scaleSetMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
 	if err := client.Client.DeleteMessage(ctx, messageID); err != nil {
 		return fmt.Errorf("delete message: %w", err)
+	}
+	return nil
+}
+
+func (client scaleSetMessageClient) Close(ctx context.Context) error {
+	if err := client.Client.Close(ctx); err != nil {
+		return fmt.Errorf("close message session: %w", err)
 	}
 	return nil
 }
@@ -75,25 +94,31 @@ func runScaleSet(
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	scaleSets scaleSetRuntime,
-) error {
+) (shutdownFunc, error) {
 	runnerGroup, err := client.GetRunnerGroupByName(ctx, scaleSetConfig.RunnerGroup)
 	if err != nil {
-		return fmt.Errorf("get runner group %q: %w", scaleSetConfig.RunnerGroup, err)
+		return nil, fmt.Errorf("get runner group %q: %w", scaleSetConfig.RunnerGroup, err)
 	}
 	runnerScaleSet, err := ensureRunnerScaleSet(ctx, client, runnerGroup.ID, scaleSetConfig.Name)
 	if err != nil {
-		return fmt.Errorf("ensure runner scale set %q: %w", scaleSetConfig.Name, err)
+		return nil, fmt.Errorf("ensure runner scale set %q: %w", scaleSetConfig.Name, err)
 	}
 	messageClient, err := client.MessageSessionClient(ctx, runnerScaleSet.ID, scaleSets.RunnerHostname())
 	if err != nil {
-		return fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
+		return nil, fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
 	}
 	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
 	if err != nil {
-		return fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err)
+		if closeErr := messageClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err),
+				fmt.Errorf("close message session: %w", closeErr),
+			)
+		}
+		return nil, fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err)
 	}
 	startPoller(ctx, logger, scaleSetConfig, messageClient, reconciler, scaleSets.PollRetryDelay)
-	return nil
+	return messageClient.Close, nil
 }
 
 func ensureRunnerScaleSet(ctx context.Context, client scaleSetClient, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error) {

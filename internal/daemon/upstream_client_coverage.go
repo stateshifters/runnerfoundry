@@ -40,6 +40,17 @@ func (client coverageScaleSetClient) CreateRunnerScaleSet(
 	return nil, errors.New("coverage client has no GitHub transport")
 }
 
+func (client coverageScaleSetClient) ListRunnerScaleSets(
+	ctx context.Context,
+	runnerGroupID int,
+) ([]upstream.RunnerScaleSet, error) {
+	return nil, errors.New("coverage client has no GitHub transport")
+}
+
+func (client coverageScaleSetClient) DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error {
+	return errors.New("coverage client has no GitHub transport")
+}
+
 func (client coverageScaleSetClient) MessageSessionClient(
 	ctx context.Context,
 	runnerScaleSetID int,

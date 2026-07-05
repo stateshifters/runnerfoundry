@@ -24,6 +24,7 @@ github:
   token_env: GITHUB_SCALER_TOKEN
 log:
   format: json
+prune: true
 scale_sets:
   - name: docker-set
     repositories:
@@ -48,6 +49,9 @@ scale_sets:
 	}
 	if loadedConfig.ScaleSets[0].Repositories[1] != "https://github.com/meza/repo-b" {
 		t.Fatalf("expected repositories to load, got %#v", loadedConfig.ScaleSets[0].Repositories)
+	}
+	if !loadedConfig.Prune {
+		t.Fatal("expected prune to load")
 	}
 	if loadedConfig.ScaleSets[0].RunnerGroup != "default" {
 		t.Fatalf("expected default runner group, got %q", loadedConfig.ScaleSets[0].RunnerGroup)
