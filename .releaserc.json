@@ -19,20 +19,20 @@
     [
       "@semantic-release/commit-analyzer",
       {
-        "preset": "conventionalcommits"
+        "config": "@meza/mezas-conventional-changelog"
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "config": "@meza/mezas-conventional-changelog"
       }
     ],
     "semantic-release-export-data",
     [
-      "@semantic-release/release-notes-generator",
-      {
-        "preset": "conventionalcommits"
-      }
-    ],
-    [
       "@semantic-release/changelog",
       {
-        "changelogTitle": "# GitHub Scaler Changelog",
+        "changelogTitle": "# Changelog",
         "changelogFile": "CHANGELOG.md"
       }
     ],
