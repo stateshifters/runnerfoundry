@@ -214,9 +214,5 @@ func apiURLFromParsed(parsedURL *url.URL, path string) string {
 }
 
 func runnerRegistrationURL(repositoryURL string) (string, error) {
-	parsedURL, err := url.Parse(repositoryURL)
-	if err != nil {
-		return "", fmt.Errorf("parse repository url: %w", err)
-	}
-	return (&url.URL{Scheme: parsedURL.Scheme, Host: parsedURL.Host, Path: "/actions/runner-registration"}).String(), nil
+	return apiURL(repositoryURL, "/actions/runner-registration")
 }

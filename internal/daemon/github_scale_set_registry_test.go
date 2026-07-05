@@ -22,7 +22,7 @@ func TestGitHubScaleSetRegistryListsScaleSets(t *testing.T) {
 			}
 			writer.WriteHeader(http.StatusCreated)
 			writeString(t, writer, `{"token":"registration"}`)
-		case "/actions/runner-registration":
+		case "/api/v3/actions/runner-registration":
 			if request.Header.Get("Authorization") != "RemoteAuth registration" {
 				t.Fatalf("expected remote auth, got %q", request.Header.Get("Authorization"))
 			}
@@ -119,7 +119,7 @@ func TestGitHubScaleSetRegistrySurfacesHTTPFailures(t *testing.T) {
 				case strings.Contains(request.URL.Path, "registration-token"):
 					writer.WriteHeader(http.StatusCreated)
 					writeString(t, writer, `{"token":"registration"}`)
-				case request.URL.Path == "/actions/runner-registration":
+				case request.URL.Path == "/api/v3/actions/runner-registration":
 					writeJSON(t, writer, actionsServiceAdminConnection{URL: serverURL(request) + "/actions-service", Token: "admin"})
 				default:
 					http.Error(writer, "failed", http.StatusUnauthorized)
@@ -133,7 +133,7 @@ func TestGitHubScaleSetRegistrySurfacesHTTPFailures(t *testing.T) {
 				case strings.Contains(request.URL.Path, "registration-token"):
 					writer.WriteHeader(http.StatusCreated)
 					writeString(t, writer, `{"token":"registration"}`)
-				case request.URL.Path == "/actions/runner-registration":
+				case request.URL.Path == "/api/v3/actions/runner-registration":
 					writeJSON(t, writer, actionsServiceAdminConnection{URL: serverURL(request) + "/actions-service", Token: "admin"})
 				default:
 					writeString(t, writer, `{`)
@@ -193,16 +193,27 @@ func TestGitHubScaleSetRegistryHelperFunctions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected api url parse error")
 	}
+	_, err = runnerRegistrationURL("http://[::1/meza/github-scaler")
+	if err == nil {
+		t.Fatal("expected runner registration url parse error")
+	}
+}
+
+func TestRunnerRegistrationURLUsesGitHubAPIHost(t *testing.T) {
 	registrationEndpoint, err := runnerRegistrationURL("https://ghe.example.com/meza/github-scaler")
 	if err != nil {
 		t.Fatalf("expected runner registration url success, got %v", err)
 	}
-	if registrationEndpoint != "https://ghe.example.com/actions/runner-registration" {
+	if registrationEndpoint != "https://ghe.example.com/api/v3/actions/runner-registration" {
 		t.Fatalf("expected runner registration endpoint, got %q", registrationEndpoint)
 	}
-	_, err = runnerRegistrationURL("http://[::1/meza/github-scaler")
-	if err == nil {
-		t.Fatal("expected runner registration url parse error")
+
+	hostedRegistrationEndpoint, err := runnerRegistrationURL("https://github.com/meza/github-scaler")
+	if err != nil {
+		t.Fatalf("expected hosted runner registration url success, got %v", err)
+	}
+	if hostedRegistrationEndpoint != "https://api.github.com/actions/runner-registration" {
+		t.Fatalf("expected hosted runner registration endpoint, got %q", hostedRegistrationEndpoint)
 	}
 }
 
