@@ -2,6 +2,8 @@
 
 `github-scaler` is a Linux-only Go daemon for autoscaling ephemeral Github Actions runner scale sets.
 
+It is using GitHub's new [Scaleset library](https://github.com/actions/scaleset)
+
 V1 polls Github scale-set demand, scales to `statistics.TotalAssignedJobs` capped by each set's `max_runners`, starts Docker Compose services or libvirt domains with Github JIT runner config, rebuilds provider state after daemon restarts, and cleans up completed runner instances.
 
 ## Configuration
