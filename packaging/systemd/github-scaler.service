@@ -4,11 +4,13 @@ After=network-online.target docker.service libvirtd.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify-reload
+NotifyAccess=main
 User=github-scaler
 Group=github-scaler
 EnvironmentFile=/etc/github-scaler/github-scaler.env
 ExecStart=/usr/bin/github-scaler --config /etc/github-scaler/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true

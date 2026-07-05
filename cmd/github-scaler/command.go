@@ -18,7 +18,9 @@ var runDaemon = daemon.Run
 func runMain(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, args); err != nil {
+	reloadRequests, stopReloadRequests := reloadSignalRequests()
+	defer stopReloadRequests()
+	if err := run(ctx, args, reloadRequests); err != nil {
 		if _, writeErr := fmt.Fprintln(stderr, err); writeErr != nil {
 			return 1
 		}
@@ -27,12 +29,12 @@ func runMain(args []string, stderr io.Writer) int {
 	return 0
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, reloadRequests <-chan struct{}) error {
 	configPath, err := parseConfigPath(args)
 	if err != nil {
 		return err
 	}
-	if err := runDaemon(ctx, daemon.Options{ConfigPath: configPath}); err != nil {
+	if err := runDaemon(ctx, daemon.Options{ConfigPath: configPath, ReloadRequests: reloadRequests}); err != nil {
 		return fmt.Errorf("run github scaler: %w", err)
 	}
 	return nil

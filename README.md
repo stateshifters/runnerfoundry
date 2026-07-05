@@ -82,6 +82,20 @@ sudo systemctl enable --now github-scaler
 sudo systemctl status github-scaler
 ```
 
+The daemon reads `/etc/github-scaler/config.yaml` at startup. It does not watch or continuously reread the file.
+
+After editing the config or environment file, reload the service:
+
+```sh
+sudo systemctl reload github-scaler
+```
+
+Reload stops old-config polling first, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, reads the config once, and starts the new config. Watch progress with:
+
+```sh
+journalctl -u github-scaler -f
+```
+
 Inspect logs with:
 
 ```sh
@@ -129,11 +143,13 @@ After=network-online.target docker.service libvirtd.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify-reload
+NotifyAccess=main
 User=github-scaler
 Group=github-scaler
 EnvironmentFile=/etc/github-scaler/github-scaler.env
 ExecStart=/usr/local/bin/github-scaler --config /etc/github-scaler/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true

@@ -71,6 +71,18 @@ func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (i
 	return desiredCount, nil
 }
 
+func (reconciler Reconciler) Drain(ctx context.Context) (int, error) {
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return 0, fmt.Errorf("list runner instances: %w", err)
+	}
+	runningCount, _, err := reconciler.cleanupCompletedRunners(ctx, instances)
+	if err != nil {
+		return 0, err
+	}
+	return runningCount, nil
+}
+
 func (reconciler Reconciler) cleanupCompletedRunners(ctx context.Context, instances []RunnerInstance) (int, map[string]bool, error) {
 	runningCount := 0
 	usedRunnerNames := map[string]bool{}

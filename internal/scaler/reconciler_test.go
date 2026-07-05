@@ -77,6 +77,59 @@ func TestReconcilerDoesNotDuplicateRecoveredRunnerNames(t *testing.T) {
 	}
 }
 
+func TestReconcilerDrainCleansCompletedAndDoesNotStartRunners(t *testing.T) {
+	provider := &recordingProvider{
+		instances: []RunnerInstance{
+			{ID: "running", RunnerName: "docker-set-1", State: RunnerStateRunning},
+			{ID: "completed", RunnerName: "docker-set-2", State: RunnerStateCompleted},
+		},
+	}
+	jitConfigs := &recordingJITGenerator{}
+	reconciler := Reconciler{
+		ScaleSet: ScaleSetRuntime{
+			Name:       "docker-set",
+			MaxRunners: 3,
+			Provider:   provider,
+			JITConfig:  jitConfigs,
+		},
+	}
+
+	runningCount, err := reconciler.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("expected drain success, got %v", err)
+	}
+	if runningCount != 1 {
+		t.Fatalf("expected one running runner, got %d", runningCount)
+	}
+	if len(provider.destroyed) != 1 || provider.destroyed[0] != "completed" {
+		t.Fatalf("expected completed runner destroyed, got %#v", provider.destroyed)
+	}
+	if len(provider.created) != 0 {
+		t.Fatalf("expected no runners to start during drain, got %#v", provider.created)
+	}
+	if len(jitConfigs.names) != 0 {
+		t.Fatalf("expected no jit configs during drain, got %#v", jitConfigs.names)
+	}
+}
+
+func TestReconcilerDrainSurfacesProviderFailures(t *testing.T) {
+	tests := map[string]Provider{
+		"list": failingProvider{failure: "list"},
+		"destroy": failingProvider{
+			failure:   "destroy",
+			instances: []RunnerInstance{{ID: "done", RunnerName: "done", State: RunnerStateCompleted}},
+		},
+	}
+	for testName, provider := range tests {
+		t.Run(testName, func(t *testing.T) {
+			reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}
+			if _, err := reconciler.Drain(context.Background()); err == nil {
+				t.Fatal("expected drain failure")
+			}
+		})
+	}
+}
+
 func TestReconcilerStopsWhenJITGenerationFails(t *testing.T) {
 	provider := &recordingProvider{}
 	reconciler := Reconciler{

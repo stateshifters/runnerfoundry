@@ -44,16 +44,20 @@ func TestRunDelegatesToDaemon(t *testing.T) {
 		return nil
 	}
 
-	if err := run(context.Background(), []string{"--config", "config.yaml"}); err != nil {
+	reloadRequests := make(chan struct{})
+	if err := run(context.Background(), []string{"--config", "config.yaml"}, reloadRequests); err != nil {
 		t.Fatalf("expected run success, got %v", err)
 	}
 	if capturedOptions.ConfigPath != "config.yaml" {
 		t.Fatalf("expected daemon config path, got %#v", capturedOptions)
 	}
+	if capturedOptions.ReloadRequests != reloadRequests {
+		t.Fatal("expected reload requests channel to be passed to daemon")
+	}
 }
 
 func TestRunSurfacesParseAndDaemonErrors(t *testing.T) {
-	if err := run(context.Background(), nil); err == nil {
+	if err := run(context.Background(), nil, nil); err == nil {
 		t.Fatal("expected parse error")
 	}
 
@@ -64,7 +68,7 @@ func TestRunSurfacesParseAndDaemonErrors(t *testing.T) {
 	runDaemon = func(ctx context.Context, options daemon.Options) error {
 		return errors.New("daemon failed")
 	}
-	if err := run(context.Background(), []string{"--config", "config.yaml"}); err == nil {
+	if err := run(context.Background(), []string{"--config", "config.yaml"}, nil); err == nil {
 		t.Fatal("expected daemon error")
 	}
 }

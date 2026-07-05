@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/config"
@@ -17,6 +18,7 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_PAT", "secret")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	loads := 0
 	var capturedConfigPath string
 	var capturedToken string
 	var capturedRepositories []string
@@ -24,6 +26,7 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 	var shutdowns int
 	daemonRuntime := runtime{
 		LoadConfig: func(configPath string) (config.Config, error) {
+			loads++
 			capturedConfigPath = configPath
 			return config.Config{
 				GitHub: config.GitHubConfig{TokenEnv: "GITHUB_SCALER_PAT"},
@@ -51,7 +54,7 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 			client scaleSetClient,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-		) (shutdownFunc, error) {
+		) (scaleSetLifecycle, error) {
 			if logger == nil {
 				t.Fatal("expected logger")
 			}
@@ -59,10 +62,10 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 			if len(capturedScaleSetNames) == 2 {
 				cancel()
 			}
-			return func(ctx context.Context) error {
+			return testScaleSetLifecycle(func(ctx context.Context) error {
 				shutdowns++
 				return nil
-			}, nil
+			}), nil
 		},
 	}
 
@@ -84,6 +87,248 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 	}
 	if shutdowns != 2 {
 		t.Fatalf("expected two shutdowns, got %d", shutdowns)
+	}
+	if loads != 1 {
+		t.Fatalf("expected config to load once without reload, got %d", loads)
+	}
+}
+
+func TestRunReloadStopsPollingBeforeDrainAndReloadsConfig(t *testing.T) {
+	t.Setenv("GITHUB_SCALER_PAT", "secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reloadRequests := make(chan struct{}, 1)
+	loads := 0
+	stopped := false
+	drains := 0
+	var started []string
+	notifier := &fakeNotifier{}
+	daemonRuntime := runtime{
+		LoadConfig: func(configPath string) (config.Config, error) {
+			loads++
+			name := "old"
+			if loads == 2 {
+				name = "new"
+			}
+			return config.Config{
+				GitHub: config.GitHubConfig{TokenEnv: "GITHUB_SCALER_PAT"},
+				ScaleSets: []config.ScaleSetConfig{{
+					Name:         name,
+					Repositories: []string{"https://github.com/meza/repo-a"},
+					MaxRunners:   1,
+					Docker:       &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+				}},
+			}, nil
+		},
+		NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		NewLogger: newLogger,
+		Notifier:  notifier,
+		StartScaleSet: func(
+			ctx context.Context,
+			logger *slog.Logger,
+			client scaleSetClient,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+		) (scaleSetLifecycle, error) {
+			started = append(started, scaleSetConfig.Name)
+			if scaleSetConfig.Name == "old" {
+				reloadRequests <- struct{}{}
+				return scaleSetLifecycle{
+					StopPolling: func() {
+						stopped = true
+					},
+					Drain: func(ctx context.Context) (int, error) {
+						if !stopped {
+							t.Fatal("expected polling to stop before drain")
+						}
+						drains++
+						if drains == 1 {
+							return 1, nil
+						}
+						return 0, nil
+					},
+					Shutdown: func(ctx context.Context) error {
+						return nil
+					},
+				}, nil
+			}
+			cancel()
+			return testScaleSetLifecycle(func(ctx context.Context) error {
+				return nil
+			}), nil
+		},
+		DrainInterval: time.Nanosecond,
+	}
+
+	err := runDaemon(ctx, Options{ConfigPath: "config.yaml", ReloadRequests: reloadRequests}, daemonRuntime)
+	if err != nil {
+		t.Fatalf("expected run success, got %v", err)
+	}
+	if strings.Join(started, ",") != "old,new" {
+		t.Fatalf("expected old then new config to start, got %#v", started)
+	}
+	if loads != 2 {
+		t.Fatalf("expected config to load on startup and reload, got %d", loads)
+	}
+	if drains != 2 {
+		t.Fatalf("expected reload to wait through active drain, got %d drains", drains)
+	}
+	if strings.Join(notifier.events, ",") != "ready,reloading,ready" {
+		t.Fatalf("expected ready/reloading notifications, got %#v", notifier.events)
+	}
+}
+
+func TestRunReloadSurfacesNotifierFailures(t *testing.T) {
+	t.Setenv("GITHUB_SCALER_PAT", "secret")
+	tests := map[string]struct {
+		notifier *fakeNotifier
+		expected string
+	}{
+		"startup ready": {
+			notifier: &fakeNotifier{readyErr: errors.New("ready failed")},
+			expected: "notify ready",
+		},
+		"reload requested": {
+			notifier: &fakeNotifier{reloadingErr: errors.New("reloading failed")},
+			expected: "notify reloading",
+		},
+		"reload ready": {
+			notifier: &fakeNotifier{readyErrAfter: 1, readyErr: errors.New("ready failed")},
+			expected: "notify ready after reload",
+		},
+	}
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			reloadRequests := make(chan struct{}, 1)
+			starts := 0
+			daemonRuntime := reloadTestRuntime(t, func(scaleSetConfig config.ScaleSetConfig) scaleSetLifecycle {
+				starts++
+				if starts == 1 && testName != "startup ready" {
+					reloadRequests <- struct{}{}
+				}
+				return testScaleSetLifecycle(func(ctx context.Context) error {
+					return nil
+				})
+			})
+			daemonRuntime.Notifier = testCase.notifier
+			err := runDaemon(context.Background(), Options{ConfigPath: "config.yaml", ReloadRequests: reloadRequests}, daemonRuntime)
+			if err == nil || !strings.Contains(err.Error(), testCase.expected) {
+				t.Fatalf("expected %q error, got %v", testCase.expected, err)
+			}
+		})
+	}
+}
+
+func TestRunReloadStopsAfterInvalidReloadConfig(t *testing.T) {
+	t.Setenv("GITHUB_SCALER_PAT", "secret")
+	reloadRequests := make(chan struct{}, 1)
+	loads := 0
+	shutdowns := 0
+	daemonRuntime := reloadTestRuntime(t, func(scaleSetConfig config.ScaleSetConfig) scaleSetLifecycle {
+		reloadRequests <- struct{}{}
+		return testScaleSetLifecycle(func(ctx context.Context) error {
+			shutdowns++
+			return nil
+		})
+	})
+	daemonRuntime.LoadConfig = func(configPath string) (config.Config, error) {
+		loads++
+		if loads == 2 {
+			return config.Config{}, errors.New("reload config failed")
+		}
+		return validTestConfig("old"), nil
+	}
+
+	err := runDaemon(context.Background(), Options{ConfigPath: "config.yaml", ReloadRequests: reloadRequests}, daemonRuntime)
+	if err == nil || !strings.Contains(err.Error(), "load reload config") {
+		t.Fatalf("expected reload config error, got %v", err)
+	}
+	if shutdowns != 1 {
+		t.Fatalf("expected old config shutdown after rejected reload, got %d", shutdowns)
+	}
+}
+
+func TestDrainConfigurationSurfacesDrainErrorsAndCancellation(t *testing.T) {
+	logger := slog.Default()
+	if err := drainConfiguration(context.Background(), activeConfiguration{ScaleSets: []scaleSetLifecycle{{
+		Drain: func(ctx context.Context) (int, error) {
+			return 0, errors.New("drain failed")
+		},
+	}}}, time.Nanosecond, logger); err == nil {
+		t.Fatal("expected drain failure")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainConfiguration(ctx, activeConfiguration{ScaleSets: []scaleSetLifecycle{{
+		Drain: func(ctx context.Context) (int, error) {
+			return 1, nil
+		},
+	}}}, time.Nanosecond, logger); err == nil {
+		t.Fatal("expected cancelled drain failure")
+	}
+}
+
+func TestLoadAndStartConfigurationAfterDrainSurfacesReloadTokenAndDrainFailures(t *testing.T) {
+	t.Setenv("GITHUB_SCALER_PAT", "secret")
+	activeConfig := activeConfiguration{ScaleSets: []scaleSetLifecycle{testScaleSetLifecycle(func(ctx context.Context) error {
+		return nil
+	})}}
+	daemonRuntime := runtime{
+		LoadConfig: func(configPath string) (config.Config, error) {
+			return config.Config{GitHub: config.GitHubConfig{TokenEnv: "MISSING"}}, nil
+		},
+		DrainInterval: time.Nanosecond,
+	}
+	_, err := loadAndStartConfigurationAfterDrain(context.Background(), "config.yaml", daemonRuntime, activeConfig, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "load reload github token") {
+		t.Fatalf("expected reload token error, got %v", err)
+	}
+
+	daemonRuntime = reloadTestRuntime(t, func(scaleSetConfig config.ScaleSetConfig) scaleSetLifecycle {
+		return testScaleSetLifecycle(func(ctx context.Context) error {
+			return nil
+		})
+	})
+	_, err = loadAndStartConfigurationAfterDrain(context.Background(), "config.yaml", daemonRuntime, activeConfiguration{
+		ScaleSets: []scaleSetLifecycle{{
+			Drain: func(ctx context.Context) (int, error) {
+				return 0, errors.New("drain failed")
+			},
+		}},
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "drain failed") {
+		t.Fatalf("expected drain error, got %v", err)
+	}
+}
+
+func TestLoadAndStartConfigurationAfterDrainSurfacesShutdownFailure(t *testing.T) {
+	t.Setenv("GITHUB_SCALER_PAT", "secret")
+	daemonRuntime := reloadTestRuntime(t, func(scaleSetConfig config.ScaleSetConfig) scaleSetLifecycle {
+		return testScaleSetLifecycle(func(ctx context.Context) error {
+			return nil
+		})
+	})
+	_, err := loadAndStartConfigurationAfterDrain(context.Background(), "config.yaml", daemonRuntime, activeConfiguration{
+		ScaleSets: []scaleSetLifecycle{testScaleSetLifecycle(func(ctx context.Context) error {
+			return errors.New("shutdown failed")
+		})},
+	}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "shutdown failed") {
+		t.Fatalf("expected shutdown error, got %v", err)
+	}
+}
+
+func TestStopAfterRejectedReloadIncludesShutdownFailure(t *testing.T) {
+	_, err := stopAfterRejectedReload(context.Background(), activeConfiguration{
+		ScaleSets: []scaleSetLifecycle{testScaleSetLifecycle(func(ctx context.Context) error {
+			return errors.New("shutdown failed")
+		})},
+	}, errors.New("reload failed"))
+	if err == nil || !strings.Contains(err.Error(), "shutdown old scale sets") {
+		t.Fatalf("expected joined reload shutdown error, got %v", err)
 	}
 }
 
@@ -143,8 +388,8 @@ func TestRunSurfacesStartupFailures(t *testing.T) {
 					return &fakeScaleSetClient{}, nil
 				},
 				NewLogger: newLogger,
-				StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) (shutdownFunc, error) {
-					return nil, errors.New("scale failed")
+				StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) (scaleSetLifecycle, error) {
+					return scaleSetLifecycle{}, errors.New("scale failed")
 				},
 			},
 			expected: "scale failed",
@@ -206,7 +451,7 @@ func TestRunPrunesUnconfiguredScaleSetsBeforeStartup(t *testing.T) {
 			client scaleSetClient,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-		) (shutdownFunc, error) {
+		) (scaleSetLifecycle, error) {
 			if len(pruneClient.deletedScaleSetIDs) != 1 || pruneClient.deletedScaleSetIDs[0] != 3 {
 				t.Fatalf("expected stale scale set pruned before startup, got %#v", pruneClient.deletedScaleSetIDs)
 			}
@@ -214,9 +459,9 @@ func TestRunPrunesUnconfiguredScaleSetsBeforeStartup(t *testing.T) {
 			if len(started) == 2 {
 				cancel()
 			}
-			return func(ctx context.Context) error {
+			return testScaleSetLifecycle(func(ctx context.Context) error {
 				return nil
-			}, nil
+			}), nil
 		},
 	}
 
@@ -264,15 +509,15 @@ func TestRunShutsDownStartedScaleSetsWhenLaterStartupFails(t *testing.T) {
 			client scaleSetClient,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-		) (shutdownFunc, error) {
+		) (scaleSetLifecycle, error) {
 			starts++
 			if starts == 2 {
-				return nil, errors.New("start failed")
+				return scaleSetLifecycle{}, errors.New("start failed")
 			}
-			return func(ctx context.Context) error {
+			return testScaleSetLifecycle(func(ctx context.Context) error {
 				shutdowns++
 				return nil
-			}, nil
+			}), nil
 		},
 	}
 
@@ -320,14 +565,14 @@ func TestRunReportsShutdownFailureAfterLaterStartupFails(t *testing.T) {
 			client scaleSetClient,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-		) (shutdownFunc, error) {
+		) (scaleSetLifecycle, error) {
 			starts++
 			if starts == 2 {
-				return nil, errors.New("start failed")
+				return scaleSetLifecycle{}, errors.New("start failed")
 			}
-			return func(ctx context.Context) error {
+			return testScaleSetLifecycle(func(ctx context.Context) error {
 				return errors.New("shutdown failed")
-			}, nil
+			}), nil
 		},
 	}
 
@@ -380,10 +625,10 @@ func TestRunSurfacesPruneFailures(t *testing.T) {
 				},
 				NewGitHubClient: testCase.newClient,
 				NewLogger:       newLogger,
-				StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) (shutdownFunc, error) {
-					return func(ctx context.Context) error {
+				StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) (scaleSetLifecycle, error) {
+					return testScaleSetLifecycle(func(ctx context.Context) error {
 						return nil
-					}, nil
+					}), nil
 				},
 			}
 			err := runDaemon(context.Background(), Options{ConfigPath: "config.yaml"}, daemonRuntime)
@@ -395,11 +640,11 @@ func TestRunSurfacesPruneFailures(t *testing.T) {
 }
 
 func TestShutdownConfiguredScaleSetsSurfacesFailure(t *testing.T) {
-	err := shutdownConfiguredScaleSets(context.Background(), []shutdownFunc{
-		func(ctx context.Context) error {
+	err := shutdownConfiguredScaleSets(context.Background(), activeConfiguration{ScaleSets: []scaleSetLifecycle{
+		testScaleSetLifecycle(func(ctx context.Context) error {
 			return errors.New("shutdown failed")
-		},
-	})
+		}),
+	}})
 	if err == nil || !strings.Contains(err.Error(), "shutdown failed") {
 		t.Fatalf("expected shutdown error, got %v", err)
 	}
@@ -434,6 +679,89 @@ func TestPruneScaleSetTargetSurfacesListAndDeleteFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testScaleSetLifecycle(shutdown func(ctx context.Context) error) scaleSetLifecycle {
+	return scaleSetLifecycle{
+		StopPolling: func() {},
+		Drain: func(ctx context.Context) (int, error) {
+			return 0, nil
+		},
+		Shutdown: shutdown,
+	}
+}
+
+func reloadTestRuntime(
+	t *testing.T,
+	scaleSetLifecycleForConfig func(scaleSetConfig config.ScaleSetConfig) scaleSetLifecycle,
+) runtime {
+	t.Helper()
+	loads := 0
+	return runtime{
+		LoadConfig: func(configPath string) (config.Config, error) {
+			loads++
+			if loads == 1 {
+				return validTestConfig("old"), nil
+			}
+			return validTestConfig("new"), nil
+		},
+		NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		NewLogger: newLogger,
+		Notifier:  &fakeNotifier{},
+		StartScaleSet: func(
+			ctx context.Context,
+			logger *slog.Logger,
+			client scaleSetClient,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+		) (scaleSetLifecycle, error) {
+			scaleSet := scaleSetLifecycleForConfig(scaleSetConfig)
+			if scaleSet.StopPolling == nil || scaleSet.Drain == nil || scaleSet.Shutdown == nil {
+				t.Fatalf("test lifecycle must be complete, got %#v", scaleSet)
+			}
+			return scaleSet, nil
+		},
+		DrainInterval: time.Nanosecond,
+	}
+}
+
+func validTestConfig(scaleSetName string) config.Config {
+	return config.Config{
+		GitHub: config.GitHubConfig{TokenEnv: "GITHUB_SCALER_PAT"},
+		ScaleSets: []config.ScaleSetConfig{{
+			Name:         scaleSetName,
+			Repositories: []string{"https://github.com/meza/repo-a"},
+			MaxRunners:   1,
+			Docker:       &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+		}},
+	}
+}
+
+type fakeNotifier struct {
+	events        []string
+	readyCalls    int
+	readyErrAfter int
+	readyErr      error
+	reloadingErr  error
+}
+
+func (notifier *fakeNotifier) Ready(ctx context.Context) error {
+	notifier.readyCalls++
+	if notifier.readyErr != nil && notifier.readyCalls > notifier.readyErrAfter {
+		return notifier.readyErr
+	}
+	notifier.events = append(notifier.events, "ready")
+	return nil
+}
+
+func (notifier *fakeNotifier) Reloading(ctx context.Context) error {
+	if notifier.reloadingErr != nil {
+		return notifier.reloadingErr
+	}
+	notifier.events = append(notifier.events, "reloading")
+	return nil
 }
 
 type fakeNonPruningScaleSetClient struct{}

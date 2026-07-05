@@ -40,6 +40,12 @@ type scaleSetMessageClient struct {
 	Client messageSessionClient
 }
 
+type scaleSetLifecycle struct {
+	StopPolling func()
+	Drain       func(ctx context.Context) (int, error)
+	Shutdown    func(ctx context.Context) error
+}
+
 type messageSessionClient interface {
 	scalesetpoller.MessageClient
 	Close(ctx context.Context) error
@@ -94,31 +100,69 @@ func runScaleSet(
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	scaleSets scaleSetRuntime,
-) (shutdownFunc, error) {
-	runnerGroup, err := client.GetRunnerGroupByName(ctx, scaleSetConfig.RunnerGroup)
+) (scaleSetLifecycle, error) {
+	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, client, scaleSetConfig, scaleSets.RunnerHostname())
 	if err != nil {
-		return nil, fmt.Errorf("get runner group %q: %w", scaleSetConfig.RunnerGroup, err)
-	}
-	runnerScaleSet, err := ensureRunnerScaleSet(ctx, client, runnerGroup.ID, scaleSetConfig.Name)
-	if err != nil {
-		return nil, fmt.Errorf("ensure runner scale set %q: %w", scaleSetConfig.Name, err)
-	}
-	messageClient, err := client.MessageSessionClient(ctx, runnerScaleSet.ID, scaleSets.RunnerHostname())
-	if err != nil {
-		return nil, fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
+		return scaleSetLifecycle{}, err
 	}
 	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
 	if err != nil {
-		if closeErr := messageClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
-			return nil, errors.Join(
-				fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err),
-				fmt.Errorf("close message session: %w", closeErr),
-			)
-		}
-		return nil, fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err)
+		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
-	startPoller(ctx, logger, scaleSetConfig, messageClient, reconciler, scaleSets.PollRetryDelay)
-	return messageClient.Close, nil
+	return startScaleSetLifecycle(ctx, logger, scaleSetConfig, messageClient, reconciler, scaleSets.PollRetryDelay), nil
+}
+
+func prepareScaleSetSession(
+	ctx context.Context,
+	client scaleSetClient,
+	scaleSetConfig config.ScaleSetConfig,
+	runnerHostname string,
+) (*upstream.RunnerScaleSet, scaleSetMessageClient, error) {
+	runnerGroup, err := client.GetRunnerGroupByName(ctx, scaleSetConfig.RunnerGroup)
+	if err != nil {
+		return nil, scaleSetMessageClient{}, fmt.Errorf("get runner group %q: %w", scaleSetConfig.RunnerGroup, err)
+	}
+	runnerScaleSet, err := ensureRunnerScaleSet(ctx, client, runnerGroup.ID, scaleSetConfig.Name)
+	if err != nil {
+		return nil, scaleSetMessageClient{}, fmt.Errorf("ensure runner scale set %q: %w", scaleSetConfig.Name, err)
+	}
+	messageClient, err := client.MessageSessionClient(ctx, runnerScaleSet.ID, runnerHostname)
+	if err != nil {
+		return nil, scaleSetMessageClient{}, fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
+	}
+	return runnerScaleSet, messageClient, nil
+}
+
+func closeMessageSessionAfterReconcilerFailure(
+	ctx context.Context,
+	scaleSetName string,
+	messageClient scaleSetMessageClient,
+	reconcilerErr error,
+) error {
+	if closeErr := messageClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
+		return errors.Join(
+			fmt.Errorf("build reconciler for %q: %w", scaleSetName, reconcilerErr),
+			fmt.Errorf("close message session: %w", closeErr),
+		)
+	}
+	return fmt.Errorf("build reconciler for %q: %w", scaleSetName, reconcilerErr)
+}
+
+func startScaleSetLifecycle(
+	ctx context.Context,
+	logger *slog.Logger,
+	scaleSetConfig config.ScaleSetConfig,
+	messageClient scaleSetMessageClient,
+	reconciler scaler.Reconciler,
+	retryDelay time.Duration,
+) scaleSetLifecycle {
+	pollerCtx, stopPolling := context.WithCancel(ctx)
+	startPoller(pollerCtx, logger, scaleSetConfig, messageClient, reconciler, retryDelay)
+	return scaleSetLifecycle{
+		StopPolling: stopPolling,
+		Drain:       reconciler.Drain,
+		Shutdown:    messageClient.Close,
+	}
 }
 
 func ensureRunnerScaleSet(ctx context.Context, client scaleSetClient, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error) {

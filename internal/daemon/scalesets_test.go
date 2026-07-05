@@ -124,7 +124,7 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 		messageClient:  scaleSetMessageClient{Client: messageClient},
 	}
 
-	shutdownScaleSet, err := runScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	scaleSet, err := runScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 		MaxRunners:  2,
@@ -132,11 +132,12 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
-	if shutdownScaleSet == nil {
-		t.Fatal("expected shutdown function")
+	if scaleSet.StopPolling == nil || scaleSet.Drain == nil || scaleSet.Shutdown == nil {
+		t.Fatalf("expected complete scale set lifecycle, got %#v", scaleSet)
 	}
 	waitForPoll(t, messageClient)
-	if err := shutdownScaleSet(context.Background()); err != nil {
+	scaleSet.StopPolling()
+	if err := scaleSet.Shutdown(context.Background()); err != nil {
 		t.Fatalf("expected shutdown success, got %v", err)
 	}
 	if !messageClient.closed {
