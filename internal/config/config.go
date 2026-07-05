@@ -10,8 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultJITConfigEnvironment = "RUNNER_JIT_CONFIG"
-
 type Config struct {
 	GitHub    GitHubConfig     `yaml:"github"`
 	Log       LogConfig        `yaml:"log"`
@@ -30,18 +28,16 @@ type LogConfig struct {
 }
 
 type ScaleSetConfig struct {
-	Name        string        `yaml:"name"`
-	RunnerGroup string        `yaml:"runner_group"`
-	MaxRunners  int           `yaml:"max_runners"`
-	Provider    string        `yaml:"provider"`
-	Docker      DockerConfig  `yaml:"docker"`
-	Libvirt     LibvirtConfig `yaml:"libvirt"`
+	Name        string         `yaml:"name"`
+	RunnerGroup string         `yaml:"runner_group"`
+	MaxRunners  int            `yaml:"max_runners"`
+	Docker      *DockerConfig  `yaml:"docker"`
+	Libvirt     *LibvirtConfig `yaml:"libvirt"`
 }
 
 type DockerConfig struct {
-	ComposeFile          string `yaml:"compose_file"`
-	Service              string `yaml:"service"`
-	JITConfigEnvironment string `yaml:"env_jit_config_name"`
+	ComposeFile string `yaml:"compose_file"`
+	Service     string `yaml:"service"`
 }
 
 type LibvirtConfig struct {
@@ -114,26 +110,23 @@ func (loadedConfig *Config) validateScaleSets() error {
 }
 
 func (scaleSet *ScaleSetConfig) validateProvider() error {
-	switch strings.ToLower(scaleSet.Provider) {
-	case "docker":
+	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
+		return errors.New("exactly one of docker or libvirt is required")
+	}
+	if scaleSet.Docker != nil {
 		if scaleSet.Docker.ComposeFile == "" {
 			return errors.New("docker.compose_file is required")
 		}
 		if scaleSet.Docker.Service == "" {
 			return errors.New("docker.service is required")
 		}
-		if scaleSet.Docker.JITConfigEnvironment == "" {
-			scaleSet.Docker.JITConfigEnvironment = DefaultJITConfigEnvironment
-		}
-	case "libvirt":
-		if scaleSet.Libvirt.ConnectionURI == "" {
-			return errors.New("libvirt.connection_uri is required")
-		}
-		if scaleSet.Libvirt.DomainXMLTemplate == "" {
-			return errors.New("libvirt.domain_xml_template is required")
-		}
-	default:
-		return fmt.Errorf("unsupported provider %q", scaleSet.Provider)
+		return nil
+	}
+	if scaleSet.Libvirt.ConnectionURI == "" {
+		return errors.New("libvirt.connection_uri is required")
+	}
+	if scaleSet.Libvirt.DomainXMLTemplate == "" {
+		return errors.New("libvirt.domain_xml_template is required")
 	}
 	return nil
 }

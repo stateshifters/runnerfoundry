@@ -12,9 +12,8 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 	provider := ComposeProvider{
 		CommandRunner: commandRunner,
 		Config: ComposeConfig{
-			ComposeFile:          "compose.yaml",
-			Service:              "runner",
-			JITConfigEnvironment: "RUNNER_JIT_CONFIG",
+			ComposeFile: "compose.yaml",
+			Service:     "runner",
 		},
 	}
 
@@ -31,7 +30,7 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 		"run", "--detach", "--rm", "--name", "linux-1",
 		"--label", "github-scaler.scale-set=linux",
 		"--label", "github-scaler.runner=linux-1",
-		"--env", "RUNNER_JIT_CONFIG=secret",
+		"--env", "ACTIONS_RUNNER_INPUT_JITCONFIG=secret",
 		"runner",
 	}
 	if !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {

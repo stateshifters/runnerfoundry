@@ -29,14 +29,12 @@ scale_sets:
   - name: docker-set
     runner_group: default
     max_runners: 2
-    provider: docker
     docker:
       compose_file: ` + composePath + `
       service: runner
   - name: vm-set
     runner_group: default
     max_runners: 1
-    provider: libvirt
     libvirt:
       connection_uri: qemu:///system
       domain_xml_template: ` + xmlPath + `
@@ -45,8 +43,8 @@ scale_sets:
 	if err != nil {
 		t.Fatalf("expected valid config, got %v", err)
 	}
-	if loadedConfig.ScaleSets[0].Docker.JITConfigEnvironment != DefaultJITConfigEnvironment {
-		t.Fatalf("expected default jit environment, got %q", loadedConfig.ScaleSets[0].Docker.JITConfigEnvironment)
+	if loadedConfig.ScaleSets[0].Docker.Service != "runner" {
+		t.Fatalf("expected docker service to load, got %q", loadedConfig.ScaleSets[0].Docker.Service)
 	}
 
 	_, err = Load(strings.NewReader(strings.Replace(validConfig, "token_env: GITHUB_SCALER_TOKEN", "token: ghp_secret", 1)))
@@ -64,13 +62,11 @@ github:
 scale_sets:
   - name: repeated
     max_runners: 1
-    provider: docker
     docker:
       compose_file: compose.yaml
       service: runner
   - name: repeated
     max_runners: 1
-    provider: docker
     docker:
       compose_file: compose.yaml
       service: runner
@@ -90,13 +86,14 @@ func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 		"missing token env":               "github:\n  url: https://github.com/meza/agent-playground\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
 		"bad log format":                  "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
 		"missing scale sets":              "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\n",
-		"missing scale set name":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - max_runners: 1\n    provider: docker\n",
-		"negative max runners":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: -1\n    provider: docker\n",
-		"unsupported provider":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: podman\n",
-		"missing docker compose file":     "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      service: runner\n",
-		"missing docker service":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: docker\n    docker:\n      compose_file: compose.yaml\n",
-		"missing libvirt connection":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: libvirt\n    libvirt:\n      domain_xml_template: domain.xml\n",
-		"missing libvirt domain template": "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    provider: libvirt\n    libvirt:\n      connection_uri: qemu:///system\n",
+		"missing scale set name":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n",
+		"negative max runners":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: -1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n",
+		"missing provider config":         "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n",
+		"multiple provider configs":       "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n    libvirt:\n      connection_uri: qemu:///system\n      domain_xml_template: domain.xml\n",
+		"missing docker compose file":     "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      service: runner\n",
+		"missing docker service":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n",
+		"missing libvirt connection":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    libvirt:\n      domain_xml_template: domain.xml\n",
+		"missing libvirt domain template": "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    libvirt:\n      connection_uri: qemu:///system\n",
 		"unknown field":                   "unknown: true\n",
 	}
 	for testName, configText := range tests {

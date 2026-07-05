@@ -27,6 +27,7 @@ func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
 		"github-scaler.runner",
 		"linux-vm-1",
 		"github-scaler.jit-env",
+		"ACTIONS_RUNNER_INPUT_JITCONFIG",
 	} {
 		if !strings.Contains(renderedXML, expected) {
 			t.Fatalf("expected rendered XML to contain %q:\n%s", expected, renderedXML)

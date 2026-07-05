@@ -11,8 +11,9 @@ import (
 type RunnerState string
 
 const (
-	RunnerStateRunning   RunnerState = "running"
-	RunnerStateCompleted RunnerState = "completed"
+	JITConfigEnvironment = "ACTIONS_RUNNER_INPUT_JITCONFIG"
+	RunnerStateRunning   = "running"
+	RunnerStateCompleted = "completed"
 )
 
 type RunnerInstance struct {
@@ -28,9 +29,8 @@ type StartRequest struct {
 }
 
 type ComposeConfig struct {
-	ComposeFile          string
-	Service              string
-	JITConfigEnvironment string
+	ComposeFile string
+	Service     string
 }
 
 type Command struct {
@@ -66,7 +66,7 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 			"--name", request.RunnerName,
 			"--label", "github-scaler.scale-set="+request.ScaleSetName,
 			"--label", "github-scaler.runner="+request.RunnerName,
-			"--env", provider.Config.JITConfigEnvironment+"="+request.JITConfig,
+			"--env", JITConfigEnvironment+"="+request.JITConfig,
 			provider.Config.Service,
 		),
 	})

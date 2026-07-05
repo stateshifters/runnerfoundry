@@ -20,16 +20,13 @@ scale_sets:
   - name: linux-docker
     runner_group: default
     max_runners: 2
-    provider: docker
     docker:
       compose_file: ./compose.yaml
       service: runner
-      env_jit_config_name: RUNNER_JIT_CONFIG
 
   - name: linux-vm
     runner_group: default
     max_runners: 1
-    provider: libvirt
     libvirt:
       connection_uri: qemu:///system
       domain_xml_template: ./domain-template.xml
@@ -44,6 +41,76 @@ Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT 
 
 `log.format` accepts `text` or `json`.
 
+## Install as a Daemon
+
+Install the Linux binary somewhere on `PATH` for system services:
+
+```sh
+sudo install -m 0755 github-scaler /usr/local/bin/github-scaler
+```
+
+Create a dedicated service user and give it access to the provider sockets it needs. For Docker, that usually means the `docker` group. For libvirt, use the group required by your host policy, commonly `libvirt`.
+
+```sh
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin github-scaler
+sudo usermod -aG docker github-scaler
+sudo usermod -aG libvirt github-scaler
+```
+
+Create the config directory and store secrets outside the YAML:
+
+```sh
+sudo install -d -m 0750 -o root -g github-scaler /etc/github-scaler
+sudo install -m 0640 -o root -g github-scaler config.yaml /etc/github-scaler/config.yaml
+sudo install -m 0640 -o root -g github-scaler github-scaler.env /etc/github-scaler/github-scaler.env
+```
+
+The environment file should define the token referenced by `github.token_env`:
+
+```sh
+GITHUB_SCALER_PAT=ghp_example
+```
+
+Use absolute paths inside `/etc/github-scaler/config.yaml`, especially for Docker Compose files and libvirt XML templates. The daemon has no required working directory and stores no local state.
+
+Create `/etc/systemd/system/github-scaler.service`:
+
+```ini
+[Unit]
+Description=GitHub runner scale-set scaler
+After=network-online.target docker.service libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=github-scaler
+Group=github-scaler
+EnvironmentFile=/etc/github-scaler/github-scaler.env
+ExecStart=/usr/local/bin/github-scaler --config /etc/github-scaler/config.yaml
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+If a host only uses Docker or only uses libvirt, remove the unused service from `After=` and omit the unused group membership.
+
+Enable and start the daemon:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now github-scaler
+sudo systemctl status github-scaler
+```
+
+Inspect logs with:
+
+```sh
+journalctl -u github-scaler -f
+```
+
 ## Docker Provider
 
 Docker runner configuration is Compose-owned. Put images, env files, volumes, labels, networks, command, user, workdir, and other Docker-native settings in the Compose service.
@@ -51,10 +118,10 @@ Docker runner configuration is Compose-owned. Put images, env files, volumes, la
 For each runner, `github-scaler` runs:
 
 ```text
-docker compose -f <compose_file> run --detach --rm --name <runner> --label github-scaler.scale-set=<name> --label github-scaler.runner=<runner> --env <jit_env>=<jit_config> <service>
+docker compose -f <compose_file> run --detach --rm --name <runner> --label github-scaler.scale-set=<name> --label github-scaler.runner=<runner> --env ACTIONS_RUNNER_INPUT_JITCONFIG=<jit_config> <service>
 ```
 
-`env_jit_config_name` defaults to `RUNNER_JIT_CONFIG`. The service image must consume that value and start the Github runner with the JIT config. The official Github runner image expects `ACTIONS_RUNNER_INPUT_JITCONFIG`; see [examples/docker-runner](examples/docker-runner). The runner process should exit after its assigned job; `--rm` lets Docker remove the container.
+The scaler injects the JIT config as `ACTIONS_RUNNER_INPUT_JITCONFIG`, which is the environment variable consumed by the Github Actions runner. The runner process should exit after its assigned job; `--rm` lets Docker remove the container.
 
 Restart recovery uses Docker labels to discover owned containers. Running owned containers count as active capacity. Stopped owned leftovers are removed during reconciliation.
 
@@ -67,7 +134,7 @@ The V1 implementation parses and renders XML with `libvirt.org/go/libvirtxml`, t
 - a unique domain name matching the runner name
 - `github-scaler.scale-set` metadata
 - `github-scaler.runner` metadata
-- `github-scaler.jit-env` metadata set to `RUNNER_JIT_CONFIG`
+- `github-scaler.jit-env` metadata set to `ACTIONS_RUNNER_INPUT_JITCONFIG`
 
 The JIT config itself is not embedded directly in the domain XML. The VM template is responsible for delivering it by its documented convention, such as cloud-init, fw_cfg, a mounted config drive, or an image-specific bootstrap script.
 

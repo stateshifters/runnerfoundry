@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -130,15 +129,13 @@ func runScaleSet(ctx context.Context, logger *slog.Logger, client *upstream.Clie
 }
 
 func buildReconciler(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client *upstream.Client, scaleSetID int) (scaler.Reconciler, error) {
-	switch strings.ToLower(scaleSetConfig.Provider) {
-	case "docker":
+	if scaleSetConfig.Docker != nil {
 		provider := dockerProviderAdapter{
 			Provider: dockerprovider.ComposeProvider{
 				CommandRunner: dockerprovider.ExecCommandRunner{},
 				Config: dockerprovider.ComposeConfig{
-					ComposeFile:          scaleSetConfig.Docker.ComposeFile,
-					Service:              scaleSetConfig.Docker.Service,
-					JITConfigEnvironment: scaleSetConfig.Docker.JITConfigEnvironment,
+					ComposeFile: scaleSetConfig.Docker.ComposeFile,
+					Service:     scaleSetConfig.Docker.Service,
 				},
 			},
 		}
@@ -151,7 +148,8 @@ func buildReconciler(ctx context.Context, scaleSetConfig config.ScaleSetConfig, 
 			Provider:   provider,
 			JITConfig:  scalesetJITGenerator{Client: client, ScaleSetID: scaleSetID},
 		}}, nil
-	case "libvirt":
+	}
+	if scaleSetConfig.Libvirt != nil {
 		provider := libvirtProviderAdapter{
 			Provider: libvirtprovider.Provider{
 				CommandRunner: libvirtprovider.ExecCommandRunner{},
@@ -170,9 +168,8 @@ func buildReconciler(ctx context.Context, scaleSetConfig config.ScaleSetConfig, 
 			Provider:   provider,
 			JITConfig:  scalesetJITGenerator{Client: client, ScaleSetID: scaleSetID},
 		}}, nil
-	default:
-		return scaler.Reconciler{}, fmt.Errorf("provider %q is not supported", scaleSetConfig.Provider)
 	}
+	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
 
 type scaleSetHandler struct {
