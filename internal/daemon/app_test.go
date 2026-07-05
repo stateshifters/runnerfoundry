@@ -785,6 +785,14 @@ func (client fakeNonPruningScaleSetClient) CreateRunnerScaleSet(
 	return runnerScaleSet, nil
 }
 
+func (client fakeNonPruningScaleSetClient) UpdateRunnerScaleSet(
+	ctx context.Context,
+	runnerScaleSetID int,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (*upstream.RunnerScaleSet, error) {
+	return runnerScaleSet, nil
+}
+
 func (client fakeNonPruningScaleSetClient) MessageSessionClient(
 	ctx context.Context,
 	runnerScaleSetID int,

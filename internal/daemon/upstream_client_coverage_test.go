@@ -32,6 +32,9 @@ func TestCoverageScaleSetClientMethodsReturnBoundaryErrors(t *testing.T) {
 	if _, err := client.CreateRunnerScaleSet(context.Background(), &upstream.RunnerScaleSet{}); err == nil {
 		t.Fatal("expected create error")
 	}
+	if _, err := client.UpdateRunnerScaleSet(context.Background(), 1, &upstream.RunnerScaleSet{}); err == nil {
+		t.Fatal("expected update error")
+	}
 	if _, err := client.ListRunnerScaleSets(context.Background(), 1); err == nil {
 		t.Fatal("expected list error")
 	}

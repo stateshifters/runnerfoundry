@@ -30,6 +30,7 @@ type LogConfig struct {
 type ScaleSetConfig struct {
 	Name         string         `yaml:"name"`
 	Repositories []string       `yaml:"repositories"`
+	Labels       []string       `yaml:"labels"`
 	RunnerGroup  string         `yaml:"runner_group"`
 	MaxRunners   int            `yaml:"max_runners"`
 	Docker       *DockerConfig  `yaml:"docker"`
@@ -95,20 +96,14 @@ func (loadedConfig *Config) validateScaleSets() error {
 }
 
 func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
-	if scaleSet.Name == "" {
-		return errors.New("scale_sets[].name is required")
+	if err := scaleSet.validateName(seenNames); err != nil {
+		return err
 	}
-	if seenNames[scaleSet.Name] {
-		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	if err := scaleSet.validateRepositories(); err != nil {
+		return err
 	}
-	seenNames[scaleSet.Name] = true
-	if len(scaleSet.Repositories) == 0 {
-		return fmt.Errorf("scale set %q repositories must not be empty", scaleSet.Name)
-	}
-	for repositoryIndex, repositoryURL := range scaleSet.Repositories {
-		if strings.TrimSpace(repositoryURL) == "" {
-			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
-		}
+	if err := scaleSet.validateLabels(); err != nil {
+		return err
 	}
 	if scaleSet.RunnerGroup == "" {
 		scaleSet.RunnerGroup = "default"
@@ -118,6 +113,43 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	}
 	if err := scaleSet.validateProvider(); err != nil {
 		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
+	}
+	return nil
+}
+
+func (scaleSet *ScaleSetConfig) validateName(seenNames map[string]bool) error {
+	if scaleSet.Name == "" {
+		return errors.New("scale_sets[].name is required")
+	}
+	if seenNames[scaleSet.Name] {
+		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	}
+	seenNames[scaleSet.Name] = true
+	return nil
+}
+
+func (scaleSet *ScaleSetConfig) validateRepositories() error {
+	if len(scaleSet.Repositories) == 0 {
+		return fmt.Errorf("scale set %q repositories must not be empty", scaleSet.Name)
+	}
+	for repositoryIndex, repositoryURL := range scaleSet.Repositories {
+		if strings.TrimSpace(repositoryURL) == "" {
+			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
+		}
+	}
+	return nil
+}
+
+func (scaleSet *ScaleSetConfig) validateLabels() error {
+	seenLabels := map[string]bool{}
+	for labelIndex, labelName := range scaleSet.Labels {
+		if strings.TrimSpace(labelName) == "" {
+			return fmt.Errorf("scale set %q labels[%d] must not be empty", scaleSet.Name, labelIndex)
+		}
+		if seenLabels[labelName] {
+			return fmt.Errorf("scale set %q duplicate label %q", scaleSet.Name, labelName)
+		}
+		seenLabels[labelName] = true
 	}
 	return nil
 }
