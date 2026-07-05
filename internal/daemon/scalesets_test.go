@@ -15,18 +15,21 @@ import (
 	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
 )
 
-func TestStartScaleSetsReturnsSuccessForEmptySet(t *testing.T) {
-	if err := startScaleSets(context.Background(), slog.Default(), &fakeScaleSetClient{}, nil); err != nil {
-		t.Fatalf("expected start success, got %v", err)
-	}
-}
-
-func TestStartScaleSetsWrapsScaleSetName(t *testing.T) {
+func TestRunScaleSetPassesRepositoryToReconciler(t *testing.T) {
 	scaleSets := scaleSetRuntime{
 		RunnerHostname: func() string {
 			return "host"
 		},
-		BuildReconciler: func(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error) {
+		BuildReconciler: func(
+			ctx context.Context,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+			client scaleSetClient,
+			scaleSetID int,
+		) (scaler.Reconciler, error) {
+			if repositoryURL != "https://github.com/meza/repo-a" {
+				t.Fatalf("expected repository url, got %q", repositoryURL)
+			}
 			return scaler.Reconciler{}, errors.New("build failed")
 		},
 	}
@@ -35,12 +38,24 @@ func TestStartScaleSetsWrapsScaleSetName(t *testing.T) {
 		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
 		messageClient:  scaleSetMessageClient{Client: &fakeMessageClient{}},
 	}
-	err := startScaleSetsWithRuntime(context.Background(), slog.Default(), client, []config.ScaleSetConfig{{
+	err := runScaleSet(context.Background(), slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
-	}}, scaleSets)
-	if err == nil || !strings.Contains(err.Error(), `run scale set "linux"`) {
-		t.Fatalf("expected scale-set wrapped error, got %v", err)
+	}, scaleSets)
+	if err == nil || !strings.Contains(err.Error(), "build reconciler") {
+		t.Fatalf("expected reconciler error, got %v", err)
+	}
+}
+
+func TestStartScaleSetUsesProductionRuntime(t *testing.T) {
+	err := startScaleSet(context.Background(), slog.Default(), &fakeScaleSetClient{
+		runnerGroupErr: errors.New("group failed"),
+	}, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+		Name:        "linux",
+		RunnerGroup: "default",
+	})
+	if err == nil {
+		t.Fatal("expected runner group error")
 	}
 }
 
@@ -53,7 +68,13 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 		RunnerHostname: func() string {
 			return "host"
 		},
-		BuildReconciler: func(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error) {
+		BuildReconciler: func(
+			ctx context.Context,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+			client scaleSetClient,
+			scaleSetID int,
+		) (scaler.Reconciler, error) {
 			capturedScaleSetID = scaleSetID
 			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 				Name:       scaleSetConfig.Name,
@@ -70,7 +91,7 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 		messageClient:  scaleSetMessageClient{Client: messageClient},
 	}
 
-	err := runScaleSet(ctx, slog.Default(), client, config.ScaleSetConfig{
+	err := runScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 		MaxRunners:  2,
@@ -95,7 +116,13 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 		RunnerHostname: func() string {
 			return "host"
 		},
-		BuildReconciler: func(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error) {
+		BuildReconciler: func(
+			ctx context.Context,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+			client scaleSetClient,
+			scaleSetID int,
+		) (scaler.Reconciler, error) {
 			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 				Name:       scaleSetConfig.Name,
 				MaxRunners: scaleSetConfig.MaxRunners,
@@ -111,7 +138,7 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 		messageClient:   scaleSetMessageClient{Client: messageClient},
 	}
 
-	err := runScaleSet(ctx, slog.Default(), client, config.ScaleSetConfig{
+	err := runScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 		MaxRunners:  2,
@@ -167,7 +194,13 @@ func TestRunScaleSetSurfacesClientAndRuntimeFailures(t *testing.T) {
 				RunnerHostname: func() string {
 					return "host"
 				},
-				BuildReconciler: func(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error) {
+				BuildReconciler: func(
+					ctx context.Context,
+					repositoryURL string,
+					scaleSetConfig config.ScaleSetConfig,
+					client scaleSetClient,
+					scaleSetID int,
+				) (scaler.Reconciler, error) {
 					return scaler.Reconciler{}, errors.New("build failed")
 				},
 			},
@@ -181,7 +214,7 @@ func TestRunScaleSetSurfacesClientAndRuntimeFailures(t *testing.T) {
 					return "host"
 				}
 			}
-			err := runScaleSet(context.Background(), slog.Default(), testCase.client, config.ScaleSetConfig{
+			err := runScaleSet(context.Background(), slog.Default(), testCase.client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 				Name:        "linux",
 				RunnerGroup: "default",
 			}, testCase.scaleSets)

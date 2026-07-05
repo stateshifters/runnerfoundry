@@ -15,13 +15,13 @@ import (
 )
 
 func TestBuildReconcilerRejectsMissingProvider(t *testing.T) {
-	if _, err := buildReconcilerWithRuntime(context.Background(), config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1, providerRuntime{}); err == nil {
+	if _, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1, providerRuntime{}); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }
 
 func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
-	reconciler, err := buildReconcilerWithRuntime(context.Background(), config.ScaleSetConfig{
+	reconciler, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:       "linux",
 		MaxRunners: 2,
 		Docker:     &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
@@ -29,13 +29,13 @@ func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected docker reconciler, got %v", err)
 	}
-	if reconciler.ScaleSet.Name != "linux" || reconciler.ScaleSet.MaxRunners != 2 {
+	if reconciler.ScaleSet.Name != "github-com-meza-repo-a-linux" || reconciler.ScaleSet.MaxRunners != 2 {
 		t.Fatalf("unexpected reconciler: %#v", reconciler)
 	}
 }
 
 func TestBuildDockerReconcilerSurfacesValidationFailure(t *testing.T) {
-	_, err := buildReconcilerWithRuntime(context.Background(), config.ScaleSetConfig{
+	_, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:   "linux",
 		Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 	}, &fakeScaleSetClient{}, 5, providerRuntime{DockerCommandRunner: dockerRunnerStub{output: "other\n"}})
@@ -45,7 +45,7 @@ func TestBuildDockerReconcilerSurfacesValidationFailure(t *testing.T) {
 }
 
 func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
-	reconciler, err := buildReconcilerWithRuntime(context.Background(), config.ScaleSetConfig{
+	reconciler, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:       "linux-vm",
 		MaxRunners: 1,
 		Libvirt: &config.LibvirtConfig{
@@ -56,13 +56,13 @@ func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected libvirt reconciler, got %v", err)
 	}
-	if reconciler.ScaleSet.Name != "linux-vm" || reconciler.ScaleSet.MaxRunners != 1 {
+	if reconciler.ScaleSet.Name != "github-com-meza-repo-a-linux-vm" || reconciler.ScaleSet.MaxRunners != 1 {
 		t.Fatalf("unexpected reconciler: %#v", reconciler)
 	}
 }
 
 func TestBuildLibvirtReconcilerSurfacesValidationFailure(t *testing.T) {
-	_, err := buildReconcilerWithRuntime(context.Background(), config.ScaleSetConfig{
+	_, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name: "linux-vm",
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI:     "qemu:///system",
@@ -75,7 +75,7 @@ func TestBuildLibvirtReconcilerSurfacesValidationFailure(t *testing.T) {
 }
 
 func TestBuildReconcilerUsesProductionRuntime(t *testing.T) {
-	if _, err := buildReconciler(context.Background(), config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1); err == nil {
+	if _, err := buildReconciler(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }

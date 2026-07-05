@@ -49,9 +49,15 @@ func (client scaleSetMessageClient) DeleteMessage(ctx context.Context, messageID
 }
 
 type scaleSetRuntime struct {
-	BuildReconciler func(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error)
-	RunnerHostname  func() string
-	PollRetryDelay  time.Duration
+	BuildReconciler func(
+		ctx context.Context,
+		repositoryURL string,
+		scaleSetConfig config.ScaleSetConfig,
+		client scaleSetClient,
+		scaleSetID int,
+	) (scaler.Reconciler, error)
+	RunnerHostname func() string
+	PollRetryDelay time.Duration
 }
 
 func productionScaleSetRuntime() scaleSetRuntime {
@@ -66,6 +72,7 @@ func runScaleSet(
 	ctx context.Context,
 	logger *slog.Logger,
 	client scaleSetClient,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	scaleSets scaleSetRuntime,
 ) error {
@@ -81,7 +88,7 @@ func runScaleSet(
 	if err != nil {
 		return fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
 	}
-	reconciler, err := scaleSets.BuildReconciler(ctx, scaleSetConfig, client, runnerScaleSet.ID)
+	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
 	if err != nil {
 		return fmt.Errorf("build reconciler for %q: %w", scaleSetConfig.Name, err)
 	}

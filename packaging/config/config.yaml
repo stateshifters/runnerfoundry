@@ -1,5 +1,4 @@
 github:
-  url: https://github.com/OWNER/REPO
   token_env: GITHUB_SCALER_PAT
 
 log:

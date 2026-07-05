@@ -10,8 +10,14 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
-func buildReconciler(ctx context.Context, scaleSetConfig config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error) {
-	return buildReconcilerWithRuntime(ctx, scaleSetConfig, client, scaleSetID, productionProviderRuntime())
+func buildReconciler(
+	ctx context.Context,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	client scaleSetClient,
+	scaleSetID int,
+) (scaler.Reconciler, error) {
+	return buildReconcilerWithRuntime(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderRuntime())
 }
 
 type providerRuntime struct {
@@ -28,22 +34,24 @@ func productionProviderRuntime() providerRuntime {
 
 func buildReconcilerWithRuntime(
 	ctx context.Context,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	client scaleSetClient,
 	scaleSetID int,
 	providers providerRuntime,
 ) (scaler.Reconciler, error) {
 	if scaleSetConfig.Docker != nil {
-		return buildDockerReconciler(ctx, scaleSetConfig, client, scaleSetID, providers.DockerCommandRunner)
+		return buildDockerReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.DockerCommandRunner)
 	}
 	if scaleSetConfig.Libvirt != nil {
-		return buildLibvirtReconciler(ctx, scaleSetConfig, client, scaleSetID, providers.LibvirtCommandRunner)
+		return buildLibvirtReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.LibvirtCommandRunner)
 	}
 	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
 
 func buildDockerReconciler(
 	ctx context.Context,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	client scaleSetClient,
 	scaleSetID int,
@@ -58,11 +66,12 @@ func buildDockerReconciler(
 			},
 		},
 	}
-	return validatedReconciler(ctx, scaleSetConfig, provider, provider.Provider.Validate, "docker", client, scaleSetID)
+	return validatedReconciler(ctx, repositoryURL, scaleSetConfig, provider, provider.Provider.Validate, "docker", client, scaleSetID)
 }
 
 func buildLibvirtReconciler(
 	ctx context.Context,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	client scaleSetClient,
 	scaleSetID int,
@@ -77,12 +86,18 @@ func buildLibvirtReconciler(
 			},
 		},
 	}
-	return validatedReconciler(ctx, scaleSetConfig, provider, provider.Provider.Validate, "libvirt", client, scaleSetID)
+	return validatedReconciler(ctx, repositoryURL, scaleSetConfig, provider, provider.Provider.Validate, "libvirt", client, scaleSetID)
 }
 
-func newReconciler(scaleSetConfig config.ScaleSetConfig, provider scaler.Provider, client scaleSetClient, scaleSetID int) scaler.Reconciler {
+func newReconciler(
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	provider scaler.Provider,
+	client scaleSetClient,
+	scaleSetID int,
+) scaler.Reconciler {
 	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-		Name:       scaleSetConfig.Name,
+		Name:       localScaleSetName(repositoryURL, scaleSetConfig.Name),
 		MaxRunners: scaleSetConfig.MaxRunners,
 		Provider:   provider,
 		JITConfig:  scalesetJITGenerator{Client: client, ScaleSetID: scaleSetID},
@@ -91,6 +106,7 @@ func newReconciler(scaleSetConfig config.ScaleSetConfig, provider scaler.Provide
 
 func validatedReconciler(
 	ctx context.Context,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	provider scaler.Provider,
 	validate func(ctx context.Context) error,
@@ -101,7 +117,7 @@ func validatedReconciler(
 	if err := validate(ctx); err != nil {
 		return scaler.Reconciler{}, fmt.Errorf("validate %s provider for %q: %w", providerName, scaleSetConfig.Name, err)
 	}
-	return newReconciler(scaleSetConfig, provider, client, scaleSetID), nil
+	return newReconciler(repositoryURL, scaleSetConfig, provider, client, scaleSetID), nil
 }
 
 type dockerProviderAdapter struct {

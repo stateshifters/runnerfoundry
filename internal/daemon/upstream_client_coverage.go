@@ -7,10 +7,12 @@ import (
 	"errors"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
 )
 
-func newGitHubClient(loadedConfig config.Config, token string) (coverageScaleSetClient, error) {
+func newGitHubClient(repositoryURL string, token string) (coverageScaleSetClient, error) {
+	if repositoryURL == "" {
+		return coverageScaleSetClient{}, errors.New("github repository url is required")
+	}
 	if token == "" {
 		return coverageScaleSetClient{}, errors.New("github token is required")
 	}

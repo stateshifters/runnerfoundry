@@ -20,19 +20,19 @@ func Run(ctx context.Context, options Options) error {
 
 type runtime struct {
 	LoadConfig      func(configPath string) (config.Config, error)
-	NewGitHubClient func(loadedConfig config.Config, token string) (scaleSetClient, error)
+	NewGitHubClient func(repositoryURL string, token string) (scaleSetClient, error)
 	NewLogger       func(format string) *slog.Logger
-	StartScaleSets  func(ctx context.Context, logger *slog.Logger, client scaleSetClient, scaleSetConfigs []config.ScaleSetConfig) error
+	StartScaleSet   func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) error
 }
 
 func productionRuntime() runtime {
 	return runtime{
 		LoadConfig: loadConfig,
-		NewGitHubClient: func(loadedConfig config.Config, token string) (scaleSetClient, error) {
-			return newGitHubClient(loadedConfig, token)
+		NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
+			return newGitHubClient(repositoryURL, token)
 		},
-		NewLogger:      newLogger,
-		StartScaleSets: startScaleSets,
+		NewLogger:     newLogger,
+		StartScaleSet: startScaleSet,
 	}
 }
 
@@ -45,15 +45,40 @@ func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) erro
 	if err != nil {
 		return fmt.Errorf("load github token: %w", err)
 	}
-	client, err := daemonRuntime.NewGitHubClient(loadedConfig, token)
-	if err != nil {
-		return err
-	}
-	if err := daemonRuntime.StartScaleSets(ctx, daemonRuntime.NewLogger(loadedConfig.Log.Format), client, loadedConfig.ScaleSets); err != nil {
+	if err := startConfiguredScaleSets(ctx, daemonRuntime, loadedConfig, token); err != nil {
 		return err
 	}
 	<-ctx.Done()
 	return fmt.Errorf("shutdown: %w", ctx.Err())
+}
+
+func startConfiguredScaleSets(ctx context.Context, daemonRuntime runtime, loadedConfig config.Config, token string) error {
+	logger := daemonRuntime.NewLogger(loadedConfig.Log.Format)
+	for _, scaleSetConfig := range loadedConfig.ScaleSets {
+		if err := startScaleSetRepositories(ctx, daemonRuntime, logger, scaleSetConfig, token); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func startScaleSetRepositories(
+	ctx context.Context,
+	daemonRuntime runtime,
+	logger *slog.Logger,
+	scaleSetConfig config.ScaleSetConfig,
+	token string,
+) error {
+	for _, repositoryURL := range scaleSetConfig.Repositories {
+		client, err := daemonRuntime.NewGitHubClient(repositoryURL, token)
+		if err != nil {
+			return fmt.Errorf("create github client for %q: %w", repositoryURL, err)
+		}
+		if err := daemonRuntime.StartScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig); err != nil {
+			return fmt.Errorf("run scale set %q for repository %q: %w", scaleSetConfig.Name, repositoryURL, err)
+		}
+	}
+	return nil
 }
 
 func loadConfig(configPath string) (config.Config, error) {
@@ -75,26 +100,12 @@ func newLogger(format string) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, nil))
 }
 
-func startScaleSets(
+func startScaleSet(
 	ctx context.Context,
 	logger *slog.Logger,
 	client scaleSetClient,
-	scaleSetConfigs []config.ScaleSetConfig,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
 ) error {
-	return startScaleSetsWithRuntime(ctx, logger, client, scaleSetConfigs, productionScaleSetRuntime())
-}
-
-func startScaleSetsWithRuntime(
-	ctx context.Context,
-	logger *slog.Logger,
-	client scaleSetClient,
-	scaleSetConfigs []config.ScaleSetConfig,
-	scaleSets scaleSetRuntime,
-) error {
-	for _, scaleSetConfig := range scaleSetConfigs {
-		if err := runScaleSet(ctx, logger, client, scaleSetConfig, scaleSets); err != nil {
-			return fmt.Errorf("run scale set %q: %w", scaleSetConfig.Name, err)
-		}
-	}
-	return nil
+	return runScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig, productionScaleSetRuntime())
 }

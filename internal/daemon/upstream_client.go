@@ -7,12 +7,11 @@ import (
 	"fmt"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
 )
 
-func newGitHubClient(loadedConfig config.Config, token string) (upstreamScaleSetClient, error) {
+func newGitHubClient(repositoryURL string, token string) (upstreamScaleSetClient, error) {
 	client, err := upstream.NewClientWithPersonalAccessToken(upstream.NewClientWithPersonalAccessTokenConfig{
-		GitHubConfigURL:     loadedConfig.GitHub.URL,
+		GitHubConfigURL:     repositoryURL,
 		PersonalAccessToken: token,
 		SystemInfo: upstream.SystemInfo{
 			System:  "github-scaler",

@@ -18,31 +18,39 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 	defer cancel()
 	var capturedConfigPath string
 	var capturedToken string
-	var capturedScaleSets []config.ScaleSetConfig
+	var capturedRepositories []string
+	var capturedScaleSetNames []string
 	daemonRuntime := runtime{
 		LoadConfig: func(configPath string) (config.Config, error) {
 			capturedConfigPath = configPath
 			return config.Config{
-				GitHub: config.GitHubConfig{URL: "https://github.com/meza/agent-playground", TokenEnv: "GITHUB_SCALER_PAT"},
+				GitHub: config.GitHubConfig{TokenEnv: "GITHUB_SCALER_PAT"},
 				Log:    config.LogConfig{Format: "json"},
 				ScaleSets: []config.ScaleSetConfig{{
-					Name:       "linux",
+					Name: "linux",
+					Repositories: []string{
+						"https://github.com/meza/repo-a",
+						"https://github.com/meza/repo-b",
+					},
 					MaxRunners: 1,
 					Docker:     &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 				}},
 			}, nil
 		},
-		NewGitHubClient: func(loadedConfig config.Config, token string) (scaleSetClient, error) {
+		NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
 			capturedToken = token
+			capturedRepositories = append(capturedRepositories, repositoryURL)
 			return &fakeScaleSetClient{}, nil
 		},
 		NewLogger: newLogger,
-		StartScaleSets: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, scaleSetConfigs []config.ScaleSetConfig) error {
+		StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) error {
 			if logger == nil {
 				t.Fatal("expected logger")
 			}
-			capturedScaleSets = scaleSetConfigs
-			cancel()
+			capturedScaleSetNames = append(capturedScaleSetNames, scaleSetConfig.Name)
+			if len(capturedScaleSetNames) == 2 {
+				cancel()
+			}
 			return nil
 		},
 	}
@@ -57,8 +65,11 @@ func TestRunUsesConfigTokenClientLoggerAndScaleSets(t *testing.T) {
 	if capturedToken != "secret" {
 		t.Fatalf("expected token, got %q", capturedToken)
 	}
-	if len(capturedScaleSets) != 1 || capturedScaleSets[0].Name != "linux" {
-		t.Fatalf("expected scale sets, got %#v", capturedScaleSets)
+	if strings.Join(capturedRepositories, ",") != "https://github.com/meza/repo-a,https://github.com/meza/repo-b" {
+		t.Fatalf("expected repositories, got %#v", capturedRepositories)
+	}
+	if strings.Join(capturedScaleSetNames, ",") != "linux,linux" {
+		t.Fatalf("expected scale set per repository, got %#v", capturedScaleSetNames)
 	}
 }
 
@@ -86,24 +97,39 @@ func TestRunSurfacesStartupFailures(t *testing.T) {
 		"client": {
 			daemonRuntime: runtime{
 				LoadConfig: func(configPath string) (config.Config, error) {
-					return config.Config{GitHub: config.GitHubConfig{TokenFile: writeFile(t, "token", "secret")}}, nil
+					return config.Config{
+						GitHub: config.GitHubConfig{TokenFile: writeFile(t, "token", "secret")},
+						ScaleSets: []config.ScaleSetConfig{{
+							Name:         "linux",
+							Repositories: []string{"https://github.com/meza/repo-a"},
+							Docker:       &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+						}},
+					}, nil
 				},
-				NewGitHubClient: func(loadedConfig config.Config, token string) (scaleSetClient, error) {
+				NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
 					return nil, errors.New("client failed")
 				},
+				NewLogger: newLogger,
 			},
 			expected: "client failed",
 		},
 		"scale sets": {
 			daemonRuntime: runtime{
 				LoadConfig: func(configPath string) (config.Config, error) {
-					return config.Config{GitHub: config.GitHubConfig{TokenFile: writeFile(t, "token", "secret")}}, nil
+					return config.Config{
+						GitHub: config.GitHubConfig{TokenFile: writeFile(t, "token", "secret")},
+						ScaleSets: []config.ScaleSetConfig{{
+							Name:         "linux",
+							Repositories: []string{"https://github.com/meza/repo-a"},
+							Docker:       &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+						}},
+					}, nil
 				},
-				NewGitHubClient: func(loadedConfig config.Config, token string) (scaleSetClient, error) {
+				NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
 					return &fakeScaleSetClient{}, nil
 				},
 				NewLogger: newLogger,
-				StartScaleSets: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, scaleSetConfigs []config.ScaleSetConfig) error {
+				StartScaleSet: func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) error {
 					return errors.New("scale failed")
 				},
 			},
@@ -128,9 +154,7 @@ func TestRunUsesProductionRuntime(t *testing.T) {
 
 func TestProductionRuntimeProvidesGitHubClientFactory(t *testing.T) {
 	daemonRuntime := productionRuntime()
-	if _, err := daemonRuntime.NewGitHubClient(config.Config{
-		GitHub: config.GitHubConfig{URL: "https://github.com/meza/agent-playground"},
-	}, "secret"); err != nil {
+	if _, err := daemonRuntime.NewGitHubClient("https://github.com/meza/agent-playground", "secret"); err != nil {
 		t.Fatalf("expected client factory success, got %v", err)
 	}
 }
@@ -139,10 +163,11 @@ func TestLoadConfigReadsOperatorConfig(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_PAT", "secret")
 	configPath := writeFile(t, "config.yaml", `
 github:
-  url: https://github.com/meza/agent-playground
   token_env: GITHUB_SCALER_PAT
 scale_sets:
   - name: linux
+    repositories:
+      - https://github.com/meza/agent-playground
     max_runners: 1
     docker:
       compose_file: compose.yaml
@@ -176,9 +201,7 @@ func TestNewLoggerSupportsTextAndJSON(t *testing.T) {
 }
 
 func TestNewGitHubClientBuildsScaleSetClient(t *testing.T) {
-	_, err := newGitHubClient(config.Config{
-		GitHub: config.GitHubConfig{URL: "https://github.com/meza/agent-playground"},
-	}, "secret")
+	_, err := newGitHubClient("https://github.com/meza/agent-playground", "secret")
 	if err != nil {
 		t.Fatalf("expected client success, got %v", err)
 	}

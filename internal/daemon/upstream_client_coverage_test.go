@@ -7,12 +7,17 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
 )
 
 func TestCoverageGitHubClientRequiresToken(t *testing.T) {
-	if _, err := newGitHubClient(config.Config{}, ""); err == nil {
+	if _, err := newGitHubClient("https://github.com/meza/repo-a", ""); err == nil {
 		t.Fatal("expected token error")
+	}
+}
+
+func TestCoverageGitHubClientRequiresRepositoryURL(t *testing.T) {
+	if _, err := newGitHubClient("", "secret"); err == nil {
+		t.Fatal("expected repository error")
 	}
 }
 

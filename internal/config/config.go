@@ -17,7 +17,6 @@ type Config struct {
 }
 
 type GitHubConfig struct {
-	URL       string `yaml:"url"`
 	TokenEnv  string `yaml:"token_env"`
 	TokenFile string `yaml:"token_file"`
 	Token     string `yaml:"token"`
@@ -28,11 +27,12 @@ type LogConfig struct {
 }
 
 type ScaleSetConfig struct {
-	Name        string         `yaml:"name"`
-	RunnerGroup string         `yaml:"runner_group"`
-	MaxRunners  int            `yaml:"max_runners"`
-	Docker      *DockerConfig  `yaml:"docker"`
-	Libvirt     *LibvirtConfig `yaml:"libvirt"`
+	Name         string         `yaml:"name"`
+	Repositories []string       `yaml:"repositories"`
+	RunnerGroup  string         `yaml:"runner_group"`
+	MaxRunners   int            `yaml:"max_runners"`
+	Docker       *DockerConfig  `yaml:"docker"`
+	Libvirt      *LibvirtConfig `yaml:"libvirt"`
 }
 
 type DockerConfig struct {
@@ -59,9 +59,6 @@ func Load(reader io.Reader) (Config, error) {
 }
 
 func (loadedConfig *Config) Validate() error {
-	if loadedConfig.GitHub.URL == "" {
-		return errors.New("github.url is required")
-	}
 	if loadedConfig.GitHub.Token != "" {
 		return errors.New("github.token is not allowed; use token_env or token_file")
 	}
@@ -104,6 +101,14 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
 	}
 	seenNames[scaleSet.Name] = true
+	if len(scaleSet.Repositories) == 0 {
+		return fmt.Errorf("scale set %q repositories must not be empty", scaleSet.Name)
+	}
+	for repositoryIndex, repositoryURL := range scaleSet.Repositories {
+		if strings.TrimSpace(repositoryURL) == "" {
+			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
+		}
+	}
 	if scaleSet.RunnerGroup == "" {
 		scaleSet.RunnerGroup = "default"
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLoadRejectsPlaintextTokenAndValidatesProviders(t *testing.T) {
+func TestLoadAcceptsScaleSetsWithRepositoryLists(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_TOKEN", "token")
 	tempDir := t.TempDir()
 	composePath := filepath.Join(tempDir, "compose.yaml")
@@ -21,18 +21,21 @@ func TestLoadRejectsPlaintextTokenAndValidatesProviders(t *testing.T) {
 
 	validConfig := `
 github:
-  url: https://github.com/meza/agent-playground
   token_env: GITHUB_SCALER_TOKEN
 log:
   format: json
 scale_sets:
   - name: docker-set
-    runner_group: default
+    repositories:
+      - https://github.com/meza/repo-a
+      - https://github.com/meza/repo-b
     max_runners: 2
     docker:
       compose_file: ` + composePath + `
       service: runner
   - name: vm-set
+    repositories:
+      - https://github.com/meza/repo-c
     runner_group: default
     max_runners: 1
     libvirt:
@@ -42,6 +45,12 @@ scale_sets:
 	loadedConfig, err := Load(strings.NewReader(validConfig))
 	if err != nil {
 		t.Fatalf("expected valid config, got %v", err)
+	}
+	if loadedConfig.ScaleSets[0].Repositories[1] != "https://github.com/meza/repo-b" {
+		t.Fatalf("expected repositories to load, got %#v", loadedConfig.ScaleSets[0].Repositories)
+	}
+	if loadedConfig.ScaleSets[0].RunnerGroup != "default" {
+		t.Fatalf("expected default runner group, got %q", loadedConfig.ScaleSets[0].RunnerGroup)
 	}
 	if loadedConfig.ScaleSets[0].Docker.Service != "runner" {
 		t.Fatalf("expected docker service to load, got %q", loadedConfig.ScaleSets[0].Docker.Service)
@@ -55,46 +64,100 @@ scale_sets:
 
 func TestLoadRejectsDuplicateScaleSetNames(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_TOKEN", "token")
-	configText := `
-github:
-  url: https://github.com/meza/agent-playground
-  token_env: GITHUB_SCALER_TOKEN
-scale_sets:
+	configText := baseConfig(`
   - name: repeated
+    repositories:
+      - https://github.com/meza/repo-a
     max_runners: 1
     docker:
       compose_file: compose.yaml
       service: runner
   - name: repeated
+    repositories:
+      - https://github.com/meza/repo-b
     max_runners: 1
     docker:
       compose_file: compose.yaml
       service: runner
-`
+`)
 	_, err := Load(strings.NewReader(configText))
 	if err == nil {
 		t.Fatal("expected duplicate name error")
 	}
 }
 
+func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
+	scaleSet := ScaleSetConfig{
+		Name:         "linux",
+		Repositories: []string{"https://github.com/meza/repo-a"},
+		RunnerGroup:  "custom",
+		MaxRunners:   1,
+		Docker:       &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+	}
+	if err := scaleSet.validate(map[string]bool{}); err != nil {
+		t.Fatalf("expected scale set to validate, got %v", err)
+	}
+	if scaleSet.RunnerGroup != "custom" {
+		t.Fatalf("expected explicit runner group, got %q", scaleSet.RunnerGroup)
+	}
+}
+
 func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_TOKEN", "token")
 	tests := map[string]string{
-		"bad yaml":                        "github: [",
-		"missing github url":              "github:\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets: []\n",
-		"two token sources":               "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\n  token_file: token\nscale_sets: []\n",
-		"missing token env":               "github:\n  url: https://github.com/meza/agent-playground\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
-		"bad log format":                  "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
-		"missing scale sets":              "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\n",
-		"missing scale set name":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n",
-		"negative max runners":            "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: -1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n",
-		"missing provider config":         "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n",
-		"multiple provider configs":       "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n    libvirt:\n      connection_uri: qemu:///system\n      domain_xml_template: domain.xml\n",
-		"missing docker compose file":     "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      service: runner\n",
-		"missing docker service":          "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n",
-		"missing libvirt connection":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    libvirt:\n      domain_xml_template: domain.xml\n",
-		"missing libvirt domain template": "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n  - name: bad\n    max_runners: 1\n    libvirt:\n      connection_uri: qemu:///system\n",
-		"unknown field":                   "unknown: true\n",
+		"bad yaml":               "github: [",
+		"global github url":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets: []\n",
+		"two token sources":      "github:\n  token_env: GITHUB_SCALER_TOKEN\n  token_file: token\nscale_sets: []\n",
+		"missing token env":      "github:\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
+		"bad log format":         "github:\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
+		"missing scale sets":     "github:\n  token_env: GITHUB_SCALER_TOKEN\n",
+		"missing scale set name": baseConfig("  - repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
+		"missing repositories":   baseConfig(validScaleSet("bad", "")),
+		"empty repository":       baseConfig(validScaleSet("bad", "    repositories:\n      - ''\n")),
+		"negative max runners": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: -1
+    docker:
+      compose_file: compose.yaml
+      service: runner
+`),
+		"missing provider config":   baseConfig("  - name: bad\n    repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n"),
+		"multiple provider configs": baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    libvirt:\n      connection_uri: qemu:///system\n      domain_xml_template: domain.xml\n")),
+		"missing docker compose file": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: 1
+    docker:
+      service: runner
+`),
+		"missing docker service": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: 1
+    docker:
+      compose_file: compose.yaml
+`),
+		"missing libvirt connection": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: 1
+    libvirt:
+      domain_xml_template: domain.xml
+`),
+		"missing libvirt domain template": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: 1
+    libvirt:
+      connection_uri: qemu:///system
+`),
+		"unknown field": "unknown: true\n",
 	}
 	for testName, configText := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -145,4 +208,17 @@ func TestTokenRejectsEmptyAndUnreadableSources(t *testing.T) {
 	if _, err := (Config{GitHub: GitHubConfig{TokenFile: filepath.Join(t.TempDir(), "missing")}}).Token(); err == nil {
 		t.Fatal("expected unreadable file token error")
 	}
+}
+
+func baseConfig(scaleSets string) string {
+	return "github:\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n" + scaleSets
+}
+
+func validScaleSet(name string, repositoryBlock string) string {
+	return "  - name: " + name + "\n" +
+		repositoryBlock +
+		"    max_runners: 1\n" +
+		"    docker:\n" +
+		"      compose_file: compose.yaml\n" +
+		"      service: runner\n"
 }

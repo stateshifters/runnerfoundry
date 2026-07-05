@@ -10,7 +10,6 @@ The daemon requires `--config <path>`.
 
 ```yaml
 github:
-  url: https://github.com/OWNER/REPO
   token_env: GITHUB_SCALER_PAT
 
 log:
@@ -18,6 +17,9 @@ log:
 
 scale_sets:
   - name: linux-docker
+    repositories:
+      - https://github.com/OWNER/REPO_A
+      - https://github.com/OWNER/REPO_B
     runner_group: default
     max_runners: 2
     docker:
@@ -25,6 +27,8 @@ scale_sets:
       service: runner
 
   - name: linux-vm
+    repositories:
+      - https://github.com/OWNER/REPO_C
     runner_group: default
     max_runners: 1
     libvirt:
@@ -38,6 +42,8 @@ Github authentication is PAT-only in V1. Use exactly one of:
 - `github.token_file`
 
 Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT configs, queue tokens, or generated runtime config containing secrets.
+
+Each scale set lists the repositories it serves. A single configured scale set such as `linux-docker` can drive multiple repositories that need the same self-hosted runner pool. Github still gets one runner scale set per repository target; the daemon qualifies local Docker/libvirt ownership internally so provider state does not collide between repositories.
 
 `log.format` accepts `text` or `json`.
 
@@ -181,7 +187,7 @@ Restart recovery lists libvirt domains, filters to scaler-owned metadata, treats
 
 For each scale set, the daemon:
 
-- creates the Github runner scale set if needed
+- creates the Github runner scale set in each configured repository if needed
 - polls Github scale-set messages with `maxCapacity = max_runners`
 - uses `statistics.TotalAssignedJobs` as desired capacity
 - caps desired capacity at `max_runners`
