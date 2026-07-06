@@ -200,7 +200,7 @@ func (adapter libvirtProviderAdapter) Destroy(ctx context.Context, instance scal
 	if err := adapter.Provider.Destroy(ctx, libvirtprovider.RunnerInstance{
 		ID:         instance.ID,
 		RunnerName: instance.RunnerName,
-		State:      libvirtprovider.RunnerStateCompleted,
+		State:      scalerLibvirtRunnerState(instance),
 	}); err != nil {
 		return fmt.Errorf("destroy libvirt provider runner: %w", err)
 	}
@@ -224,4 +224,11 @@ func libvirtRunnerState(instance libvirtprovider.RunnerInstance) scaler.RunnerSt
 		return scaler.RunnerStateRunning
 	}
 	return scaler.RunnerStateCompleted
+}
+
+func scalerLibvirtRunnerState(instance scaler.RunnerInstance) libvirtprovider.RunnerState {
+	if instance.State == scaler.RunnerStateRunning {
+		return libvirtprovider.RunnerStateRunning
+	}
+	return libvirtprovider.RunnerStateCompleted
 }

@@ -2,6 +2,7 @@ package libvirt
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,11 +69,8 @@ func (provider Provider) Start(ctx context.Context, request StartRequest) error 
 	if err != nil {
 		return err
 	}
-	if _, err := provider.runVirshWithStdin(ctx, renderedXML, "define", "/dev/stdin"); err != nil {
-		return fmt.Errorf("define libvirt runner %q: %w", request.RunnerName, err)
-	}
-	if _, err := provider.runVirsh(ctx, "start", request.RunnerName); err != nil {
-		return fmt.Errorf("start libvirt runner %q: %w", request.RunnerName, err)
+	if _, err := provider.runVirshWithStdin(ctx, renderedXML, "create", "/dev/stdin"); err != nil {
+		return fmt.Errorf("create libvirt runner %q: %w", request.RunnerName, err)
 	}
 	return nil
 }
@@ -123,8 +121,11 @@ func (provider Provider) instanceForDomain(ctx context.Context, domainName strin
 }
 
 func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	if _, err := provider.runVirsh(ctx, "undefine", instance.ID); err != nil {
-		return fmt.Errorf("undefine libvirt runner %q: %w", instance.RunnerName, err)
+	if instance.State != RunnerStateRunning {
+		return nil
+	}
+	if _, err := provider.runVirsh(ctx, "destroy", instance.ID); err != nil {
+		return fmt.Errorf("destroy libvirt runner %q: %w", instance.RunnerName, err)
 	}
 	return nil
 }
@@ -179,6 +180,29 @@ func (provider Provider) runVirshWithStdin(ctx context.Context, stdin string, ar
 }
 
 func metadataValue(domainXML string, key string) string {
+	namespacedValue := namespacedMetadataValue(domainXML, key)
+	if namespacedValue != "" {
+		return namespacedValue
+	}
+	return legacyMetadataValue(domainXML, key)
+}
+
+func namespacedMetadataValue(domainXML string, key string) string {
+	var metadata domainMetadata
+	if err := xml.Unmarshal([]byte(domainXML), &metadata); err != nil {
+		return ""
+	}
+	switch key {
+	case "github-scaler.scale-set":
+		return metadata.Metadata.Runner.ScaleSet
+	case "github-scaler.runner":
+		return metadata.Metadata.Runner.Name
+	default:
+		return ""
+	}
+}
+
+func legacyMetadataValue(domainXML string, key string) string {
 	openTag := "<" + key + ">"
 	closeTag := "</" + key + ">"
 	start := strings.Index(domainXML, openTag)
@@ -191,6 +215,19 @@ func metadataValue(domainXML string, key string) string {
 		return ""
 	}
 	return domainXML[start : start+end]
+}
+
+type domainMetadata struct {
+	Metadata scalerMetadata `xml:"metadata"`
+}
+
+type scalerMetadata struct {
+	Runner scalerRunnerMetadata `xml:"urn:github-scaler runner"`
+}
+
+type scalerRunnerMetadata struct {
+	ScaleSet string `xml:"urn:github-scaler scale-set"`
+	Name     string `xml:"urn:github-scaler name"`
 }
 
 func libvirtState(rawState string) RunnerState {

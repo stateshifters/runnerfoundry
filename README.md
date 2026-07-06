@@ -199,13 +199,13 @@ Libvirt runner configuration comes from a domain XML template. The template must
 The V1 implementation parses and renders XML with `libvirt.org/go/libvirtxml`, then applies it through `virsh` against `connection_uri`. The rendered domain gets:
 
 - a unique domain name matching the runner name
-- `github-scaler.scale-set` metadata
-- `github-scaler.runner` metadata
-- `github-scaler.jit-env` metadata set to `ACTIONS_RUNNER_INPUT_JITCONFIG`
+- namespaced `github-scaler` ownership metadata for restart recovery
+- `<os><smbios mode="sysinfo"/></os>`
+- `<sysinfo type="smbios"><oemStrings><entry>github-scaler.jit=<encoded JIT></entry></oemStrings></sysinfo>`
 
-The JIT config itself is not embedded directly in the domain XML. The VM template is responsible for delivering it by its documented convention, such as cloud-init, fw_cfg, a mounted config drive, or an image-specific bootstrap script.
+The rendered runner XML stays in memory and is sent to `virsh create /dev/stdin`, so scaler-created VM runners are transient libvirt domains. The JIT config is visible to the guest through SMBIOS OEM strings and is not stored in libvirt metadata.
 
-Restart recovery lists libvirt domains, filters to scaler-owned metadata, treats running owned domains as active capacity, and undefines shutoff owned domains during reconciliation.
+Restart recovery lists libvirt domains, filters to scaler-owned metadata, and treats running owned domains as active capacity. Shutoff transient domains disappear automatically. Forced cleanup uses `virsh destroy <domain>` for active owned domains only and never requests storage removal.
 
 ## Scale Behavior
 

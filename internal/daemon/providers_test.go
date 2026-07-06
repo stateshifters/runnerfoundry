@@ -148,7 +148,7 @@ func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{ScaleSetName: "linux-vm", RunnerName: "linux-vm-2", JITConfig: "jit"}); err != nil {
 		t.Fatalf("expected start success, got %v", err)
 	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{ID: "linux-vm-1", RunnerName: "linux-vm-1"}); err != nil {
+	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{ID: "linux-vm-1", RunnerName: "linux-vm-1", State: scaler.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestLibvirtProviderAdapterSurfacesProviderErrors(t *testing.T) {
 	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{}); err == nil {
 		t.Fatal("expected start error")
 	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{}); err == nil {
+	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy error")
 	}
 }
@@ -169,6 +169,12 @@ func TestLibvirtProviderAdapterSurfacesProviderErrors(t *testing.T) {
 func TestLibvirtRunnerStateMapsCompletedStates(t *testing.T) {
 	if libvirtRunnerState(libvirtprovider.RunnerInstance{State: libvirtprovider.RunnerStateCompleted}) != scaler.RunnerStateCompleted {
 		t.Fatal("expected completed libvirt state")
+	}
+}
+
+func TestScalerLibvirtRunnerStateMapsCompletedStates(t *testing.T) {
+	if scalerLibvirtRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateCompleted}) != libvirtprovider.RunnerStateCompleted {
+		t.Fatal("expected completed provider state")
 	}
 }
 

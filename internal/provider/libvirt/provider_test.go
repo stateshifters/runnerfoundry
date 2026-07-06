@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestStartDefinesRenderedDomainFromStdinAndStartsIt(t *testing.T) {
+func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{
 		CommandRunner: commandRunner,
@@ -29,8 +29,7 @@ func TestStartDefinesRenderedDomainFromStdinAndStartsIt(t *testing.T) {
 		t.Fatalf("expected start success, got %v", err)
 	}
 	expectedCommands := []Command{
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "define", "/dev/stdin"}, Stdin: commandRunner.commands[0].Stdin},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "start", "vm-set-1"}},
+		{Name: "virsh", Args: []string{"-c", "qemu:///system", "create", "/dev/stdin"}, Stdin: commandRunner.commands[0].Stdin},
 	}
 	if !reflect.DeepEqual(commandRunner.commands, expectedCommands) {
 		t.Fatalf("unexpected commands\nwant %#v\ngot  %#v", expectedCommands, commandRunner.commands)
@@ -38,11 +37,11 @@ func TestStartDefinesRenderedDomainFromStdinAndStartsIt(t *testing.T) {
 	if commandRunner.commands[0].Stdin == "" {
 		t.Fatal("expected rendered domain XML on stdin")
 	}
-	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "github-scaler.scale-set", "vm-set"}) {
-		t.Fatalf("expected rendered scaler metadata, got %s", commandRunner.commands[0].Stdin)
+	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "github-scaler:scale-set", "vm-set", "github-scaler.jit=secret"}) {
+		t.Fatalf("expected rendered scaler metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
 	}
-	if containsAll(commandRunner.commands[0].Stdin, []string{"secret"}) {
-		t.Fatalf("jit config must not be embedded directly in XML: %s", commandRunner.commands[0].Stdin)
+	if containsAll(commandRunner.commands[0].Stdin, []string{"github-scaler.jit-env"}) {
+		t.Fatalf("jit config must not be stored in metadata: %s", commandRunner.commands[0].Stdin)
 	}
 }
 
@@ -50,11 +49,11 @@ func TestListRebuildsOwnedDomainState(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\nvm-set-2\nother\n",
-			`<domain><metadata><github-scaler.scale-set>vm-set</github-scaler.scale-set><github-scaler.runner>vm-set-1</github-scaler.runner></metadata></domain>`,
+			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-1</github-scaler:name></github-scaler:runner></metadata></domain>`,
 			"running\n",
-			`<domain><metadata><github-scaler.scale-set>vm-set</github-scaler.scale-set><github-scaler.runner>vm-set-2</github-scaler.runner></metadata></domain>`,
+			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-2</github-scaler:name></github-scaler:runner></metadata></domain>`,
 			"shut off\n",
-			`<domain><metadata><github-scaler.scale-set>other</github-scaler.scale-set><github-scaler.runner>other</github-scaler.runner></metadata></domain>`,
+			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>other</github-scaler:scale-set><github-scaler:name>other</github-scaler:name></github-scaler:runner></metadata></domain>`,
 		},
 	}
 	provider := Provider{
@@ -90,7 +89,7 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\n",
-			`<domain><metadata><github-scaler.scale-set>vm-set</github-scaler.scale-set></metadata></domain>`,
+			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set></github-scaler:runner></metadata></domain>`,
 			"running\n",
 		},
 	}
@@ -105,16 +104,28 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	}
 }
 
-func TestDestroyUndefinesCompletedDomainWithoutRemovingStorage(t *testing.T) {
+func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
 
-	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1"}); err != nil {
+	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
-	expected := []string{"-c", "qemu:///system", "undefine", "vm-set-1"}
+	expected := []string{"-c", "qemu:///system", "destroy", "vm-set-1"}
 	if !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {
 		t.Fatalf("unexpected command\nwant %#v\ngot  %#v", expected, commandRunner.commands[0].Args)
+	}
+}
+
+func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
+	commandRunner := &recordingCommandRunner{}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateCompleted}); err != nil {
+		t.Fatalf("expected destroy success, got %v", err)
+	}
+	if len(commandRunner.commands) != 0 {
+		t.Fatalf("expected no virsh command for completed transient domain, got %#v", commandRunner.commands)
 	}
 }
 
@@ -155,19 +166,11 @@ func TestProviderSurfacesFailures(t *testing.T) {
 				t.Fatal("expected invalid template error")
 			}
 		},
-		"start define command": func(t *testing.T) {
+		"start create command": func(t *testing.T) {
 			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: validTemplate}}
 			if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
-				t.Fatal("expected define error")
-			}
-		},
-		"start command": func(t *testing.T) {
-			t.Helper()
-			commandRunner := &recordingCommandRunner{failOnCall: 2}
-			provider := Provider{CommandRunner: commandRunner, Config: Config{DomainXMLTemplate: validTemplate}}
-			if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
-				t.Fatal("expected start command error")
+				t.Fatal("expected create error")
 			}
 		},
 		"list command": func(t *testing.T) {
@@ -199,7 +202,7 @@ func TestProviderSurfacesFailures(t *testing.T) {
 		"destroy command": func(t *testing.T) {
 			t.Helper()
 			provider := Provider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{}); err == nil {
+			if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
 				t.Fatal("expected destroy command error")
 			}
 		},
