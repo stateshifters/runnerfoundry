@@ -805,6 +805,10 @@ func (client fakeNonPruningScaleSetClient) GenerateJitRunnerConfig(
 	return &upstream.RunnerScaleSetJitRunnerConfig{}, nil
 }
 
+func (client fakeNonPruningScaleSetClient) GetRunnerByName(ctx context.Context, runnerName string) (*upstream.RunnerReference, error) {
+	return nil, errors.New("unexpected runner lookup")
+}
+
 func (client fakeNonPruningScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
 	return nil
 }

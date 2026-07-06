@@ -37,6 +37,7 @@ type scaleSetRunnerClient interface {
 		setting *upstream.RunnerScaleSetJitRunnerSetting,
 		runnerScaleSetID int,
 	) (*upstream.RunnerScaleSetJitRunnerConfig, error)
+	GetRunnerByName(ctx context.Context, runnerName string) (*upstream.RunnerReference, error)
 	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
@@ -284,7 +285,38 @@ func (generator scalesetJITGenerator) Generate(ctx context.Context, runnerName s
 		Name: runnerName,
 	}, generator.ScaleSetID)
 	if err != nil {
-		return scaler.JITRunnerConfig{}, fmt.Errorf("generate jit runner config: %w", err)
+		if !errors.Is(err, upstream.RunnerExistsError) {
+			return scaler.JITRunnerConfig{}, fmt.Errorf("generate jit runner config: %w", err)
+		}
+		return generator.replaceStaleRunnerAndGenerate(ctx, runnerName, err)
+	}
+	return scaler.JITRunnerConfig{
+		Runner:    jitRunnerReference(jitConfig.Runner),
+		JITConfig: jitConfig.EncodedJITConfig,
+	}, nil
+}
+
+func (generator scalesetJITGenerator) replaceStaleRunnerAndGenerate(
+	ctx context.Context,
+	runnerName string,
+	generateErr error,
+) (scaler.JITRunnerConfig, error) {
+	staleRunner, err := generator.Client.GetRunnerByName(ctx, runnerName)
+	if err != nil {
+		return scaler.JITRunnerConfig{}, fmt.Errorf("find stale runner after jit conflict for %q: %w", runnerName, err)
+	}
+	if staleRunner == nil {
+		return scaler.JITRunnerConfig{}, fmt.Errorf("find stale runner after jit conflict for %q: %w", runnerName, generateErr)
+	}
+	removeErr := generator.Client.RemoveRunner(ctx, int64(staleRunner.ID))
+	if removeErr != nil {
+		return scaler.JITRunnerConfig{}, fmt.Errorf("remove stale runner %q: %w", runnerName, removeErr)
+	}
+	jitConfig, err := generator.Client.GenerateJitRunnerConfig(ctx, &upstream.RunnerScaleSetJitRunnerSetting{
+		Name: runnerName,
+	}, generator.ScaleSetID)
+	if err != nil {
+		return scaler.JITRunnerConfig{}, fmt.Errorf("generate jit runner config after stale runner cleanup: %w", err)
 	}
 	return scaler.JITRunnerConfig{
 		Runner:    jitRunnerReference(jitConfig.Runner),

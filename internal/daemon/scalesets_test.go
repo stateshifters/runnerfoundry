@@ -458,6 +458,83 @@ func TestJITGeneratorSurfacesClientFailure(t *testing.T) {
 	}
 }
 
+func TestJITGeneratorRemovesStaleRunnerAfterNameConflict(t *testing.T) {
+	client := &fakeScaleSetClient{
+		jitErrors:    []error{upstream.RunnerExistsError},
+		jitConfig:    "encoded",
+		jitRunner:    &upstream.RunnerReference{ID: 100, Name: "linux-1"},
+		runnerByName: &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+	}
+	generator := scalesetJITGenerator{Client: client, ScaleSetID: 12}
+	jitConfig, err := generator.Generate(context.Background(), "linux-1")
+	if err != nil {
+		t.Fatalf("expected jit success after stale runner cleanup, got %v", err)
+	}
+	if jitConfig.Runner.ID != 100 || jitConfig.JITConfig != "encoded" {
+		t.Fatalf("expected retried jit config, got %#v", jitConfig)
+	}
+	if len(client.runnerNameLookups) != 1 || client.runnerNameLookups[0] != "linux-1" {
+		t.Fatalf("expected runner name lookup, got %#v", client.runnerNameLookups)
+	}
+	if len(client.removedRunnerIDs) != 1 || client.removedRunnerIDs[0] != 99 {
+		t.Fatalf("expected stale runner removal, got %#v", client.removedRunnerIDs)
+	}
+	if len(client.generatedRunnerNames) != 2 {
+		t.Fatalf("expected one retry after stale runner cleanup, got %#v", client.generatedRunnerNames)
+	}
+}
+
+func TestJITGeneratorSurfacesStaleRunnerLookupFailure(t *testing.T) {
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{
+		jitErrors:        []error{upstream.RunnerExistsError},
+		runnerByNameErr:  errors.New("lookup failed"),
+		runnerByName:     &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+		removeRunnerErr:  nil,
+		removedRunnerIDs: nil,
+	}}
+	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
+		t.Fatal("expected lookup error")
+	}
+}
+
+func TestJITGeneratorSurfacesMissingStaleRunner(t *testing.T) {
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{
+		jitErrors: []error{upstream.RunnerExistsError},
+	}}
+	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
+		t.Fatal("expected missing stale runner error")
+	}
+}
+
+func TestJITGeneratorSurfacesStaleRunnerRemovalFailure(t *testing.T) {
+	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{
+		jitErrors:       []error{upstream.RunnerExistsError},
+		runnerByName:    &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+		removeRunnerErr: errors.New("remove failed"),
+	}}
+	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
+		t.Fatal("expected remove error")
+	}
+}
+
+func TestJITGeneratorSurfacesRetryFailureAfterStaleRunnerCleanup(t *testing.T) {
+	client := &fakeScaleSetClient{
+		jitErrors:    []error{upstream.RunnerExistsError, errors.New("retry failed")},
+		runnerByName: &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+	}
+	generator := scalesetJITGenerator{Client: client}
+
+	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
+		t.Fatal("expected retry error")
+	}
+	if len(client.removedRunnerIDs) != 1 || client.removedRunnerIDs[0] != 99 {
+		t.Fatalf("expected stale runner removal, got %#v", client.removedRunnerIDs)
+	}
+	if len(client.generatedRunnerNames) != 2 {
+		t.Fatalf("expected one retry after stale runner cleanup, got %#v", client.generatedRunnerNames)
+	}
+}
+
 func TestJITGeneratorHandlesMissingRunnerReference(t *testing.T) {
 	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{jitConfig: "encoded"}, ScaleSetID: 12}
 	jitConfig, err := generator.Generate(context.Background(), "linux-1")
@@ -537,6 +614,11 @@ type fakeScaleSetClient struct {
 	jitConfig              string
 	jitRunner              *upstream.RunnerReference
 	jitErr                 error
+	jitErrors              []error
+	generatedRunnerNames   []string
+	runnerByName           *upstream.RunnerReference
+	runnerByNameErr        error
+	runnerNameLookups      []string
 	removedRunnerIDs       []int64
 	removeRunnerErr        error
 }
@@ -598,6 +680,14 @@ func (client *fakeScaleSetClient) GenerateJitRunnerConfig(
 	setting *upstream.RunnerScaleSetJitRunnerSetting,
 	runnerScaleSetID int,
 ) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
+	client.generatedRunnerNames = append(client.generatedRunnerNames, setting.Name)
+	if len(client.jitErrors) > 0 {
+		jitErr := client.jitErrors[0]
+		client.jitErrors = client.jitErrors[1:]
+		if jitErr != nil {
+			return nil, jitErr
+		}
+	}
 	if client.jitErr != nil {
 		return nil, client.jitErr
 	}
@@ -605,6 +695,14 @@ func (client *fakeScaleSetClient) GenerateJitRunnerConfig(
 		Runner:           client.jitRunner,
 		EncodedJITConfig: client.jitConfig,
 	}, nil
+}
+
+func (client *fakeScaleSetClient) GetRunnerByName(ctx context.Context, runnerName string) (*upstream.RunnerReference, error) {
+	client.runnerNameLookups = append(client.runnerNameLookups, runnerName)
+	if client.runnerByNameErr != nil {
+		return nil, client.runnerByNameErr
+	}
+	return client.runnerByName, nil
 }
 
 func (client *fakeScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
