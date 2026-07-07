@@ -1,10 +1,14 @@
 # Github Scaler
 
-`github-scaler` is a Linux-only Go daemon for autoscaling ephemeral Github Actions runner scale sets.
+`github-scaler` is a Go daemon for autoscaling ephemeral Github Actions runner scale sets.
 
 It is using GitHub's new [Scaleset library](https://github.com/actions/scaleset)
 
-V1 polls Github scale-set demand, scales to `statistics.TotalAssignedJobs` capped by each set's `max_runners`, starts Docker Compose services or libvirt domains with Github JIT runner config, rebuilds provider state after daemon restarts, and cleans up completed runner instances.
+The current version supports Docker Compose and libvirt providers. The daemon polls Github for scale-set messages, generates JIT configs, and starts ephemeral runners in the configured provider. It does not store any local state or secrets.
+
+:::notice
+Libvirt support is for unix only. Windows hosts can only use Docker Compose.
+:::
 
 ## Configuration
 
@@ -40,7 +44,7 @@ scale_sets:
       domain_xml_template: ./domain-template.xml
 ```
 
-Github authentication is PAT-only in V1. Use exactly one of:
+Github authentication is PAT-only currently. Use exactly one of:
 
 - `github.token_env`
 - `github.token_file`
