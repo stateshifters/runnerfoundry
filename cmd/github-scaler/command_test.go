@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -103,6 +104,25 @@ func TestRunMainReportsExitStatus(t *testing.T) {
 
 func TestRunMainHandlesStderrFailures(t *testing.T) {
 	if exitCode := runMain(nil, failingWriter{}); exitCode != 1 {
+		t.Fatalf("expected failure exit, got %d", exitCode)
+	}
+}
+
+func TestMainExitsWithRunMainStatus(t *testing.T) {
+	originalArgs := os.Args
+	originalExitProcess := exitProcess
+	defer func() {
+		os.Args = originalArgs
+		exitProcess = originalExitProcess
+	}()
+	os.Args = []string{"github-scaler"}
+	var exitCode int
+	exitProcess = func(code int) {
+		exitCode = code
+	}
+
+	main()
+	if exitCode != 1 {
 		t.Fatalf("expected failure exit, got %d", exitCode)
 	}
 }

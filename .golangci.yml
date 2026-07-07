@@ -26,6 +26,7 @@ linters:
     - bodyclose
     - contextcheck
     - containedctx
+    - gocheckcompilerdirectives
     - durationcheck
     - exhaustive
     - forcetypeassert

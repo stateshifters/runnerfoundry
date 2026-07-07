@@ -1,11 +1,11 @@
-//go:build !coverage
-
 package main
 
 import (
 	"os"
 )
 
+var exitProcess = os.Exit
+
 func main() {
-	os.Exit(runMain(os.Args[1:], os.Stderr))
+	exitProcess(runMain(os.Args[1:], os.Stderr))
 }

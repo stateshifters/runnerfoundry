@@ -49,10 +49,10 @@ test-race:
 
 coverage:
 ifeq ($(OSFAMILY),Windows)
-	go test -tags coverage ./... -coverprofile=coverage
+	go test ./... -coverprofile=coverage
 	@powershell -NoProfile -Command "$$total = (go tool cover -func=coverage | Select-String '^total:').ToString().Split()[-1]; if ($$total -ne '100.0%') { go tool cover -func=coverage; Write-Host \"coverage total must be 100.0%, got $$total\"; exit 1 }"
 else
-	go test -tags coverage ./... -coverprofile=coverage
+	go test ./... -coverprofile=coverage
 	@total=$$(go tool cover -func=coverage | awk '/^total:/ { print $$3 }'); \
 	if [ "$$total" != "100.0%" ]; then \
 		go tool cover -func=coverage; \
