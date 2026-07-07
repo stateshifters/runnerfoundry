@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -384,6 +385,59 @@ func TestPollUntilShutdownHandlesPollErrors(t *testing.T) {
 	pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Nanosecond)
 }
 
+func TestPollUntilShutdownExitsDuringRetryDelayWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: errors.New("poll failed"),
+		onGetMessage:  cancel,
+	}, Handler: scaleSetHandler{}}
+	returned := make(chan struct{})
+
+	go func() {
+		pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Hour)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("expected poller to exit promptly after cancellation")
+	}
+}
+
+func TestPollUntilShutdownExitsWhenCanceledDuringRetryDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	firstPoll := make(chan struct{})
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: errors.New("poll failed"),
+		onGetMessage: func() {
+			select {
+			case <-firstPoll:
+			default:
+				close(firstPoll)
+			}
+		},
+	}, Handler: scaleSetHandler{}}
+	returned := make(chan struct{})
+
+	go func() {
+		pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Hour)
+		close(returned)
+	}()
+
+	select {
+	case <-firstPoll:
+	case <-time.After(time.Second):
+		t.Fatal("expected first poll")
+	}
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("expected poller to exit during retry delay")
+	}
+}
+
 func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logs := &bytes.Buffer{}
@@ -397,6 +451,28 @@ func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
 
 	if logs.Len() != 0 {
 		t.Fatalf("expected no shutdown cancellation log, got %q", logs.String())
+	}
+}
+
+func TestPollUntilShutdownLogsSustainedFailures(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	pollCount := 0
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: errors.New("poll failed"),
+		onGetMessage: func() {
+			pollCount++
+			if pollCount > sustainedPollFailureThreshold {
+				cancel()
+			}
+		},
+	}, Handler: scaleSetHandler{}}
+
+	pollUntilShutdown(ctx, logger, "linux", poller, time.Nanosecond)
+
+	if !strings.Contains(logs.String(), "sustained poll failures") {
+		t.Fatalf("expected sustained failure log, got %q", logs.String())
 	}
 }
 
@@ -416,6 +492,63 @@ func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {
 	}
 	if len(provider.started) != 2 {
 		t.Fatalf("expected two starts, got %#v", provider.started)
+	}
+}
+
+func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	messageClient := &blockingMessageClient{
+		entered: make(chan struct{}),
+		exited:  make(chan struct{}),
+	}
+	scaleSets := scaleSetRuntime{
+		RunnerHostname: func() string {
+			return "host"
+		},
+		BuildReconciler: func(
+			ctx context.Context,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+			client scaleSetClient,
+			scaleSetID int,
+		) (scaler.Reconciler, error) {
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+				Name:       scaleSetConfig.Name,
+				MaxRunners: scaleSetConfig.MaxRunners,
+				Provider:   &fakeScalerProvider{},
+				JITConfig:  fakeJITConfigGenerator{},
+			}}, nil
+		},
+		PollRetryDelay: time.Nanosecond,
+	}
+	client := &fakeScaleSetClient{
+		runnerGroup:    &upstream.RunnerGroup{ID: 10},
+		runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
+		messageClient:  scaleSetMessageClient{Client: messageClient},
+	}
+	scaleSet, err := runScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+		Name:        "linux",
+		RunnerGroup: "default",
+		MaxRunners:  2,
+	}, scaleSets)
+	if err != nil {
+		t.Fatalf("expected scale set success, got %v", err)
+	}
+
+	select {
+	case <-messageClient.entered:
+	case <-time.After(time.Second):
+		t.Fatal("expected poller to enter message receive")
+	}
+	scaleSet.StopPolling()
+	select {
+	case <-messageClient.exited:
+	default:
+		t.Fatal("expected StopPolling to wait for poller exit")
+	}
+	if err := scaleSet.Shutdown(context.Background()); err != nil {
+		t.Fatalf("expected shutdown success, got %v", err)
 	}
 }
 
@@ -722,6 +855,33 @@ type fakeMessageClient struct {
 	polled        chan struct{}
 	pollOnce      sync.Once
 	message       *upstream.RunnerScaleSetMessage
+}
+
+type blockingMessageClient struct {
+	entered   chan struct{}
+	exited    chan struct{}
+	enterOnce sync.Once
+	exitOnce  sync.Once
+}
+
+func (client *blockingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+	client.enterOnce.Do(func() {
+		close(client.entered)
+	})
+	<-ctx.Done()
+	time.Sleep(20 * time.Millisecond)
+	client.exitOnce.Do(func() {
+		close(client.exited)
+	})
+	return nil, fmt.Errorf("message receive stopped: %w", ctx.Err())
+}
+
+func (client *blockingMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
+	return nil
+}
+
+func (client *blockingMessageClient) Close(ctx context.Context) error {
+	return nil
 }
 
 func newFakeMessageClient(onGetMessage func()) *fakeMessageClient {

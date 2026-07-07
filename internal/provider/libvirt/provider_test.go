@@ -85,6 +85,25 @@ func TestListRebuildsOwnedDomainState(t *testing.T) {
 	}
 }
 
+func TestListClassifiesUnknownDomainState(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs: []string{
+			"vm-set-1\n",
+			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-1</github-scaler:name></github-scaler:runner></metadata></domain>`,
+			"paused\n",
+		},
+	}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background(), "vm-set")
+	if err != nil {
+		t.Fatalf("expected list success, got %v", err)
+	}
+	if len(instances) != 1 || instances[0].State != RunnerStateUnknown {
+		t.Fatalf("expected unknown state, got %#v", instances)
+	}
+}
+
 func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		outputs: []string{
@@ -243,6 +262,39 @@ func TestExecCommandRunner(t *testing.T) {
 	}
 	if _, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "definitely-missing-github-scaler-command"}); err == nil {
 		t.Fatal("expected exec failure")
+	}
+}
+
+func TestExecCommandRunnerRedactsCommandOutputAndStdinOnFailure(t *testing.T) {
+	programPath := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(programPath, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	fmt.Fprint(os.Stderr, "secret-jit-config")
+	os.Exit(1)
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{
+		Name:  "go",
+		Args:  []string{"run", programPath},
+		Stdin: "secret-stdin-jit",
+	})
+	if err == nil {
+		t.Fatal("expected command failure")
+	}
+	if strings.Contains(err.Error(), "secret-jit-config") || strings.Contains(err.Error(), "secret-stdin-jit") {
+		t.Fatalf("expected command output and stdin to be redacted, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "go run") {
+		t.Fatalf("expected command context, got %q", err.Error())
 	}
 }
 

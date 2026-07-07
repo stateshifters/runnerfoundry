@@ -47,6 +47,9 @@ jobs:
       - name: Race tests
         run: make test-race
 
+      - name: Smoke test package config
+        run: make smoke
+
       - name: Use Node.js
         uses: actions/setup-node@v6
         with:

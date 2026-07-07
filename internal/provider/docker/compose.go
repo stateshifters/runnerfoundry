@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/meza/github-scaler/internal/provider/contract"
 )
 
 type RunnerState string
 
 const (
-	JITConfigEnvironment = "ACTIONS_RUNNER_INPUT_JITCONFIG"
-	RunnerStateRunning   = "running"
-	RunnerStateCompleted = "completed"
+	JITConfigEnvironment = contract.JITConfigEnvironment
+	RunnerStateRunning   = contract.RunnerStateRunning
+	RunnerStateCompleted = contract.RunnerStateCompleted
+	RunnerStateUnknown   = contract.RunnerStateUnknown
 )
 
 type RunnerInstance struct {
@@ -48,7 +51,7 @@ func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (strin
 	execCommand := exec.CommandContext(ctx, command.Name, command.Args...)
 	outputBytes, err := execCommand.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s command failed: %w: %s", command.Name, err, string(outputBytes))
+		return "", fmt.Errorf("%s command failed: %w", command.Name, err)
 	}
 	return string(outputBytes), nil
 }
@@ -64,8 +67,8 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 		Args: append(provider.baseArgs(),
 			"run", "--detach", "--rm",
 			"--name", request.RunnerName,
-			"--label", "github-scaler.scale-set="+request.ScaleSetName,
-			"--label", "github-scaler.runner="+request.RunnerName,
+			"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+			"--label", contract.OwnershipRunner+"="+request.RunnerName,
 			"--env", JITConfigEnvironment+"="+request.JITConfig,
 			provider.Config.Service,
 		),
@@ -79,7 +82,7 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
 	output, err := provider.CommandRunner.Run(ctx, Command{
 		Name: "docker",
-		Args: []string{"ps", "--all", "--format", "json", "--filter", "label=github-scaler.scale-set=" + scaleSetName},
+		Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list compose runners: %w", err)
@@ -91,12 +94,12 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 	instances := make([]RunnerInstance, 0, len(containers))
 	for _, container := range containers {
 		labels := parseLabels(container.Labels)
-		if labels["github-scaler.scale-set"] != scaleSetName {
+		if labels[contract.OwnershipScaleSet] != scaleSetName {
 			continue
 		}
 		instances = append(instances, RunnerInstance{
 			ID:         container.ID,
-			RunnerName: labels["github-scaler.runner"],
+			RunnerName: labels[contract.OwnershipRunner],
 			State:      dockerState(container.State),
 		})
 	}
@@ -164,10 +167,14 @@ type dockerContainer struct {
 }
 
 func dockerState(state string) RunnerState {
-	if strings.EqualFold(state, "running") {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running":
 		return RunnerStateRunning
+	case "exited", "dead":
+		return RunnerStateCompleted
+	default:
+		return RunnerStateUnknown
 	}
-	return RunnerStateCompleted
 }
 
 func parseLabels(rawLabels string) map[string]string {

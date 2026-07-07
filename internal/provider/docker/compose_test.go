@@ -3,7 +3,10 @@ package docker
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +66,22 @@ func TestListClassifiesRunningAndCompletedComposeContainers(t *testing.T) {
 	}
 	if instances[0].State != RunnerStateRunning || instances[1].State != RunnerStateCompleted {
 		t.Fatalf("unexpected states: %#v", instances)
+	}
+}
+
+func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
+	provider := ComposeProvider{
+		CommandRunner: &recordingCommandRunner{
+			output: `{"ID":"1","Names":"runner-1","State":"restarting","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-1"}`,
+		},
+	}
+
+	instances, err := provider.List(context.Background(), "linux")
+	if err != nil {
+		t.Fatalf("expected list success, got %v", err)
+	}
+	if len(instances) != 1 || instances[0].State != RunnerStateUnknown {
+		t.Fatalf("expected unknown state, got %#v", instances)
 	}
 }
 
@@ -173,6 +192,35 @@ func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
 	}
 	if _, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "definitely-missing-github-scaler-command"}); err == nil {
 		t.Fatal("expected exec failure")
+	}
+}
+
+func TestExecCommandRunnerRedactsCommandOutputOnFailure(t *testing.T) {
+	programPath := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(programPath, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	fmt.Fprint(os.Stderr, "secret-jit-config")
+	os.Exit(1)
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "go", Args: []string{"run", programPath}})
+	if err == nil {
+		t.Fatal("expected command failure")
+	}
+	if strings.Contains(err.Error(), "secret-jit-config") {
+		t.Fatalf("expected command output to be redacted, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "go command failed") {
+		t.Fatalf("expected command context, got %q", err.Error())
 	}
 }
 

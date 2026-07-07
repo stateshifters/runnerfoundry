@@ -10,11 +10,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 )
 
 const scaleSetEndpoint = "_apis/runtime/runnerscalesets"
+const githubScaleSetRegistryTimeout = 30 * time.Second
 
 type scaleSetRegistry interface {
 	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
@@ -49,7 +51,7 @@ func newGitHubScaleSetRegistry(repositoryURL string, token string) githubScaleSe
 	return githubScaleSetRegistry{
 		repositoryURL: repositoryURL,
 		token:         token,
-		httpClient:    http.DefaultClient,
+		httpClient:    &http.Client{Timeout: githubScaleSetRegistryTimeout},
 	}
 }
 
@@ -122,6 +124,23 @@ func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
 	adminConnection actionsServiceAdminConnection,
 	runnerGroupID int,
 ) ([]upstream.RunnerScaleSet, error) {
+	request, err := runnerScaleSetListRequest(ctx, adminConnection, runnerGroupID)
+	if err != nil {
+		return nil, err
+	}
+
+	var response runnerScaleSetsResponse
+	if err := registry.doJSON(request, http.StatusOK, &response); err != nil {
+		return nil, fmt.Errorf("list runner scale sets: %w", err)
+	}
+	return response.RunnerScaleSets, nil
+}
+
+func runnerScaleSetListRequest(
+	ctx context.Context,
+	adminConnection actionsServiceAdminConnection,
+	runnerGroupID int,
+) (*http.Request, error) {
 	requestURL, err := url.JoinPath(adminConnection.URL, scaleSetEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("build runner scale set list url: %w", err)
@@ -129,6 +148,9 @@ func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
 	parsedURL, err := parseURL(requestURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse runner scale set list url: %w", err)
+	}
+	if httpsErr := requireHTTPSURL(parsedURL, "runner scale set list url"); httpsErr != nil {
+		return nil, httpsErr
 	}
 	query := parsedURL.Query()
 	query.Set("runnerGroupId", fmt.Sprintf("%d", runnerGroupID))
@@ -141,12 +163,7 @@ func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
 	}
 	request.Header.Set("Authorization", "Bearer "+adminConnection.Token)
 	request.Header.Set("Content-Type", "application/json")
-
-	var response runnerScaleSetsResponse
-	if err := registry.doJSON(request, http.StatusOK, &response); err != nil {
-		return nil, fmt.Errorf("list runner scale sets: %w", err)
-	}
-	return response.RunnerScaleSets, nil
+	return request, nil
 }
 
 func (registry githubScaleSetRegistry) doJSON(request *http.Request, expectedStatus int, target any) (err error) {
@@ -179,6 +196,9 @@ func parseRepositoryTarget(repositoryURL string) (repositoryTarget, error) {
 	if err != nil {
 		return repositoryTarget{}, fmt.Errorf("parse repository url: %w", err)
 	}
+	if err := requireHTTPSURL(parsedURL, "repository url"); err != nil {
+		return repositoryTarget{}, err
+	}
 	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
 	if len(pathParts) != 2 || pathParts[0] == "" || pathParts[1] == "" {
 		return repositoryTarget{}, errors.New("repository url must be https://github.com/OWNER/REPO")
@@ -199,7 +219,20 @@ func apiURL(repositoryURL string, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse repository url: %w", err)
 	}
+	if err := requireHTTPSURL(parsedURL, "repository url"); err != nil {
+		return "", err
+	}
 	return apiURLFromParsed(parsedURL, path), nil
+}
+
+func requireHTTPSURL(parsedURL *url.URL, description string) error {
+	if parsedURL.Scheme != "https" {
+		return fmt.Errorf("%s must use https", description)
+	}
+	if parsedURL.Host == "" {
+		return fmt.Errorf("%s must include a host", description)
+	}
+	return nil
 }
 
 func apiURLFromParsed(parsedURL *url.URL, path string) string {

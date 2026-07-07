@@ -113,6 +113,9 @@ func loadAndStartConfiguration(ctx context.Context, configPath string, daemonRun
 
 func startConfiguredScaleSets(ctx context.Context, daemonRuntime runtime, loadedConfig config.Config, token string) (activeConfiguration, error) {
 	logger := daemonRuntime.NewLogger(loadedConfig.Log.Format)
+	if err := validateLocalScaleSetNames(loadedConfig.ScaleSets); err != nil {
+		return activeConfiguration{}, err
+	}
 	if loadedConfig.Prune {
 		if err := pruneConfiguredScaleSets(ctx, daemonRuntime, logger, loadedConfig.ScaleSets, token); err != nil {
 			return activeConfiguration{}, err
@@ -146,22 +149,52 @@ func startScaleSetRepositories(
 ) ([]scaleSetLifecycle, error) {
 	var repositoryScaleSets []scaleSetLifecycle
 	for _, repositoryURL := range scaleSetConfig.Repositories {
+		logger.Info(
+			"starting scale set",
+			slog.String("repository", repositoryURL),
+			slog.String("runnerGroup", scaleSetConfig.RunnerGroup),
+			slog.String("scaleSet", scaleSetConfig.Name),
+			slog.Int("maxRunners", scaleSetConfig.MaxRunners),
+		)
 		client, err := daemonRuntime.NewGitHubClient(repositoryURL, token)
 		if err != nil {
 			return nil, fmt.Errorf("create github client for %q: %w", repositoryURL, err)
 		}
 		scaleSet, err := daemonRuntime.StartScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig)
 		if err != nil {
-			return nil, fmt.Errorf("run scale set %q for repository %q: %w", scaleSetConfig.Name, repositoryURL, err)
+			return nil, repositoryStartupFailure(ctx, scaleSetConfig.Name, repositoryURL, err, repositoryScaleSets)
 		}
 		repositoryScaleSets = append(repositoryScaleSets, scaleSet)
+		logger.Info(
+			"started scale set",
+			slog.String("repository", repositoryURL),
+			slog.String("scaleSet", scaleSetConfig.Name),
+		)
 	}
 	return repositoryScaleSets, nil
+}
+
+func repositoryStartupFailure(
+	ctx context.Context,
+	scaleSetName string,
+	repositoryURL string,
+	startErr error,
+	repositoryScaleSets []scaleSetLifecycle,
+) error {
+	wrappedStartErr := fmt.Errorf("run scale set %q for repository %q: %w", scaleSetName, repositoryURL, startErr)
+	shutdownErr := shutdownConfiguredScaleSets(context.WithoutCancel(ctx), activeConfiguration{
+		ScaleSets: repositoryScaleSets,
+	})
+	if shutdownErr != nil {
+		return errors.Join(wrappedStartErr, fmt.Errorf("shutdown started repository scale sets: %w", shutdownErr))
+	}
+	return wrappedStartErr
 }
 
 func shutdownConfiguredScaleSets(ctx context.Context, activeConfig activeConfiguration) error {
 	cancelActiveConfigurationWork(activeConfig)
 	for shutdownIndex := len(activeConfig.ScaleSets) - 1; shutdownIndex >= 0; shutdownIndex-- {
+		slog.Debug("stopping scale set polling", slog.Int("shutdownIndex", shutdownIndex))
 		activeConfig.ScaleSets[shutdownIndex].StopPolling()
 		if err := activeConfig.ScaleSets[shutdownIndex].Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown scale set: %w", err)
@@ -178,11 +211,16 @@ func reloadConfiguration(
 ) (activeConfiguration, error) {
 	logger := daemonRuntime.NewLogger(activeConfig.LogFormat)
 	logger.Info("reload requested")
-	stopPolling(activeConfig)
-	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
-		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
+	reloadedConfig, token, err := loadReplacementConfiguration(configPath, daemonRuntime)
+	if err != nil {
+		logger.Error("reload rejected", slog.String("error", err.Error()))
+		return activeConfig, nil
 	}
-	reloadedConfig, err := loadAndStartConfigurationAfterDrain(ctx, configPath, daemonRuntime, activeConfig, logger)
+	if notifyErr := daemonRuntime.Notifier.Reloading(ctx); notifyErr != nil {
+		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", notifyErr)
+	}
+	stopPolling(activeConfig)
+	reloadedActiveConfig, err := loadAndStartConfigurationAfterDrain(ctx, daemonRuntime, activeConfig, logger, reloadedConfig, token)
 	if err != nil {
 		return activeConfiguration{}, err
 	}
@@ -190,24 +228,29 @@ func reloadConfiguration(
 		return activeConfiguration{}, fmt.Errorf("notify ready after reload: %w", err)
 	}
 	logger.Info("reload applied")
-	return reloadedConfig, nil
+	return reloadedActiveConfig, nil
+}
+
+func loadReplacementConfiguration(configPath string, daemonRuntime runtime) (config.Config, string, error) {
+	reloadedConfig, err := daemonRuntime.LoadConfig(configPath)
+	if err != nil {
+		return config.Config{}, "", fmt.Errorf("load reload config: %w", err)
+	}
+	token, err := reloadedConfig.Token()
+	if err != nil {
+		return config.Config{}, "", fmt.Errorf("load reload github token: %w", err)
+	}
+	return reloadedConfig, token, nil
 }
 
 func loadAndStartConfigurationAfterDrain(
 	ctx context.Context,
-	configPath string,
 	daemonRuntime runtime,
 	activeConfig activeConfiguration,
 	logger *slog.Logger,
+	reloadedConfig config.Config,
+	token string,
 ) (activeConfiguration, error) {
-	reloadedConfig, err := daemonRuntime.LoadConfig(configPath)
-	if err != nil {
-		return stopAfterRejectedReload(ctx, activeConfig, fmt.Errorf("load reload config: %w", err))
-	}
-	token, err := reloadedConfig.Token()
-	if err != nil {
-		return stopAfterRejectedReload(ctx, activeConfig, fmt.Errorf("load reload github token: %w", err))
-	}
 	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval, logger); err != nil {
 		return activeConfiguration{}, err
 	}
@@ -217,15 +260,6 @@ func loadAndStartConfigurationAfterDrain(
 		return activeConfiguration{}, err
 	}
 	return startConfiguredScaleSets(ctx, daemonRuntime, reloadedConfig, token)
-}
-
-func stopAfterRejectedReload(ctx context.Context, activeConfig activeConfiguration, reloadErr error) (activeConfiguration, error) {
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancelShutdown()
-	if err := shutdownConfiguredScaleSets(shutdownCtx, activeConfig); err != nil {
-		return activeConfiguration{}, errors.Join(reloadErr, fmt.Errorf("shutdown old scale sets before resume: %w", err))
-	}
-	return activeConfiguration{}, reloadErr
 }
 
 func stopPolling(activeConfig activeConfiguration) {

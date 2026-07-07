@@ -123,6 +123,9 @@ func TestDockerRunnerStateMapsCompletedStates(t *testing.T) {
 	if dockerRunnerState(dockerprovider.RunnerInstance{State: dockerprovider.RunnerStateCompleted}) != scaler.RunnerStateCompleted {
 		t.Fatal("expected completed docker state")
 	}
+	if dockerRunnerState(dockerprovider.RunnerInstance{State: dockerprovider.RunnerStateUnknown}) != scaler.RunnerStateUnknown {
+		t.Fatal("expected unknown docker state")
+	}
 }
 
 func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
@@ -170,11 +173,23 @@ func TestLibvirtRunnerStateMapsCompletedStates(t *testing.T) {
 	if libvirtRunnerState(libvirtprovider.RunnerInstance{State: libvirtprovider.RunnerStateCompleted}) != scaler.RunnerStateCompleted {
 		t.Fatal("expected completed libvirt state")
 	}
+	if libvirtRunnerState(libvirtprovider.RunnerInstance{State: libvirtprovider.RunnerStateUnknown}) != scaler.RunnerStateUnknown {
+		t.Fatal("expected unknown libvirt state")
+	}
+	if libvirtRunnerState(libvirtprovider.RunnerInstance{State: libvirtprovider.RunnerState("paused")}) != scaler.RunnerStateUnknown {
+		t.Fatal("expected invalid libvirt state to map to unknown")
+	}
 }
 
 func TestScalerLibvirtRunnerStateMapsCompletedStates(t *testing.T) {
 	if scalerLibvirtRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateCompleted}) != libvirtprovider.RunnerStateCompleted {
 		t.Fatal("expected completed provider state")
+	}
+	if scalerLibvirtRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateUnknown}) != libvirtprovider.RunnerStateUnknown {
+		t.Fatal("expected unknown provider state")
+	}
+	if scalerLibvirtRunnerState(scaler.RunnerInstance{State: scaler.RunnerState("paused")}) != libvirtprovider.RunnerStateUnknown {
+		t.Fatal("expected invalid scaler state to map to unknown")
 	}
 }
 

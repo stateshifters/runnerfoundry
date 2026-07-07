@@ -8,14 +8,16 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/meza/github-scaler/internal/provider/contract"
 	"github.com/meza/github-scaler/internal/provider/libvirtxml"
 )
 
 type RunnerState string
 
 const (
-	RunnerStateRunning   RunnerState = "running"
-	RunnerStateCompleted RunnerState = "completed"
+	RunnerStateRunning   RunnerState = contract.RunnerStateRunning
+	RunnerStateCompleted RunnerState = contract.RunnerStateCompleted
+	RunnerStateUnknown   RunnerState = contract.RunnerStateUnknown
 )
 
 type RunnerInstance struct {
@@ -54,7 +56,7 @@ func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (strin
 	}
 	outputBytes, err := execCommand.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s %s failed: %w: %s", command.Name, strings.Join(command.Args, " "), err, string(outputBytes))
+		return "", fmt.Errorf("%s %s failed: %w", command.Name, strings.Join(command.Args, " "), err)
 	}
 	return string(outputBytes), nil
 }
@@ -102,14 +104,14 @@ func (provider Provider) instanceForDomain(ctx context.Context, domainName strin
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
 	}
-	if metadataValue(domainXML, "github-scaler.scale-set") != scaleSetName {
+	if metadataValue(domainXML, contract.OwnershipScaleSet) != scaleSetName {
 		return RunnerInstance{}, false, nil
 	}
 	domainState, err := provider.runVirsh(ctx, "domstate", domainName)
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
 	}
-	runnerName := metadataValue(domainXML, "github-scaler.runner")
+	runnerName := metadataValue(domainXML, contract.OwnershipRunner)
 	if runnerName == "" {
 		runnerName = domainName
 	}
@@ -193,9 +195,9 @@ func namespacedMetadataValue(domainXML string, key string) string {
 		return ""
 	}
 	switch key {
-	case "github-scaler.scale-set":
+	case contract.OwnershipScaleSet:
 		return metadata.Metadata.Runner.ScaleSet
-	case "github-scaler.runner":
+	case contract.OwnershipRunner:
 		return metadata.Metadata.Runner.Name
 	default:
 		return ""
@@ -231,8 +233,12 @@ type scalerRunnerMetadata struct {
 }
 
 func libvirtState(rawState string) RunnerState {
-	if strings.EqualFold(strings.TrimSpace(rawState), "running") {
+	switch strings.ToLower(strings.TrimSpace(rawState)) {
+	case "running":
 		return RunnerStateRunning
+	case "shut off":
+		return RunnerStateCompleted
+	default:
+		return RunnerStateUnknown
 	}
-	return RunnerStateCompleted
 }

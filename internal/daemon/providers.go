@@ -167,10 +167,14 @@ func convertDockerInstances(instances []dockerprovider.RunnerInstance) []scaler.
 }
 
 func dockerRunnerState(instance dockerprovider.RunnerInstance) scaler.RunnerState {
-	if instance.State == dockerprovider.RunnerStateRunning {
+	switch instance.State {
+	case dockerprovider.RunnerStateRunning:
 		return scaler.RunnerStateRunning
+	case dockerprovider.RunnerStateCompleted:
+		return scaler.RunnerStateCompleted
+	default:
+		return scaler.RunnerStateUnknown
 	}
-	return scaler.RunnerStateCompleted
 }
 
 type libvirtProviderAdapter struct {
@@ -220,15 +224,27 @@ func convertLibvirtInstances(instances []libvirtprovider.RunnerInstance) []scale
 }
 
 func libvirtRunnerState(instance libvirtprovider.RunnerInstance) scaler.RunnerState {
-	if instance.State == libvirtprovider.RunnerStateRunning {
+	switch instance.State {
+	case libvirtprovider.RunnerStateRunning:
 		return scaler.RunnerStateRunning
+	case libvirtprovider.RunnerStateCompleted:
+		return scaler.RunnerStateCompleted
+	case libvirtprovider.RunnerStateUnknown:
+		return scaler.RunnerStateUnknown
+	default:
+		return scaler.RunnerStateUnknown
 	}
-	return scaler.RunnerStateCompleted
 }
 
 func scalerLibvirtRunnerState(instance scaler.RunnerInstance) libvirtprovider.RunnerState {
-	if instance.State == scaler.RunnerStateRunning {
+	switch instance.State {
+	case scaler.RunnerStateRunning:
 		return libvirtprovider.RunnerStateRunning
+	case scaler.RunnerStateCompleted:
+		return libvirtprovider.RunnerStateCompleted
+	case scaler.RunnerStateUnknown:
+		return libvirtprovider.RunnerStateUnknown
+	default:
+		return libvirtprovider.RunnerStateUnknown
 	}
-	return libvirtprovider.RunnerStateCompleted
 }

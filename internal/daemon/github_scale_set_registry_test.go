@@ -14,7 +14,7 @@ import (
 )
 
 func TestGitHubScaleSetRegistryListsScaleSets(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/v3/repos/meza/repo/actions/runners/registration-token":
 			if request.Header.Get("Authorization") != "Bearer secret" {
@@ -144,7 +144,7 @@ func TestGitHubScaleSetRegistrySurfacesHTTPFailures(t *testing.T) {
 	}
 	for testName, testCase := range tests {
 		t.Run(testName, func(t *testing.T) {
-			server := httptest.NewServer(testCase.handler)
+			server := httptest.NewTLSServer(testCase.handler)
 			defer server.Close()
 			registry := githubScaleSetRegistry{
 				repositoryURL: server.URL + "/meza/repo",
@@ -170,6 +170,10 @@ func TestGitHubScaleSetRegistryHelperFunctions(t *testing.T) {
 	_, _, err = repositoryOwnerAndName("https://github.com/meza")
 	if err == nil {
 		t.Fatal("expected invalid repository url")
+	}
+	_, _, err = repositoryOwnerAndName("http://github.com/meza/repo")
+	if err == nil {
+		t.Fatal("expected non-https repository url error")
 	}
 	_, _, err = repositoryOwnerAndName("http://[::1/meza/repo")
 	if err == nil {
@@ -197,6 +201,10 @@ func TestGitHubScaleSetRegistryHelperFunctions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected runner registration url parse error")
 	}
+	_, err = runnerRegistrationURL("http://github.com/meza/github-scaler")
+	if err == nil {
+		t.Fatal("expected non-https runner registration url error")
+	}
 }
 
 func TestRunnerRegistrationURLUsesGitHubAPIHost(t *testing.T) {
@@ -222,6 +230,12 @@ func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
 	if registry.repositoryURL != "https://github.com/meza/github-scaler" || registry.token != "secret" || registry.httpClient == nil {
 		t.Fatalf("expected registry defaults, got %#v", registry)
 	}
+	if registry.httpClient == http.DefaultClient {
+		t.Fatal("expected registry to avoid the unbounded default HTTP client")
+	}
+	if registry.httpClient.Timeout == 0 {
+		t.Fatal("expected registry HTTP client timeout")
+	}
 }
 
 func TestGitHubScaleSetRegistrySurfacesRequestConstructionFailures(t *testing.T) {
@@ -237,6 +251,12 @@ func TestGitHubScaleSetRegistrySurfacesRequestConstructionFailures(t *testing.T)
 	}
 	if _, err := registry.fetchRunnerScaleSets(context.Background(), actionsServiceAdminConnection{URL: "%", Token: "admin"}, 1); err == nil {
 		t.Fatal("expected list parse error")
+	}
+	if _, err := registry.fetchRunnerScaleSets(context.Background(), actionsServiceAdminConnection{URL: "http://example.com", Token: "admin"}, 1); err == nil {
+		t.Fatal("expected non-https admin url error")
+	}
+	if err := requireHTTPSURL(&url.URL{Scheme: "https"}, "test url"); err == nil {
+		t.Fatal("expected missing host error")
 	}
 }
 
@@ -300,6 +320,9 @@ func TestGitHubScaleSetRegistrySurfacesConstructionHookFailures(t *testing.T) {
 }
 
 func serverURL(request *http.Request) string {
+	if request.TLS != nil {
+		return "https://" + request.Host
+	}
 	return "http://" + request.Host
 }
 

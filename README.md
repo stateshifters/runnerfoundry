@@ -53,6 +53,8 @@ Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT 
 
 Each scale set lists the repositories it serves. A single configured scale set such as `linux-docker` can drive multiple repositories that need the same self-hosted runner pool. Github still gets one runner scale set per repository target; the daemon qualifies local Docker/libvirt ownership internally so provider state does not collide between repositories.
 
+Repository URLs must use HTTPS and the `OWNER/REPO` path shape. `max_runners` must be greater than zero; omit a scale set instead of setting zero capacity.
+
 Github runner scale sets are routed by their scale-set name. Use the configured `scale_sets[].name` value in workflow `runs-on`; do not configure runner matching labels through Docker Compose environment variables such as `LABELS`.
 
 Set `prune: true` only when `github-scaler` owns every runner scale set in the configured repositories and runner groups. When enabled, startup deletes Github runner scale sets in those repository/group targets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
@@ -98,7 +100,7 @@ After editing the config or environment file, reload the service:
 sudo systemctl reload github-scaler
 ```
 
-Reload stops old-config polling first, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, reads the config once, and starts the new config. Watch progress with:
+Reload validates the replacement config and token before stopping the active scale sets. If the replacement is invalid, the daemon logs the rejection and keeps the last-known-good config running. For an accepted reload, old-config polling stops before drain, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and starts the new config. Watch progress with:
 
 ```sh
 journalctl -u github-scaler -f

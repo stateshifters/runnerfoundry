@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -46,6 +47,12 @@ type LibvirtConfig struct {
 	DomainXMLTemplate string `yaml:"domain_xml_template"`
 }
 
+// Load decodes and validates one daemon configuration document.
+//
+// The returned Config has validation defaults applied, including the default
+// log format and runner group. Validation reads the environment when
+// github.token_env is configured so startup can fail before the daemon starts
+// polling GitHub.
 func Load(reader io.Reader) (Config, error) {
 	var loadedConfig Config
 	decoder := yaml.NewDecoder(reader)
@@ -59,6 +66,12 @@ func Load(reader io.Reader) (Config, error) {
 	return loadedConfig, nil
 }
 
+// Validate applies configuration defaults and rejects unsafe startup state.
+//
+// Validation mutates the receiver for defaults. It also checks token source
+// availability, repository target shape, provider exclusivity, and positive
+// runner capacity so later daemon code can treat those invariants as already
+// established.
 func (loadedConfig *Config) Validate() error {
 	if loadedConfig.GitHub.Token != "" {
 		return errors.New("github.token is not allowed; use token_env or token_file")
@@ -104,8 +117,8 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	if scaleSet.RunnerGroup == "" {
 		scaleSet.RunnerGroup = "default"
 	}
-	if scaleSet.MaxRunners < 0 {
-		return fmt.Errorf("scale set %q max_runners must be non-negative", scaleSet.Name)
+	if scaleSet.MaxRunners <= 0 {
+		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
 	}
 	if err := scaleSet.validateProvider(); err != nil {
 		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
@@ -132,6 +145,27 @@ func (scaleSet *ScaleSetConfig) validateRepositories() error {
 		if strings.TrimSpace(repositoryURL) == "" {
 			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
 		}
+		if err := validateRepositoryURL(repositoryURL); err != nil {
+			return fmt.Errorf("scale set %q repositories[%d]: %w", scaleSet.Name, repositoryIndex, err)
+		}
+	}
+	return nil
+}
+
+func validateRepositoryURL(repositoryURL string) error {
+	parsedURL, err := url.Parse(strings.TrimRight(repositoryURL, "/"))
+	if err != nil {
+		return fmt.Errorf("parse repository url: %w", err)
+	}
+	if parsedURL.Scheme != "https" {
+		return errors.New("repository url must use https")
+	}
+	if parsedURL.Host == "" {
+		return errors.New("repository url must include a host")
+	}
+	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	if len(pathParts) != 2 || pathParts[0] == "" || pathParts[1] == "" {
+		return errors.New("repository url path must be OWNER/REPO")
 	}
 	return nil
 }
@@ -158,6 +192,11 @@ func (scaleSet *ScaleSetConfig) validateProvider() error {
 	return nil
 }
 
+// Token reads the configured GitHub token source.
+//
+// Tokens may come from an environment variable or a file selected during
+// validation. Empty values are rejected here so reload can validate a
+// replacement configuration before stopping the active scale sets.
 func (loadedConfig Config) Token() (string, error) {
 	if loadedConfig.GitHub.TokenEnv != "" {
 		token := os.Getenv(loadedConfig.GitHub.TokenEnv)

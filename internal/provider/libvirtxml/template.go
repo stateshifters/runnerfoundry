@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/meza/github-scaler/internal/provider/contract"
 	upstream "libvirt.org/go/libvirtxml"
 )
 
 const (
 	MetadataNamespace  = "urn:github-scaler"
-	JITOEMStringPrefix = "github-scaler.jit="
+	JITOEMStringPrefix = contract.JITOEMStringPrefix
 )
 
 type DomainTemplate struct {

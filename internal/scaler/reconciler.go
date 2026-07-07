@@ -10,6 +10,7 @@ type RunnerState string
 const (
 	RunnerStateRunning   RunnerState = "running"
 	RunnerStateCompleted RunnerState = "completed"
+	RunnerStateUnknown   RunnerState = "unknown"
 )
 
 type RunnerInstance struct {

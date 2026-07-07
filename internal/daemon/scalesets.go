@@ -15,6 +15,7 @@ import (
 )
 
 const pollRetryDelay = 5 * time.Second
+const sustainedPollFailureThreshold = 3
 
 var operatingSystemHostname = os.Hostname
 
@@ -170,10 +171,13 @@ func startScaleSetLifecycle(
 	retryDelay time.Duration,
 ) scaleSetLifecycle {
 	pollerCtx, stopPolling := context.WithCancel(ctx)
-	startPoller(pollerCtx, logger, scaleSetConfig, messageClient, reconciler, retryDelay)
+	pollerDone := startPoller(pollerCtx, logger, scaleSetConfig, messageClient, reconciler, retryDelay)
 	return scaleSetLifecycle{
-		StopPolling: stopPolling,
-		Drain:       reconciler.Drain,
+		StopPolling: func() {
+			stopPolling()
+			<-pollerDone
+		},
+		Drain: reconciler.Drain,
 		Shutdown: func(ctx context.Context) error {
 			return shutdownScaleSet(ctx, messageClient, client, runnerScaleSet)
 		},
@@ -236,13 +240,18 @@ func startPoller(
 	messageClient scalesetpoller.MessageClient,
 	reconciler scaler.Reconciler,
 	retryDelay time.Duration,
-) {
+) <-chan struct{} {
 	poller := scalesetpoller.Poller{
 		Client:      messageClient,
 		Handler:     scaleSetHandler{Reconciler: reconciler},
 		MaxCapacity: scaleSetConfig.MaxRunners,
 	}
-	go pollUntilShutdown(ctx, logger, scaleSetConfig.Name, &poller, retryDelay)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollUntilShutdown(ctx, logger, scaleSetConfig.Name, &poller, retryDelay)
+	}()
+	return done
 }
 
 func pollUntilShutdown(
@@ -252,14 +261,43 @@ func pollUntilShutdown(
 	poller *scalesetpoller.Poller,
 	retryDelay time.Duration,
 ) {
+	consecutiveFailures := 0
 	for ctx.Err() == nil {
 		if err := poller.PollOnce(ctx); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			logger.Error("poll failed", slog.String("scaleSet", scaleSetName), slog.String("error", err.Error()))
-			time.Sleep(retryDelay)
+			consecutiveFailures = logPollFailure(logger, scaleSetName, err, consecutiveFailures)
+			if !waitForPollRetry(ctx, retryDelay) {
+				return
+			}
+			continue
 		}
+		consecutiveFailures = 0
+	}
+}
+
+func logPollFailure(logger *slog.Logger, scaleSetName string, pollErr error, consecutiveFailures int) int {
+	consecutiveFailures++
+	logger.Error("poll failed", slog.String("scaleSet", scaleSetName), slog.String("error", pollErr.Error()))
+	if consecutiveFailures == sustainedPollFailureThreshold {
+		logger.Error(
+			"sustained poll failures",
+			slog.String("scaleSet", scaleSetName),
+			slog.Int("consecutiveFailures", consecutiveFailures),
+		)
+	}
+	return consecutiveFailures
+}
+
+func waitForPollRetry(ctx context.Context, retryDelay time.Duration) bool {
+	timer := time.NewTimer(retryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

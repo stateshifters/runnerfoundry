@@ -9,7 +9,7 @@ VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN := go1.26.4
 
-.PHONY: fmt-check lint lint-fix vet test test-race coverage build notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-fix vet test test-race coverage build smoke notices sbom package-deb prepare clean
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
@@ -67,6 +67,24 @@ ifeq ($(OSFAMILY),Windows)
 else
 	mkdir -p "$(BUILD_DIR)/linux/amd64"
 	GOOS=linux GOARCH=amd64 go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/github-scaler
+endif
+
+smoke: build
+ifeq ($(OSFAMILY),Windows)
+	@powershell -NoProfile -Command "$$env:GITHUB_SCALER_PAT='smoke-token'; go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; $$exitCode=$$LASTEXITCODE; $$message=Get-Content -Raw smoke.err; Remove-Item smoke.err -ErrorAction SilentlyContinue; if ($$exitCode -eq 0) { Write-Host 'expected smoke command to fail for placeholder config'; exit 1 }; if ($$message -notmatch 'at least one scale set is required') { Write-Host $$message; exit 1 }"
+else
+	@GITHUB_SCALER_PAT=smoke-token go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; \
+	exit_code=$$?; \
+	message=$$(cat smoke.err); \
+	rm -f smoke.err; \
+	if [ "$$exit_code" -eq 0 ]; then \
+		echo "expected smoke command to fail for placeholder config"; \
+		exit 1; \
+	fi; \
+	if ! printf '%s' "$$message" | grep -q 'at least one scale set is required'; then \
+		printf '%s\n' "$$message"; \
+		exit 1; \
+	fi
 endif
 
 notices:

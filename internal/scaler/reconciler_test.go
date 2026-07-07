@@ -113,6 +113,29 @@ func TestReconcilerDrainCleansCompletedAndDoesNotStartRunners(t *testing.T) {
 	}
 }
 
+func TestReconcilerDoesNotDestroyUnknownRunnerState(t *testing.T) {
+	provider := &recordingProvider{
+		instances: []RunnerInstance{
+			{ID: "unknown", RunnerName: "docker-set-1", State: RunnerStateUnknown},
+		},
+	}
+	reconciler := Reconciler{
+		ScaleSet: ScaleSetRuntime{
+			Name:       "docker-set",
+			MaxRunners: 1,
+			Provider:   provider,
+			JITConfig:  &recordingJITGenerator{},
+		},
+	}
+
+	if _, err := reconciler.Drain(context.Background()); err != nil {
+		t.Fatalf("expected drain success, got %v", err)
+	}
+	if len(provider.destroyed) != 0 {
+		t.Fatalf("expected unknown runner to be preserved, got destroyed %#v", provider.destroyed)
+	}
+}
+
 func TestReconcilerDrainSurfacesProviderFailures(t *testing.T) {
 	tests := map[string]Provider{
 		"list": failingProvider{failure: "list"},

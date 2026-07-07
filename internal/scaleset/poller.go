@@ -17,6 +17,11 @@ type MessageHandler interface {
 	HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error
 }
 
+// Poller receives one GitHub scale-set message and acknowledges it only after
+// the handler succeeds.
+//
+// DeleteMessage is the acknowledgement boundary. A failed handler leaves the
+// message unacknowledged so GitHub can redeliver demand instead of losing work.
 type Poller struct {
 	Client        MessageClient
 	Handler       MessageHandler

@@ -109,16 +109,29 @@ func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
 func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 	t.Setenv("GITHUB_SCALER_TOKEN", "token")
 	tests := map[string]string{
-		"bad yaml":               "github: [",
-		"global github url":      "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets: []\n",
-		"two token sources":      "github:\n  token_env: GITHUB_SCALER_TOKEN\n  token_file: token\nscale_sets: []\n",
-		"missing token env":      "github:\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
-		"bad log format":         "github:\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
-		"missing scale sets":     "github:\n  token_env: GITHUB_SCALER_TOKEN\n",
-		"missing scale set name": baseConfig("  - repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
-		"missing repositories":   baseConfig(validScaleSet("bad", "")),
-		"empty repository":       baseConfig(validScaleSet("bad", "    repositories:\n      - ''\n")),
-		"scale set labels":       baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - linux\n")),
+		"bad yaml":                "github: [",
+		"global github url":       "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets: []\n",
+		"two token sources":       "github:\n  token_env: GITHUB_SCALER_TOKEN\n  token_file: token\nscale_sets: []\n",
+		"missing token env":       "github:\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
+		"bad log format":          "github:\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
+		"missing scale sets":      "github:\n  token_env: GITHUB_SCALER_TOKEN\n",
+		"missing scale set name":  baseConfig("  - repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
+		"missing repositories":    baseConfig(validScaleSet("bad", "")),
+		"empty repository":        baseConfig(validScaleSet("bad", "    repositories:\n      - ''\n")),
+		"http repository":         baseConfig(validScaleSet("bad", "    repositories:\n      - http://github.com/meza/repo-a\n")),
+		"missing repository host": baseConfig(validScaleSet("bad", "    repositories:\n      - https:///meza/repo-a\n")),
+		"extra repository path":   baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a/actions\n")),
+		"blank repository owner":  baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com//repo-a\n")),
+		"scale set labels":        baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - linux\n")),
+		"zero max runners": baseConfig(`
+  - name: bad
+    repositories:
+      - https://github.com/meza/repo-a
+    max_runners: 0
+    docker:
+      compose_file: compose.yaml
+      service: runner
+`),
 		"negative max runners": baseConfig(`
   - name: bad
     repositories:
@@ -212,6 +225,12 @@ func TestTokenRejectsEmptyAndUnreadableSources(t *testing.T) {
 	}
 	if _, err := (Config{GitHub: GitHubConfig{TokenFile: filepath.Join(t.TempDir(), "missing")}}).Token(); err == nil {
 		t.Fatal("expected unreadable file token error")
+	}
+}
+
+func TestValidateRepositoryURLRejectsParseFailure(t *testing.T) {
+	if err := validateRepositoryURL("http://[::1/meza/repo"); err == nil {
+		t.Fatal("expected repository URL parse error")
 	}
 }
 

@@ -1,13 +1,31 @@
 package daemon
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"unicode"
+
+	"github.com/meza/github-scaler/internal/config"
 )
 
 func localScaleSetName(repositoryURL string, scaleSetName string) string {
 	return sanitizeName(repositoryIdentity(repositoryURL) + "-" + scaleSetName)
+}
+
+func validateLocalScaleSetNames(scaleSetConfigs []config.ScaleSetConfig) error {
+	owners := map[string]string{}
+	for _, scaleSetConfig := range scaleSetConfigs {
+		for _, repositoryURL := range scaleSetConfig.Repositories {
+			localName := localScaleSetName(repositoryURL, scaleSetConfig.Name)
+			owner := repositoryURL + " " + scaleSetConfig.Name
+			if previousOwner, exists := owners[localName]; exists && previousOwner != owner {
+				return fmt.Errorf("local scale set name %q is shared by %s and %s", localName, previousOwner, owner)
+			}
+			owners[localName] = owner
+		}
+	}
+	return nil
 }
 
 func repositoryIdentity(repositoryURL string) string {
