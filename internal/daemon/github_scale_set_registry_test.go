@@ -11,15 +11,14 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/meza/github-scaler/internal/config"
 )
 
 func TestGitHubScaleSetRegistryListsScaleSets(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/v3/repos/meza/repo/actions/runners/registration-token":
-			if request.Header.Get("Authorization") != "Bearer secret" {
-				t.Fatalf("expected PAT auth, got %q", request.Header.Get("Authorization"))
-			}
 			writer.WriteHeader(http.StatusCreated)
 			writeString(t, writer, `{"token":"registration"}`)
 		case "/api/v3/actions/runner-registration":
@@ -43,7 +42,6 @@ func TestGitHubScaleSetRegistryListsScaleSets(t *testing.T) {
 
 	registry := githubScaleSetRegistry{
 		repositoryURL: server.URL + "/meza/repo",
-		token:         "secret",
 		httpClient:    server.Client(),
 	}
 	runnerScaleSets, err := registry.ListRunnerScaleSets(context.Background(), 9)
@@ -148,7 +146,6 @@ func TestGitHubScaleSetRegistrySurfacesHTTPFailures(t *testing.T) {
 			defer server.Close()
 			registry := githubScaleSetRegistry{
 				repositoryURL: server.URL + "/meza/repo",
-				token:         "secret",
 				httpClient:    server.Client(),
 			}
 			_, err := registry.ListRunnerScaleSets(context.Background(), 1)
@@ -226,8 +223,11 @@ func TestRunnerRegistrationURLUsesGitHubAPIHost(t *testing.T) {
 }
 
 func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
-	registry := newGitHubScaleSetRegistry("https://github.com/meza/github-scaler", "secret")
-	if registry.repositoryURL != "https://github.com/meza/github-scaler" || registry.token != "secret" || registry.httpClient == nil {
+	registry, err := newGitHubScaleSetRegistry("https://github.com/meza/github-scaler", 1, testAppCredentials(t))
+	if err != nil {
+		t.Fatalf("expected registry, got %v", err)
+	}
+	if registry.repositoryURL != "https://github.com/meza/github-scaler" || registry.httpClient == nil {
 		t.Fatalf("expected registry defaults, got %#v", registry)
 	}
 	if registry.httpClient == http.DefaultClient {
@@ -238,8 +238,15 @@ func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
 	}
 }
 
+func TestGitHubScaleSetRegistryRejectsInvalidPrivateKey(t *testing.T) {
+	_, err := newGitHubScaleSetRegistry("https://github.com/meza/github-scaler", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
+	if err == nil {
+		t.Fatal("expected invalid private key error")
+	}
+}
+
 func TestGitHubScaleSetRegistrySurfacesRequestConstructionFailures(t *testing.T) {
-	registry := githubScaleSetRegistry{repositoryURL: "http://[::1/meza/repo", token: "secret", httpClient: http.DefaultClient}
+	registry := githubScaleSetRegistry{repositoryURL: "http://[::1/meza/repo", httpClient: http.DefaultClient}
 	if _, err := registry.runnerRegistrationToken(context.Background()); err == nil {
 		t.Fatal("expected runner registration token url error")
 	}
@@ -296,7 +303,7 @@ func TestGitHubScaleSetRegistrySurfacesConstructionHookFailures(t *testing.T) {
 		parseURL = originalParseURL
 	}()
 
-	registry := githubScaleSetRegistry{repositoryURL: "https://github.com/meza/repo", token: "secret", httpClient: http.DefaultClient}
+	registry := githubScaleSetRegistry{repositoryURL: "https://github.com/meza/repo", httpClient: http.DefaultClient}
 	newHTTPRequest = func(ctx context.Context, method string, requestURL string, body io.Reader) (*http.Request, error) {
 		return nil, errors.New("request failed")
 	}

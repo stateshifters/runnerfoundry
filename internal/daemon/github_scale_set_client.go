@@ -3,14 +3,20 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/meza/github-scaler/internal/config"
 )
 
-func newGitHubClient(repositoryURL string, token string) (githubScaleSetClient, error) {
-	client, err := upstream.NewClientWithPersonalAccessToken(upstream.NewClientWithPersonalAccessTokenConfig{
-		GitHubConfigURL:     repositoryURL,
-		PersonalAccessToken: token,
+func newGitHubClient(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (githubScaleSetClient, error) {
+	client, err := upstream.NewClientWithGitHubApp(upstream.ClientWithGitHubAppConfig{
+		GitHubConfigURL: repositoryURL,
+		GitHubAppAuth: upstream.GitHubAppAuth{
+			ClientID:       strconv.FormatInt(credentials.AppID, 10),
+			InstallationID: installationID,
+			PrivateKey:     credentials.PrivateKey,
+		},
 		SystemInfo: upstream.SystemInfo{
 			System:  "github-scaler",
 			Version: "v1",
@@ -19,9 +25,13 @@ func newGitHubClient(repositoryURL string, token string) (githubScaleSetClient, 
 	if err != nil {
 		return githubScaleSetClient{}, fmt.Errorf("create scaleset client: %w", err)
 	}
+	registry, err := newGitHubScaleSetRegistry(repositoryURL, installationID, credentials)
+	if err != nil {
+		return githubScaleSetClient{}, fmt.Errorf("create scaleset registry: %w", err)
+	}
 	return githubScaleSetClient{
 		Client:                     client,
-		Registry:                   newGitHubScaleSetRegistry(repositoryURL, token),
+		Registry:                   registry,
 		CreateMessageSessionClient: client.MessageSessionClient,
 	}, nil
 }

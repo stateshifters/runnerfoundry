@@ -13,10 +13,10 @@ func localScaleSetName(repositoryURL string, scaleSetName string) string {
 	return sanitizeName(repositoryIdentity(repositoryURL) + "-" + scaleSetName)
 }
 
-func validateLocalScaleSetNames(scaleSetConfigs []config.ScaleSetConfig) error {
+func validateLocalScaleSetNames(repositoryURLs []string, scaleSetConfigs []config.ScaleSetConfig) error {
 	owners := map[string]string{}
-	for _, scaleSetConfig := range scaleSetConfigs {
-		for _, repositoryURL := range scaleSetConfig.Repositories {
+	for _, repositoryURL := range repositoryURLs {
+		for _, scaleSetConfig := range scaleSetConfigs {
 			localName := localScaleSetName(repositoryURL, scaleSetConfig.Name)
 			owner := repositoryURL + " " + scaleSetConfig.Name
 			if previousOwner, exists := owners[localName]; exists && previousOwner != owner {

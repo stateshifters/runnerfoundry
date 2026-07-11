@@ -14,7 +14,7 @@ if [ -d /etc/github-scaler ]; then
 	chmod 0750 /etc/github-scaler
 fi
 
-for config_file in /etc/github-scaler/config.yaml /etc/github-scaler/github-scaler.env; do
+for config_file in /etc/github-scaler/config.yaml /etc/github-scaler/github-app.pem; do
 	if [ -e "$config_file" ]; then
 		chown root:github-scaler "$config_file"
 		chmod 0640 "$config_file"

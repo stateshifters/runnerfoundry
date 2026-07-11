@@ -57,6 +57,46 @@ type Reconciler struct {
 	ScaleSet ScaleSetRuntime
 }
 
+func (reconciler Reconciler) Running(ctx context.Context) (int, error) {
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return 0, fmt.Errorf("list runner instances: %w", err)
+	}
+	runningCount, _, err := reconciler.cleanupCompletedRunners(ctx, instances)
+	return runningCount, err
+}
+
+func (reconciler Reconciler) StartOne(ctx context.Context) error {
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return fmt.Errorf("list runner instances: %w", err)
+	}
+	runningCount, usedRunnerNames, err := reconciler.cleanupCompletedRunners(ctx, instances)
+	if err != nil {
+		return err
+	}
+	if runningCount >= reconciler.ScaleSet.MaxRunners {
+		return nil
+	}
+	return reconciler.startMissingRunners(ctx, runningCount, runningCount+1, usedRunnerNames)
+}
+
+func (reconciler Reconciler) DestroyActive(ctx context.Context) error {
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return fmt.Errorf("list runner instances: %w", err)
+	}
+	for _, instance := range instances {
+		if instance.State == RunnerStateUnknown {
+			continue
+		}
+		if err := reconciler.ScaleSet.Provider.Destroy(ctx, instance); err != nil {
+			return fmt.Errorf("destroy runner %q: %w", instance.RunnerName, err)
+		}
+	}
+	return nil
+}
+
 func DesiredRunnerCount(assignedJobs int, maxRunners int) int {
 	if assignedJobs < 0 {
 		return 0

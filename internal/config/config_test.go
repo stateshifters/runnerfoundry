@@ -5,177 +5,68 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestLoadAcceptsScaleSetsWithRepositoryLists(t *testing.T) {
-	t.Setenv("GITHUB_SCALER_TOKEN", "token")
-	tempDir := t.TempDir()
-	composePath := filepath.Join(tempDir, "compose.yaml")
-	xmlPath := filepath.Join(tempDir, "domain.xml")
-	if err := os.WriteFile(composePath, []byte("services:\n  runner:\n    image: runner\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(xmlPath, []byte(`<domain type="kvm"><name>template</name></domain>`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	validConfig := `
-github:
-  token_env: GITHUB_SCALER_TOKEN
-log:
-  format: json
-prune: true
-scale_sets:
-  - name: docker-set
-    repositories:
-      - https://github.com/meza/repo-a
-      - https://github.com/meza/repo-b
-    max_runners: 2
-    docker:
-      compose_file: ` + composePath + `
-      service: runner
-  - name: vm-set
-    repositories:
-      - https://github.com/meza/repo-c
-    runner_group: default
-    max_runners: 1
-    libvirt:
-      connection_uri: qemu:///system
-      domain_xml_template: ` + xmlPath + `
-`
-	loadedConfig, err := Load(strings.NewReader(validConfig))
+func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	loadedConfig, err := Load(strings.NewReader(validConfig(privateKeyPath)))
 	if err != nil {
 		t.Fatalf("expected valid config, got %v", err)
 	}
-	if loadedConfig.ScaleSets[0].Repositories[1] != "https://github.com/meza/repo-b" {
-		t.Fatalf("expected repositories to load, got %#v", loadedConfig.ScaleSets[0].Repositories)
+	if loadedConfig.GitHub.App.AppID != 12345 {
+		t.Fatalf("expected app ID, got %d", loadedConfig.GitHub.App.AppID)
 	}
-	if !loadedConfig.Prune {
-		t.Fatal("expected prune to load")
+	if loadedConfig.GitHub.DiscoveryInterval != "5m" {
+		t.Fatalf("expected default discovery interval, got %q", loadedConfig.GitHub.DiscoveryInterval)
 	}
 	if loadedConfig.ScaleSets[0].RunnerGroup != "default" {
 		t.Fatalf("expected default runner group, got %q", loadedConfig.ScaleSets[0].RunnerGroup)
 	}
-	if loadedConfig.ScaleSets[0].Docker.Service != "runner" {
-		t.Fatalf("expected docker service to load, got %q", loadedConfig.ScaleSets[0].Docker.Service)
+	credentials, err := loadedConfig.GitHub.AppCredentials()
+	if err != nil {
+		t.Fatalf("expected app credentials, got %v", err)
 	}
-
-	_, err = Load(strings.NewReader(strings.Replace(validConfig, "token_env: GITHUB_SCALER_TOKEN", "token: ghp_secret", 1)))
-	if err == nil {
-		t.Fatal("expected plaintext token to be rejected")
+	if credentials.AppID != 12345 || credentials.PrivateKey != "private-key" {
+		t.Fatalf("unexpected credentials %#v", credentials)
 	}
-}
-
-func TestLoadRejectsDuplicateScaleSetNames(t *testing.T) {
-	t.Setenv("GITHUB_SCALER_TOKEN", "token")
-	configText := baseConfig(`
-  - name: repeated
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 1
-    docker:
-      compose_file: compose.yaml
-      service: runner
-  - name: repeated
-    repositories:
-      - https://github.com/meza/repo-b
-    max_runners: 1
-    docker:
-      compose_file: compose.yaml
-      service: runner
-`)
-	_, err := Load(strings.NewReader(configText))
-	if err == nil {
-		t.Fatal("expected duplicate name error")
+	discoveryDuration, err := loadedConfig.GitHub.DiscoveryDuration()
+	if err != nil || discoveryDuration != 5*time.Minute {
+		t.Fatalf("expected five minute discovery duration, got %s, %v", discoveryDuration, err)
+	}
+	if _, err := (GitHubConfig{DiscoveryInterval: "invalid"}).DiscoveryDuration(); err == nil {
+		t.Fatal("expected invalid unvalidated discovery duration error")
 	}
 }
 
-func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
-	scaleSet := ScaleSetConfig{
-		Name:         "linux",
-		Repositories: []string{"https://github.com/meza/repo-a"},
-		RunnerGroup:  "custom",
-		MaxRunners:   1,
-		Docker:       &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
-	}
-	if err := scaleSet.validate(map[string]bool{}); err != nil {
-		t.Fatalf("expected scale set to validate, got %v", err)
-	}
-	if scaleSet.RunnerGroup != "custom" {
-		t.Fatalf("expected explicit runner group, got %q", scaleSet.RunnerGroup)
-	}
-}
-
-func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
-	t.Setenv("GITHUB_SCALER_TOKEN", "token")
+func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{
-		"bad yaml":                "github: [",
-		"global github url":       "github:\n  url: https://github.com/meza/agent-playground\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets: []\n",
-		"two token sources":       "github:\n  token_env: GITHUB_SCALER_TOKEN\n  token_file: token\nscale_sets: []\n",
-		"missing token env":       "github:\n  token_env: MISSING_TOKEN\nscale_sets: []\n",
-		"bad log format":          "github:\n  token_env: GITHUB_SCALER_TOKEN\nlog:\n  format: xml\nscale_sets: []\n",
-		"missing scale sets":      "github:\n  token_env: GITHUB_SCALER_TOKEN\n",
-		"missing scale set name":  baseConfig("  - repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
-		"missing repositories":    baseConfig(validScaleSet("bad", "")),
-		"empty repository":        baseConfig(validScaleSet("bad", "    repositories:\n      - ''\n")),
-		"http repository":         baseConfig(validScaleSet("bad", "    repositories:\n      - http://github.com/meza/repo-a\n")),
-		"missing repository host": baseConfig(validScaleSet("bad", "    repositories:\n      - https:///meza/repo-a\n")),
-		"extra repository path":   baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a/actions\n")),
-		"blank repository owner":  baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com//repo-a\n")),
-		"scale set labels":        baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    labels:\n      - linux\n")),
-		"zero max runners": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 0
-    docker:
-      compose_file: compose.yaml
-      service: runner
-`),
-		"negative max runners": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: -1
-    docker:
-      compose_file: compose.yaml
-      service: runner
-`),
-		"missing provider config":   baseConfig("  - name: bad\n    repositories:\n      - https://github.com/meza/repo-a\n    max_runners: 1\n"),
-		"multiple provider configs": baseConfig(validScaleSet("bad", "    repositories:\n      - https://github.com/meza/repo-a\n    libvirt:\n      connection_uri: qemu:///system\n      domain_xml_template: domain.xml\n")),
-		"missing docker compose file": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 1
-    docker:
-      service: runner
-`),
-		"missing docker service": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 1
-    docker:
-      compose_file: compose.yaml
-`),
-		"missing libvirt connection": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 1
-    libvirt:
-      domain_xml_template: domain.xml
-`),
-		"missing libvirt domain template": baseConfig(`
-  - name: bad
-    repositories:
-      - https://github.com/meza/repo-a
-    max_runners: 1
-    libvirt:
-      connection_uri: qemu:///system
-`),
-		"unknown field": "unknown: true\n",
+		"bad yaml":                   "github: [",
+		"legacy token env":           strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token_env: TOKEN\n  app:\n", 1),
+		"legacy token file":          strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token_file: token\n  app:\n", 1),
+		"legacy plaintext token":     strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token: secret\n  app:\n", 1),
+		"plaintext private key":      strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath, "    private_key: secret", 1),
+		"missing app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345\n", "", 1),
+		"invalid app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345", "    app_id: -1", 1),
+		"missing private key file":   strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath+"\n", "", 1),
+		"invalid discovery interval": strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: soon\n", 1),
+		"short discovery interval":   strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: 59s\n", 1),
+		"bad log format":             strings.Replace(validConfig(privateKeyPath), "log:\n  format: json", "log:\n  format: xml", 1),
+		"missing scale sets":         strings.Split(validConfig(privateKeyPath), "scale_sets:")[0],
+		"missing scale set name":     baseConfig(privateKeyPath, "  - max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
+		"duplicate scale set name":   baseConfig(privateKeyPath, validScaleSet("repeated")+validScaleSet("repeated")),
+		"zero max runners":           baseConfig(privateKeyPath, strings.Replace(validScaleSet("bad"), "max_runners: 1", "max_runners: 0", 1)),
+		"negative max runners":       baseConfig(privateKeyPath, strings.Replace(validScaleSet("bad"), "max_runners: 1", "max_runners: -1", 1)),
+		"missing provider config":    baseConfig(privateKeyPath, "  - name: bad\n    max_runners: 1\n"),
+		"multiple providers": baseConfig(privateKeyPath, validScaleSet("bad")+
+			"    libvirt:\n      connection_uri: qemu:///system\n      domain_xml_template: domain.xml\n"),
+		"missing docker compose file": baseConfig(privateKeyPath, "  - name: bad\n    max_runners: 1\n    docker:\n      service: runner\n"),
+		"missing docker service":      baseConfig(privateKeyPath, "  - name: bad\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n"),
+		"missing libvirt connection":  baseConfig(privateKeyPath, "  - name: bad\n    max_runners: 1\n    libvirt:\n      domain_xml_template: domain.xml\n"),
+		"missing libvirt template":    baseConfig(privateKeyPath, "  - name: bad\n    max_runners: 1\n    libvirt:\n      connection_uri: qemu:///system\n"),
+		"repositories are obsolete":   baseConfig(privateKeyPath, strings.Replace(validScaleSet("bad"), "    max_runners", "    repositories:\n      - https://github.com/meza/repo\n    max_runners", 1)),
+		"unknown field":               "unknown: true\n",
 	}
 	for testName, configText := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -186,61 +77,70 @@ func TestLoadRejectsInvalidConfigurationShapes(t *testing.T) {
 	}
 }
 
-func TestTokenReadsEnvironmentAndTokenFile(t *testing.T) {
-	t.Setenv("GITHUB_SCALER_TOKEN", "env-token")
-	envConfig := Config{GitHub: GitHubConfig{TokenEnv: "GITHUB_SCALER_TOKEN"}}
-	token, err := envConfig.Token()
-	if err != nil {
-		t.Fatalf("expected env token, got %v", err)
+func TestAppCredentialsRejectUnreadableOrEmptyPrivateKey(t *testing.T) {
+	emptyKeyPath := writePrivateKey(t, "\n")
+	if _, err := (GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: emptyKeyPath}}).AppCredentials(); err == nil {
+		t.Fatal("expected empty private key error")
 	}
-	if token != "env-token" {
-		t.Fatalf("unexpected token %q", token)
-	}
-
-	tokenPath := filepath.Join(t.TempDir(), "token")
-	if writeErr := os.WriteFile(tokenPath, []byte("file-token\n"), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	fileConfig := Config{GitHub: GitHubConfig{TokenFile: tokenPath}}
-	token, err = fileConfig.Token()
-	if err != nil {
-		t.Fatalf("expected file token, got %v", err)
-	}
-	if token != "file-token" {
-		t.Fatalf("unexpected file token %q", token)
+	missingPath := filepath.Join(t.TempDir(), "missing.pem")
+	if _, err := (GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: missingPath}}).AppCredentials(); err == nil {
+		t.Fatal("expected unreadable private key error")
 	}
 }
 
-func TestTokenRejectsEmptyAndUnreadableSources(t *testing.T) {
-	t.Setenv("EMPTY_TOKEN", "")
-	if _, err := (Config{GitHub: GitHubConfig{TokenEnv: "EMPTY_TOKEN"}}).Token(); err == nil {
-		t.Fatal("expected empty env token error")
+func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
+	scaleSet := ScaleSetConfig{
+		Name:        "linux",
+		RunnerGroup: "custom",
+		MaxRunners:  1,
+		Docker:      &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 	}
-	emptyTokenPath := filepath.Join(t.TempDir(), "empty-token")
-	if err := os.WriteFile(emptyTokenPath, []byte("\n"), 0o600); err != nil {
+	if err := scaleSet.validate(map[string]bool{}); err != nil {
+		t.Fatalf("expected scale set to validate, got %v", err)
+	}
+	if scaleSet.RunnerGroup != "custom" {
+		t.Fatalf("expected explicit runner group, got %q", scaleSet.RunnerGroup)
+	}
+}
+
+func TestScaleSetValidationAcceptsCompleteLibvirtProvider(t *testing.T) {
+	scaleSet := ScaleSetConfig{
+		Name: "vm", MaxRunners: 1,
+		Libvirt: &LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"},
+	}
+	if err := scaleSet.validate(map[string]bool{}); err != nil {
+		t.Fatalf("expected libvirt scale set, got %v", err)
+	}
+}
+
+func writePrivateKey(t *testing.T, contents string) string {
+	t.Helper()
+	privateKeyPath := filepath.Join(t.TempDir(), "app.pem")
+	if err := os.WriteFile(privateKeyPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Config{GitHub: GitHubConfig{TokenFile: emptyTokenPath}}).Token(); err == nil {
-		t.Fatal("expected empty file token error")
-	}
-	if _, err := (Config{GitHub: GitHubConfig{TokenFile: filepath.Join(t.TempDir(), "missing")}}).Token(); err == nil {
-		t.Fatal("expected unreadable file token error")
-	}
+	return privateKeyPath
 }
 
-func TestValidateRepositoryURLRejectsParseFailure(t *testing.T) {
-	if err := validateRepositoryURL("http://[::1/meza/repo"); err == nil {
-		t.Fatal("expected repository URL parse error")
-	}
+func validConfig(privateKeyPath string) string {
+	return `
+github:
+  app:
+    app_id: 12345
+    private_key_file: ` + privateKeyPath + `
+log:
+  format: json
+prune: true
+scale_sets:
+` + validScaleSet("docker-set")
 }
 
-func baseConfig(scaleSets string) string {
-	return "github:\n  token_env: GITHUB_SCALER_TOKEN\nscale_sets:\n" + scaleSets
+func baseConfig(privateKeyPath string, scaleSets string) string {
+	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nscale_sets:\n" + scaleSets
 }
 
-func validScaleSet(name string, repositoryBlock string) string {
+func validScaleSet(name string) string {
 	return "  - name: " + name + "\n" +
-		repositoryBlock +
 		"    max_runners: 1\n" +
 		"    docker:\n" +
 		"      compose_file: compose.yaml\n" +

@@ -71,9 +71,9 @@ endif
 
 smoke: build
 ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$env:GITHUB_SCALER_PAT='smoke-token'; go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; $$exitCode=$$LASTEXITCODE; $$message=Get-Content -Raw smoke.err; Remove-Item smoke.err -ErrorAction SilentlyContinue; if ($$exitCode -eq 0) { Write-Host 'expected smoke command to fail for placeholder config'; exit 1 }; if ($$message -notmatch 'at least one scale set is required') { Write-Host $$message; exit 1 }"
+	@powershell -NoProfile -Command "go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; $$exitCode=$$LASTEXITCODE; $$message=Get-Content -Raw smoke.err; Remove-Item smoke.err -ErrorAction SilentlyContinue; if ($$exitCode -eq 0) { Write-Host 'expected smoke command to fail for placeholder config'; exit 1 }; if ($$message -notmatch 'github.app.app_id must be positive') { Write-Host $$message; exit 1 }"
 else
-	@GITHUB_SCALER_PAT=smoke-token go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; \
+	@go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; \
 	exit_code=$$?; \
 	message=$$(cat smoke.err); \
 	rm -f smoke.err; \
@@ -81,7 +81,7 @@ else
 		echo "expected smoke command to fail for placeholder config"; \
 		exit 1; \
 	fi; \
-	if ! printf '%s' "$$message" | grep -q 'at least one scale set is required'; then \
+	if ! printf '%s' "$$message" | grep -q 'github.app.app_id must be positive'; then \
 		printf '%s\n' "$$message"; \
 		exit 1; \
 	fi

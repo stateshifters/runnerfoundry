@@ -236,6 +236,69 @@ func TestReconcilerReportsJITRunnerCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestReconcilerRepositoryWorkerCountsRecoveredRunnersAndStartsOne(t *testing.T) {
+	provider := &recordingProvider{instances: []RunnerInstance{{RunnerName: "set-1", State: RunnerStateRunning}}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name:       "set",
+		MaxRunners: 3,
+		Provider:   provider,
+		JITConfig:  &recordingJITGenerator{},
+	}}
+	runningCount, err := reconciler.Running(context.Background())
+	if err != nil || runningCount != 1 {
+		t.Fatalf("expected one recovered runner, got %d, %v", runningCount, err)
+	}
+	if err := reconciler.StartOne(context.Background()); err != nil {
+		t.Fatalf("expected one runner to start, got %v", err)
+	}
+	if len(provider.created) != 1 {
+		t.Fatalf("expected one new runner, got %#v", provider.created)
+	}
+}
+
+func TestReconcilerDestroysActiveRunnersOnImmediateRemoval(t *testing.T) {
+	provider := &recordingProvider{instances: []RunnerInstance{
+		{RunnerName: "running", State: RunnerStateRunning},
+		{RunnerName: "completed", State: RunnerStateCompleted},
+		{RunnerName: "unknown", State: RunnerStateUnknown},
+	}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}
+	if err := reconciler.DestroyActive(context.Background()); err != nil {
+		t.Fatalf("expected active cleanup, got %v", err)
+	}
+	if len(provider.destroyed) != 2 {
+		t.Fatalf("expected running and completed runners destroyed, got %#v", provider.destroyed)
+	}
+}
+
+func TestReconcilerRepositoryWorkerSurfacesProviderFailuresAndHonorsLocalLimit(t *testing.T) {
+	if _, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: failingProvider{failure: "list"}}}).Running(context.Background()); err == nil {
+		t.Fatal("expected running list failure")
+	}
+	if err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: failingProvider{failure: "list"}}}).StartOne(context.Background()); err == nil {
+		t.Fatal("expected start list failure")
+	}
+	if err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: failingProvider{
+		failure: "destroy", instances: []RunnerInstance{{RunnerName: "done", State: RunnerStateCompleted}},
+	}}}).StartOne(context.Background()); err == nil {
+		t.Fatal("expected completed cleanup failure")
+	}
+	provider := &recordingProvider{instances: []RunnerInstance{{RunnerName: "running", State: RunnerStateRunning}}}
+	if err := (Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", MaxRunners: 1, Provider: provider, JITConfig: &recordingJITGenerator{},
+	}}).StartOne(context.Background()); err != nil || len(provider.created) != 0 {
+		t.Fatalf("expected local limit to prevent start, created=%#v error=%v", provider.created, err)
+	}
+	if err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: failingProvider{failure: "list"}}}).DestroyActive(context.Background()); err == nil {
+		t.Fatal("expected destroy list failure")
+	}
+	if err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: failingProvider{
+		failure: "destroy", instances: []RunnerInstance{{RunnerName: "running", State: RunnerStateRunning}},
+	}}}).DestroyActive(context.Background()); err == nil {
+		t.Fatal("expected active destroy failure")
+	}
+}
+
 type recordingProvider struct {
 	instances []RunnerInstance
 	created   []RunnerStartRequest

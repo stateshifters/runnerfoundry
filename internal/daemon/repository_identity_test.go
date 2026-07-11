@@ -21,13 +21,13 @@ func TestLocalScaleSetNameHandlesNonURLRepositoryTargets(t *testing.T) {
 }
 
 func TestValidateLocalScaleSetNamesRejectsCollisions(t *testing.T) {
-	err := validateLocalScaleSetNames([]config.ScaleSetConfig{{
-		Name: "linux",
-		Repositories: []string{
+	err := validateLocalScaleSetNames(
+		[]string{
 			"https://github.com/meza/repo.a",
 			"https://github.com/meza/repo-a",
 		},
-	}})
+		[]config.ScaleSetConfig{{Name: "linux"}},
+	)
 	if err == nil {
 		t.Fatal("expected local scale set name collision")
 	}

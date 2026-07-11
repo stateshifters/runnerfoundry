@@ -1,5 +1,8 @@
 github:
-  token_env: GITHUB_SCALER_PAT
+  app:
+    app_id: 0
+    private_key_file: /etc/github-scaler/github-app.pem
+  discovery_interval: 5m
 
 log:
   format: text

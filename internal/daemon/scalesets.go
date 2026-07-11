@@ -53,9 +53,10 @@ type scaleSetMessageClient struct {
 }
 
 type scaleSetLifecycle struct {
-	StopPolling func()
-	Drain       func(ctx context.Context) (int, error)
-	Shutdown    func(ctx context.Context) error
+	StopPolling   func()
+	Drain         func(ctx context.Context) (int, error)
+	DestroyActive func(ctx context.Context) error
+	Shutdown      func(ctx context.Context) error
 }
 
 type messageSessionClient interface {
@@ -83,6 +84,25 @@ func (client scaleSetMessageClient) Close(ctx context.Context) error {
 		return fmt.Errorf("close message session: %w", err)
 	}
 	return nil
+}
+
+func (client scaleSetMessageClient) Acquire(ctx context.Context, requestID int64) error {
+	acquirer, ok := client.Client.(interface {
+		AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
+	})
+	if !ok {
+		return errors.New("message session does not support job acquisition")
+	}
+	acquiredIDs, err := acquirer.AcquireJobs(ctx, []int64{requestID})
+	if err != nil {
+		return fmt.Errorf("acquire job: %w", err)
+	}
+	for _, acquiredID := range acquiredIDs {
+		if acquiredID == requestID {
+			return nil
+		}
+	}
+	return fmt.Errorf("job %d was not acquired", requestID)
 }
 
 type scaleSetRuntime struct {
@@ -122,6 +142,98 @@ func runScaleSet(
 		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
 	return startScaleSetLifecycle(ctx, logger, scaleSetConfig, client, runnerScaleSet, messageClient, reconciler, scaleSets.PollRetryDelay), nil
+}
+
+func runCoordinatedScaleSet(
+	ctx context.Context,
+	logger *slog.Logger,
+	client scaleSetClient,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	coordinator *scaler.Coordinator,
+	scaleSets scaleSetRuntime,
+) (scaleSetLifecycle, error) {
+	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, client, scaleSetConfig, scaleSets.RunnerHostname())
+	if err != nil {
+		return scaleSetLifecycle{}, err
+	}
+	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
+	if err != nil {
+		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
+	}
+	return startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
+		Logger: logger, Client: client, RepositoryURL: repositoryURL,
+		ScaleSetConfig: scaleSetConfig, Coordinator: coordinator, RunnerScaleSet: runnerScaleSet,
+		MessageClient: messageClient, Reconciler: reconciler, RetryDelay: scaleSets.PollRetryDelay,
+	}), nil
+}
+
+type coordinatedLifecycleConfig struct {
+	Logger         *slog.Logger
+	Client         scaleSetClient
+	RepositoryURL  string
+	ScaleSetConfig config.ScaleSetConfig
+	Coordinator    *scaler.Coordinator
+	RunnerScaleSet *upstream.RunnerScaleSet
+	MessageClient  scaleSetMessageClient
+	Reconciler     scaler.Reconciler
+	RetryDelay     time.Duration
+}
+
+func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) scaleSetLifecycle {
+	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, coordinatedRepositoryWorker{
+		Reconciler:    lifecycleConfig.Reconciler,
+		MessageClient: lifecycleConfig.MessageClient,
+	})
+	pollerCtx, stopPolling := context.WithCancel(ctx)
+	poller := &scalesetpoller.Poller{
+		Client: lifecycleConfig.MessageClient,
+		Handler: coordinatedScaleSetHandler{
+			Coordinator: lifecycleConfig.Coordinator,
+			Repository:  lifecycleConfig.RepositoryURL,
+		},
+		MaxCapacity: lifecycleConfig.ScaleSetConfig.MaxRunners,
+	}
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		pollUntilShutdown(pollerCtx, lifecycleConfig.Logger, lifecycleConfig.ScaleSetConfig.Name, poller, lifecycleConfig.RetryDelay)
+	}()
+	return scaleSetLifecycle{
+		StopPolling: func() {
+			stopPolling()
+			<-pollerDone
+		},
+		Drain:         lifecycleConfig.Reconciler.Drain,
+		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,
+		Shutdown: func(ctx context.Context) error {
+			return shutdownScaleSet(ctx, lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet)
+		},
+	}
+}
+
+type coordinatedRepositoryWorker struct {
+	Reconciler    scaler.Reconciler
+	MessageClient scaleSetMessageClient
+}
+
+func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, error) {
+	runningCount, err := worker.Reconciler.Running(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("inspect repository runners: %w", err)
+	}
+	return runningCount, nil
+}
+
+func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID int64) error {
+	return worker.MessageClient.Acquire(ctx, requestID)
+}
+
+func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context) error {
+	if err := worker.Reconciler.StartOne(ctx); err != nil {
+		return fmt.Errorf("start repository runner: %w", err)
+	}
+	return nil
 }
 
 func prepareScaleSetSession(
@@ -177,7 +289,8 @@ func startScaleSetLifecycle(
 			stopPolling()
 			<-pollerDone
 		},
-		Drain: reconciler.Drain,
+		Drain:         reconciler.Drain,
+		DestroyActive: reconciler.DestroyActive,
 		Shutdown: func(ctx context.Context) error {
 			return shutdownScaleSet(ctx, messageClient, client, runnerScaleSet)
 		},
@@ -303,6 +416,36 @@ func waitForPollRetry(ctx context.Context, retryDelay time.Duration) bool {
 
 type scaleSetHandler struct {
 	Reconciler scaler.Reconciler
+}
+
+type coordinatedScaleSetHandler struct {
+	Coordinator *scaler.Coordinator
+	Repository  string
+}
+
+func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
+	for _, availableJob := range message.JobAvailableMessages {
+		handler.Coordinator.Observe(scaler.JobDemand{
+			RequestID:  availableJob.RunnerRequestID,
+			Repository: handler.Repository,
+			QueueTime:  availableJob.QueueTime,
+		})
+	}
+	for _, assignedJob := range message.JobAssignedMessages {
+		handler.Coordinator.Observe(scaler.JobDemand{
+			RequestID:  assignedJob.RunnerRequestID,
+			Repository: handler.Repository,
+			QueueTime:  assignedJob.QueueTime,
+			Acquired:   true,
+		})
+	}
+	for _, completedJob := range message.JobCompletedMessages {
+		handler.Coordinator.Remove(handler.Repository, completedJob.RunnerRequestID)
+	}
+	if err := handler.Coordinator.Schedule(ctx); err != nil {
+		return fmt.Errorf("schedule shared runner capacity: %w", err)
+	}
+	return nil
 }
 
 func (handler scaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {

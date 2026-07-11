@@ -25,11 +25,6 @@ contents:
     type: config
     file_info:
       mode: 0640
-  - src: packaging/config/github-scaler.env
-    dst: /etc/github-scaler/github-scaler.env
-    type: config
-    file_info:
-      mode: 0640
   - src: build/metadata/THIRD_PARTY_NOTICES.txt
     dst: /usr/share/doc/github-scaler/THIRD_PARTY_NOTICES.txt
     file_info:

@@ -156,6 +156,75 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 	}
 }
 
+func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	messageClient := newFakeMessageClient(cancel)
+	scaleSets := scaleSetRuntime{
+		RunnerHostname: func() string { return "host" },
+		BuildReconciler: func(
+			context.Context,
+			string,
+			config.ScaleSetConfig,
+			scaleSetClient,
+			int,
+		) (scaler.Reconciler, error) {
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+				Name: "local", MaxRunners: 2, Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{},
+			}}, nil
+		},
+		PollRetryDelay: time.Nanosecond,
+	}
+	client := &fakeScaleSetClient{
+		runnerGroup: &upstream.RunnerGroup{ID: 10}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
+		messageClient: scaleSetMessageClient{Client: messageClient},
+	}
+	lifecycle, err := runCoordinatedScaleSet(
+		ctx, slog.Default(), client, "https://github.com/acme/repo", config.ScaleSetConfig{
+			Name: "linux", RunnerGroup: "default", MaxRunners: 2,
+		}, scaler.NewCoordinator(2), scaleSets,
+	)
+	if err != nil {
+		t.Fatalf("expected coordinated lifecycle, got %v", err)
+	}
+	waitForPoll(t, messageClient)
+	lifecycle.StopPolling()
+	if lifecycle.DestroyActive == nil {
+		t.Fatal("expected immediate cleanup capability")
+	}
+	if err := lifecycle.Shutdown(context.Background()); err != nil {
+		t.Fatalf("expected coordinated shutdown, got %v", err)
+	}
+}
+
+func TestRunCoordinatedScaleSetSurfacesPreparationAndReconcilerFailures(t *testing.T) {
+	coordinator := scaler.NewCoordinator(1)
+	_, err := runCoordinatedScaleSet(
+		context.Background(), slog.Default(), &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")},
+		"repo", config.ScaleSetConfig{Name: "linux", RunnerGroup: "default"}, coordinator, scaleSetRuntime{
+			RunnerHostname: func() string { return "host" },
+		},
+	)
+	if err == nil {
+		t.Fatal("expected preparation failure")
+	}
+	messageClient := &fakeMessageClient{}
+	_, err = runCoordinatedScaleSet(
+		context.Background(), slog.Default(), &fakeScaleSetClient{
+			runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
+			messageClient: scaleSetMessageClient{Client: messageClient},
+		}, "repo", config.ScaleSetConfig{Name: "linux", RunnerGroup: "default"}, coordinator, scaleSetRuntime{
+			RunnerHostname: func() string { return "host" },
+			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+				return scaler.Reconciler{}, errors.New("build failed")
+			},
+		},
+	)
+	if err == nil || !messageClient.closed {
+		t.Fatalf("expected reconciler failure and session cleanup, got %v", err)
+	}
+}
+
 func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -492,6 +561,68 @@ func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {
 	}
 	if len(provider.started) != 2 {
 		t.Fatalf("expected two starts, got %#v", provider.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompleted(t *testing.T) {
+	provider := &fakeScalerProvider{}
+	coordinator := scaler.NewCoordinator(2)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}},
+		MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+	})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	queueTime := time.Now()
+	message := &upstream.RunnerScaleSetMessage{
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: queueTime}}},
+		JobAssignedMessages:  []*upstream.JobAssigned{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 2, QueueTime: queueTime.Add(time.Second)}}},
+		JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 2}}},
+	}
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatalf("expected message scheduling, got %v", err)
+	}
+	if len(provider.started) != 1 {
+		t.Fatalf("expected only non-completed demand to start, got %#v", provider.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenSchedulingFails(t *testing.T) {
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 1, Provider: &fakeScalerProvider{listErr: errors.New("list failed")},
+		}},
+		MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+	})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "schedule shared runner capacity") {
+		t.Fatalf("expected scheduling failure, got %v", err)
+	}
+}
+
+func TestScaleSetMessageClientRequiresConfirmedJobAcquisition(t *testing.T) {
+	if err := (scaleSetMessageClient{Client: &blockingMessageClient{}}).Acquire(context.Background(), 1); err == nil {
+		t.Fatal("expected unsupported acquisition error")
+	}
+	if err := (scaleSetMessageClient{Client: &fakeMessageClient{acquireErr: errors.New("acquire failed")}}).Acquire(context.Background(), 1); err == nil {
+		t.Fatal("expected acquisition request error")
+	}
+	if err := (scaleSetMessageClient{Client: &emptyAcquisitionClient{}}).Acquire(context.Background(), 1); err == nil {
+		t.Fatal("expected unconfirmed acquisition error")
+	}
+}
+
+func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {
+	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "local", MaxRunners: 1, Provider: failingStartProvider{}, JITConfig: fakeJITConfigGenerator{},
+	}}}
+	if err := worker.StartOne(context.Background()); err == nil || !strings.Contains(err.Error(), "start repository runner") {
+		t.Fatalf("expected wrapped runner start failure, got %v", err)
 	}
 }
 
@@ -855,6 +986,8 @@ type fakeMessageClient struct {
 	polled        chan struct{}
 	pollOnce      sync.Once
 	message       *upstream.RunnerScaleSetMessage
+	acquireErr    error
+	acquiredIDs   []int64
 }
 
 type blockingMessageClient struct {
@@ -862,6 +995,14 @@ type blockingMessageClient struct {
 	exited    chan struct{}
 	enterOnce sync.Once
 	exitOnce  sync.Once
+}
+
+type emptyAcquisitionClient struct {
+	fakeMessageClient
+}
+
+func (*emptyAcquisitionClient) AcquireJobs(context.Context, []int64) ([]int64, error) {
+	return []int64{}, nil
 }
 
 func (client *blockingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
@@ -882,6 +1023,14 @@ func (client *blockingMessageClient) DeleteMessage(ctx context.Context, messageI
 
 func (client *blockingMessageClient) Close(ctx context.Context) error {
 	return nil
+}
+
+func (client *fakeMessageClient) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
+	if client.acquireErr != nil {
+		return nil, client.acquireErr
+	}
+	client.acquiredIDs = append(client.acquiredIDs, requestIDs...)
+	return requestIDs, nil
 }
 
 func newFakeMessageClient(onGetMessage func()) *fakeMessageClient {
@@ -925,6 +1074,18 @@ type fakeScalerProvider struct {
 	listErr error
 	started []scaler.RunnerStartRequest
 }
+
+type failingStartProvider struct{}
+
+func (failingStartProvider) List(context.Context, string) ([]scaler.RunnerInstance, error) {
+	return nil, nil
+}
+
+func (failingStartProvider) Start(context.Context, scaler.RunnerStartRequest) error {
+	return errors.New("start failed")
+}
+
+func (failingStartProvider) Destroy(context.Context, scaler.RunnerInstance) error { return nil }
 
 func (provider *fakeScalerProvider) List(ctx context.Context, scaleSetName string) ([]scaler.RunnerInstance, error) {
 	if provider.listErr != nil {

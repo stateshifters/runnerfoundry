@@ -16,7 +16,10 @@ The daemon requires `--config <path>`.
 
 ```yaml
 github:
-  token_env: GITHUB_SCALER_PAT
+  app:
+    app_id: 123456
+    private_key_file: /etc/github-scaler/github-app.pem
+  discovery_interval: 5m
 
 log:
   format: text
@@ -25,9 +28,6 @@ prune: true
 
 scale_sets:
   - name: linux-docker
-    repositories:
-      - https://github.com/OWNER/REPO_A
-      - https://github.com/OWNER/REPO_B
     runner_group: default
     max_runners: 2
     docker:
@@ -35,8 +35,6 @@ scale_sets:
       service: runner
 
   - name: linux-vm
-    repositories:
-      - https://github.com/OWNER/REPO_C
     runner_group: default
     max_runners: 1
     libvirt:
@@ -44,20 +42,17 @@ scale_sets:
       domain_xml_template: ./domain-template.xml
 ```
 
-Github authentication is PAT-only currently. Use exactly one of:
+Create a Github App with repository administration access for self-hosted runners, install it on the accounts the daemon should serve, and grant it either selected-repository or all-repository access. `github-scaler` discovers every installation owned by the App and every repository exposed by each installation. Github installation settings are the repository opt-in boundary.
 
-- `github.token_env`
-- `github.token_file`
+Set `github.app.app_id` to the numeric App ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
 
-Plaintext `github.token` values in YAML are rejected. Do not commit tokens, JIT configs, queue tokens, or generated runtime config containing secrets.
+Each scale-set definition is created in every discovered repository. `max_runners` is one shared limit across all installations and repositories for that definition, not a per-repository limit. Jobs are admitted by Github queue time. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. FIFO ordering is held in memory and resets when the daemon restarts.
 
-Each scale set lists the repositories it serves. A single configured scale set such as `linux-docker` can drive multiple repositories that need the same self-hosted runner pool. Github still gets one runner scale set per repository target; the daemon qualifies local Docker/libvirt ownership internally so provider state does not collide between repositories.
-
-Repository URLs must use HTTPS and the `OWNER/REPO` path shape. `max_runners` must be greater than zero; omit a scale set instead of setting zero capacity.
+`max_runners` must be greater than zero; omit a scale set instead of setting zero capacity.
 
 Github runner scale sets are routed by their scale-set name. Use the configured `scale_sets[].name` value in workflow `runs-on`; do not configure runner matching labels through Docker Compose environment variables such as `LABELS`.
 
-Set `prune: true` only when `github-scaler` owns every runner scale set in the configured repositories and runner groups. When enabled, startup deletes Github runner scale sets in those repository/group targets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
+Set `prune: true` only when `github-scaler` owns every runner scale set in the discovered repositories and runner groups. When enabled, discovery deletes Github runner scale sets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 
 `log.format` accepts `text` or `json`.
 
@@ -74,7 +69,6 @@ The package installs:
 - `/usr/bin/github-scaler`
 - `/lib/systemd/system/github-scaler.service`
 - `/etc/github-scaler/config.yaml`
-- `/etc/github-scaler/github-scaler.env`
 
 Package installation creates the `github-scaler` service user and reloads systemd units. It does not enable or start the daemon because the config and token must be set first.
 
@@ -85,7 +79,7 @@ sudo usermod -aG docker github-scaler
 sudo usermod -aG libvirt github-scaler
 ```
 
-Edit `/etc/github-scaler/config.yaml` and `/etc/github-scaler/github-scaler.env`, then enable the service:
+Edit `/etc/github-scaler/config.yaml`, place the App private key at the configured path, then enable the service:
 
 ```sh
 sudo systemctl enable --now github-scaler
@@ -128,18 +122,12 @@ sudo usermod -aG docker github-scaler
 sudo usermod -aG libvirt github-scaler
 ```
 
-Create the config directory and store secrets outside the YAML:
+Create the config directory and store the App private key outside the YAML:
 
 ```sh
 sudo install -d -m 0750 -o root -g github-scaler /etc/github-scaler
 sudo install -m 0640 -o root -g github-scaler config.yaml /etc/github-scaler/config.yaml
-sudo install -m 0640 -o root -g github-scaler github-scaler.env /etc/github-scaler/github-scaler.env
-```
-
-The environment file should define the token referenced by `github.token_env`:
-
-```sh
-GITHUB_SCALER_PAT=ghp_example
+sudo install -m 0640 -o root -g github-scaler github-app.pem /etc/github-scaler/github-app.pem
 ```
 
 Use absolute paths inside `/etc/github-scaler/config.yaml`, especially for Docker Compose files and libvirt XML templates. The daemon has no required working directory and stores no local state.
@@ -157,7 +145,6 @@ Type=notify-reload
 NotifyAccess=main
 User=github-scaler
 Group=github-scaler
-EnvironmentFile=/etc/github-scaler/github-scaler.env
 ExecStart=/usr/local/bin/github-scaler --config /etc/github-scaler/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -215,18 +202,23 @@ Restart recovery lists libvirt domains, filters to scaler-owned metadata, and tr
 
 ## Scale Behavior
 
-For each scale set, the daemon:
+For each scale-set definition, the daemon:
 
-- creates the Github runner scale set in each configured repository if needed
+- discovers every App installation and accessible repository on the configured interval
+- creates the Github runner scale set in each discovered repository if needed
 - polls Github scale-set messages with `maxCapacity = max_runners`
-- uses `statistics.TotalAssignedJobs` as desired capacity
-- caps desired capacity at `max_runners`
-- generates one JIT config for each missing runner
+- queues observed jobs by Github queue time across all installations
+- enforces `max_runners` across every repository using that definition
+- generates one JIT config when shared capacity is available
 - acknowledges Github messages only after local handling succeeds
 
-The daemon stores no local database. All restart recovery comes from Github statistics plus provider-visible Docker labels/names and libvirt metadata.
+The daemon stores no local database. Runner recovery comes from Github messages plus provider-visible Docker labels/names and libvirt metadata. Queue ordering starts fresh after restart.
 
-On shutdown, the daemon closes each Github scale-set message session and unregisters each configured Github runner scale set before exiting. A stopped daemon should not leave managed runner scale sets registered. `prune: true` remains useful as crash recovery for stale scale sets left by older versions or hard process termination.
+When installation access is removed, the daemon immediately drops queued demand, destroys active local runners, closes the message sessions, and attempts to unregister the affected scale sets. This can interrupt active jobs. On normal shutdown, active jobs are left running while message sessions close and scale sets unregister.
+
+## Migrating from PAT Authentication
+
+PAT configuration is not supported. Replace `github.token_env` or `github.token_file` with `github.app.app_id` and `github.app.private_key_file`, remove every `scale_sets[].repositories` list, and install the App on the repositories the daemon should manage. Capacity changes from per-repository to one shared `max_runners` limit per scale-set definition.
 
 ## Development & Contributing
 

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/meza/github-scaler/internal/config"
 )
 
 const scaleSetEndpoint = "_apis/runtime/runnerscalesets"
@@ -24,7 +26,6 @@ type scaleSetRegistry interface {
 
 type githubScaleSetRegistry struct {
 	repositoryURL string
-	token         string
 	httpClient    *http.Client
 }
 
@@ -47,12 +48,19 @@ var (
 	parseURL       = url.Parse
 )
 
-func newGitHubScaleSetRegistry(repositoryURL string, token string) githubScaleSetRegistry {
+func newGitHubScaleSetRegistry(
+	repositoryURL string,
+	installationID int64,
+	credentials config.GitHubAppCredentials,
+) (githubScaleSetRegistry, error) {
+	transport, err := ghinstallation.New(http.DefaultTransport, credentials.AppID, installationID, []byte(credentials.PrivateKey))
+	if err != nil {
+		return githubScaleSetRegistry{}, fmt.Errorf("create installation transport: %w", err)
+	}
 	return githubScaleSetRegistry{
 		repositoryURL: repositoryURL,
-		token:         token,
-		httpClient:    &http.Client{Timeout: githubScaleSetRegistryTimeout},
-	}
+		httpClient:    &http.Client{Timeout: githubScaleSetRegistryTimeout, Transport: transport},
+	}, nil
 }
 
 func (registry githubScaleSetRegistry) ListRunnerScaleSets(
@@ -81,7 +89,6 @@ func (registry githubScaleSetRegistry) runnerRegistrationToken(ctx context.Conte
 		return "", fmt.Errorf("create runner registration token request: %w", err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Authorization", "Bearer "+registry.token)
 
 	var registrationToken githubRegistrationToken
 	if err := registry.doJSON(request, http.StatusCreated, &registrationToken); err != nil {

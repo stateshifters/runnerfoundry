@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/meza/github-scaler/internal/config"
 )
 
 func TestNewGitHubClientBuildsOfficialClientAndRegistry(t *testing.T) {
-	client, err := newGitHubClient("https://github.com/meza/agent-playground", "secret")
+	client, err := newGitHubClient("https://github.com/meza/agent-playground", 1, testAppCredentials(t))
 	if err != nil {
 		t.Fatalf("expected client success, got %v", err)
 	}
@@ -26,9 +27,16 @@ func TestNewGitHubClientBuildsOfficialClientAndRegistry(t *testing.T) {
 }
 
 func TestNewGitHubClientRejectsInvalidRepositoryURL(t *testing.T) {
-	_, err := newGitHubClient("://github.com/meza/agent-playground", "secret")
+	_, err := newGitHubClient("://github.com/meza/agent-playground", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
 	if err == nil || !strings.Contains(err.Error(), "create scaleset client") {
 		t.Fatalf("expected client creation error, got %v", err)
+	}
+}
+
+func TestNewGitHubClientRejectsInvalidAppPrivateKey(t *testing.T) {
+	_, err := newGitHubClient("https://github.com/meza/agent-playground", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
+	if err == nil || !strings.Contains(err.Error(), "create scaleset registry") {
+		t.Fatalf("expected registry authentication error, got %v", err)
 	}
 }
 

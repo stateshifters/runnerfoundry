@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+const defaultDiscoveryInterval = "5m"
 
 type Config struct {
 	GitHub    GitHubConfig     `yaml:"github"`
@@ -19,9 +21,22 @@ type Config struct {
 }
 
 type GitHubConfig struct {
-	TokenEnv  string `yaml:"token_env"`
-	TokenFile string `yaml:"token_file"`
-	Token     string `yaml:"token"`
+	App               GitHubAppConfig `yaml:"app"`
+	DiscoveryInterval string          `yaml:"discovery_interval"`
+	TokenEnv          string          `yaml:"token_env"`
+	TokenFile         string          `yaml:"token_file"`
+	Token             string          `yaml:"token"`
+}
+
+type GitHubAppConfig struct {
+	AppID          int64  `yaml:"app_id"`
+	PrivateKeyFile string `yaml:"private_key_file"`
+	PrivateKey     string `yaml:"private_key"`
+}
+
+type GitHubAppCredentials struct {
+	AppID      int64
+	PrivateKey string
 }
 
 type LogConfig struct {
@@ -29,12 +44,11 @@ type LogConfig struct {
 }
 
 type ScaleSetConfig struct {
-	Name         string         `yaml:"name"`
-	Repositories []string       `yaml:"repositories"`
-	RunnerGroup  string         `yaml:"runner_group"`
-	MaxRunners   int            `yaml:"max_runners"`
-	Docker       *DockerConfig  `yaml:"docker"`
-	Libvirt      *LibvirtConfig `yaml:"libvirt"`
+	Name        string         `yaml:"name"`
+	RunnerGroup string         `yaml:"runner_group"`
+	MaxRunners  int            `yaml:"max_runners"`
+	Docker      *DockerConfig  `yaml:"docker"`
+	Libvirt     *LibvirtConfig `yaml:"libvirt"`
 }
 
 type DockerConfig struct {
@@ -49,10 +63,9 @@ type LibvirtConfig struct {
 
 // Load decodes and validates one daemon configuration document.
 //
-// The returned Config has validation defaults applied, including the default
-// log format and runner group. Validation reads the environment when
-// github.token_env is configured so startup can fail before the daemon starts
-// polling GitHub.
+// The returned Config has defaults applied for logging, discovery, and runner
+// groups. GitHub App secrets are checked when AppCredentials reads the key so
+// reload can validate a replacement before stopping active scale sets.
 func Load(reader io.Reader) (Config, error) {
 	var loadedConfig Config
 	decoder := yaml.NewDecoder(reader)
@@ -66,23 +79,10 @@ func Load(reader io.Reader) (Config, error) {
 	return loadedConfig, nil
 }
 
-// Validate applies configuration defaults and rejects unsafe startup state.
-//
-// Validation mutates the receiver for defaults. It also checks token source
-// availability, repository target shape, provider exclusivity, and positive
-// runner capacity so later daemon code can treat those invariants as already
-// established.
+// Validate applies defaults and rejects unsafe startup state.
 func (loadedConfig *Config) Validate() error {
-	if loadedConfig.GitHub.Token != "" {
-		return errors.New("github.token is not allowed; use token_env or token_file")
-	}
-	if (loadedConfig.GitHub.TokenEnv == "") == (loadedConfig.GitHub.TokenFile == "") {
-		return errors.New("exactly one of github.token_env or github.token_file is required")
-	}
-	if loadedConfig.GitHub.TokenEnv != "" {
-		if _, ok := os.LookupEnv(loadedConfig.GitHub.TokenEnv); !ok {
-			return fmt.Errorf("github.token_env %q is not set", loadedConfig.GitHub.TokenEnv)
-		}
+	if err := loadedConfig.GitHub.validate(); err != nil {
+		return err
 	}
 	if loadedConfig.Log.Format == "" {
 		loadedConfig.Log.Format = "text"
@@ -93,14 +93,39 @@ func (loadedConfig *Config) Validate() error {
 	return loadedConfig.validateScaleSets()
 }
 
+func (githubConfig *GitHubConfig) validate() error {
+	if githubConfig.TokenEnv != "" || githubConfig.TokenFile != "" || githubConfig.Token != "" {
+		return errors.New("PAT authentication is not supported; configure github.app")
+	}
+	if githubConfig.App.AppID <= 0 {
+		return errors.New("github.app.app_id must be positive")
+	}
+	if githubConfig.App.PrivateKey != "" {
+		return errors.New("github.app.private_key is not allowed; use private_key_file")
+	}
+	if githubConfig.App.PrivateKeyFile == "" {
+		return errors.New("github.app.private_key_file is required")
+	}
+	if githubConfig.DiscoveryInterval == "" {
+		githubConfig.DiscoveryInterval = defaultDiscoveryInterval
+	}
+	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
+	if err != nil {
+		return fmt.Errorf("github.discovery_interval: %w", err)
+	}
+	if discoveryInterval < time.Minute {
+		return errors.New("github.discovery_interval must be at least 1m")
+	}
+	return nil
+}
+
 func (loadedConfig *Config) validateScaleSets() error {
 	if len(loadedConfig.ScaleSets) == 0 {
 		return errors.New("at least one scale set is required")
 	}
 	seenNames := map[string]bool{}
 	for scaleSetIndex := range loadedConfig.ScaleSets {
-		scaleSet := &loadedConfig.ScaleSets[scaleSetIndex]
-		if err := scaleSet.validate(seenNames); err != nil {
+		if err := loadedConfig.ScaleSets[scaleSetIndex].validate(seenNames); err != nil {
 			return err
 		}
 	}
@@ -108,12 +133,13 @@ func (loadedConfig *Config) validateScaleSets() error {
 }
 
 func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
-	if err := scaleSet.validateName(seenNames); err != nil {
-		return err
+	if scaleSet.Name == "" {
+		return errors.New("scale_sets[].name is required")
 	}
-	if err := scaleSet.validateRepositories(); err != nil {
-		return err
+	if seenNames[scaleSet.Name] {
+		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
 	}
+	seenNames[scaleSet.Name] = true
 	if scaleSet.RunnerGroup == "" {
 		scaleSet.RunnerGroup = "default"
 	}
@@ -122,50 +148,6 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	}
 	if err := scaleSet.validateProvider(); err != nil {
 		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
-	}
-	return nil
-}
-
-func (scaleSet *ScaleSetConfig) validateName(seenNames map[string]bool) error {
-	if scaleSet.Name == "" {
-		return errors.New("scale_sets[].name is required")
-	}
-	if seenNames[scaleSet.Name] {
-		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
-	}
-	seenNames[scaleSet.Name] = true
-	return nil
-}
-
-func (scaleSet *ScaleSetConfig) validateRepositories() error {
-	if len(scaleSet.Repositories) == 0 {
-		return fmt.Errorf("scale set %q repositories must not be empty", scaleSet.Name)
-	}
-	for repositoryIndex, repositoryURL := range scaleSet.Repositories {
-		if strings.TrimSpace(repositoryURL) == "" {
-			return fmt.Errorf("scale set %q repositories[%d] must not be empty", scaleSet.Name, repositoryIndex)
-		}
-		if err := validateRepositoryURL(repositoryURL); err != nil {
-			return fmt.Errorf("scale set %q repositories[%d]: %w", scaleSet.Name, repositoryIndex, err)
-		}
-	}
-	return nil
-}
-
-func validateRepositoryURL(repositoryURL string) error {
-	parsedURL, err := url.Parse(strings.TrimRight(repositoryURL, "/"))
-	if err != nil {
-		return fmt.Errorf("parse repository url: %w", err)
-	}
-	if parsedURL.Scheme != "https" {
-		return errors.New("repository url must use https")
-	}
-	if parsedURL.Host == "" {
-		return errors.New("repository url must include a host")
-	}
-	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	if len(pathParts) != 2 || pathParts[0] == "" || pathParts[1] == "" {
-		return errors.New("repository url path must be OWNER/REPO")
 	}
 	return nil
 }
@@ -192,26 +174,24 @@ func (scaleSet *ScaleSetConfig) validateProvider() error {
 	return nil
 }
 
-// Token reads the configured GitHub token source.
-//
-// Tokens may come from an environment variable or a file selected during
-// validation. Empty values are rejected here so reload can validate a
-// replacement configuration before stopping the active scale sets.
-func (loadedConfig Config) Token() (string, error) {
-	if loadedConfig.GitHub.TokenEnv != "" {
-		token := os.Getenv(loadedConfig.GitHub.TokenEnv)
-		if token == "" {
-			return "", fmt.Errorf("github.token_env %q is empty", loadedConfig.GitHub.TokenEnv)
-		}
-		return token, nil
-	}
-	tokenBytes, err := os.ReadFile(loadedConfig.GitHub.TokenFile)
+// AppCredentials reads the configured private key file.
+func (githubConfig GitHubConfig) AppCredentials() (GitHubAppCredentials, error) {
+	privateKeyBytes, err := os.ReadFile(githubConfig.App.PrivateKeyFile)
 	if err != nil {
-		return "", fmt.Errorf("read github.token_file: %w", err)
+		return GitHubAppCredentials{}, fmt.Errorf("read github.app.private_key_file: %w", err)
 	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return "", errors.New("github.token_file is empty")
+	privateKey := strings.TrimSpace(string(privateKeyBytes))
+	if privateKey == "" {
+		return GitHubAppCredentials{}, errors.New("github.app.private_key_file is empty")
 	}
-	return token, nil
+	return GitHubAppCredentials{AppID: githubConfig.App.AppID, PrivateKey: privateKey}, nil
+}
+
+// DiscoveryDuration returns the validated repository discovery interval.
+func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
+	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
+	if err != nil {
+		return 0, fmt.Errorf("parse validated discovery interval: %w", err)
+	}
+	return discoveryInterval, nil
 }

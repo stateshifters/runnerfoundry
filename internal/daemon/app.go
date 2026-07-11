@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/scaler"
 )
 
 type Options struct {
@@ -17,17 +21,25 @@ type Options struct {
 	ReloadRequests <-chan struct{}
 }
 
-func Run(ctx context.Context, options Options) error {
-	return runDaemon(ctx, options, productionRuntime())
+type repositoryDiscoverer interface {
+	Discover(ctx context.Context) (githubapp.DiscoveryResult, error)
 }
 
 type runtime struct {
 	LoadConfig      func(configPath string) (config.Config, error)
-	NewGitHubClient func(repositoryURL string, token string) (scaleSetClient, error)
+	NewDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
+	NewGitHubClient func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
 	NewLogger       func(format string) *slog.Logger
 	Notifier        serviceNotifier
-	StartScaleSet   func(ctx context.Context, logger *slog.Logger, client scaleSetClient, repositoryURL string, scaleSetConfig config.ScaleSetConfig) (scaleSetLifecycle, error)
-	DrainInterval   time.Duration
+	StartScaleSet   func(
+		ctx context.Context,
+		logger *slog.Logger,
+		client scaleSetClient,
+		repositoryURL string,
+		scaleSetConfig config.ScaleSetConfig,
+		coordinator *scaler.Coordinator,
+	) (scaleSetLifecycle, error)
+	DrainInterval time.Duration
 }
 
 type serviceNotifier interface {
@@ -37,29 +49,49 @@ type serviceNotifier interface {
 
 type noopNotifier struct{}
 
-func (notifier noopNotifier) Ready(ctx context.Context) error {
-	return nil
-}
+func (noopNotifier) Ready(context.Context) error     { return nil }
+func (noopNotifier) Reloading(context.Context) error { return nil }
 
-func (notifier noopNotifier) Reloading(ctx context.Context) error {
-	return nil
+type managedRepository struct {
+	InstallationID int64
+	Lifecycles     map[string]scaleSetLifecycle
 }
 
 type activeConfiguration struct {
-	LogFormat  string
-	ScaleSets  []scaleSetLifecycle
-	CancelWork context.CancelFunc
+	Config       config.Config
+	Credentials  config.GitHubAppCredentials
+	Discoverer   repositoryDiscoverer
+	Coordinators map[string]*scaler.Coordinator
+	Repositories map[string]managedRepository
+	Logger       *slog.Logger
+	CancelWork   context.CancelFunc
+}
+
+func Run(ctx context.Context, options Options) error {
+	return runDaemon(ctx, options, productionRuntime())
 }
 
 func productionRuntime() runtime {
 	return runtime{
 		LoadConfig: loadConfig,
-		NewGitHubClient: func(repositoryURL string, token string) (scaleSetClient, error) {
-			return newGitHubClient(repositoryURL, token)
+		NewDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+			return githubapp.NewDiscoverer(credentials)
 		},
-		NewLogger:     newLogger,
-		Notifier:      systemdNotifier{},
-		StartScaleSet: startScaleSet,
+		NewGitHubClient: func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
+			return newGitHubClient(repositoryURL, installationID, credentials)
+		},
+		NewLogger: newLogger,
+		Notifier:  systemdNotifier{},
+		StartScaleSet: func(
+			ctx context.Context,
+			logger *slog.Logger,
+			client scaleSetClient,
+			repositoryURL string,
+			scaleSetConfig config.ScaleSetConfig,
+			coordinator *scaler.Coordinator,
+		) (scaleSetLifecycle, error) {
+			return runCoordinatedScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig, coordinator, productionScaleSetRuntime())
+		},
 		DrainInterval: time.Second,
 	}
 }
@@ -70,23 +102,61 @@ func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) erro
 	if err != nil {
 		return err
 	}
-	if err := daemonRuntime.Notifier.Ready(ctx); err != nil {
-		return fmt.Errorf("notify ready: %w", err)
+	if notifyErr := daemonRuntime.Notifier.Ready(ctx); notifyErr != nil {
+		return fmt.Errorf("notify ready: %w", notifyErr)
 	}
+	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
+	if err != nil {
+		return fmt.Errorf("load discovery interval: %w", err)
+	}
+	return runActiveConfiguration(ctx, options, daemonRuntime, activeConfig, discoveryInterval)
+}
+
+func runActiveConfiguration(
+	ctx context.Context,
+	options Options,
+	daemonRuntime runtime,
+	activeConfig activeConfiguration,
+	discoveryInterval time.Duration,
+) error {
+	discoveryTimer := time.NewTimer(discoveryInterval)
+	defer discoveryTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancelShutdown()
-			return shutdownConfiguredScaleSets(shutdownCtx, activeConfig)
+			return shutdownWithTimeout(ctx, activeConfig, drainShutdown)
+		case <-discoveryTimer.C:
+			reconcileDiscovery(ctx, daemonRuntime, &activeConfig)
+			discoveryTimer.Reset(discoveryInterval)
 		case <-options.ReloadRequests:
-			reloadedConfig, err := reloadConfiguration(ctx, options.ConfigPath, daemonRuntime, activeConfig)
-			if err != nil {
-				return err
+			reloadedConfig, reloadedInterval, reloadErr := reloadAndReadInterval(
+				ctx, options.ConfigPath, daemonRuntime, activeConfig,
+			)
+			if reloadErr != nil {
+				return reloadErr
 			}
 			activeConfig = reloadedConfig
+			discoveryInterval = reloadedInterval
+			discoveryTimer.Reset(discoveryInterval)
 		}
 	}
+}
+
+func reloadAndReadInterval(
+	ctx context.Context,
+	configPath string,
+	daemonRuntime runtime,
+	activeConfig activeConfiguration,
+) (activeConfiguration, time.Duration, error) {
+	reloadedConfig, err := reloadConfiguration(ctx, configPath, daemonRuntime, activeConfig)
+	if err != nil {
+		return activeConfiguration{}, 0, err
+	}
+	discoveryInterval, err := reloadedConfig.Config.GitHub.DiscoveryDuration()
+	if err != nil {
+		return activeConfiguration{}, 0, fmt.Errorf("load reloaded discovery interval: %w", err)
+	}
+	return reloadedConfig, discoveryInterval, nil
 }
 
 func withRuntimeDefaults(daemonRuntime runtime) runtime {
@@ -104,102 +174,203 @@ func loadAndStartConfiguration(ctx context.Context, configPath string, daemonRun
 	if err != nil {
 		return activeConfiguration{}, err
 	}
-	token, err := loadedConfig.Token()
+	credentials, err := loadedConfig.GitHub.AppCredentials()
 	if err != nil {
-		return activeConfiguration{}, fmt.Errorf("load github token: %w", err)
+		return activeConfiguration{}, fmt.Errorf("load GitHub App credentials: %w", err)
 	}
-	return startConfiguredScaleSets(ctx, daemonRuntime, loadedConfig, token)
-}
-
-func startConfiguredScaleSets(ctx context.Context, daemonRuntime runtime, loadedConfig config.Config, token string) (activeConfiguration, error) {
-	logger := daemonRuntime.NewLogger(loadedConfig.Log.Format)
-	if err := validateLocalScaleSetNames(loadedConfig.ScaleSets); err != nil {
-		return activeConfiguration{}, err
+	discoverer, err := daemonRuntime.NewDiscoverer(credentials)
+	if err != nil {
+		return activeConfiguration{}, fmt.Errorf("create repository discoverer: %w", err)
 	}
-	if loadedConfig.Prune {
-		if err := pruneConfiguredScaleSets(ctx, daemonRuntime, logger, loadedConfig.ScaleSets, token); err != nil {
-			return activeConfiguration{}, err
-		}
+	discovery, err := discoverer.Discover(ctx)
+	if err != nil {
+		return activeConfiguration{}, fmt.Errorf("discover repositories: %w", err)
 	}
 	workCtx, cancelWork := context.WithCancel(ctx)
 	activeConfig := activeConfiguration{
-		LogFormat:  loadedConfig.Log.Format,
-		CancelWork: cancelWork,
+		Config:       loadedConfig,
+		Credentials:  credentials,
+		Discoverer:   discoverer,
+		Coordinators: coordinators(loadedConfig.ScaleSets),
+		Repositories: map[string]managedRepository{},
+		Logger:       daemonRuntime.NewLogger(loadedConfig.Log.Format),
+		CancelWork:   cancelWork,
 	}
-	for _, scaleSetConfig := range loadedConfig.ScaleSets {
-		repositoryScaleSets, err := startScaleSetRepositories(workCtx, daemonRuntime, logger, scaleSetConfig, token)
-		if err != nil {
-			shutdownErr := shutdownConfiguredScaleSets(context.WithoutCancel(ctx), activeConfig)
-			if shutdownErr != nil {
-				return activeConfiguration{}, errors.Join(err, fmt.Errorf("shutdown started scale sets: %w", shutdownErr))
-			}
-			return activeConfiguration{}, err
-		}
-		activeConfig.ScaleSets = append(activeConfig.ScaleSets, repositoryScaleSets...)
+	if err := applyDiscovery(workCtx, daemonRuntime, &activeConfig, discovery); err != nil {
+		cancelWork()
+		return activeConfiguration{}, err
 	}
 	return activeConfig, nil
 }
 
-func startScaleSetRepositories(
+func coordinators(scaleSets []config.ScaleSetConfig) map[string]*scaler.Coordinator {
+	result := make(map[string]*scaler.Coordinator, len(scaleSets))
+	for _, scaleSetConfig := range scaleSets {
+		result[scaleSetConfig.Name] = scaler.NewCoordinator(scaleSetConfig.MaxRunners)
+	}
+	return result
+}
+
+func reconcileDiscovery(ctx context.Context, daemonRuntime runtime, activeConfig *activeConfiguration) {
+	discovery, err := activeConfig.Discoverer.Discover(ctx)
+	if err != nil {
+		activeConfig.Logger.Error("repository discovery failed", slog.String("error", err.Error()))
+		return
+	}
+	if err := applyDiscovery(ctx, daemonRuntime, activeConfig, discovery); err != nil {
+		activeConfig.Logger.Error("repository reconciliation failed", slog.String("error", err.Error()))
+	}
+}
+
+func applyDiscovery(
 	ctx context.Context,
 	daemonRuntime runtime,
-	logger *slog.Logger,
-	scaleSetConfig config.ScaleSetConfig,
-	token string,
-) ([]scaleSetLifecycle, error) {
-	var repositoryScaleSets []scaleSetLifecycle
-	for _, repositoryURL := range scaleSetConfig.Repositories {
-		logger.Info(
-			"starting scale set",
-			slog.String("repository", repositoryURL),
-			slog.String("runnerGroup", scaleSetConfig.RunnerGroup),
-			slog.String("scaleSet", scaleSetConfig.Name),
-			slog.Int("maxRunners", scaleSetConfig.MaxRunners),
-		)
-		client, err := daemonRuntime.NewGitHubClient(repositoryURL, token)
-		if err != nil {
-			return nil, fmt.Errorf("create github client for %q: %w", repositoryURL, err)
-		}
-		scaleSet, err := daemonRuntime.StartScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig)
-		if err != nil {
-			return nil, repositoryStartupFailure(ctx, scaleSetConfig.Name, repositoryURL, err, repositoryScaleSets)
-		}
-		repositoryScaleSets = append(repositoryScaleSets, scaleSet)
-		logger.Info(
-			"started scale set",
-			slog.String("repository", repositoryURL),
-			slog.String("scaleSet", scaleSetConfig.Name),
-		)
-	}
-	return repositoryScaleSets, nil
-}
-
-func repositoryStartupFailure(
-	ctx context.Context,
-	scaleSetName string,
-	repositoryURL string,
-	startErr error,
-	repositoryScaleSets []scaleSetLifecycle,
+	activeConfig *activeConfiguration,
+	discovery githubapp.DiscoveryResult,
 ) error {
-	wrappedStartErr := fmt.Errorf("run scale set %q for repository %q: %w", scaleSetName, repositoryURL, startErr)
-	shutdownErr := shutdownConfiguredScaleSets(context.WithoutCancel(ctx), activeConfiguration{
-		ScaleSets: repositoryScaleSets,
-	})
-	if shutdownErr != nil {
-		return errors.Join(wrappedStartErr, fmt.Errorf("shutdown started repository scale sets: %w", shutdownErr))
+	desired := desiredRepositories(activeConfig, discovery)
+	if err := validateDiscoveredNames(desired, activeConfig.Config.ScaleSets); err != nil {
+		return err
 	}
-	return wrappedStartErr
+	if err := removeUndiscoveredRepositories(ctx, activeConfig, desired); err != nil {
+		return err
+	}
+	return startDiscoveredRepositories(ctx, daemonRuntime, activeConfig, desired)
 }
 
-func shutdownConfiguredScaleSets(ctx context.Context, activeConfig activeConfiguration) error {
-	cancelActiveConfigurationWork(activeConfig)
-	for shutdownIndex := len(activeConfig.ScaleSets) - 1; shutdownIndex >= 0; shutdownIndex-- {
-		slog.Debug("stopping scale set polling", slog.Int("shutdownIndex", shutdownIndex))
-		activeConfig.ScaleSets[shutdownIndex].StopPolling()
-		if err := activeConfig.ScaleSets[shutdownIndex].Shutdown(ctx); err != nil {
-			return fmt.Errorf("shutdown scale set: %w", err)
+func desiredRepositories(
+	activeConfig *activeConfiguration,
+	discovery githubapp.DiscoveryResult,
+) map[string]githubapp.Repository {
+	desired := map[string]githubapp.Repository{}
+	for _, repository := range discovery.Repositories {
+		desired[repository.URL] = repository
+	}
+	for repositoryURL, repository := range activeConfig.Repositories {
+		if discovery.InstallationFailures[repository.InstallationID] != nil {
+			desired[repositoryURL] = githubapp.Repository{InstallationID: repository.InstallationID, URL: repositoryURL}
 		}
 	}
+	return desired
+}
+
+func validateDiscoveredNames(desired map[string]githubapp.Repository, scaleSets []config.ScaleSetConfig) error {
+	repositoryURLs := make([]string, 0, len(desired))
+	for repositoryURL := range desired {
+		repositoryURLs = append(repositoryURLs, repositoryURL)
+	}
+	return validateLocalScaleSetNames(repositoryURLs, scaleSets)
+}
+
+func removeUndiscoveredRepositories(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	desired map[string]githubapp.Repository,
+) error {
+	for repositoryURL, repository := range activeConfig.Repositories {
+		if _, exists := desired[repositoryURL]; !exists {
+			if err := removeRepositoryImmediately(ctx, activeConfig, repositoryURL, repository); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func startDiscoveredRepositories(
+	ctx context.Context,
+	daemonRuntime runtime,
+	activeConfig *activeConfiguration,
+	desired map[string]githubapp.Repository,
+) error {
+	for repositoryURL, repository := range desired {
+		if _, exists := activeConfig.Repositories[repositoryURL]; exists {
+			continue
+		}
+		managed, err := startRepository(ctx, daemonRuntime, activeConfig, repository)
+		if err != nil {
+			return err
+		}
+		activeConfig.Repositories[repositoryURL] = managed
+	}
+	return nil
+}
+
+func startRepository(
+	ctx context.Context,
+	daemonRuntime runtime,
+	activeConfig *activeConfiguration,
+	repository githubapp.Repository,
+) (managedRepository, error) {
+	client, err := daemonRuntime.NewGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
+	if err != nil {
+		return managedRepository{}, fmt.Errorf("create GitHub client for %q: %w", repository.URL, err)
+	}
+	if err := pruneRepositoryWhenEnabled(ctx, activeConfig, client, repository.URL); err != nil {
+		return managedRepository{}, err
+	}
+	managed := managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
+	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+		lifecycle, startErr := daemonRuntime.StartScaleSet(ctx, activeConfig.Logger, client, repository.URL, scaleSetConfig, activeConfig.Coordinators[scaleSetConfig.Name])
+		if startErr != nil {
+			rollbackErr := rollbackRepositoryStartup(ctx, activeConfig, repository.URL, managed)
+			return managedRepository{}, errors.Join(
+				fmt.Errorf("start scale set %q for %q: %w", scaleSetConfig.Name, repository.URL, startErr),
+				rollbackErr,
+			)
+		}
+		managed.Lifecycles[scaleSetConfig.Name] = lifecycle
+	}
+	return managed, nil
+}
+
+func pruneRepositoryWhenEnabled(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	client scaleSetClient,
+	repositoryURL string,
+) error {
+	if !activeConfig.Config.Prune {
+		return nil
+	}
+	return pruneRepository(ctx, activeConfig.Logger, client, repositoryURL, activeConfig.Config.ScaleSets)
+}
+
+func rollbackRepositoryStartup(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	repositoryURL string,
+	repository managedRepository,
+) error {
+	var rollbackErr error
+	for scaleSetName, lifecycle := range repository.Lifecycles {
+		activeConfig.Coordinators[scaleSetName].RemoveRepository(repositoryURL)
+		lifecycle.StopPolling()
+		rollbackErr = errors.Join(rollbackErr, lifecycle.DestroyActive(context.WithoutCancel(ctx)))
+		rollbackErr = errors.Join(rollbackErr, lifecycle.Shutdown(context.WithoutCancel(ctx)))
+	}
+	if rollbackErr != nil {
+		return fmt.Errorf("rollback repository %q startup: %w", repositoryURL, rollbackErr)
+	}
+	return nil
+}
+
+func removeRepositoryImmediately(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	repositoryURL string,
+	repository managedRepository,
+) error {
+	for scaleSetName, lifecycle := range repository.Lifecycles {
+		activeConfig.Coordinators[scaleSetName].RemoveRepository(repositoryURL)
+		lifecycle.StopPolling()
+		cleanupErr := lifecycle.DestroyActive(context.WithoutCancel(ctx))
+		shutdownErr := lifecycle.Shutdown(context.WithoutCancel(ctx))
+		if err := errors.Join(cleanupErr, shutdownErr); err != nil {
+			return fmt.Errorf("remove repository %q scale set %q: %w", repositoryURL, scaleSetName, err)
+		}
+	}
+	delete(activeConfig.Repositories, repositoryURL)
 	return nil
 }
 
@@ -209,74 +380,26 @@ func reloadConfiguration(
 	daemonRuntime runtime,
 	activeConfig activeConfiguration,
 ) (activeConfiguration, error) {
-	logger := daemonRuntime.NewLogger(activeConfig.LogFormat)
-	logger.Info("reload requested")
-	reloadedConfig, token, err := loadReplacementConfiguration(configPath, daemonRuntime)
-	if err != nil {
-		logger.Error("reload rejected", slog.String("error", err.Error()))
-		return activeConfig, nil
+	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
+		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
-	if notifyErr := daemonRuntime.Notifier.Reloading(ctx); notifyErr != nil {
-		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", notifyErr)
+	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval); err != nil {
+		return activeConfiguration{}, err
 	}
-	stopPolling(activeConfig)
-	reloadedActiveConfig, err := loadAndStartConfigurationAfterDrain(ctx, daemonRuntime, activeConfig, logger, reloadedConfig, token)
+	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
+		return activeConfiguration{}, err
+	}
+	reloaded, err := loadAndStartConfiguration(ctx, configPath, daemonRuntime)
 	if err != nil {
 		return activeConfiguration{}, err
 	}
 	if err := daemonRuntime.Notifier.Ready(ctx); err != nil {
 		return activeConfiguration{}, fmt.Errorf("notify ready after reload: %w", err)
 	}
-	logger.Info("reload applied")
-	return reloadedActiveConfig, nil
+	return reloaded, nil
 }
 
-func loadReplacementConfiguration(configPath string, daemonRuntime runtime) (config.Config, string, error) {
-	reloadedConfig, err := daemonRuntime.LoadConfig(configPath)
-	if err != nil {
-		return config.Config{}, "", fmt.Errorf("load reload config: %w", err)
-	}
-	token, err := reloadedConfig.Token()
-	if err != nil {
-		return config.Config{}, "", fmt.Errorf("load reload github token: %w", err)
-	}
-	return reloadedConfig, token, nil
-}
-
-func loadAndStartConfigurationAfterDrain(
-	ctx context.Context,
-	daemonRuntime runtime,
-	activeConfig activeConfiguration,
-	logger *slog.Logger,
-	reloadedConfig config.Config,
-	token string,
-) (activeConfiguration, error) {
-	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval, logger); err != nil {
-		return activeConfiguration{}, err
-	}
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancelShutdown()
-	if err := shutdownConfiguredScaleSets(shutdownCtx, activeConfig); err != nil {
-		return activeConfiguration{}, err
-	}
-	return startConfiguredScaleSets(ctx, daemonRuntime, reloadedConfig, token)
-}
-
-func stopPolling(activeConfig activeConfiguration) {
-	cancelActiveConfigurationWork(activeConfig)
-	for _, scaleSet := range activeConfig.ScaleSets {
-		scaleSet.StopPolling()
-	}
-}
-
-func cancelActiveConfigurationWork(activeConfig activeConfiguration) {
-	if activeConfig.CancelWork != nil {
-		activeConfig.CancelWork()
-	}
-}
-
-func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, drainInterval time.Duration, logger *slog.Logger) error {
-	logger.Info("reload draining active runners")
+func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, interval time.Duration) error {
 	for {
 		runningCount, err := drainOnce(ctx, activeConfig)
 		if err != nil {
@@ -285,8 +408,7 @@ func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, d
 		if runningCount == 0 {
 			return nil
 		}
-		logger.Info("reload waiting for active runners", slog.Int("activeRunners", runningCount))
-		timer := time.NewTimer(drainInterval)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -298,26 +420,99 @@ func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, d
 
 func drainOnce(ctx context.Context, activeConfig activeConfiguration) (int, error) {
 	runningCount := 0
-	for _, scaleSet := range activeConfig.ScaleSets {
-		scaleSetRunningCount, err := scaleSet.Drain(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("drain scale set: %w", err)
+	for _, repository := range activeConfig.Repositories {
+		for _, lifecycle := range repository.Lifecycles {
+			count, err := lifecycle.Drain(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("drain scale set: %w", err)
+			}
+			runningCount += count
 		}
-		runningCount += scaleSetRunningCount
 	}
 	return runningCount, nil
 }
 
+type shutdownMode int
+
+const (
+	drainShutdown shutdownMode = iota
+	immediateShutdown
+)
+
+func shutdownWithTimeout(ctx context.Context, activeConfig activeConfiguration, mode shutdownMode) error {
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelShutdown()
+	activeConfig.CancelWork()
+	var shutdownErr error
+	for repositoryURL, repository := range activeConfig.Repositories {
+		for scaleSetName, lifecycle := range repository.Lifecycles {
+			lifecycle.StopPolling()
+			if mode == immediateShutdown {
+				shutdownErr = errors.Join(shutdownErr, lifecycle.DestroyActive(shutdownCtx))
+			}
+			if err := lifecycle.Shutdown(shutdownCtx); err != nil {
+				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown %q %q: %w", repositoryURL, scaleSetName, err))
+			}
+		}
+	}
+	return shutdownErr
+}
+
+func pruneRepository(
+	ctx context.Context,
+	logger *slog.Logger,
+	client scaleSetClient,
+	repositoryURL string,
+	scaleSets []config.ScaleSetConfig,
+) error {
+	pruneClient, ok := client.(scaleSetPruneClient)
+	if !ok {
+		return fmt.Errorf("GitHub client for %q does not support pruning", repositoryURL)
+	}
+	byGroup := map[string]map[string]bool{}
+	for _, scaleSetConfig := range scaleSets {
+		if byGroup[scaleSetConfig.RunnerGroup] == nil {
+			byGroup[scaleSetConfig.RunnerGroup] = map[string]bool{}
+		}
+		byGroup[scaleSetConfig.RunnerGroup][scaleSetConfig.Name] = true
+	}
+	for runnerGroup, names := range byGroup {
+		if err := pruneScaleSetTarget(ctx, logger, pruneClient, pruneTarget{RepositoryURL: repositoryURL, RunnerGroup: runnerGroup}, names); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func loadConfig(configPath string) (config.Config, error) {
-	configBytes, err := os.ReadFile(configPath) //nolint:gosec // configPath is the daemon's required operator-provided config file.
+	configBytes, err := readConfigFile(configPath)
 	if err != nil {
-		return config.Config{}, fmt.Errorf("read config: %w", err)
+		return config.Config{}, err
 	}
 	loadedConfig, err := config.Load(bytes.NewReader(configBytes))
 	if err != nil {
 		return config.Config{}, fmt.Errorf("load config: %w", err)
 	}
 	return loadedConfig, nil
+}
+
+func readConfigFile(configPath string) ([]byte, error) {
+	configRoot, err := os.OpenRoot(filepath.Dir(configPath))
+	if err != nil {
+		return nil, fmt.Errorf("open config directory: %w", err)
+	}
+	configFile, err := configRoot.Open(filepath.Base(configPath))
+	if err != nil {
+		rootCloseErr := configRoot.Close()
+		return nil, errors.Join(fmt.Errorf("open config: %w", err), rootCloseErr)
+	}
+	configBytes, err := io.ReadAll(configFile)
+	fileCloseErr := configFile.Close()
+	rootCloseErr := configRoot.Close()
+	if combinedErr := errors.Join(err, fileCloseErr, rootCloseErr); combinedErr != nil {
+		return nil, fmt.Errorf("read config: %w", combinedErr)
+	}
+	return configBytes, nil
 }
 
 func newLogger(format string) *slog.Logger {
@@ -342,47 +537,6 @@ type pruneTarget struct {
 	RunnerGroup   string
 }
 
-func pruneConfiguredScaleSets(
-	ctx context.Context,
-	daemonRuntime runtime,
-	logger *slog.Logger,
-	scaleSetConfigs []config.ScaleSetConfig,
-	token string,
-) error {
-	desiredNamesByTarget := desiredScaleSetNamesByTarget(scaleSetConfigs)
-	for target, desiredNames := range desiredNamesByTarget {
-		client, err := daemonRuntime.NewGitHubClient(target.RepositoryURL, token)
-		if err != nil {
-			return fmt.Errorf("create github client for prune %q: %w", target.RepositoryURL, err)
-		}
-		pruneClient, ok := client.(scaleSetPruneClient)
-		if !ok {
-			return fmt.Errorf("github client for %q does not support pruning", target.RepositoryURL)
-		}
-		if err := pruneScaleSetTarget(ctx, logger, pruneClient, target, desiredNames); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func desiredScaleSetNamesByTarget(scaleSetConfigs []config.ScaleSetConfig) map[pruneTarget]map[string]bool {
-	desiredNamesByTarget := map[pruneTarget]map[string]bool{}
-	for _, scaleSetConfig := range scaleSetConfigs {
-		for _, repositoryURL := range scaleSetConfig.Repositories {
-			target := pruneTarget{
-				RepositoryURL: repositoryURL,
-				RunnerGroup:   scaleSetConfig.RunnerGroup,
-			}
-			if desiredNamesByTarget[target] == nil {
-				desiredNamesByTarget[target] = map[string]bool{}
-			}
-			desiredNamesByTarget[target][scaleSetConfig.Name] = true
-		}
-	}
-	return desiredNamesByTarget
-}
-
 func pruneScaleSetTarget(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -402,12 +556,7 @@ func pruneScaleSetTarget(
 		if desiredNames[runnerScaleSet.Name] {
 			continue
 		}
-		logger.Info(
-			"pruning unmanaged runner scale set",
-			slog.String("repository", target.RepositoryURL),
-			slog.String("runnerGroup", target.RunnerGroup),
-			slog.String("scaleSet", runnerScaleSet.Name),
-		)
+		logger.Info("pruning unmanaged runner scale set", slog.String("repository", target.RepositoryURL), slog.String("scaleSet", runnerScaleSet.Name))
 		if err := client.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); err != nil {
 			return fmt.Errorf("delete runner scale set %q: %w", runnerScaleSet.Name, err)
 		}
