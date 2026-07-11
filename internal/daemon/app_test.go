@@ -753,7 +753,8 @@ func (nonPruningScaleSetClient) GetRunnerByName(context.Context, string) (*upstr
 func (nonPruningScaleSetClient) RemoveRunner(context.Context, int64) error { return nil }
 
 func (discoverer *sequenceDiscoverer) Discover(context.Context) (githubapp.DiscoveryResult, error) {
-	result := discoverer.results[discoverer.calls]
+	resultIndex := min(discoverer.calls, len(discoverer.results)-1)
+	result := discoverer.results[resultIndex]
 	discoverer.calls++
 	discoverer.afterDiscover(discoverer.calls)
 	return result, nil
