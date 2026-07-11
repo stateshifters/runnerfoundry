@@ -17,6 +17,9 @@ func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
 	if loadedConfig.GitHub.App.AppID != 12345 {
 		t.Fatalf("expected app ID, got %d", loadedConfig.GitHub.App.AppID)
 	}
+	if loadedConfig.GitHub.App.ClientID != "Iv1.example" {
+		t.Fatalf("expected client ID, got %q", loadedConfig.GitHub.App.ClientID)
+	}
 	if loadedConfig.GitHub.DiscoveryInterval != "5m" {
 		t.Fatalf("expected default discovery interval, got %q", loadedConfig.GitHub.DiscoveryInterval)
 	}
@@ -27,7 +30,7 @@ func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected app credentials, got %v", err)
 	}
-	if credentials.AppID != 12345 || credentials.PrivateKey != "private-key" {
+	if credentials.AppID != 12345 || credentials.ClientID != "Iv1.example" || credentials.PrivateKey != "private-key" {
 		t.Fatalf("unexpected credentials %#v", credentials)
 	}
 	discoveryDuration, err := loadedConfig.GitHub.DiscoveryDuration()
@@ -49,6 +52,8 @@ func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 		"plaintext private key":      strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath, "    private_key: secret", 1),
 		"missing app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345\n", "", 1),
 		"invalid app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345", "    app_id: -1", 1),
+		"missing client ID":          strings.Replace(validConfig(privateKeyPath), "    client_id: Iv1.example\n", "", 1),
+		"empty client ID":            strings.Replace(validConfig(privateKeyPath), "    client_id: Iv1.example", "    client_id: '   '", 1),
 		"missing private key file":   strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath+"\n", "", 1),
 		"invalid discovery interval": strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: soon\n", 1),
 		"short discovery interval":   strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: 59s\n", 1),
@@ -127,6 +132,7 @@ func validConfig(privateKeyPath string) string {
 github:
   app:
     app_id: 12345
+    client_id: Iv1.example
     private_key_file: ` + privateKeyPath + `
 log:
   format: json
@@ -136,7 +142,7 @@ scale_sets:
 }
 
 func baseConfig(privateKeyPath string, scaleSets string) string {
-	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nscale_sets:\n" + scaleSets
+	return "github:\n  app:\n    app_id: 12345\n    client_id: Iv1.example\n    private_key_file: " + privateKeyPath + "\nscale_sets:\n" + scaleSets
 }
 
 func validScaleSet(name string) string {

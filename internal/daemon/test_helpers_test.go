@@ -19,7 +19,7 @@ func testAppCredentials(t *testing.T) config.GitHubAppCredentials {
 		t.Fatal(err)
 	}
 	privateKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
-	return config.GitHubAppCredentials{AppID: 1, PrivateKey: string(privateKeyPEM)}
+	return config.GitHubAppCredentials{AppID: 1, ClientID: "Iv1.example", PrivateKey: string(privateKeyPEM)}
 }
 
 func writeFile(t *testing.T, path string, contents string) string {

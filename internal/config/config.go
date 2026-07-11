@@ -30,12 +30,14 @@ type GitHubConfig struct {
 
 type GitHubAppConfig struct {
 	AppID          int64  `yaml:"app_id"`
+	ClientID       string `yaml:"client_id"`
 	PrivateKeyFile string `yaml:"private_key_file"`
 	PrivateKey     string `yaml:"private_key"`
 }
 
 type GitHubAppCredentials struct {
 	AppID      int64
+	ClientID   string
 	PrivateKey string
 }
 
@@ -99,6 +101,9 @@ func (githubConfig *GitHubConfig) validate() error {
 	}
 	if githubConfig.App.AppID <= 0 {
 		return errors.New("github.app.app_id must be positive")
+	}
+	if strings.TrimSpace(githubConfig.App.ClientID) == "" {
+		return errors.New("github.app.client_id is required")
 	}
 	if githubConfig.App.PrivateKey != "" {
 		return errors.New("github.app.private_key is not allowed; use private_key_file")
@@ -184,7 +189,7 @@ func (githubConfig GitHubConfig) AppCredentials() (GitHubAppCredentials, error) 
 	if privateKey == "" {
 		return GitHubAppCredentials{}, errors.New("github.app.private_key_file is empty")
 	}
-	return GitHubAppCredentials{AppID: githubConfig.App.AppID, PrivateKey: privateKey}, nil
+	return GitHubAppCredentials{AppID: githubConfig.App.AppID, ClientID: githubConfig.App.ClientID, PrivateKey: privateKey}, nil
 }
 
 // DiscoveryDuration returns the validated repository discovery interval.
