@@ -18,7 +18,6 @@ The daemon requires `--config <path>`.
 github:
   app:
     app_id: 123456
-    client_id: Iv1.example
     private_key_file: /etc/github-scaler/github-app.pem
   discovery_interval: 5m
 
@@ -45,7 +44,7 @@ scale_sets:
 
 Create a Github App with repository administration access for self-hosted runners, install it on the accounts the daemon should serve, and grant it either selected-repository or all-repository access. `github-scaler` discovers every installation owned by the App and every repository exposed by each installation. Github installation settings are the repository opt-in boundary.
 
-Set `github.app.app_id` to the numeric App ID and `github.app.client_id` to the App's client ID, which starts with `Iv`. Both values are required because installation discovery uses the App ID while the scale-set client authenticates with the client ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
+Set `github.app.app_id` to the numeric App ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
 
 Each scale-set definition is created in every discovered repository. `max_runners` is one shared limit across all installations and repositories for that definition, not a per-repository limit. Jobs are admitted by Github queue time. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. FIFO ordering is held in memory and resets when the daemon restarts.
 
@@ -221,7 +220,7 @@ When installation access is removed, the daemon immediately drops queued demand,
 
 ## Migrating from PAT Authentication
 
-PAT configuration is not supported. Replace `github.token_env` or `github.token_file` with `github.app.app_id`, `github.app.client_id`, and `github.app.private_key_file`, remove every `scale_sets[].repositories` list, and install the App on the repositories the daemon should manage. Capacity changes from per-repository to one shared `max_runners` limit per scale-set definition.
+PAT configuration is not supported. Replace `github.token_env` or `github.token_file` with `github.app.app_id` and `github.app.private_key_file`, remove every `scale_sets[].repositories` list, and install the App on the repositories the daemon should manage. Capacity changes from per-repository to one shared `max_runners` limit per scale-set definition.
 
 ## Development & Contributing
 

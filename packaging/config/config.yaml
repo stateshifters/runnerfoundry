@@ -1,7 +1,6 @@
 github:
   app:
     app_id: 0
-    client_id: Iv1.example
     private_key_file: /etc/github-scaler/github-app.pem
   discovery_interval: 5m
 

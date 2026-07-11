@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/config"
@@ -12,7 +13,7 @@ func newGitHubClient(repositoryURL string, installationID int64, credentials con
 	client, err := upstream.NewClientWithGitHubApp(upstream.ClientWithGitHubAppConfig{
 		GitHubConfigURL: repositoryURL,
 		GitHubAppAuth: upstream.GitHubAppAuth{
-			ClientID:       credentials.ClientID,
+			ClientID:       strconv.FormatInt(credentials.AppID, 10),
 			InstallationID: installationID,
 			PrivateKey:     credentials.PrivateKey,
 		},

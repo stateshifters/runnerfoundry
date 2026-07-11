@@ -267,7 +267,7 @@ func TestDrainConfigurationWaitsForActiveRunnerAndSurfacesFailures(t *testing.T)
 func TestLoadConfigReadsValidatedFileAndLoggerFormats(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	configText := "github:\n  app:\n    app_id: 1\n    client_id: Iv1.example\n    private_key_file: " + loadedConfig.GitHub.App.PrivateKeyFile + "\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"
+	configText := "github:\n  app:\n    app_id: 1\n    private_key_file: " + loadedConfig.GitHub.App.PrivateKeyFile + "\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +742,7 @@ func runnableConfig(t *testing.T) config.Config {
 	}
 	return config.Config{
 		GitHub: config.GitHubConfig{
-			App:               config.GitHubAppConfig{AppID: 1, ClientID: "Iv1.example", PrivateKeyFile: privateKeyPath},
+			App:               config.GitHubAppConfig{AppID: 1, PrivateKeyFile: privateKeyPath},
 			DiscoveryInterval: "5m",
 		},
 		Log: config.LogConfig{Format: "text"},
