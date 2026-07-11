@@ -184,6 +184,9 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, coordinatedRepositoryWorker{
 		Reconciler:    lifecycleConfig.Reconciler,
 		MessageClient: lifecycleConfig.MessageClient,
+		Logger:        lifecycleConfig.Logger,
+		Repository:    lifecycleConfig.RepositoryURL,
+		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	})
 	pollerCtx, stopPolling := context.WithCancel(ctx)
 	poller := &scalesetpoller.Poller{
@@ -191,6 +194,8 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		Handler: coordinatedScaleSetHandler{
 			Coordinator: lifecycleConfig.Coordinator,
 			Repository:  lifecycleConfig.RepositoryURL,
+			Logger:      lifecycleConfig.Logger,
+			ScaleSet:    lifecycleConfig.ScaleSetConfig.Name,
 		},
 		MaxCapacity: lifecycleConfig.ScaleSetConfig.MaxRunners,
 	}
@@ -215,6 +220,9 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 type coordinatedRepositoryWorker struct {
 	Reconciler    scaler.Reconciler
 	MessageClient scaleSetMessageClient
+	Logger        *slog.Logger
+	Repository    string
+	ScaleSet      string
 }
 
 func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, error) {
@@ -226,13 +234,18 @@ func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, err
 }
 
 func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID int64) error {
-	return worker.MessageClient.Acquire(ctx, requestID)
+	if err := worker.MessageClient.Acquire(ctx, requestID); err != nil {
+		return err
+	}
+	effectiveLogger(worker.Logger).Info("job acquired", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)
+	return nil
 }
 
-func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context) error {
+func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context, requestID int64) error {
 	if err := worker.Reconciler.StartOne(ctx); err != nil {
 		return fmt.Errorf("start repository runner: %w", err)
 	}
+	effectiveLogger(worker.Logger).Info("runner started", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)
 	return nil
 }
 
@@ -421,10 +434,13 @@ type scaleSetHandler struct {
 type coordinatedScaleSetHandler struct {
 	Coordinator *scaler.Coordinator
 	Repository  string
+	Logger      *slog.Logger
+	ScaleSet    string
 }
 
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
 	for _, availableJob := range message.JobAvailableMessages {
+		handler.logDemand("available", availableJob.RunnerRequestID, availableJob.QueueTime)
 		handler.Coordinator.Observe(scaler.JobDemand{
 			RequestID:  availableJob.RunnerRequestID,
 			Repository: handler.Repository,
@@ -432,6 +448,7 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 		})
 	}
 	for _, assignedJob := range message.JobAssignedMessages {
+		handler.logDemand("assigned", assignedJob.RunnerRequestID, assignedJob.QueueTime)
 		handler.Coordinator.Observe(scaler.JobDemand{
 			RequestID:  assignedJob.RunnerRequestID,
 			Repository: handler.Repository,
@@ -441,11 +458,30 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	}
 	for _, completedJob := range message.JobCompletedMessages {
 		handler.Coordinator.Remove(handler.Repository, completedJob.RunnerRequestID)
+		effectiveLogger(handler.Logger).Info("job demand removed", append(jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID), slog.String("status", "completed"))...)
 	}
 	if err := handler.Coordinator.Schedule(ctx); err != nil {
 		return fmt.Errorf("schedule shared runner capacity: %w", err)
 	}
 	return nil
+}
+
+func (handler coordinatedScaleSetHandler) logDemand(status string, requestID int64, queueTime time.Time) {
+	effectiveLogger(handler.Logger).Info("job demand observed", append(
+		jobLogAttributes(handler.Repository, handler.ScaleSet, requestID),
+		slog.String("status", status), slog.Time("queueTime", queueTime),
+	)...)
+}
+
+func jobLogAttributes(repository string, scaleSet string, requestID int64) []any {
+	return []any{slog.String("repository", repository), slog.String("scaleSet", scaleSet), slog.Int64("requestID", requestID)}
+}
+
+func effectiveLogger(logger *slog.Logger) *slog.Logger {
+	if logger == nil {
+		return slog.Default()
+	}
+	return logger
 }
 
 func (handler scaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {

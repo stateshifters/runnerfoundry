@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/meza/github-scaler/internal/config"
@@ -39,7 +40,8 @@ type runtime struct {
 		scaleSetConfig config.ScaleSetConfig,
 		coordinator *scaler.Coordinator,
 	) (scaleSetLifecycle, error)
-	DrainInterval time.Duration
+	DrainInterval            time.Duration
+	ReconciliationRetryDelay time.Duration
 }
 
 type serviceNotifier interface {
@@ -58,12 +60,13 @@ type managedRepository struct {
 }
 
 type activeConfiguration struct {
-	Config       config.Config
-	Credentials  config.GitHubAppCredentials
-	Discoverer   repositoryDiscoverer
-	Coordinators map[string]*scaler.Coordinator
-	Repositories map[string]managedRepository
-	Logger       *slog.Logger
+	Config                config.Config
+	Credentials           config.GitHubAppCredentials
+	Discoverer            repositoryDiscoverer
+	Coordinators          map[string]*scaler.Coordinator
+	Repositories          map[string]managedRepository
+	Logger                *slog.Logger
+	ReconciliationPending bool
 }
 
 func Run(ctx context.Context, options Options) error {
@@ -91,7 +94,8 @@ func productionRuntime() runtime {
 		) (scaleSetLifecycle, error) {
 			return runCoordinatedScaleSet(ctx, logger, client, repositoryURL, scaleSetConfig, coordinator, productionScaleSetRuntime())
 		},
-		DrainInterval: time.Second,
+		DrainInterval:            time.Second,
+		ReconciliationRetryDelay: pollRetryDelay,
 	}
 }
 
@@ -119,15 +123,18 @@ func runActiveConfiguration(
 	activeConfig activeConfiguration,
 	discoveryInterval time.Duration,
 ) error {
-	discoveryTimer := time.NewTimer(discoveryInterval)
+	discoveryTimer := time.NewTimer(nextReconciliationDelay(activeConfig, discoveryInterval, daemonRuntime.ReconciliationRetryDelay))
 	defer discoveryTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return shutdownWithTimeout(ctx, activeConfig, drainShutdown)
+			if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
+				activeConfig.Logger.Warn("shutdown cleanup incomplete", slog.String("error", err.Error()))
+			}
+			return nil
 		case <-discoveryTimer.C:
 			reconcileDiscovery(ctx, daemonRuntime, &activeConfig)
-			discoveryTimer.Reset(discoveryInterval)
+			discoveryTimer.Reset(nextReconciliationDelay(activeConfig, discoveryInterval, daemonRuntime.ReconciliationRetryDelay))
 		case <-options.ReloadRequests:
 			reloadedConfig, reloadedInterval, reloadErr := reloadAndReadInterval(
 				ctx, options.ConfigPath, daemonRuntime, activeConfig,
@@ -137,7 +144,7 @@ func runActiveConfiguration(
 			}
 			activeConfig = reloadedConfig
 			discoveryInterval = reloadedInterval
-			discoveryTimer.Reset(discoveryInterval)
+			discoveryTimer.Reset(nextReconciliationDelay(activeConfig, discoveryInterval, daemonRuntime.ReconciliationRetryDelay))
 		}
 	}
 }
@@ -166,6 +173,9 @@ func withRuntimeDefaults(daemonRuntime runtime) runtime {
 	}
 	if daemonRuntime.DrainInterval == 0 {
 		daemonRuntime.DrainInterval = time.Second
+	}
+	if daemonRuntime.ReconciliationRetryDelay == 0 {
+		daemonRuntime.ReconciliationRetryDelay = pollRetryDelay
 	}
 	return daemonRuntime
 }
@@ -205,12 +215,23 @@ func coordinators(scaleSets []config.ScaleSetConfig) map[string]*scaler.Coordina
 func reconcileDiscovery(ctx context.Context, daemonRuntime runtime, activeConfig *activeConfiguration) {
 	discovery, err := activeConfig.Discoverer.Discover(ctx)
 	if err != nil {
+		activeConfig.ReconciliationPending = true
 		activeConfig.Logger.Error("repository discovery failed", slog.String("error", err.Error()))
 		return
 	}
 	if err := applyDiscovery(ctx, daemonRuntime, activeConfig, discovery); err != nil {
+		activeConfig.ReconciliationPending = true
 		activeConfig.Logger.Error("repository reconciliation failed", slog.String("error", err.Error()))
+		return
 	}
+	activeConfig.ReconciliationPending = false
+}
+
+func nextReconciliationDelay(activeConfig activeConfiguration, discoveryInterval time.Duration, retryDelay time.Duration) time.Duration {
+	if activeConfig.ReconciliationPending {
+		return retryDelay
+	}
+	return discoveryInterval
 }
 
 func applyDiscovery(
@@ -431,22 +452,64 @@ const (
 	immediateShutdown
 )
 
+type lifecycleCleanup struct {
+	repositoryURL string
+	scaleSetName  string
+	lifecycle     scaleSetLifecycle
+}
+
 func shutdownWithTimeout(ctx context.Context, activeConfig activeConfiguration, mode shutdownMode) error {
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancelShutdown()
-	var shutdownErr error
+	targets := lifecycleCleanupTargets(activeConfig)
+	return cleanupLifecycles(ctx, targets, mode)
+}
+
+func lifecycleCleanupTargets(activeConfig activeConfiguration) []lifecycleCleanup {
+	targets := make([]lifecycleCleanup, 0)
 	for repositoryURL, repository := range activeConfig.Repositories {
 		for scaleSetName, lifecycle := range repository.Lifecycles {
 			lifecycle.StopPolling()
-			if mode == immediateShutdown {
-				shutdownErr = errors.Join(shutdownErr, lifecycle.DestroyActive(shutdownCtx))
-			}
-			if err := lifecycle.Shutdown(shutdownCtx); err != nil {
-				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown %q %q: %w", repositoryURL, scaleSetName, err))
-			}
+			targets = append(targets, lifecycleCleanup{repositoryURL: repositoryURL, scaleSetName: scaleSetName, lifecycle: lifecycle})
 		}
 	}
+	return targets
+}
+
+func cleanupLifecycles(ctx context.Context, targets []lifecycleCleanup, mode shutdownMode) error {
+	results := make(chan error, len(targets))
+	concurrency := make(chan struct{}, 8)
+	var cleanups sync.WaitGroup
+	for _, target := range targets {
+		cleanups.Add(1)
+		go func(target lifecycleCleanup) {
+			defer cleanups.Done()
+			concurrency <- struct{}{}
+			defer func() { <-concurrency }()
+			if err := cleanupLifecycle(ctx, target, mode); err != nil {
+				results <- err
+			}
+		}(target)
+	}
+	cleanups.Wait()
+	close(results)
+	var shutdownErr error
+	for err := range results {
+		shutdownErr = errors.Join(shutdownErr, err)
+	}
 	return shutdownErr
+}
+
+func cleanupLifecycle(ctx context.Context, target lifecycleCleanup, mode shutdownMode) error {
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelShutdown()
+	var err error
+	if mode == immediateShutdown {
+		err = errors.Join(err, target.lifecycle.DestroyActive(shutdownCtx))
+	}
+	err = errors.Join(err, target.lifecycle.Shutdown(shutdownCtx))
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("shutdown %q %q: %w", target.repositoryURL, target.scaleSetName, err)
 }
 
 func stopPolling(activeConfig activeConfiguration) {

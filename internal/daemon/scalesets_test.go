@@ -588,6 +588,36 @@ func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompl
 	}
 }
 
+func TestCoordinatedScaleSetLogsJobServingLifecycle(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	provider := &fakeScalerProvider{}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Logger: logger, Repository: "repo", ScaleSet: "linux",
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}},
+		MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+	})
+	handler := coordinatedScaleSetHandler{Logger: logger, ScaleSet: "linux", Coordinator: coordinator, Repository: "repo"}
+	queueTime := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42, QueueTime: queueTime}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output := logs.String()
+	for _, expected := range []string{
+		"job demand observed", "status=available", "requestID=42", "repository=repo", "scaleSet=linux",
+		"job acquired", "runner started",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected log %q in %q", expected, output)
+		}
+	}
+}
+
 func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenSchedulingFails(t *testing.T) {
 	coordinator := scaler.NewCoordinator(1)
 	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
@@ -621,8 +651,12 @@ func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {
 	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 		Name: "local", MaxRunners: 1, Provider: failingStartProvider{}, JITConfig: fakeJITConfigGenerator{},
 	}}}
-	if err := worker.StartOne(context.Background()); err == nil || !strings.Contains(err.Error(), "start repository runner") {
+	if err := worker.StartOne(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "start repository runner") {
 		t.Fatalf("expected wrapped runner start failure, got %v", err)
+	}
+	worker.MessageClient = scaleSetMessageClient{Client: &fakeMessageClient{acquireErr: errors.New("acquire failed")}}
+	if err := worker.Acquire(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "acquire failed") {
+		t.Fatalf("expected acquisition failure, got %v", err)
 	}
 }
 

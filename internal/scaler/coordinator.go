@@ -18,7 +18,7 @@ type JobDemand struct {
 type RepositoryWorker interface {
 	Running(ctx context.Context) (int, error)
 	Acquire(ctx context.Context, requestID int64) error
-	StartOne(ctx context.Context) error
+	StartOne(ctx context.Context, requestID int64) error
 }
 
 type demandKey struct {
@@ -117,7 +117,7 @@ func (coordinator *Coordinator) admitDemand(ctx context.Context, demand queuedDe
 			return false, fmt.Errorf("acquire job %d for repository %q: %w", demand.RequestID, demand.Repository, err)
 		}
 	}
-	if err := worker.StartOne(ctx); err != nil {
+	if err := worker.StartOne(ctx, demand.RequestID); err != nil {
 		return false, fmt.Errorf("start runner for repository %q: %w", demand.Repository, err)
 	}
 	delete(coordinator.demand, demandKey{Repository: demand.Repository, RequestID: demand.RequestID})

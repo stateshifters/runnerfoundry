@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +307,9 @@ func TestReconcileDiscoveryRetainsStateOnDiscoveryFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	activeConfig.Discoverer = staticDiscoverer{err: errors.New("unavailable")}
 	reconcileDiscovery(context.Background(), runtime{}, &activeConfig)
+	if !activeConfig.ReconciliationPending {
+		t.Fatal("expected failed discovery to request a short reconciliation retry")
+	}
 	activeConfig.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/repo"}},
 		InstallationFailures: map[int64]error{},
@@ -312,6 +317,14 @@ func TestReconcileDiscoveryRetainsStateOnDiscoveryFailure(t *testing.T) {
 	reconcileDiscovery(context.Background(), runtime{NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("start failed")
 	}}, &activeConfig)
+	if !activeConfig.ReconciliationPending {
+		t.Fatal("expected failed repository startup to request a short reconciliation retry")
+	}
+	activeConfig.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}
+	reconcileDiscovery(context.Background(), runtime{}, &activeConfig)
+	if activeConfig.ReconciliationPending {
+		t.Fatal("expected successful reconciliation to restore the discovery interval")
+	}
 }
 
 func TestRunUsesProductionRuntimeAndRejectsMissingConfig(t *testing.T) {
@@ -559,6 +572,56 @@ func TestLifecycleFailurePathsRemainExplicit(t *testing.T) {
 	}
 	if err := shutdownWithTimeout(context.Background(), activeConfig, immediateShutdown); err == nil {
 		t.Fatal("expected forced shutdown failure")
+	}
+}
+
+func TestShutdownCleansLifecyclesConcurrentlyWithIndependentContexts(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	activeConfig := testActiveConfiguration()
+	for _, repositoryURL := range []string{"repo-a", "repo-b"} {
+		activeConfig.Repositories[repositoryURL] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+			StopPolling: func() {},
+			Shutdown: func(ctx context.Context) error {
+				started <- struct{}{}
+				select {
+				case <-release:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		}}}
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- shutdownWithTimeout(context.Background(), activeConfig, drainShutdown) }()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("expected lifecycle cleanup to run concurrently")
+		}
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatalf("expected concurrent cleanup success, got %v", err)
+	}
+}
+
+func TestTerminationReportsCleanupFailuresAsWarnings(t *testing.T) {
+	logs := &bytes.Buffer{}
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling: func() {},
+		Shutdown:    func(context.Context) error { return errors.New("close failed") },
+	})
+	activeConfig.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runActiveConfiguration(ctx, Options{}, runtime{}, activeConfig, time.Hour); err != nil {
+		t.Fatalf("expected termination cleanup failure not to fail the process, got %v", err)
+	}
+	if !strings.Contains(logs.String(), "shutdown cleanup incomplete") || !strings.Contains(logs.String(), "close failed") {
+		t.Fatalf("expected actionable shutdown warning, got %q", logs.String())
 	}
 }
 

@@ -152,15 +152,15 @@ type failingWorker struct {
 	startErr   error
 }
 
-func (worker failingWorker) Running(context.Context) (int, error) { return 0, worker.runningErr }
-func (worker failingWorker) Acquire(context.Context, int64) error { return worker.acquireErr }
-func (worker failingWorker) StartOne(context.Context) error       { return worker.startErr }
+func (worker failingWorker) Running(context.Context) (int, error)  { return 0, worker.runningErr }
+func (worker failingWorker) Acquire(context.Context, int64) error  { return worker.acquireErr }
+func (worker failingWorker) StartOne(context.Context, int64) error { return worker.startErr }
 
 func (worker *recordingWorker) Running(context.Context) (int, error) {
 	return worker.running, nil
 }
 
-func (worker *recordingWorker) StartOne(context.Context) error {
+func (worker *recordingWorker) StartOne(context.Context, int64) error {
 	*worker.startOrder = append(*worker.startOrder, worker.repository)
 	worker.running++
 	return nil
