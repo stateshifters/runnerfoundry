@@ -221,7 +221,6 @@ func reconcileDiscovery(ctx context.Context, daemonRuntime runtime, activeConfig
 	}
 	if err := applyDiscovery(ctx, daemonRuntime, activeConfig, discovery); err != nil {
 		activeConfig.ReconciliationPending = true
-		activeConfig.Logger.Error("repository reconciliation failed", slog.String("error", err.Error()))
 		return
 	}
 	activeConfig.ReconciliationPending = false
@@ -242,6 +241,9 @@ func applyDiscovery(
 ) error {
 	desired := desiredRepositories(activeConfig, discovery)
 	if err := validateDiscoveredNames(desired, activeConfig.Config.ScaleSets); err != nil {
+		for repositoryURL, repository := range desired {
+			logRepositoryReconciliationFailure(activeConfig.Logger, repositoryURL, repository.InstallationID, err)
+		}
 		return err
 	}
 	if err := removeUndiscoveredRepositories(ctx, activeConfig, desired); err != nil {
@@ -282,6 +284,7 @@ func removeUndiscoveredRepositories(
 	for repositoryURL, repository := range activeConfig.Repositories {
 		if _, exists := desired[repositoryURL]; !exists {
 			if err := removeRepositoryImmediately(ctx, activeConfig, repositoryURL, repository); err != nil {
+				logRepositoryReconciliationFailure(activeConfig.Logger, repositoryURL, repository.InstallationID, err)
 				return err
 			}
 		}
@@ -295,17 +298,37 @@ func startDiscoveredRepositories(
 	activeConfig *activeConfiguration,
 	desired map[string]githubapp.Repository,
 ) error {
+	var startupErr error
 	for repositoryURL, repository := range desired {
 		if _, exists := activeConfig.Repositories[repositoryURL]; exists {
 			continue
 		}
 		managed, err := startRepository(ctx, daemonRuntime, activeConfig, repository)
 		if err != nil {
-			return err
+			activeConfig.Logger.Error(
+				"repository startup failed",
+				slog.String("repository", repositoryURL),
+				slog.Int64("installationID", repository.InstallationID),
+				slog.String("error", err.Error()),
+			)
+			startupErr = errors.Join(startupErr, fmt.Errorf("start repository %q: %w", repositoryURL, err))
+			continue
 		}
 		activeConfig.Repositories[repositoryURL] = managed
 	}
-	return nil
+	if startupErr == nil {
+		return nil
+	}
+	return startupErr
+}
+
+func logRepositoryReconciliationFailure(logger *slog.Logger, repositoryURL string, installationID int64, err error) {
+	logger.Error(
+		"repository reconciliation failed",
+		slog.String("repository", repositoryURL),
+		slog.Int64("installationID", installationID),
+		slog.String("error", err.Error()),
+	)
 }
 
 func startRepository(

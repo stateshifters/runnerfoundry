@@ -141,7 +141,11 @@ func runScaleSet(
 	if err != nil {
 		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
-	return startScaleSetLifecycle(ctx, logger, scaleSetConfig, client, runnerScaleSet, messageClient, reconciler, scaleSets.PollRetryDelay), nil
+	return startScaleSetLifecycle(ctx, scaleSetLifecycleConfig{
+		Logger: logger, RepositoryURL: repositoryURL, ScaleSetConfig: scaleSetConfig,
+		Client: client, RunnerScaleSet: runnerScaleSet, MessageClient: messageClient,
+		Reconciler: reconciler, RetryDelay: scaleSets.PollRetryDelay,
+	}), nil
 }
 
 func runCoordinatedScaleSet(
@@ -202,7 +206,7 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 	pollerDone := make(chan struct{})
 	go func() {
 		defer close(pollerDone)
-		pollUntilShutdown(pollerCtx, lifecycleConfig.Logger, lifecycleConfig.ScaleSetConfig.Name, poller, lifecycleConfig.RetryDelay)
+		pollUntilShutdown(pollerCtx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, poller, lifecycleConfig.RetryDelay)
 	}()
 	return scaleSetLifecycle{
 		StopPolling: func() {
@@ -285,27 +289,32 @@ func closeMessageSessionAfterReconcilerFailure(
 	return fmt.Errorf("build reconciler for %q: %w", scaleSetName, reconcilerErr)
 }
 
-func startScaleSetLifecycle(
-	ctx context.Context,
-	logger *slog.Logger,
-	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetManager,
-	runnerScaleSet *upstream.RunnerScaleSet,
-	messageClient scaleSetMessageClient,
-	reconciler scaler.Reconciler,
-	retryDelay time.Duration,
-) scaleSetLifecycle {
+type scaleSetLifecycleConfig struct {
+	Logger         *slog.Logger
+	RepositoryURL  string
+	ScaleSetConfig config.ScaleSetConfig
+	Client         scaleSetManager
+	RunnerScaleSet *upstream.RunnerScaleSet
+	MessageClient  scaleSetMessageClient
+	Reconciler     scaler.Reconciler
+	RetryDelay     time.Duration
+}
+
+func startScaleSetLifecycle(ctx context.Context, lifecycleConfig scaleSetLifecycleConfig) scaleSetLifecycle {
 	pollerCtx, stopPolling := context.WithCancel(ctx)
-	pollerDone := startPoller(pollerCtx, logger, scaleSetConfig, messageClient, reconciler, retryDelay)
+	pollerDone := startPoller(
+		pollerCtx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig,
+		lifecycleConfig.MessageClient, lifecycleConfig.Reconciler, lifecycleConfig.RetryDelay,
+	)
 	return scaleSetLifecycle{
 		StopPolling: func() {
 			stopPolling()
 			<-pollerDone
 		},
-		Drain:         reconciler.Drain,
-		DestroyActive: reconciler.DestroyActive,
+		Drain:         lifecycleConfig.Reconciler.Drain,
+		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,
 		Shutdown: func(ctx context.Context) error {
-			return shutdownScaleSet(ctx, messageClient, client, runnerScaleSet)
+			return shutdownScaleSet(ctx, lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet)
 		},
 	}
 }
@@ -362,6 +371,7 @@ func runnerHostname() string {
 func startPoller(
 	ctx context.Context,
 	logger *slog.Logger,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	messageClient scalesetpoller.MessageClient,
 	reconciler scaler.Reconciler,
@@ -375,7 +385,7 @@ func startPoller(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollUntilShutdown(ctx, logger, scaleSetConfig.Name, &poller, retryDelay)
+		pollUntilShutdown(ctx, logger, repositoryURL, scaleSetConfig.Name, &poller, retryDelay)
 	}()
 	return done
 }
@@ -383,6 +393,7 @@ func startPoller(
 func pollUntilShutdown(
 	ctx context.Context,
 	logger *slog.Logger,
+	repositoryURL string,
 	scaleSetName string,
 	poller *scalesetpoller.Poller,
 	retryDelay time.Duration,
@@ -393,7 +404,7 @@ func pollUntilShutdown(
 			if ctx.Err() != nil {
 				return
 			}
-			consecutiveFailures = logPollFailure(logger, scaleSetName, err, consecutiveFailures)
+			consecutiveFailures = logPollFailure(logger, repositoryURL, scaleSetName, err, consecutiveFailures)
 			if !waitForPollRetry(ctx, retryDelay) {
 				return
 			}
@@ -403,12 +414,13 @@ func pollUntilShutdown(
 	}
 }
 
-func logPollFailure(logger *slog.Logger, scaleSetName string, pollErr error, consecutiveFailures int) int {
+func logPollFailure(logger *slog.Logger, repositoryURL string, scaleSetName string, pollErr error, consecutiveFailures int) int {
 	consecutiveFailures++
-	logger.Error("poll failed", slog.String("scaleSet", scaleSetName), slog.String("error", pollErr.Error()))
+	logger.Error("poll failed", slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName), slog.String("error", pollErr.Error()))
 	if consecutiveFailures == sustainedPollFailureThreshold {
 		logger.Error(
 			"sustained poll failures",
+			slog.String("repository", repositoryURL),
 			slog.String("scaleSet", scaleSetName),
 			slog.Int("consecutiveFailures", consecutiveFailures),
 		)

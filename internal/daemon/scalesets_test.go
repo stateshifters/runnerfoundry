@@ -451,7 +451,7 @@ func TestPollUntilShutdownHandlesPollErrors(t *testing.T) {
 			}
 		},
 	}, Handler: scaleSetHandler{}}
-	pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Nanosecond)
+	pollUntilShutdown(ctx, slog.Default(), "repo", "linux", poller, time.Nanosecond)
 }
 
 func TestPollUntilShutdownExitsDuringRetryDelayWhenCanceled(t *testing.T) {
@@ -463,7 +463,7 @@ func TestPollUntilShutdownExitsDuringRetryDelayWhenCanceled(t *testing.T) {
 	returned := make(chan struct{})
 
 	go func() {
-		pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Hour)
+		pollUntilShutdown(ctx, slog.Default(), "repo", "linux", poller, time.Hour)
 		close(returned)
 	}()
 
@@ -490,7 +490,7 @@ func TestPollUntilShutdownExitsWhenCanceledDuringRetryDelay(t *testing.T) {
 	returned := make(chan struct{})
 
 	go func() {
-		pollUntilShutdown(ctx, slog.Default(), "linux", poller, time.Hour)
+		pollUntilShutdown(ctx, slog.Default(), "repo", "linux", poller, time.Hour)
 		close(returned)
 	}()
 
@@ -516,7 +516,7 @@ func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
 		onGetMessage:  cancel,
 	}, Handler: scaleSetHandler{}}
 
-	pollUntilShutdown(ctx, logger, "linux", poller, time.Nanosecond)
+	pollUntilShutdown(ctx, logger, "repo", "linux", poller, time.Nanosecond)
 
 	if logs.Len() != 0 {
 		t.Fatalf("expected no shutdown cancellation log, got %q", logs.String())
@@ -538,9 +538,9 @@ func TestPollUntilShutdownLogsSustainedFailures(t *testing.T) {
 		},
 	}, Handler: scaleSetHandler{}}
 
-	pollUntilShutdown(ctx, logger, "linux", poller, time.Nanosecond)
+	pollUntilShutdown(ctx, logger, "https://github.com/acme/repo", "linux", poller, time.Nanosecond)
 
-	if !strings.Contains(logs.String(), "sustained poll failures") {
+	if !strings.Contains(logs.String(), "sustained poll failures") || !strings.Contains(logs.String(), "repository=https://github.com/acme/repo") {
 		t.Fatalf("expected sustained failure log, got %q", logs.String())
 	}
 }

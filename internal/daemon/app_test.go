@@ -74,17 +74,38 @@ func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 	}
 }
 
-func TestApplyDiscoverySurfacesRepositoryStartupFailure(t *testing.T) {
+func TestApplyDiscoveryIsolatesRepositoryStartupFailureAndLogsItsIdentity(t *testing.T) {
+	logs := &bytes.Buffer{}
 	activeConfig := testActiveConfiguration()
-	daemonRuntime := runtime{NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
-		return nil, errors.New("client failed")
-	}}
+	activeConfig.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemonRuntime := runtime{
+		NewGitHubClient: func(repositoryURL string, _ int64, _ config.GitHubAppCredentials) (scaleSetClient, error) {
+			if repositoryURL == "https://github.com/acme/failing" {
+				return nil, errors.New("client failed")
+			}
+			return &fakeScaleSetClient{}, nil
+		},
+		StartScaleSet: func(context.Context, *slog.Logger, scaleSetClient, string, config.ScaleSetConfig, *scaler.Coordinator) (scaleSetLifecycle, error) {
+			return inertLifecycle(), nil
+		},
+	}
 	err := applyDiscovery(context.Background(), daemonRuntime, &activeConfig, githubapp.DiscoveryResult{
-		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/repo"}},
+		Repositories: []githubapp.Repository{
+			{InstallationID: 1, URL: "https://github.com/acme/failing"},
+			{InstallationID: 2, URL: "https://github.com/acme/healthy"},
+		},
 		InstallationFailures: map[int64]error{},
 	})
 	if err == nil {
 		t.Fatal("expected repository startup failure")
+	}
+	if _, exists := activeConfig.Repositories["https://github.com/acme/healthy"]; !exists {
+		t.Fatal("expected healthy repository to start despite another repository failure")
+	}
+	for _, expected := range []string{"repository startup failed", "repository=https://github.com/acme/failing", "installationID=1", "client failed"} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Fatalf("expected %q in repository failure log %q", expected, logs.String())
+		}
 	}
 }
 
