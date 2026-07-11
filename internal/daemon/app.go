@@ -64,7 +64,6 @@ type activeConfiguration struct {
 	Coordinators map[string]*scaler.Coordinator
 	Repositories map[string]managedRepository
 	Logger       *slog.Logger
-	CancelWork   context.CancelFunc
 }
 
 func Run(ctx context.Context, options Options) error {
@@ -98,17 +97,18 @@ func productionRuntime() runtime {
 
 func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) error {
 	daemonRuntime = withRuntimeDefaults(daemonRuntime)
-	activeConfig, err := loadAndStartConfiguration(ctx, options.ConfigPath, daemonRuntime)
+	activeConfig, err := loadConfiguration(options.ConfigPath, daemonRuntime)
 	if err != nil {
 		return err
-	}
-	if notifyErr := daemonRuntime.Notifier.Ready(ctx); notifyErr != nil {
-		return fmt.Errorf("notify ready: %w", notifyErr)
 	}
 	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
 	if err != nil {
 		return fmt.Errorf("load discovery interval: %w", err)
 	}
+	if notifyErr := daemonRuntime.Notifier.Ready(ctx); notifyErr != nil {
+		return fmt.Errorf("notify ready: %w", notifyErr)
+	}
+	reconcileDiscovery(ctx, daemonRuntime, &activeConfig)
 	return runActiveConfiguration(ctx, options, daemonRuntime, activeConfig, discoveryInterval)
 }
 
@@ -156,6 +156,7 @@ func reloadAndReadInterval(
 	if err != nil {
 		return activeConfiguration{}, 0, fmt.Errorf("load reloaded discovery interval: %w", err)
 	}
+	reconcileDiscovery(ctx, daemonRuntime, &reloadedConfig)
 	return reloadedConfig, discoveryInterval, nil
 }
 
@@ -169,7 +170,7 @@ func withRuntimeDefaults(daemonRuntime runtime) runtime {
 	return daemonRuntime
 }
 
-func loadAndStartConfiguration(ctx context.Context, configPath string, daemonRuntime runtime) (activeConfiguration, error) {
+func loadConfiguration(configPath string, daemonRuntime runtime) (activeConfiguration, error) {
 	loadedConfig, err := daemonRuntime.LoadConfig(configPath)
 	if err != nil {
 		return activeConfiguration{}, err
@@ -182,11 +183,6 @@ func loadAndStartConfiguration(ctx context.Context, configPath string, daemonRun
 	if err != nil {
 		return activeConfiguration{}, fmt.Errorf("create repository discoverer: %w", err)
 	}
-	discovery, err := discoverer.Discover(ctx)
-	if err != nil {
-		return activeConfiguration{}, fmt.Errorf("discover repositories: %w", err)
-	}
-	workCtx, cancelWork := context.WithCancel(ctx)
 	activeConfig := activeConfiguration{
 		Config:       loadedConfig,
 		Credentials:  credentials,
@@ -194,11 +190,6 @@ func loadAndStartConfiguration(ctx context.Context, configPath string, daemonRun
 		Coordinators: coordinators(loadedConfig.ScaleSets),
 		Repositories: map[string]managedRepository{},
 		Logger:       daemonRuntime.NewLogger(loadedConfig.Log.Format),
-		CancelWork:   cancelWork,
-	}
-	if err := applyDiscovery(workCtx, daemonRuntime, &activeConfig, discovery); err != nil {
-		cancelWork()
-		return activeConfiguration{}, err
 	}
 	return activeConfig, nil
 }
@@ -383,18 +374,19 @@ func reloadConfiguration(
 	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
 		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
-	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval); err != nil {
-		return activeConfiguration{}, err
-	}
-	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
-		return activeConfiguration{}, err
-	}
-	reloaded, err := loadAndStartConfiguration(ctx, configPath, daemonRuntime)
+	reloaded, err := loadConfiguration(configPath, daemonRuntime)
 	if err != nil {
 		return activeConfiguration{}, err
 	}
 	if err := daemonRuntime.Notifier.Ready(ctx); err != nil {
 		return activeConfiguration{}, fmt.Errorf("notify ready after reload: %w", err)
+	}
+	stopPolling(activeConfig)
+	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval); err != nil {
+		return activeConfiguration{}, err
+	}
+	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
+		return activeConfiguration{}, err
 	}
 	return reloaded, nil
 }
@@ -442,7 +434,6 @@ const (
 func shutdownWithTimeout(ctx context.Context, activeConfig activeConfiguration, mode shutdownMode) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancelShutdown()
-	activeConfig.CancelWork()
 	var shutdownErr error
 	for repositoryURL, repository := range activeConfig.Repositories {
 		for scaleSetName, lifecycle := range repository.Lifecycles {
@@ -456,6 +447,14 @@ func shutdownWithTimeout(ctx context.Context, activeConfig activeConfiguration, 
 		}
 	}
 	return shutdownErr
+}
+
+func stopPolling(activeConfig activeConfiguration) {
+	for _, repository := range activeConfig.Repositories {
+		for _, lifecycle := range repository.Lifecycles {
+			lifecycle.StopPolling()
+		}
+	}
 }
 
 func pruneRepository(

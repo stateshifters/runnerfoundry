@@ -88,13 +88,15 @@ sudo systemctl status github-scaler
 
 The daemon reads `/etc/github-scaler/config.yaml` at startup. It does not watch or continuously reread the file.
 
-After editing the config or environment file, reload the service:
+Systemd readiness covers local preflight only. The daemon sends `READY=1` after the configuration, App credentials, and local settings validate. Github discovery, scale-set registration, and message-session creation run immediately afterward through the reconciliation loop. A Github outage or repository-specific registration failure does not block service startup; the daemon logs the failure and retries on the configured discovery interval.
+
+After editing the config or replacing the private-key file, reload the service:
 
 ```sh
 sudo systemctl reload github-scaler
 ```
 
-Reload validates the replacement config and token before stopping the active scale sets. If the replacement is invalid, the daemon logs the rejection and keeps the last-known-good config running. For an accepted reload, old-config polling stops before drain, so no new runners are started from the old config while reload is pending. Existing runner containers or VMs keep running until their active jobs exit. `systemctl reload` waits while the daemon drains those active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and starts the new config. Watch progress with:
+Reload validates the replacement configuration and credentials before stopping the active scale sets. Systemd considers the reload accepted after this local preflight succeeds. The daemon then drains active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and reconciles the replacement configuration. Existing runner containers or VMs keep running until their active jobs exit. Watch progress with:
 
 ```sh
 journalctl -u github-scaler -f

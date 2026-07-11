@@ -176,7 +176,7 @@ func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 	}
 }
 
-func TestLoadAndStartConfigurationSurfacesCredentialDiscoveryAndStartupFailures(t *testing.T) {
+func TestLoadConfigurationSurfacesLocalPreflightFailures(t *testing.T) {
 	valid := runnableConfig(t)
 	tests := map[string]runtime{
 		"credentials": {
@@ -192,19 +192,29 @@ func TestLoadAndStartConfigurationSurfacesCredentialDiscoveryAndStartupFailures(
 				return nil, errors.New("factory failed")
 			},
 		},
-		"discovery": {
-			LoadConfig: func(string) (config.Config, error) { return valid, nil },
-			NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-				return staticDiscoverer{err: errors.New("discovery failed")}, nil
-			},
-		},
 	}
 	for testName, daemonRuntime := range tests {
 		t.Run(testName, func(t *testing.T) {
-			if _, err := loadAndStartConfiguration(context.Background(), "config", daemonRuntime); err == nil {
+			if _, err := loadConfiguration("config", daemonRuntime); err == nil {
 				t.Fatal("expected startup failure")
 			}
 		})
+	}
+}
+
+func TestLoadConfigurationDoesNotContactGitHub(t *testing.T) {
+	valid := runnableConfig(t)
+	discoverer := &sequenceDiscoverer{results: []githubapp.DiscoveryResult{{InstallationFailures: map[int64]error{}}}}
+	activeConfig, err := loadConfiguration("config", runtime{
+		LoadConfig:    func(string) (config.Config, error) { return valid, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
+		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+	})
+	if err != nil {
+		t.Fatalf("expected local preflight success, got %v", err)
+	}
+	if discoverer.calls != 0 || len(activeConfig.Repositories) != 0 {
+		t.Fatalf("expected no GitHub work before readiness, calls=%d repositories=%#v", discoverer.calls, activeConfig.Repositories)
 	}
 }
 
@@ -369,6 +379,25 @@ func TestRunDaemonSurfacesReadyFailure(t *testing.T) {
 	}
 }
 
+func TestRunDaemonSignalsReadyBeforeGitHubDiscovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := false
+	loadedConfig := runnableConfig(t)
+	discoverer := readinessCheckingDiscoverer{ready: &ready, cancel: cancel}
+	daemonRuntime := runtime{
+		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
+		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		Notifier:      readyRecordingNotifier{ready: &ready},
+	}
+	if err := runDaemon(ctx, Options{}, daemonRuntime); err != nil {
+		t.Fatalf("expected discovery failure to remain retryable, got %v", err)
+	}
+	if !ready {
+		t.Fatal("expected readiness notification")
+	}
+}
+
 func TestRunDaemonRejectsUnvalidatedDiscoveryInterval(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	loadedConfig.GitHub.DiscoveryInterval = "invalid"
@@ -425,9 +454,7 @@ func TestRunDaemonSurfacesReloadFailure(t *testing.T) {
 
 func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 	loadedConfig := runnableConfig(t)
-	_, cancel := context.WithCancel(context.Background())
 	activeConfig := testActiveConfiguration()
-	activeConfig.CancelWork = cancel
 	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": inertLifecycle()}}
 	daemonRuntime := runtime{
 		LoadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
@@ -516,28 +543,11 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 }
 
 func TestLifecycleFailurePathsRemainExplicit(t *testing.T) {
-	loadedConfig := runnableConfig(t)
-	if _, err := loadAndStartConfiguration(context.Background(), "config", runtime{
+	if _, err := loadConfiguration("config", runtime{
 		LoadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("load failed") },
 	}); err == nil {
 		t.Fatal("expected load failure")
 	}
-	if _, err := loadAndStartConfiguration(context.Background(), "config", runtime{
-		LoadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
-		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{
-				Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/repo"}},
-				InstallationFailures: map[int64]error{},
-			}}, nil
-		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return nil, errors.New("startup failed")
-		},
-	}); err == nil {
-		t.Fatal("expected initial repository startup failure")
-	}
-
 	activeConfig := testActiveConfiguration()
 	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
 		StopPolling:   func() {},
@@ -547,8 +557,6 @@ func TestLifecycleFailurePathsRemainExplicit(t *testing.T) {
 	if err := removeRepositoryImmediately(context.Background(), &activeConfig, "repo", activeConfig.Repositories["repo"]); err == nil {
 		t.Fatal("expected immediate removal failure")
 	}
-	_, cancel := context.WithCancel(context.Background())
-	activeConfig.CancelWork = cancel
 	if err := shutdownWithTimeout(context.Background(), activeConfig, immediateShutdown); err == nil {
 		t.Fatal("expected forced shutdown failure")
 	}
@@ -662,9 +670,16 @@ func runnableConfig(t *testing.T) config.Config {
 }
 
 func activeWithLifecycle(lifecycle scaleSetLifecycle) activeConfiguration {
-	_, cancel := context.WithCancel(context.Background())
+	if lifecycle.StopPolling == nil {
+		lifecycle.StopPolling = func() {}
+	}
+	if lifecycle.Drain == nil {
+		lifecycle.Drain = func(context.Context) (int, error) { return 0, nil }
+	}
+	if lifecycle.Shutdown == nil {
+		lifecycle.Shutdown = func(context.Context) error { return nil }
+	}
 	active := testActiveConfiguration()
-	active.CancelWork = cancel
 	active.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": lifecycle}}
 	return active
 }
@@ -692,6 +707,30 @@ func (cancellingNotifier) Reloading(context.Context) error { return nil }
 type failingNotifier struct {
 	readyErr  error
 	reloadErr error
+}
+
+type readyRecordingNotifier struct {
+	ready *bool
+}
+
+func (notifier readyRecordingNotifier) Ready(context.Context) error {
+	*notifier.ready = true
+	return nil
+}
+
+func (readyRecordingNotifier) Reloading(context.Context) error { return nil }
+
+type readinessCheckingDiscoverer struct {
+	ready  *bool
+	cancel context.CancelFunc
+}
+
+func (discoverer readinessCheckingDiscoverer) Discover(context.Context) (githubapp.DiscoveryResult, error) {
+	if !*discoverer.ready {
+		return githubapp.DiscoveryResult{}, errors.New("discovery ran before readiness")
+	}
+	discoverer.cancel()
+	return githubapp.DiscoveryResult{}, errors.New("GitHub unavailable")
 }
 
 func (notifier failingNotifier) Ready(context.Context) error     { return notifier.readyErr }
