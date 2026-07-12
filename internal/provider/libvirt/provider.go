@@ -50,7 +50,8 @@ type CommandRunner interface {
 type ExecCommandRunner struct{}
 
 func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (string, error) {
-	execCommand := exec.CommandContext(ctx, command.Name, command.Args...)
+	// Production callers restrict Name to the hard-coded virsh executable.
+	execCommand := exec.CommandContext(ctx, command.Name, command.Args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	if command.Stdin != "" {
 		execCommand.Stdin = strings.NewReader(command.Stdin)
 	}

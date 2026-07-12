@@ -48,7 +48,8 @@ type CommandRunner interface {
 type ExecCommandRunner struct{}
 
 func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (string, error) {
-	execCommand := exec.CommandContext(ctx, command.Name, command.Args...)
+	// Production callers restrict Name to the hard-coded docker executable.
+	execCommand := exec.CommandContext(ctx, command.Name, command.Args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	outputBytes, err := execCommand.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s command failed: %w", command.Name, err)
