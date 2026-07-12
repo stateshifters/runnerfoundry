@@ -238,7 +238,7 @@ func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, err
 }
 
 func (worker coordinatedRepositoryWorker) Exists(ctx context.Context, requestID int64) (bool, error) {
-	exists, err := worker.Reconciler.Exists(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID))
+	exists, err := worker.Reconciler.Exists(ctx, fmt.Sprintf("%s-%d", worker.Reconciler.ScaleSet.Name, requestID))
 	if err != nil {
 		return false, fmt.Errorf("inspect runner for request %d: %w", requestID, err)
 	}
@@ -254,7 +254,7 @@ func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID
 }
 
 func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context, requestID int64) error {
-	if err := worker.Reconciler.StartNamed(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID)); err != nil {
+	if err := worker.Reconciler.StartNamed(ctx, fmt.Sprintf("%s-%d", worker.Reconciler.ScaleSet.Name, requestID)); err != nil {
 		return fmt.Errorf("start repository runner: %w", err)
 	}
 	effectiveLogger(worker.Logger).Info("runner started", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)

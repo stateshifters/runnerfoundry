@@ -52,9 +52,27 @@ func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (strin
 	execCommand := exec.CommandContext(ctx, command.Name, command.Args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	outputBytes, err := execCommand.CombinedOutput()
 	if err != nil {
+		diagnostic := redactJITConfig(string(outputBytes), command.Args)
+		if diagnostic != "" {
+			return "", fmt.Errorf("%s command failed: %w: %s", command.Name, err, diagnostic)
+		}
 		return "", fmt.Errorf("%s command failed: %w", command.Name, err)
 	}
 	return string(outputBytes), nil
+}
+
+func redactJITConfig(output string, commandArguments []string) string {
+	redactedOutput := strings.TrimSpace(output)
+	jitConfigPrefix := JITConfigEnvironment + "="
+	for _, argument := range commandArguments {
+		if strings.HasPrefix(argument, jitConfigPrefix) {
+			jitConfig := strings.TrimPrefix(argument, jitConfigPrefix)
+			if jitConfig != "" {
+				redactedOutput = strings.ReplaceAll(redactedOutput, jitConfig, "[REDACTED]")
+			}
+		}
+	}
+	return redactedOutput
 }
 
 type ComposeProvider struct {

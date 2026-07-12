@@ -687,6 +687,27 @@ func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {
 	}
 }
 
+func TestCoordinatedRepositoryWorkerUsesRepositoryQualifiedRunnerName(t *testing.T) {
+	provider := &fakeScalerProvider{instances: []scaler.RunnerInstance{{
+		RunnerName: "github-com-meza-repo-a-self-hosted-42",
+		State:      scaler.RunnerStateRunning,
+	}}}
+	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "github-com-meza-repo-a-self-hosted", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+	}}}
+
+	if err := worker.StartOne(context.Background(), 42); err != nil {
+		t.Fatalf("expected runner start success, got %v", err)
+	}
+	if len(provider.started) != 1 || provider.started[0].RunnerName != "github-com-meza-repo-a-self-hosted-42" {
+		t.Fatalf("expected repository-qualified runner name, got %#v", provider.started)
+	}
+	exists, err := worker.Exists(context.Background(), 42)
+	if err != nil || !exists {
+		t.Fatalf("expected repository-qualified runner lookup to find the runner, got exists=%t err=%v", exists, err)
+	}
+}
+
 func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1132,8 +1153,9 @@ func (client *fakeMessageClient) Close(ctx context.Context) error {
 }
 
 type fakeScalerProvider struct {
-	listErr error
-	started []scaler.RunnerStartRequest
+	listErr   error
+	instances []scaler.RunnerInstance
+	started   []scaler.RunnerStartRequest
 }
 
 type failingStartProvider struct{}
@@ -1152,7 +1174,7 @@ func (provider *fakeScalerProvider) List(ctx context.Context, scaleSetName strin
 	if provider.listErr != nil {
 		return nil, provider.listErr
 	}
-	return nil, nil
+	return provider.instances, nil
 }
 
 func (provider *fakeScalerProvider) Start(ctx context.Context, request scaler.RunnerStartRequest) error {

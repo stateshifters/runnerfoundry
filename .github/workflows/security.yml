@@ -35,6 +35,7 @@ jobs:
             --metrics off \
             --error \
             --strict \
+            --scan-unknown-extensions \
             --verbose \
             --matching-explanations \
             --json-output semgrep-results.json \

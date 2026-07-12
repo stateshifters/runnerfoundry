@@ -195,7 +195,7 @@ func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
 	}
 }
 
-func TestExecCommandRunnerRedactsCommandOutputOnFailure(t *testing.T) {
+func TestExecCommandRunnerReportsDiagnosticsWithoutJITConfig(t *testing.T) {
 	programPath := filepath.Join(t.TempDir(), "main.go")
 	if err := os.WriteFile(programPath, []byte(`package main
 
@@ -205,22 +205,28 @@ import (
 )
 
 func main() {
-	fmt.Fprint(os.Stderr, "secret-jit-config")
+	fmt.Fprint(os.Stderr, "docker diagnostic: secret-jit-config")
 	os.Exit(1)
 }
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "go", Args: []string{"run", programPath}})
+	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{
+		Name: "go",
+		Args: []string{"run", programPath, "--env", JITConfigEnvironment + "=secret-jit-config"},
+	})
 	if err == nil {
 		t.Fatal("expected command failure")
 	}
 	if strings.Contains(err.Error(), "secret-jit-config") {
-		t.Fatalf("expected command output to be redacted, got %q", err.Error())
+		t.Fatalf("expected JIT config to be redacted, got %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "go command failed") {
 		t.Fatalf("expected command context, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "docker diagnostic: [REDACTED]") {
+		t.Fatalf("expected redacted command diagnostic, got %q", err.Error())
 	}
 }
 
