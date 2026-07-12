@@ -681,6 +681,10 @@ func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {
 	if err := worker.Acquire(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "acquire failed") {
 		t.Fatalf("expected acquisition failure, got %v", err)
 	}
+	worker.Reconciler.ScaleSet.Provider = &fakeScalerProvider{listErr: errors.New("list failed")}
+	if _, err := worker.Exists(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "inspect runner") {
+		t.Fatalf("expected wrapped runner inspection failure, got %v", err)
+	}
 }
 
 func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {

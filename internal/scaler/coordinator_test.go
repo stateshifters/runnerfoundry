@@ -191,18 +191,32 @@ func TestCoordinatorReportsDurableStoreFailures(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReportsDemandMutationFailures(t *testing.T) {
+	store := &failingDemandStore{applyErr: errors.New("apply failed"), removeRepositoryErr: errors.New("remove failed")}
+	coordinator := NewDurableCoordinator("linux", 1, store)
+	if err := coordinator.Apply(context.Background(), nil, nil); err == nil {
+		t.Fatal("expected apply failure")
+	}
+	if err := coordinator.RemoveRepository(context.Background(), "repo"); err == nil {
+		t.Fatal("expected repository removal failure")
+	}
+}
+
 type failingDemandStore struct {
-	demand     []QueuedDemand
-	orderedErr error
-	applyErr   error
-	deleteErr  error
+	demand              []QueuedDemand
+	orderedErr          error
+	applyErr            error
+	deleteErr           error
+	removeRepositoryErr error
 }
 
 func (store *failingDemandStore) Apply(context.Context, string, []JobDemand, []DemandRemoval) error {
 	return store.applyErr
 }
-func (store *failingDemandStore) RemoveRepository(context.Context, string, string) error { return nil }
-func (store *failingDemandStore) RemoveScaleSet(context.Context, string) error           { return nil }
+func (store *failingDemandStore) RemoveRepository(context.Context, string, string) error {
+	return store.removeRepositoryErr
+}
+func (store *failingDemandStore) RemoveScaleSet(context.Context, string) error { return nil }
 func (store *failingDemandStore) Ordered(context.Context, string) ([]QueuedDemand, error) {
 	return store.demand, store.orderedErr
 }

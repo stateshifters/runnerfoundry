@@ -233,6 +233,13 @@ func TestSQLiteDemandStoreReleasesLockWhenDatabaseOpenFails(t *testing.T) {
 }
 
 func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
+	t.Run("database configuration", func(t *testing.T) {
+		store, mock := mockDemandStore(t)
+		mock.ExpectExec("PRAGMA journal_mode").WillReturnError(errors.New("configure failed"))
+		if err := store.migrate(context.Background()); err == nil {
+			t.Fatal("expected database configuration error")
+		}
+	})
 	t.Run("schema version read", func(t *testing.T) {
 		store, mock := mockDemandStore(t)
 		mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -303,8 +310,8 @@ func mockDemandStore(t *testing.T) (*SQLiteDemandStore, sqlmock.Sqlmock) { //nol
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectClose()
 	t.Cleanup(func() {
+		mock.ExpectClose()
 		if err := database.Close(); err != nil {
 			t.Error(err)
 		}

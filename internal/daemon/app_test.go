@@ -371,6 +371,9 @@ func TestProductionRuntimeBuildsAppBoundaries(t *testing.T) {
 	if production.NewLogger("text") == nil || production.Notifier == nil {
 		t.Fatal("expected production logger and notifier")
 	}
+	if _, _, err := production.OpenDemandStore(filepath.Join(t.TempDir(), "missing", "state.db")); err == nil {
+		t.Fatal("expected production demand store failure")
+	}
 }
 
 func TestRunDaemonReconcilesPeriodicDiscovery(t *testing.T) {
