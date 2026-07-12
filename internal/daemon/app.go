@@ -276,7 +276,19 @@ func applyDiscovery(
 	if err := removeUndiscoveredRepositories(ctx, activeConfig, desired); err != nil {
 		return err
 	}
-	return startDiscoveredRepositories(ctx, daemonRuntime, activeConfig, desired)
+	startupErr := startDiscoveredRepositories(ctx, daemonRuntime, activeConfig, desired)
+	recoveryErr := schedulePersistedDemand(ctx, activeConfig)
+	return errors.Join(startupErr, recoveryErr)
+}
+
+func schedulePersistedDemand(ctx context.Context, activeConfig *activeConfiguration) error {
+	var recoveryErr error
+	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+		if err := activeConfig.Coordinators[scaleSetConfig.Name].Schedule(ctx); err != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover scale set %q demand: %w", scaleSetConfig.Name, err))
+		}
+	}
+	return recoveryErr
 }
 
 func desiredRepositories(

@@ -53,6 +53,184 @@ func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.
 	}
 }
 
+func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *testing.T) {
+	const repositoryURL = "https://github.com/acme/repo"
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		RequestID: 42, Repository: repositoryURL, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	worker := &recordingRecoveryWorker{}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Coordinators["linux"] = coordinator
+	daemonRuntime := recoveryRuntime(worker)
+
+	err := applyDiscovery(context.Background(), daemonRuntime, &activeConfig, githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
+		InstallationFailures: map[int64]error{},
+	})
+	if err != nil {
+		t.Fatalf("expected startup recovery, got %v", err)
+	}
+	if len(worker.acquired) != 0 || len(worker.started) != 1 || worker.started[0] != 42 {
+		t.Fatalf("expected promised runner 42 to start without reacquisition, acquired=%#v started=%#v", worker.acquired, worker.started)
+	}
+}
+
+func recoveryRuntime(worker scaler.RepositoryWorker) runtime {
+	return runtime{
+		NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		StartScaleSet: func(
+			_ context.Context,
+			_ *slog.Logger,
+			_ scaleSetClient,
+			startedRepositoryURL string,
+			_ config.ScaleSetConfig,
+			startedCoordinator *scaler.Coordinator,
+		) (scaleSetLifecycle, error) {
+			startedCoordinator.AddRepository(startedRepositoryURL, worker)
+			return inertLifecycle(), nil
+		},
+	}
+}
+
+func TestApplyDiscoveryAcquiresPersistedAvailableDemandBeforeProvisioning(t *testing.T) {
+	const repositoryURL = "https://github.com/acme/repo"
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		RequestID: 43, Repository: repositoryURL, QueueTime: time.Now(),
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	worker := &recordingRecoveryWorker{}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Coordinators["linux"] = coordinator
+	daemonRuntime := recoveryRuntime(worker)
+
+	err := applyDiscovery(context.Background(), daemonRuntime, &activeConfig, githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
+		InstallationFailures: map[int64]error{},
+	})
+	if err != nil {
+		t.Fatalf("expected startup recovery, got %v", err)
+	}
+	if len(worker.acquired) != 1 || worker.acquired[0] != 43 || len(worker.started) != 1 || worker.started[0] != 43 {
+		t.Fatalf("expected available demand 43 to be acquired before start, acquired=%#v started=%#v", worker.acquired, worker.started)
+	}
+}
+
+func TestApplyDiscoveryRecognizesProviderVisiblePromisedRunner(t *testing.T) {
+	const repositoryURL = "https://github.com/acme/repo"
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		RequestID: 44, Repository: repositoryURL, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	worker := &recordingRecoveryWorker{existing: map[int64]bool{44: true}}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Coordinators["linux"] = coordinator
+
+	err := applyDiscovery(context.Background(), recoveryRuntime(worker), &activeConfig, githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
+		InstallationFailures: map[int64]error{},
+	})
+	if err != nil {
+		t.Fatalf("expected provider-visible recovery, got %v", err)
+	}
+	worker.existing[44] = false
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.acquired) != 0 || len(worker.started) != 0 {
+		t.Fatalf("expected provider-visible promise to complete without duplication, acquired=%#v started=%#v", worker.acquired, worker.started)
+	}
+}
+
+func TestApplyDiscoveryResumesAvailableRepositoriesAndRetainsUnavailableDemand(t *testing.T) {
+	const healthyRepository = "https://github.com/acme/healthy"
+	const unavailableRepository = "https://github.com/acme/unavailable"
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 2, store)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{
+		{RequestID: 45, Repository: unavailableRepository, QueueTime: time.Now(), Acquired: true},
+		{RequestID: 46, Repository: healthyRepository, QueueTime: time.Now().Add(time.Second), Acquired: true},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	healthyWorker := &recordingRecoveryWorker{}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Config.ScaleSets[0].MaxRunners = 2
+	activeConfig.Coordinators["linux"] = coordinator
+	daemonRuntime := recoveryRuntime(healthyWorker)
+	daemonRuntime.NewGitHubClient = func(repositoryURL string, _ int64, _ config.GitHubAppCredentials) (scaleSetClient, error) {
+		if repositoryURL == unavailableRepository {
+			return nil, errors.New("unavailable")
+		}
+		return &fakeScaleSetClient{}, nil
+	}
+
+	err := applyDiscovery(context.Background(), daemonRuntime, &activeConfig, githubapp.DiscoveryResult{
+		Repositories: []githubapp.Repository{
+			{InstallationID: 1, URL: unavailableRepository},
+			{InstallationID: 2, URL: healthyRepository},
+		},
+		InstallationFailures: map[int64]error{},
+	})
+	if err == nil {
+		t.Fatal("expected unavailable repository startup failure")
+	}
+	if len(healthyWorker.started) != 1 || healthyWorker.started[0] != 46 {
+		t.Fatalf("expected healthy promised runner to resume, got %#v", healthyWorker.started)
+	}
+	unavailableWorker := &recordingRecoveryWorker{}
+	coordinator.AddRepository(unavailableRepository, unavailableWorker)
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(unavailableWorker.started) != 1 || unavailableWorker.started[0] != 45 {
+		t.Fatalf("expected unavailable demand to remain queued for retry, got %#v", unavailableWorker.started)
+	}
+}
+
+func TestReconcileDiscoveryRetriesPersistedDemandAfterRecoveryFailure(t *testing.T) {
+	const repositoryURL = "https://github.com/acme/repo"
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		RequestID: 47, Repository: repositoryURL, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	worker := &recordingRecoveryWorker{existsErr: errors.New("provider unavailable")}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Coordinators["linux"] = coordinator
+	activeConfig.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
+		InstallationFailures: map[int64]error{},
+	}}
+	daemonRuntime := recoveryRuntime(worker)
+
+	reconcileDiscovery(context.Background(), daemonRuntime, &activeConfig)
+	if !activeConfig.ReconciliationPending {
+		t.Fatal("expected failed recovery to request a short reconciliation retry")
+	}
+	worker.existsErr = nil
+	reconcileDiscovery(context.Background(), daemonRuntime, &activeConfig)
+	if activeConfig.ReconciliationPending {
+		t.Fatal("expected successful recovery retry to restore the discovery interval")
+	}
+	if len(worker.started) != 1 || worker.started[0] != 47 {
+		t.Fatalf("expected failed recovery to retain promised demand, got %#v", worker.started)
+	}
+}
+
 func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 	stopped := false
 	destroyed := false
@@ -818,6 +996,32 @@ func inertLifecycle() scaleSetLifecycle {
 		DestroyActive: func(context.Context) error { return nil },
 		Shutdown:      func(context.Context) error { return nil },
 	}
+}
+
+type recordingRecoveryWorker struct {
+	running   int
+	existing  map[int64]bool
+	existsErr error
+	acquired  []int64
+	started   []int64
+}
+
+func (worker *recordingRecoveryWorker) Running(context.Context) (int, error) {
+	return worker.running, nil
+}
+
+func (worker *recordingRecoveryWorker) Exists(_ context.Context, requestID int64) (bool, error) {
+	return worker.existing[requestID], worker.existsErr
+}
+
+func (worker *recordingRecoveryWorker) Acquire(_ context.Context, requestID int64) error {
+	worker.acquired = append(worker.acquired, requestID)
+	return nil
+}
+
+func (worker *recordingRecoveryWorker) StartOne(_ context.Context, requestID int64) error {
+	worker.started = append(worker.started, requestID)
+	return nil
 }
 
 func runnableConfig(t *testing.T) config.Config {
