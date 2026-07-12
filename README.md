@@ -216,12 +216,13 @@ For each scale-set definition, the daemon:
 - discovers every App installation and accessible repository on the configured interval
 - creates the Github runner scale set in each discovered repository if needed
 - polls Github scale-set messages with `maxCapacity = max_runners`
-- queues observed jobs by Github queue time across all installations
+- queues identifiable job-available demand by Github queue time across all installations
 - enforces `max_runners` across every repository using that definition
-- generates one JIT config when shared capacity is available
+- reconciles identity-free assigned capacity from Github statistics after durable FIFO demand
+- generates JIT configs while shared capacity is available
 - acknowledges Github messages only after local handling succeeds
 
-The daemon commits Github demand to SQLite before acknowledging its message. Runner recovery combines that durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate Github delivery updates the existing request rather than adding another queue entry.
+The daemon commits identifiable Github demand to SQLite before acknowledging its message. Job-assigned and job-completed messages without positive request identities are not stored as queue entries; their assigned capacity comes from Github message statistics. Runner recovery combines the durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate job-available delivery updates the existing request rather than adding another queue entry.
 
 When installation access is removed, the daemon immediately drops queued demand, destroys active local runners, closes the message sessions, and attempts to unregister the affected scale sets. This can interrupt active jobs. On normal shutdown, active jobs are left running while message sessions close and scale sets unregister.
 

@@ -202,6 +202,60 @@ func TestCoordinatorReportsDemandMutationFailures(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReconcilesAssignedJobsWithinSharedCapacity(t *testing.T) {
+	firstWorker := &recordingWorker{running: 1}
+	secondWorker := &recordingWorker{}
+	coordinator := NewCoordinator(2)
+	coordinator.AddRepository("first", firstWorker)
+	coordinator.AddRepository("second", secondWorker)
+
+	result, err := coordinator.ReconcileAssigned(context.Background(), "second", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondWorker.assignedStarts != 1 || result.StartedRunners != 1 || result.RunningRunners != 0 {
+		t.Fatalf("expected one remaining shared slot to start, worker=%d result=%#v", secondWorker.assignedStarts, result)
+	}
+}
+
+func TestCoordinatorSchedulesDurableFIFOBeforeAssignedCapacity(t *testing.T) {
+	startOrder := []string{}
+	coordinator := NewCoordinator(1)
+	coordinator.AddRepository("fifo", &recordingWorker{repository: "fifo", startOrder: &startOrder})
+	coordinator.AddRepository("assigned", &recordingWorker{repository: "assigned", startOrder: &startOrder})
+	coordinator.Observe(JobDemand{Repository: "fifo", RequestID: 1, QueueTime: time.Now(), Acquired: true})
+
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.ReconcileAssigned(context.Background(), "assigned", 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(startOrder) != 1 || startOrder[0] != "fifo" {
+		t.Fatalf("expected durable FIFO to consume shared capacity first, got %#v", startOrder)
+	}
+}
+
+func TestCoordinatorReportsAssignedRunnerFailure(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	coordinator.AddRepository("repo", failingWorker{startErr: errors.New("start failed")})
+	if _, err := coordinator.ReconcileAssigned(context.Background(), "repo", 1); err == nil {
+		t.Fatal("expected assigned runner failure")
+	}
+}
+
+func TestCoordinatorHandlesMissingAndFailingAssignedWorkers(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	result, err := coordinator.ReconcileAssigned(context.Background(), "missing", 1)
+	if err != nil || result.AssignedJobs != 1 {
+		t.Fatalf("expected missing worker to preserve assigned statistic without failure, result=%#v err=%v", result, err)
+	}
+	coordinator.AddRepository("failing", failingWorker{runningErr: errors.New("count failed")})
+	if _, err := coordinator.ReconcileAssigned(context.Background(), "failing", 1); err == nil {
+		t.Fatal("expected assigned runner count failure")
+	}
+}
+
 type failingDemandStore struct {
 	demand              []QueuedDemand
 	orderedErr          error
@@ -230,10 +284,20 @@ type recordingWorker struct {
 	startOrder        *[]string
 	acquired          []int64
 	existingRequestID int64
+	assignedStarts    int
 }
 
 func (worker *recordingWorker) Acquire(_ context.Context, requestID int64) error {
 	worker.acquired = append(worker.acquired, requestID)
+	return nil
+}
+
+func (worker *recordingWorker) StartAssigned(context.Context) error {
+	worker.assignedStarts++
+	if worker.startOrder != nil {
+		*worker.startOrder = append(*worker.startOrder, worker.repository)
+	}
+	worker.running++
 	return nil
 }
 
@@ -250,6 +314,7 @@ func (worker failingWorker) Exists(context.Context, int64) (bool, error) {
 }
 func (worker failingWorker) Acquire(context.Context, int64) error  { return worker.acquireErr }
 func (worker failingWorker) StartOne(context.Context, int64) error { return worker.startErr }
+func (worker failingWorker) StartAssigned(context.Context) error   { return worker.startErr }
 
 func (worker *recordingWorker) Running(context.Context) (int, error) {
 	return worker.running, nil

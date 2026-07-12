@@ -123,6 +123,40 @@ func TestSQLiteDemandStoreMutationsAreDurableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestSQLiteDemandStoreMigratesLegacyZeroIdentityDemand(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	queueTime := time.Now()
+	if err := store.Apply(context.Background(), "linux", []JobDemand{
+		{Repository: "repo", RequestID: 0, QueueTime: time.Time{}, Acquired: true},
+		{Repository: "repo", RequestID: 49, QueueTime: queueTime, Acquired: true},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.database.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenSQLiteDemandStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	ordered, err := reopened.Ordered(context.Background(), "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != 1 || ordered[0].RequestID != 49 {
+		t.Fatalf("expected migration to preserve only valid demand, got %#v", ordered)
+	}
+}
+
 func TestSQLiteDemandStoreRejectsFutureAndCorruptDatabases(t *testing.T) {
 	futurePath := filepath.Join(t.TempDir(), "future.db")
 	database, err := sql.Open("sqlite", futurePath)
@@ -278,6 +312,38 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 			t.Fatal("expected migration commit error")
 		}
 	})
+	legacyMigrationFailures := map[string]func(sqlmock.Sqlmock){
+		"legacy migration begin": func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+		},
+		"legacy demand removal": func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("delete failed"))
+			mock.ExpectRollback()
+		},
+		"legacy version write": func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec("PRAGMA user_version").WillReturnError(errors.New("write failed"))
+			mock.ExpectRollback()
+		},
+		"legacy migration commit": func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec("PRAGMA user_version").WillReturnResult(sqlmock.NewResult(0, 0))
+			mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+		},
+	}
+	for testName, configureFailure := range legacyMigrationFailures {
+		t.Run(testName, func(t *testing.T) {
+			store, mock := mockDemandStore(t)
+			expectSchemaVersion(mock, 1)
+			configureFailure(mock)
+			if err := store.migrate(context.Background()); err == nil {
+				t.Fatal("expected legacy migration failure")
+			}
+		})
+	}
 	t.Run("demand commit", func(t *testing.T) {
 		store, mock := mockDemandStore(t)
 		mock.ExpectBegin()

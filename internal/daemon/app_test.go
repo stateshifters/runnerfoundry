@@ -1004,6 +1004,7 @@ type recordingRecoveryWorker struct {
 	existsErr error
 	acquired  []int64
 	started   []int64
+	assigned  int
 }
 
 func (worker *recordingRecoveryWorker) Running(context.Context) (int, error) {
@@ -1021,6 +1022,11 @@ func (worker *recordingRecoveryWorker) Acquire(_ context.Context, requestID int6
 
 func (worker *recordingRecoveryWorker) StartOne(_ context.Context, requestID int64) error {
 	worker.started = append(worker.started, requestID)
+	return nil
+}
+
+func (worker *recordingRecoveryWorker) StartAssigned(context.Context) error {
+	worker.assigned++
 	return nil
 }
 

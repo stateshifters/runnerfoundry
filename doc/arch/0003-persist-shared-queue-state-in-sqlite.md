@@ -16,13 +16,13 @@ The daemon remains a single-writer service and must support Windows, macOS, and 
 
 ## Decision
 
-We will retain Github App discovery and one shared capacity budget per configured scale set. We will persist waiting demand in a single-writer SQLite database before acknowledging Github messages. The configured database will be required, exclusively locked by the daemon, and placed on operator-selected durable storage.
+We will retain Github App discovery and one shared capacity budget per configured scale set. We will persist identifiable waiting demand from job-available messages in a single-writer SQLite database before acknowledging Github messages. Assigned capacity without a positive request identity will be reconciled from Github message statistics after the durable FIFO queue. The configured database will be required, exclusively locked by the daemon, and placed on operator-selected durable storage.
 
 Queue mutations from one Github message will commit atomically. A stable runner name derived from the scale set and Github request ID will let restart recovery recognize provider-visible work. Completed demand and demand outside the current repository and scale-set authority will be deleted rather than retained as history.
 
 ## Consequences
 
-FIFO admission and acknowledged waiting demand survive daemon reloads, crashes, reboots, and movement of the durable volume to another host. Redelivered Github messages are harmless because the request identity is unique within its repository and scale set.
+FIFO admission and acknowledged waiting demand with Github request identities survive daemon reloads, crashes, reboots, and movement of the durable volume to another host. Redelivered job-available messages are harmless because the request identity is unique within its repository and scale set. Assigned capacity without an identity cannot participate in exact cross-repository FIFO ordering and is admitted only after identifiable demand.
 
 The daemon owns schema migration, locking, file permissions, and database lifecycle behavior. Only one daemon may use a database at a time. Operators must stop the daemon before copying the database or changing its path. Debian removal preserves package-managed state, while Debian purge deletes it.
 

@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 1
+const currentStateSchemaVersion = 2
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -55,10 +55,16 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 	if version > currentStateSchemaVersion {
 		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentStateSchemaVersion)
 	}
-	if version == currentStateSchemaVersion {
-		return nil
+	if version == 0 {
+		if err := store.createSchema(ctx); err != nil {
+			return err
+		}
+		version = 1
 	}
-	return store.createSchema(ctx)
+	if version == 1 {
+		return store.removeLegacyZeroIdentityDemand(ctx)
+	}
+	return nil
 }
 
 func (store *SQLiteDemandStore) schemaVersion(ctx context.Context) (int, error) {
@@ -73,12 +79,8 @@ func (store *SQLiteDemandStore) schemaVersion(ctx context.Context) (int, error) 
 }
 
 func (store *SQLiteDemandStore) createSchema(ctx context.Context) error {
-	transaction, err := store.database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin state migration: %w", err)
-	}
-	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
-	if _, err := transaction.ExecContext(ctx, `CREATE TABLE demand (
+	return store.runMigration(ctx, "state migration", func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(ctx, `CREATE TABLE demand (
 		observation_order INTEGER PRIMARY KEY AUTOINCREMENT,
 		scale_set TEXT NOT NULL,
 		repository TEXT NOT NULL,
@@ -87,13 +89,38 @@ func (store *SQLiteDemandStore) createSchema(ctx context.Context) error {
 		acquired INTEGER NOT NULL,
 		UNIQUE(scale_set, repository, request_id)
 	)`); err != nil {
-		return fmt.Errorf("create demand table: %w", err)
+			return fmt.Errorf("create demand table: %w", err)
+		}
+		if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
+			return fmt.Errorf("record state schema version: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *SQLiteDemandStore) removeLegacyZeroIdentityDemand(ctx context.Context) error {
+	return store.runMigration(ctx, "legacy demand migration", func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(ctx, "DELETE FROM demand WHERE request_id <= 0"); err != nil {
+			return fmt.Errorf("remove legacy zero-identity demand: %w", err)
+		}
+		if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+			return fmt.Errorf("record legacy demand migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *SQLiteDemandStore) runMigration(ctx context.Context, description string, migrate func(*sql.Tx) error) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin %s: %w", description, err)
 	}
-	if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-		return fmt.Errorf("record state schema version: %w", err)
+	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
+	if err := migrate(transaction); err != nil {
+		return err
 	}
 	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("commit state migration: %w", err)
+		return fmt.Errorf("commit %s: %w", description, err)
 	}
 	return nil
 }

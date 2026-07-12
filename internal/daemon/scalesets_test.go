@@ -565,7 +565,7 @@ func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {
 }
 
 func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompleted(t *testing.T) {
-	provider := &fakeScalerProvider{}
+	provider := &fakeScalerProvider{trackStarted: true}
 	coordinator := scaler.NewCoordinator(2)
 	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
 		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -576,6 +576,7 @@ func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompl
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
 	queueTime := time.Now()
 	message := &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: queueTime}}},
 		JobAssignedMessages:  []*upstream.JobAssigned{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 2, QueueTime: queueTime.Add(time.Second)}}},
 		JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 2}}},
@@ -585,6 +586,139 @@ func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompl
 	}
 	if len(provider.started) != 1 {
 		t.Fatalf("expected only non-completed demand to start, got %#v", provider.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerUsesStatisticsForZeroIdentityAssignedJobs(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	provider := &fakeScalerProvider{trackStarted: true}
+	coordinator := scaler.NewCoordinator(2)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}},
+	})
+	handler := coordinatedScaleSetHandler{Logger: logger, ScaleSet: "self-hosted", Coordinator: coordinator, Repository: "repo"}
+	message := &upstream.RunnerScaleSetMessage{
+		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+		JobAssignedMessages: []*upstream.JobAssigned{{}, {}},
+	}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatalf("expected assigned capacity reconciliation, got %v", err)
+	}
+	if len(provider.started) != 2 {
+		t.Fatalf("expected two assigned runners, got %#v", provider.started)
+	}
+	for _, startedRunner := range provider.started {
+		if strings.HasSuffix(startedRunner.RunnerName, "-0") {
+			t.Fatalf("expected assigned runner without zero request identity, got %q", startedRunner.RunnerName)
+		}
+	}
+	if !strings.Contains(logs.String(), "assigned capacity reconciled") || !strings.Contains(logs.String(), "startedRunners=2") || strings.Contains(logs.String(), "requestID=0") {
+		t.Fatalf("expected aggregate assigned-capacity log without fabricated identity, got %q", logs.String())
+	}
+}
+
+func TestCoordinatedScaleSetHandlerRejectsMalformedAvailableDemand(t *testing.T) {
+	worker := &recordingRecoveryWorker{}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", worker)
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
+		JobAvailableMessages: []*upstream.JobAvailable{{}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "positive runner request ID and queue time") {
+		t.Fatalf("expected malformed available demand rejection, got %v", err)
+	}
+	if len(worker.acquired) != 0 || len(worker.started) != 0 {
+		t.Fatalf("expected no malformed demand side effects, acquired=%#v started=%#v", worker.acquired, worker.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerRequiresStatisticsAndStartsAssignedWorker(t *testing.T) {
+	worker := &recordingRecoveryWorker{}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", worker)
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{}); err == nil {
+		t.Fatal("expected missing statistics failure")
+	}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if worker.assigned != 1 {
+		t.Fatalf("expected assigned worker start, got %d", worker.assigned)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerIgnoresZeroIdentityCompletion(t *testing.T) {
+	worker := &recordingRecoveryWorker{running: 1}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		Repository: "repo", RequestID: 48, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobCompletedMessages: []*upstream.JobCompleted{{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	worker.running = 0
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.started) != 1 || worker.started[0] != 48 {
+		t.Fatalf("expected valid demand to survive zero-ID completion, got %#v", worker.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerRemovesPositiveIdentityCompletion(t *testing.T) {
+	worker := &recordingRecoveryWorker{running: 1}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		Repository: "repo", RequestID: 49, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 49}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	worker.running = 0
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.started) != 0 {
+		t.Fatalf("expected positive completion identity to remove demand, got %#v", worker.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerLeavesAssignedReconciliationRetryable(t *testing.T) {
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "local", MaxRunners: 1, Provider: failingStartProvider{}, JITConfig: fakeJITConfigGenerator{},
+	}}})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAssignedMessages: []*upstream.JobAssigned{{}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reconcile assigned runner capacity") {
+		t.Fatalf("expected retryable assigned reconciliation failure, got %v", err)
 	}
 }
 
@@ -603,6 +737,7 @@ func TestCoordinatedScaleSetLogsJobServingLifecycle(t *testing.T) {
 	handler := coordinatedScaleSetHandler{Logger: logger, ScaleSet: "linux", Coordinator: coordinator, Repository: "repo"}
 	queueTime := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42, QueueTime: queueTime}}},
 	}); err != nil {
 		t.Fatal(err)
@@ -628,6 +763,7 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenSchedulingFails(t *
 	})
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
 	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "schedule shared runner capacity") {
@@ -639,6 +775,7 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t 
 	coordinator := scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{})
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
 	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "persist GitHub job demand") {
@@ -1153,9 +1290,10 @@ func (client *fakeMessageClient) Close(ctx context.Context) error {
 }
 
 type fakeScalerProvider struct {
-	listErr   error
-	instances []scaler.RunnerInstance
-	started   []scaler.RunnerStartRequest
+	listErr      error
+	instances    []scaler.RunnerInstance
+	started      []scaler.RunnerStartRequest
+	trackStarted bool
 }
 
 type failingStartProvider struct{}
@@ -1179,6 +1317,9 @@ func (provider *fakeScalerProvider) List(ctx context.Context, scaleSetName strin
 
 func (provider *fakeScalerProvider) Start(ctx context.Context, request scaler.RunnerStartRequest) error {
 	provider.started = append(provider.started, request)
+	if provider.trackStarted {
+		provider.instances = append(provider.instances, scaler.RunnerInstance{RunnerName: request.RunnerName, State: scaler.RunnerStateRunning})
+	}
 	return nil
 }
 

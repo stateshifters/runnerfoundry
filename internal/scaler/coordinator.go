@@ -20,6 +20,7 @@ type RepositoryWorker interface {
 	Exists(ctx context.Context, requestID int64) (bool, error)
 	Acquire(ctx context.Context, requestID int64) error
 	StartOne(ctx context.Context, requestID int64) error
+	StartAssigned(ctx context.Context) error
 }
 
 type demandKey struct {
@@ -51,6 +52,12 @@ type Coordinator struct {
 	store      DemandStore
 	workers    map[string]RepositoryWorker
 	mutex      sync.Mutex
+}
+
+type AssignedReconciliation struct {
+	AssignedJobs   int
+	RunningRunners int
+	StartedRunners int
 }
 
 func NewCoordinator(maxRunners int) *Coordinator {
@@ -115,6 +122,41 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 		return err
 	}
 	return coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount)
+}
+
+// ReconcileAssigned starts enough identity-free runners for one repository's
+// assigned-job statistic without exceeding shared scale-set capacity.
+func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repository string, assignedJobs int) (AssignedReconciliation, error) {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	worker := coordinator.workers[repository]
+	if worker == nil {
+		return AssignedReconciliation{AssignedJobs: assignedJobs}, nil
+	}
+	runningCount := 0
+	repositoryRunningCount := 0
+	for workerRepository, repositoryWorker := range coordinator.workers {
+		workerRunningCount, err := repositoryWorker.Running(ctx)
+		if err != nil {
+			return AssignedReconciliation{}, fmt.Errorf("count runners for repository %q: %w", workerRepository, err)
+		}
+		runningCount += workerRunningCount
+		if workerRepository == repository {
+			repositoryRunningCount = workerRunningCount
+		}
+	}
+	missingAssignedRunners := assignedJobs - repositoryRunningCount
+	availableCapacity := coordinator.maxRunners - runningCount
+	result := AssignedReconciliation{AssignedJobs: assignedJobs, RunningRunners: repositoryRunningCount}
+	for missingAssignedRunners > 0 && availableCapacity > 0 {
+		if err := worker.StartAssigned(ctx); err != nil {
+			return AssignedReconciliation{}, fmt.Errorf("start assigned runner for repository %q: %w", repository, err)
+		}
+		missingAssignedRunners--
+		availableCapacity--
+		result.StartedRunners++
+	}
+	return result, nil
 }
 
 func (coordinator *Coordinator) removeRecoveredDemand(ctx context.Context, orderedDemand []QueuedDemand) ([]QueuedDemand, error) {
