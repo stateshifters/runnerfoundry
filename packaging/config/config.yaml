@@ -7,6 +7,9 @@ github:
 log:
   format: text
 
+state:
+  path: /var/lib/github-scaler/state.db
+
 prune: false
 
 scale_sets: []

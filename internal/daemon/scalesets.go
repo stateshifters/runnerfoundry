@@ -237,6 +237,10 @@ func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, err
 	return runningCount, nil
 }
 
+func (worker coordinatedRepositoryWorker) Exists(ctx context.Context, requestID int64) (bool, error) {
+	return worker.Reconciler.Exists(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID))
+}
+
 func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID int64) error {
 	if err := worker.MessageClient.Acquire(ctx, requestID); err != nil {
 		return err
@@ -246,7 +250,7 @@ func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID
 }
 
 func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context, requestID int64) error {
-	if err := worker.Reconciler.StartOne(ctx); err != nil {
+	if err := worker.Reconciler.StartNamed(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID)); err != nil {
 		return fmt.Errorf("start repository runner: %w", err)
 	}
 	effectiveLogger(worker.Logger).Info("runner started", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)
@@ -451,9 +455,11 @@ type coordinatedScaleSetHandler struct {
 }
 
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
+	observedDemand := make([]scaler.JobDemand, 0, len(message.JobAvailableMessages)+len(message.JobAssignedMessages))
+	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobCompletedMessages))
 	for _, availableJob := range message.JobAvailableMessages {
 		handler.logDemand("available", availableJob.RunnerRequestID, availableJob.QueueTime)
-		handler.Coordinator.Observe(scaler.JobDemand{
+		observedDemand = append(observedDemand, scaler.JobDemand{
 			RequestID:  availableJob.RunnerRequestID,
 			Repository: handler.Repository,
 			QueueTime:  availableJob.QueueTime,
@@ -461,7 +467,7 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	}
 	for _, assignedJob := range message.JobAssignedMessages {
 		handler.logDemand("assigned", assignedJob.RunnerRequestID, assignedJob.QueueTime)
-		handler.Coordinator.Observe(scaler.JobDemand{
+		observedDemand = append(observedDemand, scaler.JobDemand{
 			RequestID:  assignedJob.RunnerRequestID,
 			Repository: handler.Repository,
 			QueueTime:  assignedJob.QueueTime,
@@ -469,8 +475,11 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 		})
 	}
 	for _, completedJob := range message.JobCompletedMessages {
-		handler.Coordinator.Remove(handler.Repository, completedJob.RunnerRequestID)
+		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: completedJob.RunnerRequestID})
 		effectiveLogger(handler.Logger).Info("job demand removed", append(jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID), slog.String("status", "completed"))...)
+	}
+	if err := handler.Coordinator.Apply(ctx, observedDemand, removedDemand); err != nil {
+		return fmt.Errorf("persist GitHub job demand: %w", err)
 	}
 	if err := handler.Coordinator.Schedule(ctx); err != nil {
 		return fmt.Errorf("schedule shared runner capacity: %w", err)

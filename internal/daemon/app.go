@@ -31,6 +31,7 @@ type runtime struct {
 	NewDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
 	NewGitHubClient func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
 	NewLogger       func(format string) *slog.Logger
+	OpenDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
 	Notifier        serviceNotifier
 	StartScaleSet   func(
 		ctx context.Context,
@@ -66,6 +67,8 @@ type activeConfiguration struct {
 	Coordinators          map[string]*scaler.Coordinator
 	Repositories          map[string]managedRepository
 	Logger                *slog.Logger
+	DemandStore           scaler.DemandStore
+	StateCloser           io.Closer
 	ReconciliationPending bool
 }
 
@@ -83,7 +86,11 @@ func productionRuntime() runtime {
 			return newGitHubClient(repositoryURL, installationID, credentials)
 		},
 		NewLogger: newLogger,
-		Notifier:  systemdNotifier{},
+		OpenDemandStore: func(path string) (scaler.DemandStore, io.Closer, error) {
+			store, err := scaler.OpenSQLiteDemandStore(path)
+			return store, store, err
+		},
+		Notifier: systemdNotifier{},
 		StartScaleSet: func(
 			ctx context.Context,
 			logger *slog.Logger,
@@ -99,12 +106,13 @@ func productionRuntime() runtime {
 	}
 }
 
-func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) error {
+func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) (runErr error) {
 	daemonRuntime = withRuntimeDefaults(daemonRuntime)
 	activeConfig, err := loadConfiguration(options.ConfigPath, daemonRuntime)
 	if err != nil {
 		return err
 	}
+	defer func() { runErr = errors.Join(runErr, activeConfig.StateCloser.Close()) }()
 	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
 	if err != nil {
 		return fmt.Errorf("load discovery interval: %w", err)
@@ -177,10 +185,20 @@ func withRuntimeDefaults(daemonRuntime runtime) runtime {
 	if daemonRuntime.ReconciliationRetryDelay == 0 {
 		daemonRuntime.ReconciliationRetryDelay = pollRetryDelay
 	}
+	if daemonRuntime.OpenDemandStore == nil {
+		daemonRuntime.OpenDemandStore = func(string) (scaler.DemandStore, io.Closer, error) {
+			return scaler.NewMemoryDemandStore(), noOpCloser{}, nil
+		}
+	}
 	return daemonRuntime
 }
 
+type noOpCloser struct{}
+
+func (noOpCloser) Close() error { return nil }
+
 func loadConfiguration(configPath string, daemonRuntime runtime) (activeConfiguration, error) {
+	daemonRuntime = withRuntimeDefaults(daemonRuntime)
 	loadedConfig, err := daemonRuntime.LoadConfig(configPath)
 	if err != nil {
 		return activeConfiguration{}, err
@@ -193,21 +211,27 @@ func loadConfiguration(configPath string, daemonRuntime runtime) (activeConfigur
 	if err != nil {
 		return activeConfiguration{}, fmt.Errorf("create repository discoverer: %w", err)
 	}
+	demandStore, stateCloser, err := daemonRuntime.OpenDemandStore(loadedConfig.State.Path)
+	if err != nil {
+		return activeConfiguration{}, fmt.Errorf("open durable state: %w", err)
+	}
 	activeConfig := activeConfiguration{
 		Config:       loadedConfig,
 		Credentials:  credentials,
 		Discoverer:   discoverer,
-		Coordinators: coordinators(loadedConfig.ScaleSets),
+		Coordinators: coordinators(loadedConfig.ScaleSets, demandStore),
 		Repositories: map[string]managedRepository{},
 		Logger:       daemonRuntime.NewLogger(loadedConfig.Log.Format),
+		DemandStore:  demandStore,
+		StateCloser:  stateCloser,
 	}
 	return activeConfig, nil
 }
 
-func coordinators(scaleSets []config.ScaleSetConfig) map[string]*scaler.Coordinator {
+func coordinators(scaleSets []config.ScaleSetConfig, store scaler.DemandStore) map[string]*scaler.Coordinator {
 	result := make(map[string]*scaler.Coordinator, len(scaleSets))
 	for _, scaleSetConfig := range scaleSets {
-		result[scaleSetConfig.Name] = scaler.NewCoordinator(scaleSetConfig.MaxRunners)
+		result[scaleSetConfig.Name] = scaler.NewDurableCoordinator(scaleSetConfig.Name, scaleSetConfig.MaxRunners, store)
 	}
 	return result
 }
@@ -379,7 +403,7 @@ func rollbackRepositoryStartup(
 ) error {
 	var rollbackErr error
 	for scaleSetName, lifecycle := range repository.Lifecycles {
-		activeConfig.Coordinators[scaleSetName].RemoveRepository(repositoryURL)
+		rollbackErr = errors.Join(rollbackErr, activeConfig.Coordinators[scaleSetName].RemoveRepository(context.WithoutCancel(ctx), repositoryURL))
 		lifecycle.StopPolling()
 		rollbackErr = errors.Join(rollbackErr, lifecycle.DestroyActive(context.WithoutCancel(ctx)))
 		rollbackErr = errors.Join(rollbackErr, lifecycle.Shutdown(context.WithoutCancel(ctx)))
@@ -397,7 +421,9 @@ func removeRepositoryImmediately(
 	repository managedRepository,
 ) error {
 	for scaleSetName, lifecycle := range repository.Lifecycles {
-		activeConfig.Coordinators[scaleSetName].RemoveRepository(repositoryURL)
+		if err := activeConfig.Coordinators[scaleSetName].RemoveRepository(context.WithoutCancel(ctx), repositoryURL); err != nil {
+			return fmt.Errorf("remove repository %q queued demand: %w", repositoryURL, err)
+		}
 		lifecycle.StopPolling()
 		cleanupErr := lifecycle.DestroyActive(context.WithoutCancel(ctx))
 		shutdownErr := lifecycle.Shutdown(context.WithoutCancel(ctx))
@@ -418,7 +444,14 @@ func reloadConfiguration(
 	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
 		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
-	reloaded, err := loadConfiguration(configPath, daemonRuntime)
+	reloadRuntime := daemonRuntime
+	reloadRuntime.OpenDemandStore = func(path string) (scaler.DemandStore, io.Closer, error) {
+		if path != activeConfig.Config.State.Path {
+			return nil, nil, errors.New("state.path cannot change during reload; restart the daemon")
+		}
+		return activeConfig.DemandStore, noOpCloser{}, nil
+	}
+	reloaded, err := loadConfiguration(configPath, reloadRuntime)
 	if err != nil {
 		return activeConfiguration{}, err
 	}
@@ -431,6 +464,17 @@ func reloadConfiguration(
 	}
 	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
 		return activeConfiguration{}, err
+	}
+	configuredScaleSets := map[string]bool{}
+	for _, scaleSetConfig := range reloaded.Config.ScaleSets {
+		configuredScaleSets[scaleSetConfig.Name] = true
+	}
+	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+		if !configuredScaleSets[scaleSetConfig.Name] {
+			if err := activeConfig.DemandStore.RemoveScaleSet(ctx, scaleSetConfig.Name); err != nil {
+				return activeConfiguration{}, err
+			}
+		}
 	}
 	return reloaded, nil
 }

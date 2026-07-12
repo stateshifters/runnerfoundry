@@ -16,8 +16,13 @@ const defaultDiscoveryInterval = "5m"
 type Config struct {
 	GitHub    GitHubConfig     `yaml:"github"`
 	Log       LogConfig        `yaml:"log"`
+	State     StateConfig      `yaml:"state"`
 	Prune     bool             `yaml:"prune"`
 	ScaleSets []ScaleSetConfig `yaml:"scale_sets"`
+}
+
+type StateConfig struct {
+	Path string `yaml:"path"`
 }
 
 type GitHubConfig struct {
@@ -89,6 +94,9 @@ func (loadedConfig *Config) Validate() error {
 	}
 	if loadedConfig.Log.Format != "text" && loadedConfig.Log.Format != "json" {
 		return fmt.Errorf("unsupported log.format %q", loadedConfig.Log.Format)
+	}
+	if strings.TrimSpace(loadedConfig.State.Path) == "" {
+		return errors.New("state.path is required")
 	}
 	return loadedConfig.validateScaleSets()
 }

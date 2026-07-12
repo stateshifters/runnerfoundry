@@ -67,6 +67,14 @@ func (reconciler Reconciler) Running(ctx context.Context) (int, error) {
 }
 
 func (reconciler Reconciler) StartOne(ctx context.Context) error {
+	return reconciler.startOne(ctx, "")
+}
+
+func (reconciler Reconciler) StartNamed(ctx context.Context, runnerName string) error {
+	return reconciler.startOne(ctx, runnerName)
+}
+
+func (reconciler Reconciler) startOne(ctx context.Context, runnerName string) error {
 	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
 	if err != nil {
 		return fmt.Errorf("list runner instances: %w", err)
@@ -78,7 +86,24 @@ func (reconciler Reconciler) StartOne(ctx context.Context) error {
 	if runningCount >= reconciler.ScaleSet.MaxRunners {
 		return nil
 	}
+	if runnerName != "" {
+		usedRunnerNames[runnerName] = true
+		return reconciler.startRunner(ctx, runnerName)
+	}
 	return reconciler.startMissingRunners(ctx, runningCount, runningCount+1, usedRunnerNames)
+}
+
+func (reconciler Reconciler) Exists(ctx context.Context, runnerName string) (bool, error) {
+	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
+	if err != nil {
+		return false, fmt.Errorf("list runner instances: %w", err)
+	}
+	for _, instance := range instances {
+		if instance.RunnerName == runnerName && instance.State == RunnerStateRunning {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (reconciler Reconciler) DestroyActive(ctx context.Context) error {
@@ -159,20 +184,27 @@ func (reconciler Reconciler) startMissingRunners(ctx context.Context, runningCou
 	nextRunnerIndex := 1
 	for runnerIndex := runningCount; runnerIndex < desiredCount; runnerIndex++ {
 		runnerName := reconciler.nextRunnerName(usedRunnerNames, &nextRunnerIndex)
-		jitConfig, err := reconciler.ScaleSet.JITConfig.Generate(ctx, runnerName)
-		if err != nil {
-			return fmt.Errorf("generate jit config for %q: %w", runnerName, err)
+		if err := reconciler.startRunner(ctx, runnerName); err != nil {
+			return err
 		}
-		if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
-			ScaleSetName: reconciler.ScaleSet.Name,
-			RunnerName:   runnerName,
-			JITConfig:    jitConfig.JITConfig,
-		}); err != nil {
-			if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner); removeErr != nil {
-				return fmt.Errorf("start runner %q: %w; remove github runner: %w", runnerName, err, removeErr)
-			}
-			return fmt.Errorf("start runner %q: %w", runnerName, err)
+	}
+	return nil
+}
+
+func (reconciler Reconciler) startRunner(ctx context.Context, runnerName string) error {
+	jitConfig, err := reconciler.ScaleSet.JITConfig.Generate(ctx, runnerName)
+	if err != nil {
+		return fmt.Errorf("generate jit config for %q: %w", runnerName, err)
+	}
+	if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
+		ScaleSetName: reconciler.ScaleSet.Name,
+		RunnerName:   runnerName,
+		JITConfig:    jitConfig.JITConfig,
+	}); err != nil {
+		if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner); removeErr != nil {
+			return fmt.Errorf("start runner %q: %w; remove github runner: %w", runnerName, err, removeErr)
 		}
+		return fmt.Errorf("start runner %q: %w", runnerName, err)
 	}
 	return nil
 }

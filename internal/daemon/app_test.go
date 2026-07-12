@@ -267,7 +267,7 @@ func TestDrainConfigurationWaitsForActiveRunnerAndSurfacesFailures(t *testing.T)
 func TestLoadConfigReadsValidatedFileAndLoggerFormats(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	configText := "github:\n  app:\n    app_id: 1\n    private_key_file: " + loadedConfig.GitHub.App.PrivateKeyFile + "\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"
+	configText := "github:\n  app:\n    app_id: 1\n    private_key_file: " + loadedConfig.GitHub.App.PrivateKeyFile + "\nstate:\n  path: state.db\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -508,6 +508,89 @@ func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 	if _, err := reloadConfiguration(context.Background(), "config", runtime{Notifier: failingNotifier{reloadErr: errors.New("reload failed")}}, activeConfig); err == nil {
 		t.Fatal("expected reload notification failure")
 	}
+}
+
+func TestDurableStateLifecycleFailuresRemainExplicit(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.State.Path = "replacement.db"
+	baseRuntime := runtime{
+		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
+		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		Notifier:      noopNotifier{}, DrainInterval: time.Millisecond,
+	}
+	if _, err := reloadConfiguration(context.Background(), "config", baseRuntime, testActiveConfiguration()); err == nil {
+		t.Fatal("expected reload state path rejection")
+	}
+	openFailureRuntime := baseRuntime
+	openFailureRuntime.OpenDemandStore = func(string) (scaler.DemandStore, io.Closer, error) { return nil, nil, errors.New("open failed") }
+	if _, err := loadConfiguration("config", openFailureRuntime); err == nil {
+		t.Fatal("expected durable state open failure")
+	}
+
+	production := productionRuntime()
+	store, closer, err := production.OpenDemandStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil || store == nil {
+		t.Fatalf("expected production state store, got %v", err)
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storeFailure := &recordingAppDemandStore{removeRepositoryErr: errors.New("remove failed")}
+	active := testActiveConfiguration()
+	active.Coordinators["linux"] = scaler.NewDurableCoordinator("linux", 1, storeFailure)
+	active.Coordinators["linux"].AddRepository("repo", coordinatedRepositoryWorker{})
+	if err := removeRepositoryImmediately(context.Background(), &active, "repo", managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": inertLifecycle()}}); err == nil {
+		t.Fatal("expected repository state removal failure")
+	}
+}
+
+func TestReloadPurgesRemovedScaleSetDemand(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Name = "replacement"
+	store := &recordingAppDemandStore{}
+	active := testActiveConfiguration()
+	active.DemandStore = store
+	active.Config.State.Path = loadedConfig.State.Path
+	baseRuntime := runtime{
+		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
+		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		Notifier:      noopNotifier{}, DrainInterval: time.Millisecond,
+	}
+	if _, err := reloadConfiguration(context.Background(), "config", baseRuntime, active); err != nil {
+		t.Fatal(err)
+	}
+	if store.removedScaleSet != "linux" {
+		t.Fatalf("expected old scale set purge, got %q", store.removedScaleSet)
+	}
+	store.removeScaleSetErr = errors.New("remove failed")
+	if _, err := reloadConfiguration(context.Background(), "config", baseRuntime, active); err == nil {
+		t.Fatal("expected scale set purge failure")
+	}
+}
+
+type recordingAppDemandStore struct {
+	removedScaleSet     string
+	removeScaleSetErr   error
+	removeRepositoryErr error
+}
+
+func (store *recordingAppDemandStore) Apply(context.Context, string, []scaler.JobDemand, []scaler.DemandRemoval) error {
+	return nil
+}
+func (store *recordingAppDemandStore) RemoveRepository(context.Context, string, string) error {
+	return store.removeRepositoryErr
+}
+func (store *recordingAppDemandStore) RemoveScaleSet(_ context.Context, scaleSet string) error {
+	store.removedScaleSet = scaleSet
+	return store.removeScaleSetErr
+}
+func (store *recordingAppDemandStore) Ordered(context.Context, string) ([]scaler.QueuedDemand, error) {
+	return nil, nil
+}
+func (store *recordingAppDemandStore) Delete(context.Context, string, string, int64) error {
+	return nil
 }
 
 func TestReloadConfigurationSurfacesDrainShutdownReplacementAndReadyFailures(t *testing.T) {

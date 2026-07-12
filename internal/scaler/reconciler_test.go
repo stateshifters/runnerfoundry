@@ -256,6 +256,29 @@ func TestReconcilerRepositoryWorkerCountsRecoveredRunnersAndStartsOne(t *testing
 	}
 }
 
+func TestReconcilerStartsAndFindsNamedRunner(t *testing.T) {
+	provider := &recordingProvider{instances: []RunnerInstance{{RunnerName: "linux-42", State: RunnerStateRunning}}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "linux", MaxRunners: 2, Provider: provider, JITConfig: &recordingJITGenerator{}}}
+	exists, err := reconciler.Exists(context.Background(), "linux-42")
+	if err != nil || !exists {
+		t.Fatalf("expected named runner, got %t, %v", exists, err)
+	}
+	exists, err = reconciler.Exists(context.Background(), "missing")
+	if err != nil || exists {
+		t.Fatalf("expected missing runner, got %t, %v", exists, err)
+	}
+	provider.instances = nil
+	if err := reconciler.StartNamed(context.Background(), "linux-42"); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.created) != 1 || provider.created[0].RunnerName != "linux-42" {
+		t.Fatalf("expected stable runner name, got %#v", provider.created)
+	}
+	if _, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "linux", Provider: failingProvider{failure: "list"}}}).Exists(context.Background(), "linux-42"); err == nil {
+		t.Fatal("expected exists failure")
+	}
+}
+
 func TestReconcilerDestroysActiveRunnersOnImmediateRemoval(t *testing.T) {
 	provider := &recordingProvider{instances: []RunnerInstance{
 		{RunnerName: "running", State: RunnerStateRunning},

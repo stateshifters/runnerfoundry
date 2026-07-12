@@ -635,6 +635,29 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenSchedulingFails(t *
 	}
 }
 
+func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t *testing.T) {
+	coordinator := scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "persist GitHub job demand") {
+		t.Fatalf("expected persistence failure, got %v", err)
+	}
+}
+
+type failingDaemonDemandStore struct{}
+
+func (failingDaemonDemandStore) Apply(context.Context, string, []scaler.JobDemand, []scaler.DemandRemoval) error {
+	return errors.New("persist failed")
+}
+func (failingDaemonDemandStore) RemoveRepository(context.Context, string, string) error { return nil }
+func (failingDaemonDemandStore) RemoveScaleSet(context.Context, string) error           { return nil }
+func (failingDaemonDemandStore) Ordered(context.Context, string) ([]scaler.QueuedDemand, error) {
+	return nil, nil
+}
+func (failingDaemonDemandStore) Delete(context.Context, string, string, int64) error { return nil }
+
 func TestScaleSetMessageClientRequiresConfirmedJobAcquisition(t *testing.T) {
 	if err := (scaleSetMessageClient{Client: &blockingMessageClient{}}).Acquire(context.Background(), 1); err == nil {
 		t.Fatal("expected unsupported acquisition error")

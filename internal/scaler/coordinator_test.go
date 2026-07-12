@@ -77,7 +77,9 @@ func TestCoordinatorRemovesRepositoryDemand(t *testing.T) {
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("removed", worker)
 	coordinator.Observe(JobDemand{RequestID: 1, Repository: "removed", QueueTime: time.Now()})
-	coordinator.RemoveRepository("removed")
+	if err := coordinator.RemoveRepository(context.Background(), "removed"); err != nil {
+		t.Fatal(err)
+	}
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,9 @@ func TestCoordinatorSurfacesWorkerFailuresAndSkipsRemovedWorkers(t *testing.T) {
 	if err := coordinator.Schedule(context.Background()); err == nil {
 		t.Fatal("expected running count failure")
 	}
-	coordinator.RemoveRepository("count-fails")
+	if err := coordinator.RemoveRepository(context.Background(), "count-fails"); err != nil {
+		t.Fatal(err)
+	}
 	coordinator.Observe(JobDemand{RequestID: 1, Repository: "removed", QueueTime: time.Now()})
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatalf("expected removed worker demand to be skipped, got %v", err)
@@ -134,11 +138,84 @@ func TestCoordinatorUsesObservationOrderForEqualQueueTimes(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
+	store := newMemoryDemandStore()
+	worker := &recordingWorker{existingRequestID: 42}
+	coordinator := NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Apply(context.Background(), []JobDemand{{Repository: "repo", RequestID: 42, QueueTime: time.Now()}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.acquired) != 0 {
+		t.Fatalf("expected existing runner to complete recovery, got %#v", worker.acquired)
+	}
+}
+
+func TestCoordinatorReportsRecoveryFailure(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	coordinator.AddRepository("repo", failingWorker{existsErr: errors.New("inspect failed")})
+	coordinator.Observe(JobDemand{Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+	if err := coordinator.Schedule(context.Background()); err == nil {
+		t.Fatal("expected recovery failure")
+	}
+	store := NewMemoryDemandStore()
+	if err := store.RemoveScaleSet(context.Background(), "linux"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoordinatorReportsDurableStoreFailures(t *testing.T) {
+	ctx := context.Background()
+	tests := map[string]*failingDemandStore{
+		"load":                {orderedErr: errors.New("load failed")},
+		"recover delete":      {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1}}}, deleteErr: errors.New("delete failed")},
+		"persist acquisition": {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1}}}, applyErr: errors.New("apply failed")},
+		"complete admission":  {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1, Acquired: true}}}, deleteErr: errors.New("delete failed")},
+	}
+	for name, store := range tests {
+		t.Run(name, func(t *testing.T) {
+			coordinator := NewDurableCoordinator("linux", 1, store)
+			startOrder := []string{}
+			worker := &recordingWorker{startOrder: &startOrder}
+			if name == "recover delete" {
+				worker.existingRequestID = 1
+			}
+			coordinator.AddRepository("repo", worker)
+			if err := coordinator.Schedule(ctx); err == nil {
+				t.Fatal("expected durable store failure")
+			}
+		})
+	}
+}
+
+type failingDemandStore struct {
+	demand     []QueuedDemand
+	orderedErr error
+	applyErr   error
+	deleteErr  error
+}
+
+func (store *failingDemandStore) Apply(context.Context, string, []JobDemand, []DemandRemoval) error {
+	return store.applyErr
+}
+func (store *failingDemandStore) RemoveRepository(context.Context, string, string) error { return nil }
+func (store *failingDemandStore) RemoveScaleSet(context.Context, string) error           { return nil }
+func (store *failingDemandStore) Ordered(context.Context, string) ([]QueuedDemand, error) {
+	return store.demand, store.orderedErr
+}
+func (store *failingDemandStore) Delete(context.Context, string, string, int64) error {
+	return store.deleteErr
+}
+
 type recordingWorker struct {
-	repository string
-	running    int
-	startOrder *[]string
-	acquired   []int64
+	repository        string
+	running           int
+	startOrder        *[]string
+	acquired          []int64
+	existingRequestID int64
 }
 
 func (worker *recordingWorker) Acquire(_ context.Context, requestID int64) error {
@@ -150,14 +227,21 @@ type failingWorker struct {
 	runningErr error
 	acquireErr error
 	startErr   error
+	existsErr  error
 }
 
-func (worker failingWorker) Running(context.Context) (int, error)  { return 0, worker.runningErr }
+func (worker failingWorker) Running(context.Context) (int, error) { return 0, worker.runningErr }
+func (worker failingWorker) Exists(context.Context, int64) (bool, error) {
+	return false, worker.existsErr
+}
 func (worker failingWorker) Acquire(context.Context, int64) error  { return worker.acquireErr }
 func (worker failingWorker) StartOne(context.Context, int64) error { return worker.startErr }
 
 func (worker *recordingWorker) Running(context.Context) (int, error) {
 	return worker.running, nil
+}
+func (worker *recordingWorker) Exists(_ context.Context, requestID int64) (bool, error) {
+	return requestID == worker.existingRequestID, nil
 }
 
 func (worker *recordingWorker) StartOne(context.Context, int64) error {

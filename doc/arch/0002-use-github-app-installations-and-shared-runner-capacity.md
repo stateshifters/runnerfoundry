@@ -4,7 +4,7 @@ Date: 2026-07-11
 
 ## Status
 
-Accepted
+Superseded by [3. Persist shared queue state in SQLite](0003-persist-shared-queue-state-in-sqlite.md)
 
 ## Context
 

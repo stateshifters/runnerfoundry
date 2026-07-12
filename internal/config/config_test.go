@@ -53,6 +53,7 @@ func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 		"invalid discovery interval": strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: soon\n", 1),
 		"short discovery interval":   strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: 59s\n", 1),
 		"bad log format":             strings.Replace(validConfig(privateKeyPath), "log:\n  format: json", "log:\n  format: xml", 1),
+		"missing state path":         strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "", 1),
 		"missing scale sets":         strings.Split(validConfig(privateKeyPath), "scale_sets:")[0],
 		"missing scale set name":     baseConfig(privateKeyPath, "  - max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
 		"duplicate scale set name":   baseConfig(privateKeyPath, validScaleSet("repeated")+validScaleSet("repeated")),
@@ -131,12 +132,14 @@ github:
 log:
   format: json
 prune: true
+state:
+  path: state.db
 scale_sets:
 ` + validScaleSet("docker-set")
 }
 
 func baseConfig(privateKeyPath string, scaleSets string) string {
-	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nscale_sets:\n" + scaleSets
+	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + scaleSets
 }
 
 func validScaleSet(name string) string {

@@ -4,7 +4,7 @@
 
 It is using GitHub's new [Scaleset library](https://github.com/actions/scaleset)
 
-The current version supports Docker Compose and libvirt providers. The daemon polls Github for scale-set messages, generates JIT configs, and starts ephemeral runners in the configured provider. It does not store any local state or secrets.
+The current version supports Docker Compose and libvirt providers. The daemon polls Github for scale-set messages, stores waiting demand in SQLite, generates JIT configs, and starts ephemeral runners in the configured provider. It does not store Github credentials or JIT secrets in the database.
 
 :::notice
 Libvirt support is for unix only. Windows hosts can only use Docker Compose.
@@ -23,6 +23,9 @@ github:
 
 log:
   format: text
+
+state:
+  path: /var/lib/github-scaler/state.db
 
 prune: true
 
@@ -46,7 +49,9 @@ Create a Github App with repository administration access for self-hosted runner
 
 Set `github.app.app_id` to the numeric App ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
 
-Each scale-set definition is created in every discovered repository. `max_runners` is one shared limit across all installations and repositories for that definition, not a per-repository limit. Jobs are admitted by Github queue time. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. FIFO ordering is held in memory and resets when the daemon restarts.
+Each scale-set definition is created in every discovered repository. `max_runners` is one shared limit across all installations and repositories for that definition, not a per-repository limit. Jobs are admitted by Github queue time. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. FIFO ordering survives daemon restarts and reloads through the configured SQLite database.
+
+`state.path` is required and should be an absolute path in production. Only one daemon may open a state database. Changing the path requires a restart; reload rejects the replacement configuration. Put the database on durable storage if a replacement host must resume queued work. Back up or migrate the database only while the service is stopped.
 
 `max_runners` must be greater than zero; omit a scale set instead of setting zero capacity.
 
@@ -69,8 +74,9 @@ The package installs:
 - `/usr/bin/github-scaler`
 - `/lib/systemd/system/github-scaler.service`
 - `/etc/github-scaler/config.yaml`
+- `/var/lib/github-scaler` for durable queue state
 
-Package installation creates the `github-scaler` service user and reloads systemd units. It does not enable or start the daemon because the config and token must be set first.
+Package installation creates the `github-scaler` service user and its state directory, then reloads systemd units. It does not enable or start the daemon because the config and credentials must be set first. Package upgrades, reinstalls, and `apt remove` preserve `/var/lib/github-scaler/state.db`. `apt purge github-scaler` removes the package-managed database and its sidecars. A custom `state.path` remains operator-managed and is not deleted by purge.
 
 If the configured providers require host group access, add the service user to those groups before starting the daemon:
 
@@ -128,11 +134,12 @@ Create the config directory and store the App private key outside the YAML:
 
 ```sh
 sudo install -d -m 0750 -o root -g github-scaler /etc/github-scaler
+sudo install -d -m 0750 -o github-scaler -g github-scaler /var/lib/github-scaler
 sudo install -m 0640 -o root -g github-scaler config.yaml /etc/github-scaler/config.yaml
 sudo install -m 0640 -o root -g github-scaler github-app.pem /etc/github-scaler/github-app.pem
 ```
 
-Use absolute paths inside `/etc/github-scaler/config.yaml`, especially for Docker Compose files and libvirt XML templates. The daemon has no required working directory and stores no local state.
+Use absolute paths inside `/etc/github-scaler/config.yaml`, especially for the SQLite state database, Docker Compose files, and libvirt XML templates. The daemon has no required working directory.
 
 Create `/etc/systemd/system/github-scaler.service`:
 
@@ -214,7 +221,7 @@ For each scale-set definition, the daemon:
 - generates one JIT config when shared capacity is available
 - acknowledges Github messages only after local handling succeeds
 
-The daemon stores no local database. Runner recovery comes from Github messages plus provider-visible Docker labels/names and libvirt metadata. Queue ordering starts fresh after restart.
+The daemon commits Github demand to SQLite before acknowledging its message. Runner recovery combines that durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate Github delivery updates the existing request rather than adding another queue entry.
 
 When installation access is removed, the daemon immediately drops queued demand, destroys active local runners, closes the message sessions, and attempts to unregister the affected scale sets. This can interrupt active jobs. On normal shutdown, active jobs are left running while message sessions close and scale sets unregister.
 
