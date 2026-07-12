@@ -1,0 +1,48 @@
+name: Security Scan
+on:
+  pull_request: {}
+
+jobs:
+  osv:
+    name: OSV Scan
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Run OSV Scan
+        run: |
+          osv-scanner --recursive --json osv-results.json .
+
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: osv-results
+          path: 'osv-results.json'
+
+  semgrep:
+    name: Semgrep Scan
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Run Semgrep Scan
+        run: |
+          semgrep scan \
+            --config p/default \
+            --metrics off \
+            --error \
+            --strict \
+            --verbose \
+            --matching-explanations \
+            --json-output semgrep-results.json \
+            .
+
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: semgrep-results
+          path: 'semgrep-results.json'
