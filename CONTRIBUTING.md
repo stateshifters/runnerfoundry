@@ -69,4 +69,5 @@ go vet ./...
 gofmt -l $(find . -name '*.go')
 ```
 
-The coverage total must report `100.0%`.
+- The coverage total must report `100.0%`.
+- The code must not use build tags with the only exception being the `ruleguard/rules-team.go` file.

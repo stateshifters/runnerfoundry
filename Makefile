@@ -9,42 +9,40 @@ VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN := go1.26.4
 
-.PHONY: fmt-check lint lint-config lint-fix vet test test-race coverage build smoke notices sbom package-deb prepare clean
-
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
+override SHELL := pwsh.exe
+.SHELLFLAGS := -NoLogo -NoProfile -Command
+MKDIR := New-Item -ItemType Directory -Force -Path
+REMOVE_DIR := Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path
 else
 OSFAMILY := Unix
+override SHELL := bash
+.SHELLFLAGS := -c
+MKDIR := mkdir -p
+REMOVE_DIR := rm -rf
 endif
+
+.PHONY: fmt-check lint lint-config lint-fix vet test test-race coverage build smoke notices sbom package-deb prepare clean
 
 fmt-check:
+	gofmt -l . > gofmt.out
 ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$files = gofmt -l .; if ($$files) { Write-Host 'Run gofmt on:'; $$files; exit 1 }"
+	@$$files = Get-Content gofmt.out; Remove-Item gofmt.out; if ($$files) { Write-Host 'Run gofmt on:'; $$files; exit 1 }
 else
-	@files=$$(gofmt -l $$(find . -name '*.go')); if [ -n "$$files" ]; then echo 'Run gofmt on:'; echo "$$files"; exit 1; fi
+	@files=$$(cat gofmt.out); rm -f gofmt.out; if [ -n "$$files" ]; then echo 'Run gofmt on:'; echo "$$files"; exit 1; fi
 endif
+
+lint lint-config lint-fix: export GOTOOLCHAIN := $(GOLANGCI_LINT_TOOLCHAIN)
 
 lint: lint-config
-ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run"
-else
-	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
-endif
+	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
 
 lint-config:
-
-ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify"
-else
-	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify
-endif
+	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify
 
 lint-fix:
-ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix"
-else
-	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix
-endif
+	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix
 
 vet:
 	go vet ./...
@@ -56,76 +54,45 @@ test-race:
 	go test -race ./...
 
 coverage:
+	go test ./... -coverprofile=coverage
+	go tool cover -func=coverage > coverage.out
 ifeq ($(OSFAMILY),Windows)
-	go test ./... -coverprofile=coverage
-	@powershell -NoProfile -Command "$$total = (go tool cover -func=coverage | Select-String '^total:').ToString().Split()[-1]; if ($$total -ne '100.0%') { go tool cover -func=coverage; Write-Host \"coverage total must be 100.0%, got $$total\"; exit 1 }"
+	@$$total = (Select-String -Path coverage.out '^total:').ToString().Split()[-1]; if ($$total -ne '100.0%') { Get-Content coverage.out; Write-Host "coverage total must be 100.0%, got $$total"; exit 1 }
 else
-	go test ./... -coverprofile=coverage
-	@total=$$(go tool cover -func=coverage | awk '/^total:/ { print $$3 }'); \
-	if [ "$$total" != "100.0%" ]; then \
-		go tool cover -func=coverage; \
-		echo "coverage total must be 100.0%, got $$total"; \
-		exit 1; \
-	fi
+	@total=$$(awk '/^total:/ { print $$3 }' coverage.out); if [ "$$total" != "100.0%" ]; then cat coverage.out; echo "coverage total must be 100.0%, got $$total"; exit 1; fi
 endif
 
+build: export GOOS := linux
+build: export GOARCH := amd64
+build: export CGO_ENABLED := 0
 build:
-ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '$(BUILD_DIR)/linux/amd64' | Out-Null; $$env:GOOS='linux'; $$env:GOARCH='amd64'; $$env:CGO_ENABLED='0'; go build -o '$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)' ./cmd/github-scaler"
-else
-	mkdir -p "$(BUILD_DIR)/linux/amd64"
-	GOOS=linux GOARCH=amd64 go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/github-scaler
-endif
+	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
+	go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/github-scaler
 
 smoke: build
+	@go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; exit 0
 ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; $$exitCode=$$LASTEXITCODE; $$message=Get-Content -Raw smoke.err; Remove-Item smoke.err -ErrorAction SilentlyContinue; if ($$exitCode -eq 0) { Write-Host 'expected smoke command to fail for placeholder config'; exit 1 }; if ($$message -notmatch 'github.app.app_id must be positive') { Write-Host $$message; exit 1 }"
+	@$$message=Get-Content -Raw smoke.err; Remove-Item smoke.err -ErrorAction SilentlyContinue; if ($$message -notmatch 'github.app.app_id must be positive') { Write-Host $$message; exit 1 }
 else
-	@go run ./cmd/github-scaler --config packaging/config/config.yaml 2> smoke.err; \
-	exit_code=$$?; \
-	message=$$(cat smoke.err); \
-	rm -f smoke.err; \
-	if [ "$$exit_code" -eq 0 ]; then \
-		echo "expected smoke command to fail for placeholder config"; \
-		exit 1; \
-	fi; \
-	if ! printf '%s' "$$message" | grep -q 'github.app.app_id must be positive'; then \
-		printf '%s\n' "$$message"; \
-		exit 1; \
-	fi
+	@message=$$(cat smoke.err); rm -f smoke.err; if ! printf '%s' "$$message" | grep -q 'github.app.app_id must be positive'; then printf '%s\n' "$$message"; exit 1; fi
 endif
 
 notices:
-ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '$(METADATA_DIR)' | Out-Null; go run github.com/google/go-licenses@v1.6.0 report ./... | Out-File -FilePath '$(NOTICES_FILE)' -Encoding utf8"
-else
-	mkdir -p "$(METADATA_DIR)"
+	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
 	go run github.com/google/go-licenses@v1.6.0 report ./... > "$(NOTICES_FILE)"
-endif
 
 sbom:
-ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '$(METADATA_DIR)' | Out-Null; go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -licenses -json -output '$(SBOM_FILE)'"
-else
-	mkdir -p "$(METADATA_DIR)"
+	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
 	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -licenses -json -output "$(SBOM_FILE)"
-endif
 
+package-deb: export VERSION := $(VERSION)
 package-deb: build notices sbom
-ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(DIST_DIR)' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$(DIST_DIR)' | Out-Null; $$env:VERSION='$(VERSION)'; $(NFPM) package --packager deb --config nfpm.yaml --target '$(DIST_DIR)'"
-else
-	rm -rf "$(DIST_DIR)"
-	mkdir -p "$(DIST_DIR)"
-	VERSION="$(VERSION)" $(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
-endif
+	@$(REMOVE_DIR) "$(DIST_DIR)"
+	@$(MKDIR) "$(DIST_DIR)" > /dev/null
+	$(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
 
 prepare:
 	$(MAKE) package-deb VERSION="$(VERSION)"
 
 clean:
-ifeq ($(OSFAMILY),Windows)
-	powershell -NoProfile -Command "foreach ($$path in '$(BUILD_DIR)','$(DIST_DIR)','coverage','coverage.out') { if (Test-Path -LiteralPath $$path) { Remove-Item -Recurse -Force -LiteralPath $$path } }"
-else
-	rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" coverage coverage.out
-endif
+	@$(REMOVE_DIR) "$(BUILD_DIR)"; $(REMOVE_DIR) "$(DIST_DIR)"; $(REMOVE_DIR) coverage; $(REMOVE_DIR) coverage.out
