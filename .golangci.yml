@@ -10,10 +10,9 @@ output:
   formats:
     text:
       path: stdout
-  sort-results: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     # Correctness / reliability
     - staticcheck
@@ -185,13 +184,10 @@ linters:
     nolintlint:
       require-explanation: true
       require-specific: true
-      allow-leading-space: false
 
     revive:
       severity: warning
       confidence: 0.8
-      error-code: 0
-      warning-code: 0
       rules:
         # --- Correctness / reliability ---
         - name: atomic
@@ -305,7 +301,6 @@ linters:
           enable: receiverNameMinLength,forbidIgnoringJSONDecodeError,forbidIgnoringHTTPRequestBuildError,forbidIgnoringAtoiErrorInBoundaryParsing
 
     gosec:
-      exclude-generated: true
       severity: low
       confidence: low
       excludes:

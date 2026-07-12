@@ -139,7 +139,7 @@ func TestCoordinatorUsesObservationOrderForEqualQueueTimes(t *testing.T) {
 }
 
 func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
-	store := newMemoryDemandStore()
+	store := createMemoryDemandStore()
 	worker := &recordingWorker{existingRequestID: 42}
 	coordinator := NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", worker)

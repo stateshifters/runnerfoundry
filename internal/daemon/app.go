@@ -88,7 +88,10 @@ func productionRuntime() runtime {
 		NewLogger: newLogger,
 		OpenDemandStore: func(path string) (scaler.DemandStore, io.Closer, error) {
 			store, err := scaler.OpenSQLiteDemandStore(path)
-			return store, store, err
+			if err != nil {
+				return nil, nil, fmt.Errorf("open SQLite demand store: %w", err)
+			}
+			return store, store, nil
 		},
 		Notifier: systemdNotifier{},
 		StartScaleSet: func(
@@ -444,13 +447,7 @@ func reloadConfiguration(
 	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
 		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
-	reloadRuntime := daemonRuntime
-	reloadRuntime.OpenDemandStore = func(path string) (scaler.DemandStore, io.Closer, error) {
-		if path != activeConfig.Config.State.Path {
-			return nil, nil, errors.New("state.path cannot change during reload; restart the daemon")
-		}
-		return activeConfig.DemandStore, noOpCloser{}, nil
-	}
+	reloadRuntime := runtimeForReload(daemonRuntime, activeConfig)
 	reloaded, err := loadConfiguration(configPath, reloadRuntime)
 	if err != nil {
 		return activeConfiguration{}, err
@@ -465,6 +462,24 @@ func reloadConfiguration(
 	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
 		return activeConfiguration{}, err
 	}
+	if err := removeUnconfiguredScaleSets(ctx, activeConfig, reloaded); err != nil {
+		return activeConfiguration{}, err
+	}
+	return reloaded, nil
+}
+
+func runtimeForReload(daemonRuntime runtime, activeConfig activeConfiguration) runtime {
+	reloadRuntime := daemonRuntime
+	reloadRuntime.OpenDemandStore = func(path string) (scaler.DemandStore, io.Closer, error) {
+		if path != activeConfig.Config.State.Path {
+			return nil, nil, errors.New("state.path cannot change during reload; restart the daemon")
+		}
+		return activeConfig.DemandStore, noOpCloser{}, nil
+	}
+	return reloadRuntime
+}
+
+func removeUnconfiguredScaleSets(ctx context.Context, activeConfig activeConfiguration, reloaded activeConfiguration) error {
 	configuredScaleSets := map[string]bool{}
 	for _, scaleSetConfig := range reloaded.Config.ScaleSets {
 		configuredScaleSets[scaleSetConfig.Name] = true
@@ -472,11 +487,11 @@ func reloadConfiguration(
 	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
 		if !configuredScaleSets[scaleSetConfig.Name] {
 			if err := activeConfig.DemandStore.RemoveScaleSet(ctx, scaleSetConfig.Name); err != nil {
-				return activeConfiguration{}, err
+				return fmt.Errorf("remove unconfigured scale set %q demand: %w", scaleSetConfig.Name, err)
 			}
 		}
 	}
-	return reloaded, nil
+	return nil
 }
 
 func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, interval time.Duration) error {

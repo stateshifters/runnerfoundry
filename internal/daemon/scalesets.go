@@ -238,7 +238,11 @@ func (worker coordinatedRepositoryWorker) Running(ctx context.Context) (int, err
 }
 
 func (worker coordinatedRepositoryWorker) Exists(ctx context.Context, requestID int64) (bool, error) {
-	return worker.Reconciler.Exists(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID))
+	exists, err := worker.Reconciler.Exists(ctx, fmt.Sprintf("%s-%d", worker.ScaleSet, requestID))
+	if err != nil {
+		return false, fmt.Errorf("inspect runner for request %d: %w", requestID, err)
+	}
+	return exists, nil
 }
 
 func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID int64) error {
@@ -455,6 +459,17 @@ type coordinatedScaleSetHandler struct {
 }
 
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
+	observedDemand, removedDemand := handler.collectDemand(message)
+	if err := handler.Coordinator.Apply(ctx, observedDemand, removedDemand); err != nil {
+		return fmt.Errorf("persist GitHub job demand: %w", err)
+	}
+	if err := handler.Coordinator.Schedule(ctx); err != nil {
+		return fmt.Errorf("schedule shared runner capacity: %w", err)
+	}
+	return nil
+}
+
+func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.RunnerScaleSetMessage) ([]scaler.JobDemand, []scaler.DemandRemoval) {
 	observedDemand := make([]scaler.JobDemand, 0, len(message.JobAvailableMessages)+len(message.JobAssignedMessages))
 	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobCompletedMessages))
 	for _, availableJob := range message.JobAvailableMessages {
@@ -478,13 +493,7 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: completedJob.RunnerRequestID})
 		effectiveLogger(handler.Logger).Info("job demand removed", append(jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID), slog.String("status", "completed"))...)
 	}
-	if err := handler.Coordinator.Apply(ctx, observedDemand, removedDemand); err != nil {
-		return fmt.Errorf("persist GitHub job demand: %w", err)
-	}
-	if err := handler.Coordinator.Schedule(ctx); err != nil {
-		return fmt.Errorf("schedule shared runner capacity: %w", err)
-	}
-	return nil
+	return observedDemand, removedDemand
 }
 
 func (handler coordinatedScaleSetHandler) logDemand(status string, requestID int64, queueTime time.Time) {

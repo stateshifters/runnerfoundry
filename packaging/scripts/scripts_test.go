@@ -32,7 +32,7 @@ func TestDebianStateSurvivesRemoveAndIsDeletedByPurge(t *testing.T) {
 
 func runScript(t *testing.T, root string, script string, action string) {
 	t.Helper()
-	cmd := exec.Command("sh", script, action)
+	cmd := exec.Command("sh", script, action) //nolint:gosec // Test inputs are fixed repository script names and package lifecycle actions.
 	cmd.Env = append(os.Environ(), "GITHUB_SCALER_ROOT="+root)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

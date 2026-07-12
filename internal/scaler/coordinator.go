@@ -54,7 +54,7 @@ type Coordinator struct {
 }
 
 func NewCoordinator(maxRunners int) *Coordinator {
-	return NewDurableCoordinator("", maxRunners, newMemoryDemandStore())
+	return NewDurableCoordinator("", maxRunners, createMemoryDemandStore())
 }
 
 func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *Coordinator {
@@ -76,21 +76,27 @@ func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	delete(coordinator.workers, repository)
-	return coordinator.store.RemoveRepository(ctx, coordinator.scaleSet, repository)
+	if err := coordinator.store.RemoveRepository(ctx, coordinator.scaleSet, repository); err != nil {
+		return fmt.Errorf("remove repository demand: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) Observe(demand JobDemand) {
-	_ = coordinator.Apply(context.Background(), []JobDemand{demand}, nil)
+	_ = coordinator.Apply(context.Background(), []JobDemand{demand}, nil) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
 }
 
 func (coordinator *Coordinator) Apply(ctx context.Context, observed []JobDemand, removed []DemandRemoval) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
-	return coordinator.store.Apply(ctx, coordinator.scaleSet, observed, removed)
+	if err := coordinator.store.Apply(ctx, coordinator.scaleSet, observed, removed); err != nil {
+		return fmt.Errorf("apply demand changes: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) Remove(repository string, requestID int64) {
-	_ = coordinator.Apply(context.Background(), nil, []DemandRemoval{{Repository: repository, RequestID: requestID}})
+	_ = coordinator.Apply(context.Background(), nil, []DemandRemoval{{Repository: repository, RequestID: requestID}}) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
 }
 
 func (coordinator *Coordinator) Schedule(ctx context.Context) error {
@@ -104,6 +110,14 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load queued demand: %w", err)
 	}
+	remainingDemand, err := coordinator.removeRecoveredDemand(ctx, orderedDemand)
+	if err != nil {
+		return err
+	}
+	return coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount)
+}
+
+func (coordinator *Coordinator) removeRecoveredDemand(ctx context.Context, orderedDemand []QueuedDemand) ([]QueuedDemand, error) {
 	remainingDemand := orderedDemand[:0]
 	for _, demand := range orderedDemand {
 		worker := coordinator.workers[demand.Repository]
@@ -113,16 +127,20 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 		}
 		exists, existsErr := worker.Exists(ctx, demand.RequestID)
 		if existsErr != nil {
-			return fmt.Errorf("recover runner for repository %q: %w", demand.Repository, existsErr)
+			return nil, fmt.Errorf("recover runner for repository %q: %w", demand.Repository, existsErr)
 		}
 		if !exists {
 			remainingDemand = append(remainingDemand, demand)
 			continue
 		}
 		if err := coordinator.store.Delete(ctx, coordinator.scaleSet, demand.Repository, demand.RequestID); err != nil {
-			return fmt.Errorf("complete recovered demand: %w", err)
+			return nil, fmt.Errorf("complete recovered demand: %w", err)
 		}
 	}
+	return remainingDemand, nil
+}
+
+func (coordinator *Coordinator) admitRemainingDemand(ctx context.Context, remainingDemand []QueuedDemand, runningCount int) error {
 	for _, demand := range remainingDemand {
 		if runningCount >= coordinator.maxRunners {
 			return nil
@@ -178,12 +196,14 @@ type memoryDemandStore struct {
 	nextObservation uint64
 }
 
-func newMemoryDemandStore() *memoryDemandStore {
+func createMemoryDemandStore() *memoryDemandStore {
 	return &memoryDemandStore{demand: map[demandKey]QueuedDemand{}}
 }
 
 // NewMemoryDemandStore provides transient demand storage for tests and embedded callers.
-func NewMemoryDemandStore() DemandStore { return newMemoryDemandStore() }
+func NewMemoryDemandStore() DemandStore { //nolint:ireturn // The exported test seam intentionally exposes only the production store contract.
+	return createMemoryDemandStore()
+}
 
 func (store *memoryDemandStore) Apply(_ context.Context, _ string, observed []JobDemand, removed []DemandRemoval) error {
 	for _, demand := range observed {
@@ -199,7 +219,7 @@ func (store *memoryDemandStore) Apply(_ context.Context, _ string, observed []Jo
 		store.demand[key] = QueuedDemand{JobDemand: demand, observationOrder: store.nextObservation}
 	}
 	for _, removal := range removed {
-		delete(store.demand, demandKey{Repository: removal.Repository, RequestID: removal.RequestID})
+		delete(store.demand, demandKey(removal))
 	}
 	return nil
 }

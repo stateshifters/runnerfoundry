@@ -67,14 +67,14 @@ func (reconciler Reconciler) Running(ctx context.Context) (int, error) {
 }
 
 func (reconciler Reconciler) StartOne(ctx context.Context) error {
-	return reconciler.startOne(ctx, "")
+	return reconciler.startRequestedRunner(ctx, "")
 }
 
 func (reconciler Reconciler) StartNamed(ctx context.Context, runnerName string) error {
-	return reconciler.startOne(ctx, runnerName)
+	return reconciler.startRequestedRunner(ctx, runnerName)
 }
 
-func (reconciler Reconciler) startOne(ctx context.Context, runnerName string) error {
+func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerName string) error {
 	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
 	if err != nil {
 		return fmt.Errorf("list runner instances: %w", err)

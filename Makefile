@@ -9,7 +9,7 @@ VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN := go1.26.4
 
-.PHONY: fmt-check lint lint-fix vet test test-race coverage build smoke notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-platform lint-fix vet test test-race coverage build smoke notices sbom package-deb prepare clean
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
@@ -24,11 +24,25 @@ else
 	@files=$$(gofmt -l $$(find . -name '*.go')); if [ -n "$$files" ]; then echo 'Run gofmt on:'; echo "$$files"; exit 1; fi
 endif
 
-lint:
+lint: lint-config
+	@$(MAKE) lint-platform LINT_GOOS=windows
+	@$(MAKE) lint-platform LINT_GOOS=linux
+	@$(MAKE) lint-platform LINT_GOOS=darwin
+
+lint-platform:
 ifeq ($(OSFAMILY),Windows)
-	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run"
+	@powershell -NoProfile -Command "Write-Host 'Linting GOOS=$(LINT_GOOS)'; $$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; $$env:CGO_ENABLED='0'; $$env:GOOS='$(LINT_GOOS)'; go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint run; exit $$LASTEXITCODE"
 else
-	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
+	@echo "Linting GOOS=$(LINT_GOOS)"
+	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) CGO_ENABLED=0 GOOS=$(LINT_GOOS) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
+endif
+
+lint-config:
+
+ifeq ($(OSFAMILY),Windows)
+	@powershell -NoProfile -Command "$$env:GOTOOLCHAIN='$(GOLANGCI_LINT_TOOLCHAIN)'; go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify"
+else
+	@GOTOOLCHAIN=$(GOLANGCI_LINT_TOOLCHAIN) go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify
 endif
 
 lint-fix:

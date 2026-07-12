@@ -14,9 +14,9 @@ import (
 
 func TestSQLiteDemandStorePreservesFIFOAcrossReopen(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	store, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	if err := store.Apply(context.Background(), "linux", []JobDemand{
@@ -45,9 +45,9 @@ func TestSQLiteDemandStorePreservesFIFOAcrossReopen(t *testing.T) {
 
 func TestSQLiteDemandStoreReopensTwoHundredQueuedJobs(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	store, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	observed := make([]JobDemand, 200)
@@ -76,9 +76,9 @@ func TestSQLiteDemandStoreReopensTwoHundredQueuedJobs(t *testing.T) {
 
 func TestSQLiteDemandStoreRejectsSecondOwner(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	first, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatal(err)
+	first, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	defer first.Close()
 	if _, err := OpenSQLiteDemandStore(databasePath); err == nil {
@@ -88,9 +88,9 @@ func TestSQLiteDemandStoreRejectsSecondOwner(t *testing.T) {
 
 func TestSQLiteDemandStoreMutationsAreDurableAndIdempotent(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	store, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	defer store.Close()
 	ctx := context.Background()
@@ -148,9 +148,9 @@ func TestSQLiteDemandStoreRejectsFutureAndCorruptDatabases(t *testing.T) {
 }
 
 func TestSQLiteDemandStoreReportsOperationsAfterClose(t *testing.T) {
-	store, err := OpenSQLiteDemandStore(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := OpenSQLiteDemandStore(filepath.Join(t.TempDir(), "state.db"))
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -220,14 +220,16 @@ func TestSQLiteDemandStoreRejectsUnavailableDirectory(t *testing.T) {
 
 func TestSQLiteDemandStoreReleasesLockWhenDatabaseOpenFails(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	if _, err := openSQLiteDemandStore(databasePath, func(string) (*sql.DB, error) { return nil, errors.New("open failed") }); err == nil {
+	if _, err := createSQLiteDemandStore(databasePath, func(string) (*sql.DB, error) { return nil, errors.New("open failed") }); err == nil {
 		t.Fatal("expected database open failure")
 	}
 	store, err := OpenSQLiteDemandStore(databasePath)
 	if err != nil {
 		t.Fatalf("expected released lock, got %v", err)
 	}
-	store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
@@ -295,13 +297,18 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 	})
 }
 
-func mockDemandStore(t *testing.T) (*SQLiteDemandStore, sqlmock.Sqlmock) {
+func mockDemandStore(t *testing.T) (*SQLiteDemandStore, sqlmock.Sqlmock) { //nolint:ireturn // sqlmock exposes its expectation API through this interface.
 	t.Helper()
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close() })
+	mock.ExpectClose()
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return &SQLiteDemandStore{database: database}, mock
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	// Register the pure-Go SQLite database driver used by sql.Open below.
 	_ "modernc.org/sqlite"
 )
 
@@ -22,10 +23,10 @@ type SQLiteDemandStore struct {
 // The caller must close the store to release both the database and its adjacent
 // process lock. A second daemon using the same path is rejected.
 func OpenSQLiteDemandStore(path string) (*SQLiteDemandStore, error) {
-	return openSQLiteDemandStore(path, func(path string) (*sql.DB, error) { return sql.Open("sqlite", path) })
+	return createSQLiteDemandStore(path, func(path string) (*sql.DB, error) { return sql.Open("sqlite", path) })
 }
 
-func openSQLiteDemandStore(path string, openDatabase func(path string) (*sql.DB, error)) (*SQLiteDemandStore, error) {
+func createSQLiteDemandStore(path string, openDatabase func(path string) (*sql.DB, error)) (*SQLiteDemandStore, error) {
 	stateLock := flock.New(path + ".lock")
 	locked, err := stateLock.TryLock()
 	if err != nil {
@@ -36,25 +37,20 @@ func openSQLiteDemandStore(path string, openDatabase func(path string) (*sql.DB,
 	}
 	database, err := openDatabase(path)
 	if err != nil {
-		_ = stateLock.Unlock()
-		return nil, fmt.Errorf("open state database: %w", err)
+		return nil, errors.Join(fmt.Errorf("open state database: %w", err), stateLock.Unlock())
 	}
 	database.SetMaxOpenConns(1)
 	store := &SQLiteDemandStore{database: database, lock: stateLock}
 	if err := store.migrate(context.Background()); err != nil {
-		_ = store.Close()
-		return nil, err
+		return nil, errors.Join(err, store.Close())
 	}
 	return store, nil
 }
 
 func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
-	if _, err := store.database.ExecContext(ctx, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;"); err != nil {
-		return fmt.Errorf("configure state database: %w", err)
-	}
-	var version int
-	if err := store.database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read state schema version: %w", err)
+	version, err := store.schemaVersion(ctx)
+	if err != nil {
+		return err
 	}
 	if version > currentStateSchemaVersion {
 		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentStateSchemaVersion)
@@ -62,11 +58,26 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 	if version == currentStateSchemaVersion {
 		return nil
 	}
+	return store.createSchema(ctx)
+}
+
+func (store *SQLiteDemandStore) schemaVersion(ctx context.Context) (int, error) {
+	if _, err := store.database.ExecContext(ctx, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;"); err != nil {
+		return 0, fmt.Errorf("configure state database: %w", err)
+	}
+	var version int
+	if err := store.database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return 0, fmt.Errorf("read state schema version: %w", err)
+	}
+	return version, nil
+}
+
+func (store *SQLiteDemandStore) createSchema(ctx context.Context) error {
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin state migration: %w", err)
 	}
-	defer transaction.Rollback()
+	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
 	if _, err := transaction.ExecContext(ctx, `CREATE TABLE demand (
 		observation_order INTEGER PRIMARY KEY AUTOINCREMENT,
 		scale_set TEXT NOT NULL,
@@ -92,7 +103,7 @@ func (store *SQLiteDemandStore) Apply(ctx context.Context, scaleSet string, obse
 	if err != nil {
 		return fmt.Errorf("begin demand update: %w", err)
 	}
-	defer transaction.Rollback()
+	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
 	for _, demand := range observed {
 		_, err = transaction.ExecContext(ctx, `INSERT INTO demand(scale_set, repository, request_id, queue_time, acquired)
 			VALUES(?, ?, ?, ?, ?)
@@ -135,7 +146,7 @@ func (store *SQLiteDemandStore) Ordered(ctx context.Context, scaleSet string) ([
 	if err != nil {
 		return nil, fmt.Errorf("query queued demand: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Query iteration and rows.Err report relevant read failures.
 	var result []QueuedDemand
 	for rows.Next() {
 		var demand QueuedDemand
