@@ -9,7 +9,7 @@ require (
 	github.com/google/go-github/v80 v80.0.0
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	gopkg.in/yaml.v3 v3.0.1
-	libvirt.org/go/libvirtxml v1.11002.0
+	libvirt.org/go/libvirtxml v1.12005.0
 )
 
 require (
