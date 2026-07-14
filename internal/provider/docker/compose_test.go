@@ -41,12 +41,14 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 	}
 }
 
-func TestListClassifiesRunningAndCompletedComposeContainers(t *testing.T) {
+func TestListClassifiesComposeContainerStates(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		output: `[
 {"ID":"1","Names":"runner-1","State":"running","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-1"},
 {"ID":"2","Names":"runner-2","State":"exited","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-2"},
-{"ID":"3","Names":"other","State":"running","Labels":"github-scaler.scale-set=other"}
+{"ID":"3","Names":"runner-3","State":"removing","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-3"},
+{"ID":"4","Names":"runner-4","State":"dead","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-4"},
+{"ID":"5","Names":"other","State":"running","Labels":"github-scaler.scale-set=other"}
 ]`,
 	}
 	provider := ComposeProvider{
@@ -61,10 +63,13 @@ func TestListClassifiesRunningAndCompletedComposeContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
 	}
-	if len(instances) != 2 {
-		t.Fatalf("expected 2 owned instances, got %#v", instances)
+	if len(instances) != 4 {
+		t.Fatalf("expected 4 owned instances, got %#v", instances)
 	}
-	if instances[0].State != RunnerStateRunning || instances[1].State != RunnerStateCompleted {
+	if instances[0].State != RunnerStateRunning ||
+		instances[1].State != RunnerStateUnknown ||
+		instances[2].State != RunnerStateUnknown ||
+		instances[3].State != RunnerStateCompleted {
 		t.Fatalf("unexpected states: %#v", instances)
 	}
 }
@@ -141,7 +146,7 @@ func TestDockerProviderSurfacesCommandAndJSONFailures(t *testing.T) {
 		"destroy": func(t *testing.T) {
 			t.Helper()
 			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{}); err == nil {
+			if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
 				t.Fatal("expected destroy error")
 			}
 		},
@@ -169,15 +174,19 @@ func TestDockerProviderSurfacesCommandAndJSONFailures(t *testing.T) {
 }
 
 func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
+	commandRunner := &recordingCommandRunner{output: "runner\n"}
 	provider := ComposeProvider{
-		CommandRunner: &recordingCommandRunner{output: "runner\n"},
+		CommandRunner: commandRunner,
 		Config: ComposeConfig{
 			ComposeFile: "compose.yaml",
 			Service:     "runner",
 		},
 	}
-	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "abc", RunnerName: "runner"}); err != nil {
+	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "abc", RunnerName: "runner", State: RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
+	}
+	if got := commandRunner.commands[0]; !reflect.DeepEqual(got.Args, []string{"rm", "--force", "abc"}) {
+		t.Fatalf("unexpected running runner removal command: %#v", got)
 	}
 	if err := provider.Validate(context.Background()); err != nil {
 		t.Fatalf("expected validate success, got %v", err)
@@ -192,6 +201,39 @@ func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
 	}
 	if _, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "definitely-missing-github-scaler-command"}); err == nil {
 		t.Fatal("expected exec failure")
+	}
+}
+
+func TestDestroyLeavesTransitionalOrUnknownRunnerToDocker(t *testing.T) {
+	commandRunner := &recordingCommandRunner{}
+	provider := ComposeProvider{CommandRunner: commandRunner}
+
+	if err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         "runner-id",
+		RunnerName: "linux-1",
+		State:      RunnerStateUnknown,
+	}); err != nil {
+		t.Fatalf("expected unknown runner destroy to be ignored, got %v", err)
+	}
+	if len(commandRunner.commands) != 0 {
+		t.Fatalf("expected no docker command, got %#v", commandRunner.commands)
+	}
+}
+
+func TestDestroyRemovesDeadRunner(t *testing.T) {
+	commandRunner := &recordingCommandRunner{}
+	provider := ComposeProvider{CommandRunner: commandRunner}
+
+	if err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         "runner-id",
+		RunnerName: "linux-1",
+		State:      RunnerStateCompleted,
+	}); err != nil {
+		t.Fatalf("expected dead runner destroy to succeed, got %v", err)
+	}
+	expected := []string{"rm", "--force", "runner-id"}
+	if len(commandRunner.commands) != 1 || !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {
+		t.Fatalf("expected dead runner removal command %#v, got %#v", expected, commandRunner.commands)
 	}
 }
 

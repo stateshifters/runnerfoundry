@@ -147,7 +147,7 @@ func (adapter dockerProviderAdapter) Destroy(ctx context.Context, instance scale
 	if err := adapter.Provider.Destroy(ctx, dockerprovider.RunnerInstance{
 		ID:         instance.ID,
 		RunnerName: instance.RunnerName,
-		State:      dockerprovider.RunnerStateCompleted,
+		State:      scalerDockerRunnerState(instance),
 	}); err != nil {
 		return fmt.Errorf("destroy docker provider runner: %w", err)
 	}
@@ -174,6 +174,19 @@ func dockerRunnerState(instance dockerprovider.RunnerInstance) scaler.RunnerStat
 		return scaler.RunnerStateCompleted
 	default:
 		return scaler.RunnerStateUnknown
+	}
+}
+
+func scalerDockerRunnerState(instance scaler.RunnerInstance) dockerprovider.RunnerState {
+	switch instance.State {
+	case scaler.RunnerStateRunning:
+		return dockerprovider.RunnerStateRunning
+	case scaler.RunnerStateCompleted:
+		return dockerprovider.RunnerStateCompleted
+	case scaler.RunnerStateUnknown:
+		return dockerprovider.RunnerStateUnknown
+	default:
+		return dockerprovider.RunnerStateUnknown
 	}
 }
 

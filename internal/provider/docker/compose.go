@@ -126,6 +126,11 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 }
 
 func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
+	switch instance.State {
+	case RunnerStateRunning, RunnerStateCompleted:
+	default:
+		return nil
+	}
 	_, err := provider.CommandRunner.Run(ctx, Command{
 		Name: "docker",
 		Args: []string{"rm", "--force", instance.ID},
@@ -189,7 +194,7 @@ func dockerState(state string) RunnerState {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "running":
 		return RunnerStateRunning
-	case "exited", "dead":
+	case "dead":
 		return RunnerStateCompleted
 	default:
 		return RunnerStateUnknown

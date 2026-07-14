@@ -101,8 +101,43 @@ func TestDockerProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{ScaleSetName: "linux", RunnerName: "linux-2", JITConfig: "jit"}); err != nil {
 		t.Fatalf("expected start success, got %v", err)
 	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{ID: "1", RunnerName: "linux-1"}); err != nil {
+	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{ID: "1", RunnerName: "linux-1", State: scaler.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
+	}
+}
+
+func TestDockerReconcilerLeavesExitedAutoRemovingRunnerToDocker(t *testing.T) {
+	commandRunner := &dockerRecordingRunner{outputs: []string{
+		`{"ID":"1","State":"exited","Labels":"github-scaler.scale-set=linux,github-scaler.runner=linux-1"}`,
+	}}
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux",
+		Provider: dockerProviderAdapter{Provider: dockerprovider.ComposeProvider{
+			CommandRunner: commandRunner,
+		}},
+	}}
+
+	if _, err := reconciler.Running(context.Background()); err != nil {
+		t.Fatalf("expected scheduling inspection to succeed, got %v", err)
+	}
+	if len(commandRunner.commands) != 1 {
+		t.Fatalf("expected only docker ps, got commands %#v", commandRunner.commands)
+	}
+}
+
+func TestDockerProviderAdapterPreservesRunnerStateOnDestroy(t *testing.T) {
+	commandRunner := &dockerRecordingRunner{}
+	adapter := dockerProviderAdapter{Provider: dockerprovider.ComposeProvider{CommandRunner: commandRunner}}
+
+	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{
+		ID:         "1",
+		RunnerName: "linux-1",
+		State:      scaler.RunnerStateUnknown,
+	}); err != nil {
+		t.Fatalf("expected unknown runner destroy to be ignored, got %v", err)
+	}
+	if len(commandRunner.commands) != 0 {
+		t.Fatalf("expected no docker command, got %#v", commandRunner.commands)
 	}
 }
 
@@ -114,7 +149,7 @@ func TestDockerProviderAdapterSurfacesProviderErrors(t *testing.T) {
 	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{}); err == nil {
 		t.Fatal("expected start error")
 	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{}); err == nil {
+	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy error")
 	}
 }
@@ -125,6 +160,21 @@ func TestDockerRunnerStateMapsCompletedStates(t *testing.T) {
 	}
 	if dockerRunnerState(dockerprovider.RunnerInstance{State: dockerprovider.RunnerStateUnknown}) != scaler.RunnerStateUnknown {
 		t.Fatal("expected unknown docker state")
+	}
+}
+
+func TestScalerDockerRunnerStatePreservesKnownStates(t *testing.T) {
+	if scalerDockerRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateRunning}) != dockerprovider.RunnerStateRunning {
+		t.Fatal("expected running provider state")
+	}
+	if scalerDockerRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateCompleted}) != dockerprovider.RunnerStateCompleted {
+		t.Fatal("expected completed provider state")
+	}
+	if scalerDockerRunnerState(scaler.RunnerInstance{State: scaler.RunnerStateUnknown}) != dockerprovider.RunnerStateUnknown {
+		t.Fatal("expected unknown provider state")
+	}
+	if scalerDockerRunnerState(scaler.RunnerInstance{State: scaler.RunnerState("paused")}) != dockerprovider.RunnerStateUnknown {
+		t.Fatal("expected invalid scaler state to map to unknown")
 	}
 }
 

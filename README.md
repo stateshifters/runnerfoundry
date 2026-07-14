@@ -193,7 +193,7 @@ docker compose -f <compose_file> run --detach --rm --name <runner> --label githu
 
 The scaler injects the JIT config as `ACTIONS_RUNNER_INPUT_JITCONFIG`, which is the environment variable consumed by the Github Actions runner. The runner process should exit after its assigned job; `--rm` lets Docker remove the container.
 
-Restart recovery uses Docker labels to discover owned containers. Running owned containers count as active capacity. Stopped owned leftovers are removed during reconciliation.
+Restart recovery uses Docker labels to discover owned containers. Running owned containers count as active capacity. Exited and removing containers are left to Docker's `--rm` lifecycle. Dead containers are removed during reconciliation, and explicit repository teardown force-removes running containers.
 
 ## Libvirt Provider
 
