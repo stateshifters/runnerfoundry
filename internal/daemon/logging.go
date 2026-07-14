@@ -9,10 +9,8 @@ func logAction(ctx context.Context, logger *slog.Logger, level slog.Level, actio
 	if logger == nil {
 		return
 	}
-	baseAttributes := []slog.Attr{
-		slog.String("action", action),
-		slog.String("phase", phase),
-	}
+	baseAttributes := make([]slog.Attr, 0, 2+len(attributes))
+	baseAttributes = append(baseAttributes, slog.String("action", action), slog.String("phase", phase))
 	logger.LogAttrs(ctx, level, action, append(baseAttributes, attributes...)...)
 }
 
