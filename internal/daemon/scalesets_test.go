@@ -877,6 +877,33 @@ func TestCoordinatedRepositoryWorkerUsesRepositoryQualifiedRunnerName(t *testing
 	}
 }
 
+func TestCoordinatedRepositoryWorkerUsesCompactedRunnerNameForStartAndRecovery(t *testing.T) {
+	baseName := "github-com-meza-mezas-conventional-changelog-meza-ubuntu-latest"
+	expectedRunnerName := "github-com-meza-mezas-conventional-changelog-ee540047238cb46a-42"
+	provider := &fakeScalerProvider{instances: []scaler.RunnerInstance{{
+		RunnerName: expectedRunnerName,
+		State:      scaler.RunnerStateRunning,
+	}}}
+	jitGenerator := &recordingRunnerNameJITGenerator{}
+	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: baseName, MaxRunners: 2, Provider: provider, JITConfig: jitGenerator,
+	}}}
+
+	if err := worker.StartOne(context.Background(), 42); err != nil {
+		t.Fatalf("expected runner start success, got %v", err)
+	}
+	if len(provider.started) != 1 || provider.started[0].RunnerName != expectedRunnerName {
+		t.Fatalf("expected compacted runner name, got %#v", provider.started)
+	}
+	if len(jitGenerator.runnerNames) != 1 || jitGenerator.runnerNames[0] != expectedRunnerName {
+		t.Fatalf("expected compacted JIT runner name, got %#v", jitGenerator.runnerNames)
+	}
+	exists, err := worker.Exists(context.Background(), 42)
+	if err != nil || !exists {
+		t.Fatalf("expected compacted runner lookup to find the runner, got exists=%t err=%v", exists, err)
+	}
+}
+
 func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1366,5 +1393,18 @@ func (generator fakeJITConfigGenerator) Generate(ctx context.Context, runnerName
 }
 
 func (generator fakeJITConfigGenerator) Remove(ctx context.Context, runner scaler.JITRunner) error {
+	return nil
+}
+
+type recordingRunnerNameJITGenerator struct {
+	runnerNames []string
+}
+
+func (generator *recordingRunnerNameJITGenerator) Generate(_ context.Context, runnerName string) (scaler.JITRunnerConfig, error) {
+	generator.runnerNames = append(generator.runnerNames, runnerName)
+	return scaler.JITRunnerConfig{JITConfig: "jit"}, nil
+}
+
+func (generator *recordingRunnerNameJITGenerator) Remove(context.Context, scaler.JITRunner) error {
 	return nil
 }

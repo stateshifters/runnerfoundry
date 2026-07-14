@@ -259,23 +259,71 @@ func TestReconcilerRepositoryWorkerCountsRecoveredRunnersAndStartsOne(t *testing
 func TestReconcilerStartsAndFindsNamedRunner(t *testing.T) {
 	provider := &recordingProvider{instances: []RunnerInstance{{RunnerName: "linux-42", State: RunnerStateRunning}}}
 	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "linux", MaxRunners: 2, Provider: provider, JITConfig: &recordingJITGenerator{}}}
-	exists, err := reconciler.Exists(context.Background(), "linux-42")
+	exists, err := reconciler.Exists(context.Background(), 42)
 	if err != nil || !exists {
 		t.Fatalf("expected named runner, got %t, %v", exists, err)
 	}
-	exists, err = reconciler.Exists(context.Background(), "missing")
+	exists, err = reconciler.Exists(context.Background(), 43)
 	if err != nil || exists {
 		t.Fatalf("expected missing runner, got %t, %v", exists, err)
 	}
 	provider.instances = nil
-	if err := reconciler.StartNamed(context.Background(), "linux-42"); err != nil {
+	if err := reconciler.StartNamed(context.Background(), 42); err != nil {
 		t.Fatal(err)
 	}
 	if len(provider.created) != 1 || provider.created[0].RunnerName != "linux-42" {
 		t.Fatalf("expected stable runner name, got %#v", provider.created)
 	}
-	if _, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "linux", Provider: failingProvider{failure: "list"}}}).Exists(context.Background(), "linux-42"); err == nil {
+	if _, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "linux", Provider: failingProvider{failure: "list"}}}).Exists(context.Background(), 42); err == nil {
 		t.Fatal("expected exists failure")
+	}
+}
+
+func TestReconcilerCompactsNamedRunnerForStartAndRecovery(t *testing.T) {
+	baseName := "github-com-meza-mezas-conventional-changelog-meza-ubuntu-latest"
+	expectedRunnerName := "github-com-meza-mezas-conventional-changelog-ee540047238cb46a-42"
+	provider := &recordingProvider{instances: []RunnerInstance{{RunnerName: expectedRunnerName, State: RunnerStateRunning}}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name:       baseName,
+		MaxRunners: 2,
+		Provider:   provider,
+		JITConfig:  &recordingJITGenerator{},
+	}}
+
+	exists, err := reconciler.Exists(context.Background(), 42)
+	if err != nil || !exists {
+		t.Fatalf("expected compacted runner to be recovered, got exists=%t err=%v", exists, err)
+	}
+
+	provider.instances = nil
+	if err := reconciler.StartNamed(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.created) != 1 || provider.created[0].RunnerName != expectedRunnerName {
+		t.Fatalf("expected compacted runner name, got %#v", provider.created)
+	}
+}
+
+func TestReconcilerCompactsAutomaticallyAllocatedRunnerName(t *testing.T) {
+	baseName := "github-com-meza-mezas-conventional-changelog-meza-ubuntu-latest"
+	expectedRunnerName := "github-com-meza-mezas-conventional-changelog-ee540047238cb46a-1"
+	provider := &recordingProvider{}
+	jitGenerator := &recordingJITGenerator{}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name:       baseName,
+		MaxRunners: 1,
+		Provider:   provider,
+		JITConfig:  jitGenerator,
+	}}
+
+	if _, err := reconciler.Reconcile(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(jitGenerator.names) != 1 || jitGenerator.names[0] != expectedRunnerName {
+		t.Fatalf("expected compacted JIT runner name, got %#v", jitGenerator.names)
+	}
+	if len(provider.created) != 1 || provider.created[0].RunnerName != expectedRunnerName {
+		t.Fatalf("expected compacted provider runner name, got %#v", provider.created)
 	}
 }
 

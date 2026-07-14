@@ -70,8 +70,9 @@ func (reconciler Reconciler) StartOne(ctx context.Context) error {
 	return reconciler.startRequestedRunner(ctx, "")
 }
 
-func (reconciler Reconciler) StartNamed(ctx context.Context, runnerName string) error {
-	return reconciler.startRequestedRunner(ctx, runnerName)
+// StartNamed starts the runner identified within this scale set by identifier.
+func (reconciler Reconciler) StartNamed(ctx context.Context, identifier int64) error {
+	return reconciler.startRequestedRunner(ctx, runnerName(reconciler.ScaleSet.Name, identifier))
 }
 
 func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerName string) error {
@@ -93,13 +94,15 @@ func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerNam
 	return reconciler.startMissingRunners(ctx, runningCount, runningCount+1, usedRunnerNames)
 }
 
-func (reconciler Reconciler) Exists(ctx context.Context, runnerName string) (bool, error) {
+// Exists reports whether the identified runner is currently running in this scale set.
+func (reconciler Reconciler) Exists(ctx context.Context, identifier int64) (bool, error) {
+	expectedRunnerName := runnerName(reconciler.ScaleSet.Name, identifier)
 	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
 	if err != nil {
 		return false, fmt.Errorf("list runner instances: %w", err)
 	}
 	for _, instance := range instances {
-		if instance.RunnerName == runnerName && instance.State == RunnerStateRunning {
+		if instance.RunnerName == expectedRunnerName && instance.State == RunnerStateRunning {
 			return true, nil
 		}
 	}
@@ -211,11 +214,11 @@ func (reconciler Reconciler) startRunner(ctx context.Context, runnerName string)
 
 func (reconciler Reconciler) nextRunnerName(usedRunnerNames map[string]bool, nextRunnerIndex *int) string {
 	for {
-		runnerName := fmt.Sprintf("%s-%d", reconciler.ScaleSet.Name, *nextRunnerIndex)
+		candidateRunnerName := runnerName(reconciler.ScaleSet.Name, int64(*nextRunnerIndex))
 		(*nextRunnerIndex)++
-		if !usedRunnerNames[runnerName] {
-			usedRunnerNames[runnerName] = true
-			return runnerName
+		if !usedRunnerNames[candidateRunnerName] {
+			usedRunnerNames[candidateRunnerName] = true
+			return candidateRunnerName
 		}
 	}
 }
