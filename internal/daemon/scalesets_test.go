@@ -159,6 +159,8 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
 	messageClient := newFakeMessageClient(cancel)
 	scaleSets := scaleSetRuntime{
 		RunnerHostname: func() string { return "host" },
@@ -180,7 +182,7 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 		messageClient: scaleSetMessageClient{Client: messageClient},
 	}
 	lifecycle, err := runCoordinatedScaleSet(
-		ctx, slog.Default(), client, "https://github.com/acme/repo", config.ScaleSetConfig{
+		ctx, logger, client, "https://github.com/acme/repo", config.ScaleSetConfig{
 			Name: "linux", RunnerGroup: "default", MaxRunners: 2,
 		}, scaler.NewCoordinator(2), scaleSets,
 	)
@@ -194,6 +196,18 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 	}
 	if err := lifecycle.Shutdown(context.Background()); err != nil {
 		t.Fatalf("expected coordinated shutdown, got %v", err)
+	}
+	for _, action := range []string{
+		"runner_group_lookup",
+		"runner_scale_set_ensure",
+		"message_session_create",
+		"reconciler_build",
+		"polling_start",
+		"message_session_close",
+		"runner_scale_set_delete",
+	} {
+		assertStructuredAction(t, logs.Bytes(), action, "started")
+		assertStructuredAction(t, logs.Bytes(), action, "completed")
 	}
 }
 
@@ -273,7 +287,10 @@ func TestScaleSetShutdownReportsCloseAndDeleteFailures(t *testing.T) {
 	client := &fakeScaleSetClient{deleteScaleSetErr: errors.New("delete failed")}
 	messageClient := scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}}
 
-	err := shutdownScaleSet(context.Background(), messageClient, client, &upstream.RunnerScaleSet{ID: 20})
+	err := shutdownScaleSet(
+		context.Background(), slog.Default(), "repo", "linux",
+		messageClient, client, &upstream.RunnerScaleSet{ID: 20},
+	)
 	if err == nil || !strings.Contains(err.Error(), "close message session") || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("expected joined close and delete errors, got %v", err)
 	}
@@ -521,6 +538,21 @@ func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("expected no shutdown cancellation log, got %q", logs.String())
 	}
+}
+
+func TestPollUntilShutdownLogsPollActionsAtDebugLevel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: context.Canceled,
+		onGetMessage:  cancel,
+	}, Handler: scaleSetHandler{}}
+
+	pollUntilShutdown(ctx, logger, "https://github.com/acme/repo", "linux", poller, time.Nanosecond)
+
+	assertStructuredAction(t, logs.Bytes(), "message_poll", "started")
+	assertStructuredAction(t, logs.Bytes(), "message_poll", "canceled")
 }
 
 func TestPollUntilShutdownLogsSustainedFailures(t *testing.T) {

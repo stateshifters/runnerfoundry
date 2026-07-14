@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -50,6 +51,46 @@ func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.
 	}
 	if len(started) != 1 || len(activeConfig.Repositories) != 2 {
 		t.Fatalf("expected new and retained repositories, started=%#v repositories=%#v", started, activeConfig.Repositories)
+	}
+}
+
+func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
+	logs := &bytes.Buffer{}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Logger = newLoggerForWriter(logs, "json", "debug")
+	daemonRuntime := runtime{
+		NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		StartScaleSet: func(
+			context.Context,
+			*slog.Logger,
+			scaleSetClient,
+			string,
+			config.ScaleSetConfig,
+			*scaler.Coordinator,
+		) (scaleSetLifecycle, error) {
+			return inertLifecycle(), nil
+		},
+	}
+	discovery := githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
+		InstallationFailures: map[int64]error{},
+	}
+	if err := applyDiscovery(context.Background(), daemonRuntime, &activeConfig, discovery); err != nil {
+		t.Fatalf("expected repository reconciliation, got %v", err)
+	}
+	for _, expected := range []struct {
+		action string
+		phase  string
+	}{
+		{action: "repository_start", phase: "started"},
+		{action: "scale_set_start", phase: "started"},
+		{action: "scale_set_start", phase: "completed"},
+		{action: "repository_start", phase: "completed"},
+		{action: "demand_recovery", phase: "completed"},
+	} {
+		assertStructuredAction(t, logs.Bytes(), expected.action, expected.phase)
 	}
 }
 
@@ -235,7 +276,9 @@ func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 	stopped := false
 	destroyed := false
 	shutdown := false
+	logs := &bytes.Buffer{}
 	activeConfig := testActiveConfiguration()
+	activeConfig.Logger = newLoggerForWriter(logs, "json", "debug")
 	activeConfig.Repositories["https://github.com/acme/removed"] = managedRepository{
 		InstallationID: 1,
 		Lifecycles: map[string]scaleSetLifecycle{"linux": {
@@ -249,6 +292,10 @@ func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 	}
 	if !stopped || !destroyed || !shutdown || len(activeConfig.Repositories) != 0 {
 		t.Fatalf("expected immediate teardown, stopped=%t destroyed=%t shutdown=%t", stopped, destroyed, shutdown)
+	}
+	for _, action := range []string{"repository_remove", "demand_remove", "runner_destroy", "scale_set_shutdown"} {
+		assertStructuredAction(t, logs.Bytes(), action, "started")
+		assertStructuredAction(t, logs.Bytes(), action, "completed")
 	}
 }
 
@@ -351,7 +398,7 @@ func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 		NewGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  cancellingNotifier{cancel: cancel},
 		StartScaleSet: func(
 			context.Context,
@@ -374,6 +421,41 @@ func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 	}
 	if !stopped || !shutdown {
 		t.Fatalf("expected lifecycle shutdown, stopped=%t shutdown=%t", stopped, shutdown)
+	}
+}
+
+func TestDaemonLogsLifecycleActions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
+	discoverer := &sequenceDiscoverer{
+		results: []githubapp.DiscoveryResult{{InstallationFailures: map[int64]error{}}},
+		afterDiscover: func(int) {
+			cancel()
+		},
+	}
+	loadedConfig := runnableConfig(t)
+	daemonRuntime := runtime{
+		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
+		NewLogger:     func(string, string) *slog.Logger { return logger },
+		Notifier:      noopNotifier{},
+	}
+	if err := runDaemon(ctx, Options{ConfigPath: "config.yaml"}, daemonRuntime); err != nil {
+		t.Fatalf("expected clean daemon shutdown, got %v", err)
+	}
+	for _, expected := range []struct {
+		action string
+		phase  string
+	}{
+		{action: "configuration", phase: "loaded"},
+		{action: "daemon", phase: "ready"},
+		{action: "discovery", phase: "started"},
+		{action: "discovery", phase: "completed"},
+		{action: "shutdown", phase: "started"},
+		{action: "shutdown", phase: "completed"},
+	} {
+		assertStructuredAction(t, logs.Bytes(), expected.action, expected.phase)
 	}
 }
 
@@ -409,7 +491,7 @@ func TestLoadConfigurationDoesNotContactGitHub(t *testing.T) {
 	activeConfig, err := loadConfiguration("config", runtime{
 		LoadConfig:    func(string) (config.Config, error) { return valid, nil },
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
-		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	})
 	if err != nil {
 		t.Fatalf("expected local preflight success, got %v", err)
@@ -461,9 +543,36 @@ func TestLoadConfigReadsValidatedFileAndLoggerFormats(t *testing.T) {
 	if _, err := readConfigFile(t.TempDir()); err == nil {
 		t.Fatal("expected directory read error")
 	}
-	if newLogger("json") == nil || newLogger("text") == nil {
+	if newLogger("json", "info") == nil || newLogger("text", "info") == nil {
 		t.Fatal("expected both logger formats")
 	}
+}
+
+func TestLoggerHonorsConfiguredLevel(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "info")
+	logger.Debug("hidden debug action", slog.String("action", "hidden"))
+	logger.Info("visible info action", slog.String("action", "visible"))
+	if strings.Contains(logs.String(), "hidden") || !strings.Contains(logs.String(), `"action":"visible"`) {
+		t.Fatalf("expected info level to filter debug actions, got %q", logs.String())
+	}
+
+	logs.Reset()
+	debugLogger := newLoggerForWriter(logs, "text", "debug")
+	debugLogger.Debug("visible debug action", slog.String("action", "debug"))
+	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "action=debug") {
+		t.Fatalf("expected debug level action, got %q", logs.String())
+	}
+	if configuredLogLevel("warn") != slog.LevelWarn {
+		t.Fatal("expected warn log level")
+	}
+	if configuredLogLevel("error") != slog.LevelError {
+		t.Fatal("expected error log level")
+	}
+}
+
+func TestLogActionIgnoresNilLogger(t *testing.T) {
+	logAction(context.Background(), nil, slog.LevelInfo, "test", "started")
 }
 
 func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
@@ -546,7 +655,7 @@ func TestProductionRuntimeBuildsAppBoundaries(t *testing.T) {
 	); err == nil {
 		t.Fatal("expected coordinated scale set startup failure")
 	}
-	if production.NewLogger("text") == nil || production.Notifier == nil {
+	if production.NewLogger("text", "info") == nil || production.Notifier == nil {
 		t.Fatal("expected production logger and notifier")
 	}
 	if _, _, err := production.OpenDemandStore(filepath.Join(t.TempDir(), "missing", "state.db")); err == nil {
@@ -569,7 +678,7 @@ func TestRunDaemonReconcilesPeriodicDiscovery(t *testing.T) {
 	daemonRuntime := runtime{
 		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
-		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	}
 	if err := runDaemon(ctx, Options{}, daemonRuntime); err != nil {
 		t.Fatalf("expected periodic reconciliation shutdown, got %v", err)
@@ -586,7 +695,7 @@ func TestRunDaemonSurfacesReadyFailure(t *testing.T) {
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  failingNotifier{readyErr: errors.New("ready failed")},
 	}
 	if err := runDaemon(context.Background(), Options{}, daemonRuntime); err == nil {
@@ -602,7 +711,7 @@ func TestRunDaemonSignalsReadyBeforeGitHubDiscovery(t *testing.T) {
 	daemonRuntime := runtime{
 		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
-		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:      readyRecordingNotifier{ready: &ready},
 	}
 	if err := runDaemon(ctx, Options{}, daemonRuntime); err != nil {
@@ -621,7 +730,7 @@ func TestRunDaemonRejectsUnvalidatedDiscoveryInterval(t *testing.T) {
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	}
 	if err := runDaemon(context.Background(), Options{}, daemonRuntime); err == nil {
 		t.Fatal("expected invalid discovery interval error")
@@ -639,7 +748,7 @@ func TestRunDaemonAppliesReloadRequest(t *testing.T) {
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  notifier, DrainInterval: time.Millisecond,
 	}
 	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonRuntime); err != nil {
@@ -659,7 +768,7 @@ func TestRunDaemonSurfacesReloadFailure(t *testing.T) {
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  failingNotifier{reloadErr: errors.New("reload failed")},
 	}
 	if err := runDaemon(context.Background(), Options{ReloadRequests: reloads}, daemonRuntime); err == nil {
@@ -676,7 +785,7 @@ func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  noopNotifier{}, DrainInterval: time.Millisecond,
 	}
 	reloaded, err := reloadConfiguration(context.Background(), "config", daemonRuntime, activeConfig)
@@ -691,13 +800,53 @@ func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 	}
 }
 
+func TestReloadLogsEveryLifecycleStage(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
+	loadedConfig := runnableConfig(t)
+	activeConfig := activeWithLifecycle(inertLifecycle())
+	activeConfig.Config.State.Path = loadedConfig.State.Path
+	activeConfig.Logger = logger
+	activeConfig.DemandStore = scaler.NewMemoryDemandStore()
+	daemonRuntime := runtime{
+		LoadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
+		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+		},
+		NewLogger:     func(string, string) *slog.Logger { return logger },
+		Notifier:      noopNotifier{},
+		DrainInterval: time.Millisecond,
+	}
+
+	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonRuntime, activeConfig); err != nil {
+		t.Fatalf("expected reload success, got %v", err)
+	}
+	for _, phase := range []string{
+		"requested",
+		"replacement_validated",
+		"polling_stopped",
+		"drain_started",
+		"drain_completed",
+		"old_configuration_stopped",
+		"state_reconciled",
+		"replacement_reconciliation_started",
+		"completed",
+	} {
+		assertStructuredAction(t, logs.Bytes(), "reload", phase)
+	}
+	for _, action := range []string{"polling_stop", "runner_drain", "scale_set_shutdown", "state_cleanup"} {
+		assertStructuredAction(t, logs.Bytes(), action, "started")
+		assertStructuredAction(t, logs.Bytes(), action, "completed")
+	}
+}
+
 func TestDurableStateLifecycleFailuresRemainExplicit(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	loadedConfig.State.Path = "replacement.db"
 	baseRuntime := runtime{
 		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
-		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:      noopNotifier{}, DrainInterval: time.Millisecond,
 	}
 	if _, err := reloadConfiguration(context.Background(), "config", baseRuntime, testActiveConfiguration()); err == nil {
@@ -736,7 +885,7 @@ func TestReloadPurgesRemovedScaleSetDemand(t *testing.T) {
 	baseRuntime := runtime{
 		LoadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
-		NewLogger:     func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:      noopNotifier{}, DrainInterval: time.Millisecond,
 	}
 	if _, err := reloadConfiguration(context.Background(), "config", baseRuntime, active); err != nil {
@@ -781,7 +930,7 @@ func TestReloadConfigurationSurfacesDrainShutdownReplacementAndReadyFailures(t *
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  noopNotifier{}, DrainInterval: time.Millisecond,
 	}
 	tests := map[string]struct {
@@ -832,7 +981,7 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
 		},
-		NewLogger: func(string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		NewLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		Notifier:  noopNotifier{}, DrainInterval: time.Millisecond,
 	}
 	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonRuntime, activeConfig); err == nil {
@@ -1142,6 +1291,20 @@ func (notifier *reloadCancellingNotifier) Reloading(context.Context) error {
 }
 
 type nonPruningScaleSetClient struct{}
+
+func assertStructuredAction(t *testing.T, logBytes []byte, action string, phase string) {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimSpace(logBytes), []byte("\n")) {
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode structured log %q: %v", line, err)
+		}
+		if event["action"] == action && event["phase"] == phase {
+			return
+		}
+	}
+	t.Fatalf("expected action %q phase %q in logs %s", action, phase, logBytes)
+}
 
 func (nonPruningScaleSetClient) GetRunnerGroupByName(context.Context, string) (*upstream.RunnerGroup, error) {
 	return nil, errors.New("not implemented")

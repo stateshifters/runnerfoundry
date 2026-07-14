@@ -20,6 +20,9 @@ func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
 	if loadedConfig.GitHub.DiscoveryInterval != "5m" {
 		t.Fatalf("expected default discovery interval, got %q", loadedConfig.GitHub.DiscoveryInterval)
 	}
+	if loadedConfig.Log.Level != "debug" {
+		t.Fatalf("expected configured debug log level, got %q", loadedConfig.Log.Level)
+	}
 	if loadedConfig.ScaleSets[0].RunnerGroup != "default" {
 		t.Fatalf("expected default runner group, got %q", loadedConfig.ScaleSets[0].RunnerGroup)
 	}
@@ -39,6 +42,18 @@ func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsLogLevelToInfo(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	configWithoutLevel := strings.Replace(validConfig(privateKeyPath), "  level: debug\n", "", 1)
+	loadedConfig, err := Load(strings.NewReader(configWithoutLevel))
+	if err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+	if loadedConfig.Log.Level != "info" {
+		t.Fatalf("expected default info log level, got %q", loadedConfig.Log.Level)
+	}
+}
+
 func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{
@@ -53,6 +68,7 @@ func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 		"invalid discovery interval": strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: soon\n", 1),
 		"short discovery interval":   strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: 59s\n", 1),
 		"bad log format":             strings.Replace(validConfig(privateKeyPath), "log:\n  format: json", "log:\n  format: xml", 1),
+		"bad log level":              strings.Replace(validConfig(privateKeyPath), "  level: debug", "  level: verbose", 1),
 		"missing state path":         strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "", 1),
 		"missing scale sets":         strings.Split(validConfig(privateKeyPath), "scale_sets:")[0],
 		"missing scale set name":     baseConfig(privateKeyPath, "  - max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"),
@@ -131,6 +147,7 @@ github:
     private_key_file: ` + privateKeyPath + `
 log:
   format: json
+  level: debug
 prune: true
 state:
   path: state.db

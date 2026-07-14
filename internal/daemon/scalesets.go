@@ -133,14 +133,20 @@ func runScaleSet(
 	scaleSetConfig config.ScaleSetConfig,
 	scaleSets scaleSetRuntime,
 ) (scaleSetLifecycle, error) {
-	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, client, scaleSetConfig, scaleSets.RunnerHostname())
+	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, logger, client, repositoryURL, scaleSetConfig, scaleSets.RunnerHostname())
 	if err != nil {
 		return scaleSetLifecycle{}, err
 	}
+	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "started",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
 	if err != nil {
+		logActionFailure(ctx, logger, "reconciler_build", err,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
+	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "completed",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	return startScaleSetLifecycle(ctx, scaleSetLifecycleConfig{
 		Logger: logger, RepositoryURL: repositoryURL, ScaleSetConfig: scaleSetConfig,
 		Client: client, RunnerScaleSet: runnerScaleSet, MessageClient: messageClient,
@@ -157,14 +163,20 @@ func runCoordinatedScaleSet(
 	coordinator *scaler.Coordinator,
 	scaleSets scaleSetRuntime,
 ) (scaleSetLifecycle, error) {
-	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, client, scaleSetConfig, scaleSets.RunnerHostname())
+	runnerScaleSet, messageClient, err := prepareScaleSetSession(ctx, logger, client, repositoryURL, scaleSetConfig, scaleSets.RunnerHostname())
 	if err != nil {
 		return scaleSetLifecycle{}, err
 	}
+	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "started",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
 	if err != nil {
+		logActionFailure(ctx, logger, "reconciler_build", err,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
 	}
+	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "completed",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	return startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
 		Logger: logger, Client: client, RepositoryURL: repositoryURL,
 		ScaleSetConfig: scaleSetConfig, Coordinator: coordinator, RunnerScaleSet: runnerScaleSet,
@@ -204,10 +216,18 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		MaxCapacity: lifecycleConfig.ScaleSetConfig.MaxRunners,
 	}
 	pollerDone := make(chan struct{})
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "started",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
+	)
 	go func() {
 		defer close(pollerDone)
 		pollUntilShutdown(pollerCtx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, poller, lifecycleConfig.RetryDelay)
 	}()
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
+	)
 	return scaleSetLifecycle{
 		StopPolling: func() {
 			stopPolling()
@@ -216,7 +236,10 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		Drain:         lifecycleConfig.Reconciler.Drain,
 		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,
 		Shutdown: func(ctx context.Context) error {
-			return shutdownScaleSet(ctx, lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet)
+			return shutdownScaleSet(
+				ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name,
+				lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet,
+			)
 		},
 	}
 }
@@ -249,7 +272,10 @@ func (worker coordinatedRepositoryWorker) Acquire(ctx context.Context, requestID
 	if err := worker.MessageClient.Acquire(ctx, requestID); err != nil {
 		return err
 	}
-	effectiveLogger(worker.Logger).Info("job acquired", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)
+	effectiveLogger(worker.Logger).Info("job acquired", append(
+		[]any{slog.String("action", "job_acquire"), slog.String("phase", "completed")},
+		jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...,
+	)...)
 	return nil
 }
 
@@ -257,7 +283,10 @@ func (worker coordinatedRepositoryWorker) StartOne(ctx context.Context, requestI
 	if err := worker.Reconciler.StartNamed(ctx, fmt.Sprintf("%s-%d", worker.Reconciler.ScaleSet.Name, requestID)); err != nil {
 		return fmt.Errorf("start repository runner: %w", err)
 	}
-	effectiveLogger(worker.Logger).Info("runner started", jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...)
+	effectiveLogger(worker.Logger).Info("runner started", append(
+		[]any{slog.String("action", "runner_start"), slog.String("phase", "completed")},
+		jobLogAttributes(worker.Repository, worker.ScaleSet, requestID)...,
+	)...)
 	return nil
 }
 
@@ -270,22 +299,58 @@ func (worker coordinatedRepositoryWorker) StartAssigned(ctx context.Context) err
 
 func prepareScaleSetSession(
 	ctx context.Context,
+	logger *slog.Logger,
 	client scaleSetClient,
+	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	runnerHostname string,
 ) (*upstream.RunnerScaleSet, scaleSetMessageClient, error) {
+	logAction(ctx, logger, slog.LevelDebug, "runner_group_lookup", "started",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetConfig.Name),
+		slog.String("runnerGroup", scaleSetConfig.RunnerGroup),
+	)
 	runnerGroup, err := client.GetRunnerGroupByName(ctx, scaleSetConfig.RunnerGroup)
 	if err != nil {
+		logActionFailure(ctx, logger, "runner_group_lookup", err,
+			slog.String("repository", repositoryURL),
+			slog.String("scaleSet", scaleSetConfig.Name),
+			slog.String("runnerGroup", scaleSetConfig.RunnerGroup),
+		)
 		return nil, scaleSetMessageClient{}, fmt.Errorf("get runner group %q: %w", scaleSetConfig.RunnerGroup, err)
 	}
+	logAction(ctx, logger, slog.LevelDebug, "runner_group_lookup", "completed",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetConfig.Name),
+		slog.String("runnerGroup", scaleSetConfig.RunnerGroup),
+		slog.Int("runnerGroupID", runnerGroup.ID),
+	)
+	logAction(ctx, logger, slog.LevelDebug, "runner_scale_set_ensure", "started",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	runnerScaleSet, err := ensureRunnerScaleSet(ctx, client, runnerGroup.ID, scaleSetConfig)
 	if err != nil {
+		logActionFailure(ctx, logger, "runner_scale_set_ensure", err,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 		return nil, scaleSetMessageClient{}, fmt.Errorf("ensure runner scale set %q: %w", scaleSetConfig.Name, err)
 	}
+	logAction(ctx, logger, slog.LevelDebug, "runner_scale_set_ensure", "completed",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetConfig.Name),
+		slog.Int("runnerScaleSetID", runnerScaleSet.ID),
+	)
+	logAction(ctx, logger, slog.LevelDebug, "message_session_create", "started",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 	messageClient, err := client.MessageSessionClient(ctx, runnerScaleSet.ID, runnerHostname)
 	if err != nil {
+		logActionFailure(ctx, logger, "message_session_create", err,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
 		return nil, scaleSetMessageClient{}, fmt.Errorf("create message session for %q: %w", scaleSetConfig.Name, err)
 	}
+	logAction(ctx, logger, slog.LevelDebug, "message_session_create", "completed",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetConfig.Name),
+		slog.Int("runnerScaleSetID", runnerScaleSet.ID),
+	)
 	return runnerScaleSet, messageClient, nil
 }
 
@@ -317,9 +382,17 @@ type scaleSetLifecycleConfig struct {
 
 func startScaleSetLifecycle(ctx context.Context, lifecycleConfig scaleSetLifecycleConfig) scaleSetLifecycle {
 	pollerCtx, stopPolling := context.WithCancel(ctx)
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "started",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
+	)
 	pollerDone := startPoller(
 		pollerCtx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig,
 		lifecycleConfig.MessageClient, lifecycleConfig.Reconciler, lifecycleConfig.RetryDelay,
+	)
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
 	)
 	return scaleSetLifecycle{
 		StopPolling: func() {
@@ -329,19 +402,49 @@ func startScaleSetLifecycle(ctx context.Context, lifecycleConfig scaleSetLifecyc
 		Drain:         lifecycleConfig.Reconciler.Drain,
 		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,
 		Shutdown: func(ctx context.Context) error {
-			return shutdownScaleSet(ctx, lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet)
+			return shutdownScaleSet(
+				ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name,
+				lifecycleConfig.MessageClient, lifecycleConfig.Client, lifecycleConfig.RunnerScaleSet,
+			)
 		},
 	}
 }
 
 func shutdownScaleSet(
 	ctx context.Context,
+	logger *slog.Logger,
+	repositoryURL string,
+	scaleSetName string,
 	messageClient scaleSetMessageClient,
 	client scaleSetManager,
 	runnerScaleSet *upstream.RunnerScaleSet,
 ) error {
+	logAction(ctx, logger, slog.LevelDebug, "message_session_close", "started",
+		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
 	closeErr := messageClient.Close(ctx)
+	if closeErr != nil {
+		logActionFailure(ctx, logger, "message_session_close", closeErr,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+	} else {
+		logAction(ctx, logger, slog.LevelDebug, "message_session_close", "completed",
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+	}
+	logAction(ctx, logger, slog.LevelDebug, "runner_scale_set_delete", "started",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetName),
+		slog.Int("runnerScaleSetID", runnerScaleSet.ID),
+	)
 	deleteErr := client.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID)
+	if deleteErr != nil {
+		logActionFailure(ctx, logger, "runner_scale_set_delete", deleteErr,
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+	} else {
+		logAction(ctx, logger, slog.LevelDebug, "runner_scale_set_delete", "completed",
+			slog.String("repository", repositoryURL),
+			slog.String("scaleSet", scaleSetName),
+			slog.Int("runnerScaleSetID", runnerScaleSet.ID),
+		)
+	}
 	return errors.Join(closeErr, deleteErr)
 }
 
@@ -415,8 +518,18 @@ func pollUntilShutdown(
 ) {
 	consecutiveFailures := 0
 	for ctx.Err() == nil {
+		pollStartedAt := time.Now()
+		logAction(ctx, logger, slog.LevelDebug, "message_poll", "started",
+			slog.String("repository", repositoryURL),
+			slog.String("scaleSet", scaleSetName),
+		)
 		if err := poller.PollOnce(ctx); err != nil {
 			if ctx.Err() != nil {
+				logAction(context.WithoutCancel(ctx), logger, slog.LevelDebug, "message_poll", "canceled",
+					slog.String("repository", repositoryURL),
+					slog.String("scaleSet", scaleSetName),
+					slog.Duration("duration", time.Since(pollStartedAt)),
+				)
 				return
 			}
 			consecutiveFailures = logPollFailure(logger, repositoryURL, scaleSetName, err, consecutiveFailures)
@@ -426,15 +539,29 @@ func pollUntilShutdown(
 			continue
 		}
 		consecutiveFailures = 0
+		logAction(ctx, logger, slog.LevelDebug, "message_poll", "completed",
+			slog.String("repository", repositoryURL),
+			slog.String("scaleSet", scaleSetName),
+			slog.Int("lastMessageID", poller.LastMessageID),
+			slog.Duration("duration", time.Since(pollStartedAt)),
+		)
 	}
 }
 
 func logPollFailure(logger *slog.Logger, repositoryURL string, scaleSetName string, pollErr error, consecutiveFailures int) int {
 	consecutiveFailures++
-	logger.Error("poll failed", slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName), slog.String("error", pollErr.Error()))
+	logger.Error("poll failed",
+		slog.String("action", "message_poll"),
+		slog.String("phase", "failed"),
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetName),
+		slog.String("error", pollErr.Error()),
+	)
 	if consecutiveFailures == sustainedPollFailureThreshold {
 		logger.Error(
 			"sustained poll failures",
+			slog.String("action", "message_poll"),
+			slog.String("phase", "degraded"),
 			slog.String("repository", repositoryURL),
 			slog.String("scaleSet", scaleSetName),
 			slog.Int("consecutiveFailures", consecutiveFailures),
@@ -485,6 +612,8 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	}
 	effectiveLogger(handler.Logger).Info(
 		"assigned capacity reconciled",
+		slog.String("action", "capacity_reconcile"),
+		slog.String("phase", "completed"),
 		slog.String("repository", handler.Repository),
 		slog.String("scaleSet", handler.ScaleSet),
 		slog.Int("assignedJobs", reconciliation.AssignedJobs),
@@ -513,16 +642,19 @@ func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.Runner
 			continue
 		}
 		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: completedJob.RunnerRequestID})
-		effectiveLogger(handler.Logger).Info("job demand removed", append(jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID), slog.String("status", "completed"))...)
+		attributes := []any{slog.String("action", "demand_remove"), slog.String("phase", "completed")}
+		attributes = append(attributes, jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID)...)
+		attributes = append(attributes, slog.String("status", "completed"))
+		effectiveLogger(handler.Logger).Info("job demand removed", attributes...)
 	}
 	return observedDemand, removedDemand, nil
 }
 
 func (handler coordinatedScaleSetHandler) logDemand(status string, requestID int64, queueTime time.Time) {
-	effectiveLogger(handler.Logger).Info("job demand observed", append(
-		jobLogAttributes(handler.Repository, handler.ScaleSet, requestID),
-		slog.String("status", status), slog.Time("queueTime", queueTime),
-	)...)
+	attributes := []any{slog.String("action", "demand_observe"), slog.String("phase", "completed")}
+	attributes = append(attributes, jobLogAttributes(handler.Repository, handler.ScaleSet, requestID)...)
+	attributes = append(attributes, slog.String("status", status), slog.Time("queueTime", queueTime))
+	effectiveLogger(handler.Logger).Info("job demand observed", attributes...)
 }
 
 func jobLogAttributes(repository string, scaleSet string, requestID int64) []any {

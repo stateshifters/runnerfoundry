@@ -23,6 +23,7 @@ github:
 
 log:
   format: text
+  level: info
 
 state:
   path: /var/lib/github-scaler/state.db
@@ -59,7 +60,7 @@ Github runner scale sets are routed by their scale-set name. Use the configured 
 
 Set `prune: true` only when `github-scaler` owns every runner scale set in the discovered repositories and runner groups. When enabled, discovery deletes Github runner scale sets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 
-`log.format` accepts `text` or `json`.
+`log.format` accepts `text` or `json`. `log.level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`. Lifecycle milestones are logged at `info`. Set the level to `debug` to include individual repository, scale-set, polling, reconciliation, cleanup, and reload actions. Failures remain visible at `warn` or `error` as appropriate.
 
 ## Install as a Daemon
 

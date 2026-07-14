@@ -46,6 +46,7 @@ type GitHubAppCredentials struct {
 
 type LogConfig struct {
 	Format string `yaml:"format"`
+	Level  string `yaml:"level"`
 }
 
 type ScaleSetConfig struct {
@@ -94,6 +95,14 @@ func (loadedConfig *Config) Validate() error {
 	}
 	if loadedConfig.Log.Format != "text" && loadedConfig.Log.Format != "json" {
 		return fmt.Errorf("unsupported log.format %q", loadedConfig.Log.Format)
+	}
+	if loadedConfig.Log.Level == "" {
+		loadedConfig.Log.Level = "info"
+	}
+	switch loadedConfig.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("unsupported log.level %q", loadedConfig.Log.Level)
 	}
 	if strings.TrimSpace(loadedConfig.State.Path) == "" {
 		return errors.New("state.path is required")

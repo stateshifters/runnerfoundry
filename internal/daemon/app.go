@@ -30,7 +30,7 @@ type runtime struct {
 	LoadConfig      func(configPath string) (config.Config, error)
 	NewDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
 	NewGitHubClient func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
-	NewLogger       func(format string) *slog.Logger
+	NewLogger       func(format string, level string) *slog.Logger
 	OpenDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
 	Notifier        serviceNotifier
 	StartScaleSet   func(
@@ -115,6 +115,12 @@ func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) (run
 	if err != nil {
 		return err
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "configuration", "loaded",
+		slog.String("configPath", options.ConfigPath),
+		slog.Int("scaleSetCount", len(activeConfig.Config.ScaleSets)),
+		slog.String("logFormat", activeConfig.Config.Log.Format),
+		slog.String("logLevel", activeConfig.Config.Log.Level),
+	)
 	defer func() { runErr = errors.Join(runErr, activeConfig.StateCloser.Close()) }()
 	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
 	if err != nil {
@@ -123,6 +129,7 @@ func runDaemon(ctx context.Context, options Options, daemonRuntime runtime) (run
 	if notifyErr := daemonRuntime.Notifier.Ready(ctx); notifyErr != nil {
 		return fmt.Errorf("notify ready: %w", notifyErr)
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "daemon", "ready")
 	reconcileDiscovery(ctx, daemonRuntime, &activeConfig)
 	return runActiveConfiguration(ctx, options, daemonRuntime, activeConfig, discoveryInterval)
 }
@@ -139,9 +146,15 @@ func runActiveConfiguration(
 	for {
 		select {
 		case <-ctx.Done():
+			logAction(context.WithoutCancel(ctx), activeConfig.Logger, slog.LevelInfo, "shutdown", "started")
 			if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
-				activeConfig.Logger.Warn("shutdown cleanup incomplete", slog.String("error", err.Error()))
+				activeConfig.Logger.Warn("shutdown cleanup incomplete",
+					slog.String("action", "shutdown"),
+					slog.String("phase", "failed"),
+					slog.String("error", err.Error()),
+				)
 			}
+			logAction(context.WithoutCancel(ctx), activeConfig.Logger, slog.LevelInfo, "shutdown", "completed")
 			return nil
 		case <-discoveryTimer.C:
 			reconcileDiscovery(ctx, daemonRuntime, &activeConfig)
@@ -174,7 +187,9 @@ func reloadAndReadInterval(
 	if err != nil {
 		return activeConfiguration{}, 0, fmt.Errorf("load reloaded discovery interval: %w", err)
 	}
+	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "replacement_reconciliation_started")
 	reconcileDiscovery(ctx, daemonRuntime, &reloadedConfig)
+	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "completed")
 	return reloadedConfig, discoveryInterval, nil
 }
 
@@ -224,7 +239,7 @@ func loadConfiguration(configPath string, daemonRuntime runtime) (activeConfigur
 		Discoverer:   discoverer,
 		Coordinators: coordinators(loadedConfig.ScaleSets, demandStore),
 		Repositories: map[string]managedRepository{},
-		Logger:       daemonRuntime.NewLogger(loadedConfig.Log.Format),
+		Logger:       daemonRuntime.NewLogger(loadedConfig.Log.Format, loadedConfig.Log.Level),
 		DemandStore:  demandStore,
 		StateCloser:  stateCloser,
 	}
@@ -240,17 +255,29 @@ func coordinators(scaleSets []config.ScaleSetConfig, store scaler.DemandStore) m
 }
 
 func reconcileDiscovery(ctx context.Context, daemonRuntime runtime, activeConfig *activeConfiguration) {
+	startedAt := time.Now()
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "discovery", "started")
 	discovery, err := activeConfig.Discoverer.Discover(ctx)
 	if err != nil {
 		activeConfig.ReconciliationPending = true
-		activeConfig.Logger.Error("repository discovery failed", slog.String("error", err.Error()))
+		logActionFailure(ctx, activeConfig.Logger, "discovery", err, slog.Duration("duration", time.Since(startedAt)))
 		return
 	}
 	if err := applyDiscovery(ctx, daemonRuntime, activeConfig, discovery); err != nil {
 		activeConfig.ReconciliationPending = true
+		logActionFailure(ctx, activeConfig.Logger, "discovery", err,
+			slog.Int("repositoryCount", len(discovery.Repositories)),
+			slog.Int("installationFailureCount", len(discovery.InstallationFailures)),
+			slog.Duration("duration", time.Since(startedAt)),
+		)
 		return
 	}
 	activeConfig.ReconciliationPending = false
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "discovery", "completed",
+		slog.Int("repositoryCount", len(discovery.Repositories)),
+		slog.Int("installationFailureCount", len(discovery.InstallationFailures)),
+		slog.Duration("duration", time.Since(startedAt)),
+	)
 }
 
 func nextReconciliationDelay(activeConfig activeConfiguration, discoveryInterval time.Duration, retryDelay time.Duration) time.Duration {
@@ -282,13 +309,34 @@ func applyDiscovery(
 }
 
 func schedulePersistedDemand(ctx context.Context, activeConfig *activeConfiguration) error {
+	startedAt := time.Now()
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_recovery", "started")
 	var recoveryErr error
 	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "started",
+			slog.String("scaleSet", scaleSetConfig.Name),
+		)
 		if err := activeConfig.Coordinators[scaleSetConfig.Name].Schedule(ctx); err != nil {
 			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover scale set %q demand: %w", scaleSetConfig.Name, err))
+			logActionFailure(ctx, activeConfig.Logger, "demand_schedule", err,
+				slog.String("scaleSet", scaleSetConfig.Name),
+			)
+			continue
 		}
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "completed",
+			slog.String("scaleSet", scaleSetConfig.Name),
+		)
 	}
-	return recoveryErr
+	if recoveryErr != nil {
+		logActionFailure(ctx, activeConfig.Logger, "demand_recovery", recoveryErr,
+			slog.Duration("duration", time.Since(startedAt)),
+		)
+		return recoveryErr
+	}
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_recovery", "completed",
+		slog.Duration("duration", time.Since(startedAt)),
+	)
+	return nil
 }
 
 func desiredRepositories(
@@ -346,6 +394,8 @@ func startDiscoveredRepositories(
 		if err != nil {
 			activeConfig.Logger.Error(
 				"repository startup failed",
+				slog.String("action", "repository_start"),
+				slog.String("phase", "failed"),
 				slog.String("repository", repositoryURL),
 				slog.Int64("installationID", repository.InstallationID),
 				slog.String("error", err.Error()),
@@ -364,6 +414,8 @@ func startDiscoveredRepositories(
 func logRepositoryReconciliationFailure(logger *slog.Logger, repositoryURL string, installationID int64, err error) {
 	logger.Error(
 		"repository reconciliation failed",
+		slog.String("action", "repository_reconcile"),
+		slog.String("phase", "failed"),
 		slog.String("repository", repositoryURL),
 		slog.Int64("installationID", installationID),
 		slog.String("error", err.Error()),
@@ -375,7 +427,24 @@ func startRepository(
 	daemonRuntime runtime,
 	activeConfig *activeConfiguration,
 	repository githubapp.Repository,
-) (managedRepository, error) {
+) (managed managedRepository, resultErr error) {
+	startedAt := time.Now()
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", "started",
+		slog.String("repository", repository.URL),
+		slog.Int64("installationID", repository.InstallationID),
+	)
+	defer func() {
+		attributes := []slog.Attr{
+			slog.String("repository", repository.URL),
+			slog.Int64("installationID", repository.InstallationID),
+			slog.Duration("duration", time.Since(startedAt)),
+		}
+		if resultErr != nil {
+			logActionFailure(ctx, activeConfig.Logger, "repository_start", resultErr, attributes...)
+			return
+		}
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", "completed", attributes...)
+	}()
 	client, err := daemonRuntime.NewGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
 	if err != nil {
 		return managedRepository{}, fmt.Errorf("create GitHub client for %q: %w", repository.URL, err)
@@ -383,10 +452,20 @@ func startRepository(
 	if err := pruneRepositoryWhenEnabled(ctx, activeConfig, client, repository.URL); err != nil {
 		return managedRepository{}, err
 	}
-	managed := managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
+	managed = managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
 	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+		scaleSetStartedAt := time.Now()
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", "started",
+			slog.String("repository", repository.URL),
+			slog.String("scaleSet", scaleSetConfig.Name),
+		)
 		lifecycle, startErr := daemonRuntime.StartScaleSet(ctx, activeConfig.Logger, client, repository.URL, scaleSetConfig, activeConfig.Coordinators[scaleSetConfig.Name])
 		if startErr != nil {
+			logActionFailure(ctx, activeConfig.Logger, "scale_set_start", startErr,
+				slog.String("repository", repository.URL),
+				slog.String("scaleSet", scaleSetConfig.Name),
+				slog.Duration("duration", time.Since(scaleSetStartedAt)),
+			)
 			rollbackErr := rollbackRepositoryStartup(ctx, activeConfig, repository.URL, managed)
 			return managedRepository{}, errors.Join(
 				fmt.Errorf("start scale set %q for %q: %w", scaleSetConfig.Name, repository.URL, startErr),
@@ -394,6 +473,11 @@ func startRepository(
 			)
 		}
 		managed.Lifecycles[scaleSetConfig.Name] = lifecycle
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", "completed",
+			slog.String("repository", repository.URL),
+			slog.String("scaleSet", scaleSetConfig.Name),
+			slog.Duration("duration", time.Since(scaleSetStartedAt)),
+		)
 	}
 	return managed, nil
 }
@@ -434,14 +518,53 @@ func removeRepositoryImmediately(
 	activeConfig *activeConfiguration,
 	repositoryURL string,
 	repository managedRepository,
-) error {
+) (resultErr error) {
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_remove", "started",
+		slog.String("repository", repositoryURL),
+		slog.Int64("installationID", repository.InstallationID),
+	)
+	defer func() {
+		attributes := []slog.Attr{
+			slog.String("repository", repositoryURL),
+			slog.Int64("installationID", repository.InstallationID),
+		}
+		if resultErr != nil {
+			logActionFailure(ctx, activeConfig.Logger, "repository_remove", resultErr, attributes...)
+			return
+		}
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_remove", "completed", attributes...)
+	}()
 	for scaleSetName, lifecycle := range repository.Lifecycles {
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_remove", "started",
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
 		if err := activeConfig.Coordinators[scaleSetName].RemoveRepository(context.WithoutCancel(ctx), repositoryURL); err != nil {
+			logActionFailure(ctx, activeConfig.Logger, "demand_remove", err,
+				slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
 			return fmt.Errorf("remove repository %q queued demand: %w", repositoryURL, err)
 		}
-		lifecycle.StopPolling()
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_remove", "completed",
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+		stopLifecyclePolling(ctx, activeConfig.Logger, repositoryURL, scaleSetName, lifecycle)
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "runner_destroy", "started",
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
 		cleanupErr := lifecycle.DestroyActive(context.WithoutCancel(ctx))
+		if cleanupErr != nil {
+			logActionFailure(ctx, activeConfig.Logger, "runner_destroy", cleanupErr,
+				slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+		} else {
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "runner_destroy", "completed",
+				slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+		}
+		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_shutdown", "started",
+			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
 		shutdownErr := lifecycle.Shutdown(context.WithoutCancel(ctx))
+		if shutdownErr != nil {
+			logActionFailure(ctx, activeConfig.Logger, "scale_set_shutdown", shutdownErr,
+				slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+		} else {
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_shutdown", "completed",
+				slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetName))
+		}
 		if err := errors.Join(cleanupErr, shutdownErr); err != nil {
 			return fmt.Errorf("remove repository %q scale set %q: %w", repositoryURL, scaleSetName, err)
 		}
@@ -456,27 +579,40 @@ func reloadConfiguration(
 	daemonRuntime runtime,
 	activeConfig activeConfiguration,
 ) (activeConfiguration, error) {
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "requested")
 	if err := daemonRuntime.Notifier.Reloading(ctx); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
 	reloadRuntime := runtimeForReload(daemonRuntime, activeConfig)
 	reloaded, err := loadConfiguration(configPath, reloadRuntime)
 	if err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "replacement_validated")
 	if err := daemonRuntime.Notifier.Ready(ctx); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, fmt.Errorf("notify ready after reload: %w", err)
 	}
 	stopPolling(activeConfig)
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "polling_stopped")
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "drain_started")
 	if err := drainConfiguration(ctx, activeConfig, daemonRuntime.DrainInterval); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "drain_completed")
 	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "old_configuration_stopped")
 	if err := removeUnconfiguredScaleSets(ctx, activeConfig, reloaded); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "state_reconciled")
 	return reloaded, nil
 }
 
@@ -492,6 +628,7 @@ func runtimeForReload(daemonRuntime runtime, activeConfig activeConfiguration) r
 }
 
 func removeUnconfiguredScaleSets(ctx context.Context, activeConfig activeConfiguration, reloaded activeConfiguration) error {
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "state_cleanup", "started")
 	configuredScaleSets := map[string]bool{}
 	for _, scaleSetConfig := range reloaded.Config.ScaleSets {
 		configuredScaleSets[scaleSetConfig.Name] = true
@@ -499,10 +636,17 @@ func removeUnconfiguredScaleSets(ctx context.Context, activeConfig activeConfigu
 	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
 		if !configuredScaleSets[scaleSetConfig.Name] {
 			if err := activeConfig.DemandStore.RemoveScaleSet(ctx, scaleSetConfig.Name); err != nil {
+				logActionFailure(ctx, activeConfig.Logger, "state_cleanup", err,
+					slog.String("scaleSet", scaleSetConfig.Name),
+				)
 				return fmt.Errorf("remove unconfigured scale set %q demand: %w", scaleSetConfig.Name, err)
 			}
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "state_remove", "completed",
+				slog.String("scaleSet", scaleSetConfig.Name),
+			)
 		}
 	}
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "state_cleanup", "completed")
 	return nil
 }
 
@@ -527,13 +671,26 @@ func drainConfiguration(ctx context.Context, activeConfig activeConfiguration, i
 
 func drainOnce(ctx context.Context, activeConfig activeConfiguration) (int, error) {
 	runningCount := 0
-	for _, repository := range activeConfig.Repositories {
-		for _, lifecycle := range repository.Lifecycles {
+	for repositoryURL, repository := range activeConfig.Repositories {
+		for scaleSetName, lifecycle := range repository.Lifecycles {
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "runner_drain", "started",
+				slog.String("repository", repositoryURL),
+				slog.String("scaleSet", scaleSetName),
+			)
 			count, err := lifecycle.Drain(ctx)
 			if err != nil {
+				logActionFailure(ctx, activeConfig.Logger, "runner_drain", err,
+					slog.String("repository", repositoryURL),
+					slog.String("scaleSet", scaleSetName),
+				)
 				return 0, fmt.Errorf("drain scale set: %w", err)
 			}
 			runningCount += count
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "runner_drain", "completed",
+				slog.String("repository", repositoryURL),
+				slog.String("scaleSet", scaleSetName),
+				slog.Int("runningRunnerCount", count),
+			)
 		}
 	}
 	return runningCount, nil
@@ -550,19 +707,25 @@ type lifecycleCleanup struct {
 	repositoryURL string
 	scaleSetName  string
 	lifecycle     scaleSetLifecycle
+	logger        *slog.Logger
 }
 
 func shutdownWithTimeout(ctx context.Context, activeConfig activeConfiguration, mode shutdownMode) error {
-	targets := lifecycleCleanupTargets(activeConfig)
+	targets := lifecycleCleanupTargets(ctx, activeConfig)
 	return cleanupLifecycles(ctx, targets, mode)
 }
 
-func lifecycleCleanupTargets(activeConfig activeConfiguration) []lifecycleCleanup {
+func lifecycleCleanupTargets(ctx context.Context, activeConfig activeConfiguration) []lifecycleCleanup {
 	targets := make([]lifecycleCleanup, 0)
 	for repositoryURL, repository := range activeConfig.Repositories {
 		for scaleSetName, lifecycle := range repository.Lifecycles {
-			lifecycle.StopPolling()
-			targets = append(targets, lifecycleCleanup{repositoryURL: repositoryURL, scaleSetName: scaleSetName, lifecycle: lifecycle})
+			stopLifecyclePolling(ctx, activeConfig.Logger, repositoryURL, scaleSetName, lifecycle)
+			targets = append(targets, lifecycleCleanup{
+				repositoryURL: repositoryURL,
+				scaleSetName:  scaleSetName,
+				lifecycle:     lifecycle,
+				logger:        activeConfig.Logger,
+			})
 		}
 	}
 	return targets
@@ -595,23 +758,48 @@ func cleanupLifecycles(ctx context.Context, targets []lifecycleCleanup, mode shu
 func cleanupLifecycle(ctx context.Context, target lifecycleCleanup, mode shutdownMode) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancelShutdown()
+	logAction(shutdownCtx, target.logger, slog.LevelDebug, "scale_set_shutdown", "started",
+		slog.String("repository", target.repositoryURL),
+		slog.String("scaleSet", target.scaleSetName),
+		slog.Bool("destroyActive", mode == immediateShutdown),
+	)
 	var err error
 	if mode == immediateShutdown {
 		err = errors.Join(err, target.lifecycle.DestroyActive(shutdownCtx))
 	}
 	err = errors.Join(err, target.lifecycle.Shutdown(shutdownCtx))
 	if err == nil {
+		logAction(shutdownCtx, target.logger, slog.LevelDebug, "scale_set_shutdown", "completed",
+			slog.String("repository", target.repositoryURL),
+			slog.String("scaleSet", target.scaleSetName),
+		)
 		return nil
 	}
+	logActionFailure(shutdownCtx, target.logger, "scale_set_shutdown", err,
+		slog.String("repository", target.repositoryURL),
+		slog.String("scaleSet", target.scaleSetName),
+	)
 	return fmt.Errorf("shutdown %q %q: %w", target.repositoryURL, target.scaleSetName, err)
 }
 
 func stopPolling(activeConfig activeConfiguration) {
-	for _, repository := range activeConfig.Repositories {
-		for _, lifecycle := range repository.Lifecycles {
-			lifecycle.StopPolling()
+	for repositoryURL, repository := range activeConfig.Repositories {
+		for scaleSetName, lifecycle := range repository.Lifecycles {
+			stopLifecyclePolling(context.Background(), activeConfig.Logger, repositoryURL, scaleSetName, lifecycle)
 		}
 	}
+}
+
+func stopLifecyclePolling(ctx context.Context, logger *slog.Logger, repositoryURL string, scaleSetName string, lifecycle scaleSetLifecycle) {
+	logAction(ctx, logger, slog.LevelDebug, "polling_stop", "started",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetName),
+	)
+	lifecycle.StopPolling()
+	logAction(ctx, logger, slog.LevelDebug, "polling_stop", "completed",
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetName),
+	)
 }
 
 func pruneRepository(
@@ -671,11 +859,29 @@ func readConfigFile(configPath string) ([]byte, error) {
 	return configBytes, nil
 }
 
-func newLogger(format string) *slog.Logger {
+func newLogger(format string, level string) *slog.Logger {
+	return newLoggerForWriter(os.Stdout, format, level)
+}
+
+func newLoggerForWriter(writer io.Writer, format string, level string) *slog.Logger {
+	handlerOptions := &slog.HandlerOptions{Level: configuredLogLevel(level)}
 	if format == "json" {
-		return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		return slog.New(slog.NewJSONHandler(writer, handlerOptions))
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, nil))
+	return slog.New(slog.NewTextHandler(writer, handlerOptions))
+}
+
+func configuredLogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func startScaleSet(
@@ -712,10 +918,19 @@ func pruneScaleSetTarget(
 		if desiredNames[runnerScaleSet.Name] {
 			continue
 		}
-		logger.Info("pruning unmanaged runner scale set", slog.String("repository", target.RepositoryURL), slog.String("scaleSet", runnerScaleSet.Name))
+		logger.Info("pruning unmanaged runner scale set",
+			slog.String("action", "runner_scale_set_prune"),
+			slog.String("phase", "started"),
+			slog.String("repository", target.RepositoryURL),
+			slog.String("scaleSet", runnerScaleSet.Name),
+		)
 		if err := client.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); err != nil {
 			return fmt.Errorf("delete runner scale set %q: %w", runnerScaleSet.Name, err)
 		}
+		logAction(ctx, logger, slog.LevelInfo, "runner_scale_set_prune", "completed",
+			slog.String("repository", target.RepositoryURL),
+			slog.String("scaleSet", runnerScaleSet.Name),
+		)
 	}
 	return nil
 }
