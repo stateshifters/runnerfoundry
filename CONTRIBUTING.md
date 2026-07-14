@@ -61,12 +61,13 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 V1 code must maintain 100% Go test coverage.
 
 ```sh
-go test ./...
-go test -race ./...
-go test ./... -coverprofile=coverage
-go tool cover -func=coverage
-go vet ./...
-gofmt -l $(find . -name '*.go')
+make lint
+make fmt-check
+make vet
+make test
+make coverage
+make test-race
+make smoke
 ```
 
 - The coverage total must report `100.0%`.
