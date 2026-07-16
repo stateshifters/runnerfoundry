@@ -225,6 +225,18 @@ For each scale-set definition, the daemon:
 
 The daemon commits identifiable Github demand to SQLite before acknowledging its message. Job-assigned and job-completed messages without positive request identities are not stored as queue entries; their assigned capacity comes from Github message statistics. Runner recovery combines the durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate job-available delivery updates the existing request rather than adding another queue entry.
 
+### Recovery Guarantees
+
+Positive-identity job demand is durable across restart and reload. For each available job, the daemon first stores the request in SQLite. When shared capacity is available, it asks Github to acquire the request, records the acquired state, and provisions the named runner. The queue entry remains until Github reports `JobStarted` for that request or reports terminal `JobCompleted` state. Starting or observing a runner is not proof that Github assigned the job successfully.
+
+At startup, the daemon reopens `state.path`, rebuilds repository workers from Github discovery, and schedules the persisted queue. A provider-visible named runner suppresses duplicate provisioning without completing its matching queue entry. If that runner disappears before `JobStarted`, the daemon provisions it again without reacquiring the request. Missing repositories retain their demand until discovery can register their workers. FIFO order and the shared `max_runners` limit continue to apply to recovered demand.
+
+Reload validates the replacement configuration before stopping old polling. It drains active runners, closes the old scale-set sessions, reuses the same SQLite store for configured scale sets, registers replacement workers, and schedules retained demand. A failed replacement reconciliation keeps the demand durable and selects the shorter reconciliation retry delay. Demand for repositories or scale sets removed by the replacement configuration is intentionally deleted.
+
+Positive request identities and their acquired state come from SQLite. Provider labels, names, and metadata identify runners that already exist. Identity-free assigned work is not stored as queue demand. Each Github message-session snapshot restores its authoritative assigned-job count after restart or reload, and later statistics refresh that retained count. Every recovery pass reconciles those counts again, so capacity released without a new Github event still provisions the waiting work.
+
+Github's scale-set client does not formally specify whether acquiring the same request again after a successful acquisition is idempotent. A crash after Github accepts acquisition but before SQLite records it can therefore produce an unconfirmed reacquisition response. The daemon requires the response to contain the requested ID; otherwise it starts no identity-bound runner, retains the durable request, and leaves the message unacknowledged. Public release remains blocked until the upstream reacquisition contract is confirmed or recovery no longer depends on it.
+
 When installation access is removed, the daemon immediately drops queued demand, destroys active local runners, closes the message sessions, and attempts to unregister the affected scale sets. This can interrupt active jobs. On normal shutdown, active jobs are left running while message sessions close and scale sets unregister.
 
 ## Migrating from PAT Authentication

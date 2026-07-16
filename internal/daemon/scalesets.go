@@ -62,6 +62,7 @@ type scaleSetLifecycle struct {
 type messageSessionClient interface {
 	scalesetpoller.MessageClient
 	Close(ctx context.Context) error
+	Session() upstream.RunnerScaleSetSession
 }
 
 func (client scaleSetMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
@@ -84,6 +85,10 @@ func (client scaleSetMessageClient) Close(ctx context.Context) error {
 		return fmt.Errorf("close message session: %w", err)
 	}
 	return nil
+}
+
+func (client scaleSetMessageClient) initialStatistics() *upstream.RunnerScaleSetStatistic {
+	return client.Client.Session().Statistics
 }
 
 func (client scaleSetMessageClient) Acquire(ctx context.Context, requestID int64) error {
@@ -205,6 +210,9 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	}
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, worker)
+	if statistics := lifecycleConfig.MessageClient.initialStatistics(); statistics != nil {
+		lifecycleConfig.Coordinator.ObserveAssigned(lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs)
+	}
 	pollerCtx, stopPolling := context.WithCancel(ctx)
 	pollerDone := startCoordinatedPoller(pollerCtx, lifecycleConfig)
 	return coordinatedScaleSetLifecycle(lifecycleConfig, stopPolling, pollerDone)
@@ -698,12 +706,9 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	if applyErr := handler.Coordinator.Apply(ctx, observedDemand, removedDemand); applyErr != nil {
 		return fmt.Errorf("persist GitHub job demand: %w", applyErr)
 	}
-	if scheduleErr := handler.Coordinator.Schedule(ctx); scheduleErr != nil {
-		return fmt.Errorf("schedule shared runner capacity: %w", scheduleErr)
-	}
 	reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, message.Statistics.TotalAssignedJobs)
 	if err != nil {
-		return fmt.Errorf("reconcile assigned runner capacity: %w", err)
+		return fmt.Errorf("schedule shared runner capacity: %w", err)
 	}
 	effectiveLogger(handler.Logger).Info(
 		"assigned capacity reconciled",
@@ -719,11 +724,21 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 }
 
 func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.RunnerScaleSetMessage) ([]scaler.JobDemand, []scaler.DemandRemoval, error) {
-	observedDemand := make([]scaler.JobDemand, 0, len(message.JobAvailableMessages))
-	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobCompletedMessages))
-	for _, availableJob := range message.JobAvailableMessages {
+	observedDemand, err := handler.collectAvailableDemand(message.JobAvailableMessages)
+	if err != nil {
+		return nil, nil, err
+	}
+	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobStartedMessages)+len(message.JobCompletedMessages))
+	removedDemand = handler.collectStartedDemand(message.JobStartedMessages, removedDemand)
+	removedDemand = handler.collectCompletedDemand(message.JobCompletedMessages, removedDemand)
+	return observedDemand, removedDemand, nil
+}
+
+func (handler coordinatedScaleSetHandler) collectAvailableDemand(messages []*upstream.JobAvailable) ([]scaler.JobDemand, error) {
+	observedDemand := make([]scaler.JobDemand, 0, len(messages))
+	for _, availableJob := range messages {
 		if availableJob == nil || availableJob.RunnerRequestID <= 0 || availableJob.QueueTime.IsZero() {
-			return nil, nil, errors.New("job available message requires a positive runner request ID and queue time")
+			return nil, errors.New("job available message requires a positive runner request ID and queue time")
 		}
 		handler.logDemand("available", availableJob.RunnerRequestID, availableJob.QueueTime)
 		observedDemand = append(observedDemand, scaler.JobDemand{
@@ -732,18 +747,43 @@ func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.Runner
 			QueueTime:  availableJob.QueueTime,
 		})
 	}
-	for _, completedJob := range message.JobCompletedMessages {
+	return observedDemand, nil
+}
+
+func (handler coordinatedScaleSetHandler) collectStartedDemand(
+	messages []*upstream.JobStarted,
+	removedDemand []scaler.DemandRemoval,
+) []scaler.DemandRemoval {
+	for _, startedJob := range messages {
+		if startedJob == nil || startedJob.RunnerRequestID <= 0 {
+			continue
+		}
+		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: startedJob.RunnerRequestID})
+		handler.logDemandRemoval("started", startedJob.RunnerRequestID)
+	}
+	return removedDemand
+}
+
+func (handler coordinatedScaleSetHandler) collectCompletedDemand(
+	messages []*upstream.JobCompleted,
+	removedDemand []scaler.DemandRemoval,
+) []scaler.DemandRemoval {
+	for _, completedJob := range messages {
 		if completedJob == nil || completedJob.RunnerRequestID <= 0 {
 			continue
 		}
 		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: completedJob.RunnerRequestID})
-		attributes := make([]any, 0, 6)
-		attributes = append(attributes, slog.String("action", "demand_remove"), slog.String("phase", "completed"))
-		attributes = append(attributes, jobLogAttributes(handler.Repository, handler.ScaleSet, completedJob.RunnerRequestID)...)
-		attributes = append(attributes, slog.String("status", "completed"))
-		effectiveLogger(handler.Logger).Info("job demand removed", attributes...)
+		handler.logDemandRemoval("completed", completedJob.RunnerRequestID)
 	}
-	return observedDemand, removedDemand, nil
+	return removedDemand
+}
+
+func (handler coordinatedScaleSetHandler) logDemandRemoval(status string, requestID int64) {
+	attributes := make([]any, 0, 6)
+	attributes = append(attributes, slog.String("action", "demand_remove"), slog.String("phase", "completed"))
+	attributes = append(attributes, jobLogAttributes(handler.Repository, handler.ScaleSet, requestID)...)
+	attributes = append(attributes, slog.String("status", status))
+	effectiveLogger(handler.Logger).Info("job demand removed", attributes...)
 }
 
 func (handler coordinatedScaleSetHandler) logDemand(status string, requestID int64, queueTime time.Time) {

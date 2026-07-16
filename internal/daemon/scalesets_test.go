@@ -211,6 +211,42 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 	}
 }
 
+func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	messageClient := newFakeMessageClient(cancel)
+	messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
+	provider := &fakeScalerProvider{trackStarted: true}
+	coordinator := scaler.NewCoordinator(1)
+	client := &fakeScaleSetClient{
+		runnerGroup: &upstream.RunnerGroup{ID: 10}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
+		messageClient: scaleSetMessageClient{Client: messageClient},
+	}
+	lifecycle, err := runCoordinatedScaleSet(
+		ctx, slog.Default(), client, "https://github.com/acme/repo", config.ScaleSetConfig{
+			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
+		}, coordinator, scaleSetRuntime{
+			RunnerHostname: func() string { return "host" },
+			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+				return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+					Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+				}}, nil
+			},
+			PollRetryDelay: time.Nanosecond,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.StopPolling()
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.started) != 1 {
+		t.Fatalf("expected initial session statistics to restore assigned demand, got %#v", provider.started)
+	}
+}
+
 func TestRunCoordinatedScaleSetSurfacesPreparationAndReconcilerFailures(t *testing.T) {
 	coordinator := scaler.NewCoordinator(1)
 	_, err := runCoordinatedScaleSet(
@@ -653,6 +689,30 @@ func TestCoordinatedScaleSetHandlerUsesStatisticsForZeroIdentityAssignedJobs(t *
 	}
 }
 
+func TestCoordinatedScaleSetHandlerAppliesLowerAssignedCountBeforeScheduling(t *testing.T) {
+	capacityHolder := &recordingRecoveryWorker{running: 1}
+	waitingWorker := &recordingRecoveryWorker{}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("capacity-holder", capacityHolder)
+	coordinator.AddRepository("waiting", waitingWorker)
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "waiting"}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	capacityHolder.running = 0
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if waitingWorker.assigned != 0 {
+		t.Fatalf("expected current zero assigned count to prevent stale provisioning, got %d", waitingWorker.assigned)
+	}
+}
+
 func TestCoordinatedScaleSetHandlerRejectsMalformedAvailableDemand(t *testing.T) {
 	worker := &recordingRecoveryWorker{}
 	coordinator := scaler.NewCoordinator(1)
@@ -701,6 +761,7 @@ func TestCoordinatedScaleSetHandlerIgnoresZeroIdentityCompletion(t *testing.T) {
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
 	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
 		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobStartedMessages:   []*upstream.JobStarted{{}},
 		JobCompletedMessages: []*upstream.JobCompleted{{}},
 	}); err != nil {
 		t.Fatal(err)
@@ -714,7 +775,7 @@ func TestCoordinatedScaleSetHandlerIgnoresZeroIdentityCompletion(t *testing.T) {
 	}
 }
 
-func TestCoordinatedScaleSetHandlerRemovesPositiveIdentityCompletion(t *testing.T) {
+func TestCoordinatedScaleSetHandlerRemovesRepeatedPositiveIdentityCompletionIdempotently(t *testing.T) {
 	worker := &recordingRecoveryWorker{running: 1}
 	coordinator := scaler.NewCoordinator(1)
 	coordinator.AddRepository("repo", worker)
@@ -724,11 +785,14 @@ func TestCoordinatedScaleSetHandlerRemovesPositiveIdentityCompletion(t *testing.
 		t.Fatal(err)
 	}
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
-	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+	completion := &upstream.RunnerScaleSetMessage{
 		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
 		JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 49}}},
-	}); err != nil {
-		t.Fatal(err)
+	}
+	for range 2 {
+		if err := handler.HandleMessage(context.Background(), completion); err != nil {
+			t.Fatal(err)
+		}
 	}
 	worker.running = 0
 	if err := coordinator.Schedule(context.Background()); err != nil {
@@ -736,6 +800,49 @@ func TestCoordinatedScaleSetHandlerRemovesPositiveIdentityCompletion(t *testing.
 	}
 	if len(worker.started) != 0 {
 		t.Fatalf("expected positive completion identity to remove demand, got %#v", worker.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerRetainsDemandUntilJobStarted(t *testing.T) {
+	worker := &recordingRecoveryWorker{running: 1}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		Repository: "repo", RequestID: 50, QueueTime: time.Now(), Acquired: true,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAssignedMessages: []*upstream.JobAssigned{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	worker.running = 0
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.started) != 1 || worker.started[0] != 50 {
+		t.Fatalf("expected JobAssigned demand to remain provisionable, got %#v", worker.started)
+	}
+
+	worker.running = 1
+	started := &upstream.RunnerScaleSetMessage{
+		Statistics:         &upstream.RunnerScaleSetStatistic{},
+		JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
+	}
+	for range 2 {
+		if err := handler.HandleMessage(context.Background(), started); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worker.running = 0
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.started) != 1 {
+		t.Fatalf("expected JobStarted to complete durable demand, got %#v", worker.started)
 	}
 }
 
@@ -749,7 +856,7 @@ func TestCoordinatedScaleSetHandlerLeavesAssignedReconciliationRetryable(t *test
 		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
 		JobAssignedMessages: []*upstream.JobAssigned{{}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "reconcile assigned runner capacity") {
+	if err == nil || !strings.Contains(err.Error(), "schedule shared runner capacity") {
 		t.Fatalf("expected retryable assigned reconciliation failure, got %v", err)
 	}
 }
@@ -803,6 +910,34 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenSchedulingFails(t *
 	}
 }
 
+func TestCoordinatedScaleSetHandlerDoesNotDuplicateRunnerWhenAvailableDemandIsRedelivered(t *testing.T) {
+	provider := &fakeScalerProvider{trackStarted: true}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}},
+		MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+	})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	message := &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{
+			RunnerRequestID: 50, QueueTime: time.Now(),
+		}}},
+	}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.started) != 1 {
+		t.Fatalf("expected redelivery to reuse the provider-visible runner, got %#v", provider.started)
+	}
+}
+
 func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t *testing.T) {
 	coordinator := scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{})
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
@@ -836,6 +971,39 @@ func TestScaleSetMessageClientRequiresConfirmedJobAcquisition(t *testing.T) {
 	}
 	if err := (scaleSetMessageClient{Client: &emptyAcquisitionClient{}}).Acquire(context.Background(), 1); err == nil {
 		t.Fatal("expected unconfirmed acquisition error")
+	}
+}
+
+func TestUnconfirmedJobAcquisitionPreservesDemandWithoutStartingRunner(t *testing.T) {
+	provider := &fakeScalerProvider{trackStarted: true}
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}},
+		MessageClient: scaleSetMessageClient{Client: &emptyAcquisitionClient{}},
+	})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{
+			RunnerRequestID: 51, QueueTime: time.Now(),
+		}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "job 51 was not acquired") {
+		t.Fatalf("expected unconfirmed acquisition failure, got %v", err)
+	}
+	if len(provider.started) != 0 {
+		t.Fatalf("expected no runner for unconfirmed acquisition, got %#v", provider.started)
+	}
+
+	recoveryWorker := &recordingRecoveryWorker{}
+	coordinator.AddRepository("repo", recoveryWorker)
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recoveryWorker.acquired) != 1 || recoveryWorker.acquired[0] != 51 || len(recoveryWorker.started) != 1 {
+		t.Fatalf("expected preserved demand to remain recoverable, acquired=%#v started=%#v", recoveryWorker.acquired, recoveryWorker.started)
 	}
 }
 
@@ -1266,6 +1434,7 @@ type fakeMessageClient struct {
 	message       *upstream.RunnerScaleSetMessage
 	acquireErr    error
 	acquiredIDs   []int64
+	session       upstream.RunnerScaleSetSession
 }
 
 type blockingMessageClient struct {
@@ -1301,6 +1470,10 @@ func (client *blockingMessageClient) DeleteMessage(ctx context.Context, messageI
 
 func (client *blockingMessageClient) Close(ctx context.Context) error {
 	return nil
+}
+
+func (client *blockingMessageClient) Session() upstream.RunnerScaleSetSession {
+	return upstream.RunnerScaleSetSession{}
 }
 
 func (client *fakeMessageClient) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
@@ -1346,6 +1519,10 @@ func (client *fakeMessageClient) Close(ctx context.Context) error {
 	}
 	client.closed = true
 	return nil
+}
+
+func (client *fakeMessageClient) Session() upstream.RunnerScaleSetSession {
+	return client.session
 }
 
 type fakeScalerProvider struct {

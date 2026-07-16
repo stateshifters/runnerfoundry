@@ -171,21 +171,82 @@ func TestCoordinatorReportsDurableStoreFailures(t *testing.T) {
 	ctx := context.Background()
 	tests := map[string]*failingDemandStore{
 		"load":                {orderedErr: errors.New("load failed")},
-		"recover delete":      {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1}}}, deleteErr: errors.New("delete failed")},
 		"persist acquisition": {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1}}}, applyErr: errors.New("apply failed")},
-		"complete admission":  {demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 1, Acquired: true}}}, deleteErr: errors.New("delete failed")},
 	}
 	for name, store := range tests {
 		t.Run(name, func(t *testing.T) {
 			coordinator := NewDurableCoordinator("linux", 1, store)
 			startOrder := []string{}
 			worker := &recordingWorker{startOrder: &startOrder}
-			if name == "recover delete" {
-				worker.existingRequestID = 1
-			}
 			coordinator.AddRepository("repo", worker)
 			if err := coordinator.Schedule(ctx); err == nil {
 				t.Fatal("expected durable store failure")
+			}
+		})
+	}
+}
+
+func TestCoordinatorDoesNotStartWhenPersistingAcquisitionFails(t *testing.T) {
+	store := &failingDemandStore{
+		demand:   []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 8}}},
+		applyErr: errors.New("persist failed"),
+	}
+	startOrder := []string{}
+	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
+	coordinator := NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", worker)
+
+	if err := coordinator.Schedule(context.Background()); err == nil {
+		t.Fatal("expected acquisition persistence failure")
+	}
+	if len(worker.acquired) != 1 || worker.acquired[0] != 8 {
+		t.Fatalf("expected acquisition before persistence failure, got %#v", worker.acquired)
+	}
+	if len(startOrder) != 0 {
+		t.Fatalf("expected no runner start before acquired state is durable, got %#v", startOrder)
+	}
+	if len(store.demand) != 1 || store.demand[0].Acquired {
+		t.Fatalf("expected available demand to remain retryable, got %#v", store.demand)
+	}
+}
+
+func TestCoordinatorPreservesDemandAcrossCancellationBoundaries(t *testing.T) {
+	startOrder := []string{}
+	tests := map[string]struct {
+		store  *failingDemandStore
+		worker RepositoryWorker
+	}{
+		"running inspection": {
+			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
+			worker: failingWorker{runningErr: context.Canceled},
+		},
+		"named runner inspection": {
+			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
+			worker: failingWorker{existsErr: context.Canceled},
+		},
+		"acquisition": {
+			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11}}}},
+			worker: failingWorker{acquireErr: context.Canceled},
+		},
+		"acquisition persistence": {
+			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11}}}, applyErr: context.Canceled},
+			worker: &recordingWorker{repository: "repo", startOrder: &startOrder},
+		},
+		"runner start": {
+			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
+			worker: failingWorker{startErr: context.Canceled},
+		},
+	}
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			coordinator := NewDurableCoordinator("linux", 1, testCase.store)
+			coordinator.AddRepository("repo", testCase.worker)
+			err := coordinator.Schedule(context.Background())
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected cancellation, got %v", err)
+			}
+			if len(testCase.store.demand) != 1 || testCase.store.demand[0].RequestID != 11 {
+				t.Fatalf("expected demand preservation, got %#v", testCase.store.demand)
 			}
 		})
 	}
@@ -215,6 +276,46 @@ func TestCoordinatorReconcilesAssignedJobsWithinSharedCapacity(t *testing.T) {
 	}
 	if secondWorker.assignedStarts != 1 || result.StartedRunners != 1 || result.RunningRunners != 0 {
 		t.Fatalf("expected one remaining shared slot to start, worker=%d result=%#v", secondWorker.assignedStarts, result)
+	}
+}
+
+func TestCoordinatorRetainsAssignedDemandUntilCapacityReturns(t *testing.T) {
+	capacityHolder := &recordingWorker{running: 1}
+	waitingWorker := &recordingWorker{}
+	coordinator := NewCoordinator(1)
+	coordinator.AddRepository("capacity-holder", capacityHolder)
+	coordinator.AddRepository("waiting", waitingWorker)
+
+	result, err := coordinator.ReconcileAssigned(context.Background(), "waiting", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StartedRunners != 0 || waitingWorker.assignedStarts != 0 {
+		t.Fatalf("expected full capacity to defer assigned demand, result=%#v starts=%d", result, waitingWorker.assignedStarts)
+	}
+
+	capacityHolder.running = 0
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if waitingWorker.assignedStarts != 1 {
+		t.Fatalf("expected retained assigned demand to start after capacity returned, got %d", waitingWorker.assignedStarts)
+	}
+}
+
+func TestCoordinatorRemovesAssignedDemandWithRepository(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	coordinator.ObserveAssigned("repo", 1)
+	if err := coordinator.RemoveRepository(context.Background(), "repo"); err != nil {
+		t.Fatal(err)
+	}
+	worker := &recordingWorker{}
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if worker.assignedStarts != 0 {
+		t.Fatalf("expected repository removal to discard assigned demand, got %d starts", worker.assignedStarts)
 	}
 }
 

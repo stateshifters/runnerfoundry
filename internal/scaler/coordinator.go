@@ -43,7 +43,6 @@ type DemandStore interface {
 	RemoveRepository(ctx context.Context, scaleSet string, repository string) error
 	RemoveScaleSet(ctx context.Context, scaleSet string) error
 	Ordered(ctx context.Context, scaleSet string) ([]QueuedDemand, error)
-	Delete(ctx context.Context, scaleSet string, repository string, requestID int64) error
 }
 
 type Coordinator struct {
@@ -51,6 +50,7 @@ type Coordinator struct {
 	scaleSet   string
 	store      DemandStore
 	workers    map[string]RepositoryWorker
+	assigned   map[string]int
 	mutex      sync.Mutex
 }
 
@@ -70,6 +70,7 @@ func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *
 		scaleSet:   scaleSet,
 		store:      store,
 		workers:    map[string]RepositoryWorker{},
+		assigned:   map[string]int{},
 	}
 }
 
@@ -83,6 +84,7 @@ func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	delete(coordinator.workers, repository)
+	delete(coordinator.assigned, repository)
 	if err := coordinator.store.RemoveRepository(ctx, coordinator.scaleSet, repository); err != nil {
 		return fmt.Errorf("remove repository demand: %w", err)
 	}
@@ -106,22 +108,39 @@ func (coordinator *Coordinator) Remove(repository string, requestID int64) {
 	_ = coordinator.Apply(context.Background(), nil, []DemandRemoval{{Repository: repository, RequestID: requestID}}) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
 }
 
+// ObserveAssigned replaces a repository's authoritative GitHub assigned-job count.
+// It is safe for concurrent use and defers provisioning until the next scheduling pass.
+func (coordinator *Coordinator) ObserveAssigned(repository string, assignedJobs int) {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	coordinator.assigned[repository] = assignedJobs
+}
+
 func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
-	runningCount, err := coordinator.runningCount(ctx)
+	_, err := coordinator.reconcileCapacity(ctx)
+	return err
+}
+
+func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[string]AssignedReconciliation, error) {
+	runningCount, repositoryRunningCounts, err := coordinator.runningCounts(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	orderedDemand, err := coordinator.store.Ordered(ctx, coordinator.scaleSet)
 	if err != nil {
-		return fmt.Errorf("load queued demand: %w", err)
+		return nil, fmt.Errorf("load queued demand: %w", err)
 	}
 	remainingDemand, err := coordinator.removeRecoveredDemand(ctx, orderedDemand)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount)
+	runningCount, err = coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount, repositoryRunningCounts)
+	if err != nil {
+		return nil, err
+	}
+	return coordinator.reconcileRetainedAssigned(ctx, runningCount, repositoryRunningCounts)
 }
 
 // ReconcileAssigned starts enough identity-free runners for one repository's
@@ -129,22 +148,26 @@ func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repository string, assignedJobs int) (AssignedReconciliation, error) {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
+	coordinator.assigned[repository] = assignedJobs
+	reconciliations, err := coordinator.reconcileCapacity(ctx)
+	if err != nil {
+		return AssignedReconciliation{}, err
+	}
+	return reconciliations[repository], nil
+}
+
+func (coordinator *Coordinator) provisionAssignedForRepository(
+	ctx context.Context,
+	repository string,
+	assignedJobs int,
+	runningCount int,
+	repositoryRunningCounts map[string]int,
+) (AssignedReconciliation, error) {
 	worker := coordinator.workers[repository]
 	if worker == nil {
 		return AssignedReconciliation{AssignedJobs: assignedJobs}, nil
 	}
-	runningCount := 0
-	repositoryRunningCount := 0
-	for workerRepository, repositoryWorker := range coordinator.workers {
-		workerRunningCount, err := repositoryWorker.Running(ctx)
-		if err != nil {
-			return AssignedReconciliation{}, fmt.Errorf("count runners for repository %q: %w", workerRepository, err)
-		}
-		runningCount += workerRunningCount
-		if workerRepository == repository {
-			repositoryRunningCount = workerRunningCount
-		}
-	}
+	repositoryRunningCount := repositoryRunningCounts[repository]
 	missingAssignedRunners := assignedJobs - repositoryRunningCount
 	availableCapacity := coordinator.maxRunners - runningCount
 	result := AssignedReconciliation{AssignedJobs: assignedJobs, RunningRunners: repositoryRunningCount}
@@ -154,9 +177,35 @@ func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repositor
 		}
 		missingAssignedRunners--
 		availableCapacity--
+		repositoryRunningCount++
+		repositoryRunningCounts[repository] = repositoryRunningCount
 		result.StartedRunners++
 	}
 	return result, nil
+}
+
+func (coordinator *Coordinator) reconcileRetainedAssigned(
+	ctx context.Context,
+	runningCount int,
+	repositoryRunningCounts map[string]int,
+) (map[string]AssignedReconciliation, error) {
+	repositories := make([]string, 0, len(coordinator.assigned))
+	for repository := range coordinator.assigned {
+		repositories = append(repositories, repository)
+	}
+	sort.Strings(repositories)
+	reconciliations := make(map[string]AssignedReconciliation, len(repositories))
+	for _, repository := range repositories {
+		result, err := coordinator.provisionAssignedForRepository(
+			ctx, repository, coordinator.assigned[repository], runningCount, repositoryRunningCounts,
+		)
+		if err != nil {
+			return nil, err
+		}
+		reconciliations[repository] = result
+		runningCount += result.StartedRunners
+	}
+	return reconciliations, nil
 }
 
 func (coordinator *Coordinator) removeRecoveredDemand(ctx context.Context, orderedDemand []QueuedDemand) ([]QueuedDemand, error) {
@@ -175,27 +224,30 @@ func (coordinator *Coordinator) removeRecoveredDemand(ctx context.Context, order
 			remainingDemand = append(remainingDemand, demand)
 			continue
 		}
-		if err := coordinator.store.Delete(ctx, coordinator.scaleSet, demand.Repository, demand.RequestID); err != nil {
-			return nil, fmt.Errorf("complete recovered demand: %w", err)
-		}
 	}
 	return remainingDemand, nil
 }
 
-func (coordinator *Coordinator) admitRemainingDemand(ctx context.Context, remainingDemand []QueuedDemand, runningCount int) error {
+func (coordinator *Coordinator) admitRemainingDemand(
+	ctx context.Context,
+	remainingDemand []QueuedDemand,
+	runningCount int,
+	repositoryRunningCounts map[string]int,
+) (int, error) {
 	for _, demand := range remainingDemand {
 		if runningCount >= coordinator.maxRunners {
-			return nil
+			return runningCount, nil
 		}
 		admitted, err := coordinator.admitDemand(ctx, demand)
 		if err != nil {
-			return err
+			return runningCount, err
 		}
 		if admitted {
 			runningCount++
+			repositoryRunningCounts[demand.Repository]++
 		}
 	}
-	return nil
+	return runningCount, nil
 }
 
 func (coordinator *Coordinator) admitDemand(ctx context.Context, demand QueuedDemand) (bool, error) {
@@ -215,22 +267,21 @@ func (coordinator *Coordinator) admitDemand(ctx context.Context, demand QueuedDe
 	if err := worker.StartOne(ctx, demand.RequestID); err != nil {
 		return false, fmt.Errorf("start runner for repository %q: %w", demand.Repository, err)
 	}
-	if err := coordinator.store.Delete(ctx, coordinator.scaleSet, demand.Repository, demand.RequestID); err != nil {
-		return false, fmt.Errorf("complete queued demand: %w", err)
-	}
 	return true, nil
 }
 
-func (coordinator *Coordinator) runningCount(ctx context.Context) (int, error) {
+func (coordinator *Coordinator) runningCounts(ctx context.Context) (int, map[string]int, error) {
 	runningCount := 0
+	repositoryRunningCounts := make(map[string]int, len(coordinator.workers))
 	for repository, worker := range coordinator.workers {
 		workerRunningCount, err := worker.Running(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("count runners for repository %q: %w", repository, err)
+			return 0, nil, fmt.Errorf("count runners for repository %q: %w", repository, err)
 		}
 		runningCount += workerRunningCount
+		repositoryRunningCounts[repository] = workerRunningCount
 	}
-	return runningCount, nil
+	return runningCount, repositoryRunningCounts, nil
 }
 
 type memoryDemandStore struct {
@@ -290,9 +341,4 @@ func (store *memoryDemandStore) Ordered(context.Context, string) ([]QueuedDemand
 		return left.QueueTime.Before(right.QueueTime)
 	})
 	return ordered, nil
-}
-
-func (store *memoryDemandStore) Delete(_ context.Context, _ string, repository string, requestID int64) error {
-	delete(store.demand, demandKey{Repository: repository, RequestID: requestID})
-	return nil
 }

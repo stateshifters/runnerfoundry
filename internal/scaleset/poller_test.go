@@ -81,10 +81,34 @@ func TestPollerSurfacesClientAndAcknowledgementFailures(t *testing.T) {
 	}
 }
 
+func TestPollerRedeliversHandledMessageAfterAcknowledgementFailure(t *testing.T) {
+	message := &upstream.RunnerScaleSetMessage{MessageID: 8, Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}
+	client := &recordingMessageClient{
+		messages:       []*upstream.RunnerScaleSetMessage{message, message},
+		deleteFailures: 1,
+	}
+	handler := &recordingMessageHandler{}
+	poller := &Poller{Client: client, Handler: handler}
+
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected first acknowledgement failure")
+	}
+	if poller.LastMessageID != 0 {
+		t.Fatalf("expected failed acknowledgement to leave the cursor unchanged, got %d", poller.LastMessageID)
+	}
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatalf("expected redelivery acknowledgement success, got %v", err)
+	}
+	if len(handler.desiredCounts) != 2 || len(client.deleted) != 1 || client.deleted[0] != 8 || poller.LastMessageID != 8 {
+		t.Fatalf("expected handled redelivery to advance only after acknowledgement, handled=%#v deleted=%#v cursor=%d", handler.desiredCounts, client.deleted, poller.LastMessageID)
+	}
+}
+
 type recordingMessageClient struct {
-	messages    []*upstream.RunnerScaleSetMessage
-	deleted     []int
-	deleteFails bool
+	messages       []*upstream.RunnerScaleSetMessage
+	deleted        []int
+	deleteFails    bool
+	deleteFailures int
 }
 
 func (client *recordingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
@@ -98,7 +122,10 @@ func (client *recordingMessageClient) GetMessage(ctx context.Context, lastMessag
 }
 
 func (client *recordingMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
-	if client.deleteFails {
+	if client.deleteFails || client.deleteFailures > 0 {
+		if client.deleteFailures > 0 {
+			client.deleteFailures--
+		}
 		return errors.New("delete failed")
 	}
 	client.deleted = append(client.deleted, messageID)

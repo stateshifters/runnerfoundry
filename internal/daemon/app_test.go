@@ -165,7 +165,7 @@ func TestApplyDiscoveryAcquiresPersistedAvailableDemandBeforeProvisioning(t *tes
 	}
 }
 
-func TestApplyDiscoveryRecognizesProviderVisiblePromisedRunner(t *testing.T) {
+func TestApplyDiscoveryReprovisionsProviderVisiblePromiseThatDisappearsBeforeJobStarted(t *testing.T) {
 	const repositoryURL = "https://github.com/acme/repo"
 	store := scaler.NewMemoryDemandStore()
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
@@ -189,8 +189,8 @@ func TestApplyDiscoveryRecognizesProviderVisiblePromisedRunner(t *testing.T) {
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(worker.acquired) != 0 || len(worker.started) != 0 {
-		t.Fatalf("expected provider-visible promise to complete without duplication, acquired=%#v started=%#v", worker.acquired, worker.started)
+	if len(worker.acquired) != 0 || len(worker.started) != 1 || worker.started[0] != 44 {
+		t.Fatalf("expected disappeared promise to reprovision without reacquisition, acquired=%#v started=%#v", worker.acquired, worker.started)
 	}
 }
 
