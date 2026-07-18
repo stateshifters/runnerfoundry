@@ -58,6 +58,8 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 
 ## Verification
 
+PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
+
 V1 code must maintain 100% Go test coverage.
 
 ```sh

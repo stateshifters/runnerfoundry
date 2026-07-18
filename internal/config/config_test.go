@@ -54,6 +54,92 @@ func TestLoadDefaultsLogLevelToInfo(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsPostgreSQLClusterStateSources(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	tests := map[string]string{
+		"standard environment": "\n    role: github_scaler\n",
+		"direct DSN":           "\n    role: github_scaler\n    dsn: postgres://scaler@database/scaler\n",
+		"referenced DSN":       "\n    role: env://POSTGRES_ROLE\n    dsn: env://DATABASE_URL\n",
+		"structured settings":  "\n    role: file:///run/secrets/postgres-role\n    host: postgresql.internal\n    port: file:///run/secrets/postgres-port\n    name: github_scaler\n    user: env://POSTGRES_USER\n    password: file:///run/secrets/postgres-password\n    direct:\n      host: postgresql-direct.internal\n      port: 5432\n",
+	}
+	for testName, connectionSource := range tests {
+		t.Run(testName, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n",
+				"state:\n  postgres:"+connectionSource, 1)
+			loadedConfig, err := Load(strings.NewReader(configText))
+			if err != nil {
+				t.Fatalf("expected PostgreSQL cluster config, got %v", err)
+			}
+			if loadedConfig.State.Postgres == nil {
+				t.Fatalf("unexpected PostgreSQL state config %#v", loadedConfig.State.Postgres)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsConfiguredPostgreSQLNodeID(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n",
+		"state:\n  postgres:\n    node_id: spock\n", 1)
+
+	_, err := Load(strings.NewReader(configText))
+	if err == nil || !strings.Contains(err.Error(), "field node_id not found") {
+		t.Fatalf("configured PostgreSQL node ID error = %v", err)
+	}
+}
+
+func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	tests := map[string]struct {
+		state         string
+		expectedError string
+	}{
+		"SQLite and PostgreSQL": {
+			state:         "  path: state.db\n  postgres: {}\n",
+			expectedError: "state.path and state.postgres are mutually exclusive",
+		},
+		"DSN and structured settings": {
+			state:         "  postgres:\n    role: github_scaler\n    dsn: postgres://database/scaler\n    host: database\n",
+			expectedError: "state.postgres.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"missing role": {
+			state:         "  postgres: {}\n",
+			expectedError: "state.postgres.role is required",
+		},
+		"direct DSN and structured settings": {
+			state:         "  postgres:\n    role: github_scaler\n    direct:\n      dsn: postgres://database/scaler\n      host: database\n",
+			expectedError: "state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"opaque primary DSN with partial direct override": {
+			state:         "  postgres:\n    role: github_scaler\n    dsn: postgres://pool/scaler\n    direct:\n      host: database\n",
+			expectedError: "state.postgres.direct.dsn is required when overriding a primary DSN",
+		},
+	}
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "state:\n"+testCase.state, 1)
+			_, err := Load(strings.NewReader(configText))
+			if err == nil || err.Error() != testCase.expectedError {
+				t.Fatalf("expected %q, got %v", testCase.expectedError, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsLegacyPostgreSQLCredentialKeys(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	for _, legacyKey := range []string{"dsn_env", "dsn_file"} {
+		t.Run(legacyKey, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n",
+				"state:\n  postgres:\n    "+legacyKey+": legacy\n", 1)
+			_, err := Load(strings.NewReader(configText))
+			if err == nil || !strings.Contains(err.Error(), "field "+legacyKey+" not found") {
+				t.Fatalf("legacy PostgreSQL key error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{

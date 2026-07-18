@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
 	"github.com/meza/github-scaler/internal/scaler"
@@ -27,13 +28,17 @@ type repositoryDiscoverer interface {
 }
 
 type runtime struct {
-	LoadConfig      func(configPath string) (config.Config, error)
-	NewDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
-	NewGitHubClient func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
-	NewLogger       func(format string, level string) *slog.Logger
-	OpenDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
-	Notifier        serviceNotifier
-	StartScaleSet   func(
+	LoadConfig       func(configPath string) (config.Config, error)
+	Hostname         func() (string, error)
+	NewDiscoverer    func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
+	NewGitHubClient  func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
+	NewLogger        func(format string, level string) *slog.Logger
+	OpenDemandStore  func(path string) (scaler.DemandStore, io.Closer, error)
+	OpenClusterStore func(state config.PostgreSQLStateConfig) (clusterState, error)
+	ProviderHealthy  func(ctx context.Context, scaleSet config.ScaleSetConfig) error
+	BuildReconciler  func(ctx context.Context, repositoryURL string, scaleSet config.ScaleSetConfig, client scaleSetClient, scaleSetID int) (scaler.Reconciler, error)
+	Notifier         serviceNotifier
+	StartScaleSet    func(
 		ctx context.Context,
 		logger *slog.Logger,
 		client scaleSetClient,
@@ -73,12 +78,24 @@ type activeConfiguration struct {
 }
 
 func Run(ctx context.Context, options Options) error {
-	return runDaemon(ctx, options, productionRuntime())
+	return runWithRuntime(ctx, options, productionRuntime())
 }
 
-func productionRuntime() runtime {
+func runWithRuntime(ctx context.Context, options Options, daemonRuntime runtime) error {
+	configured, err := daemonRuntime.LoadConfig(options.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if configured.State.Postgres != nil {
+		return runClusteredDaemon(ctx, options, daemonRuntime, configured)
+	}
+	return runDaemon(ctx, options, daemonRuntime)
+}
+
+func productionRuntime() runtime { //nolint:maintidx // Production dependency wiring is intentionally centralized.
 	return runtime{
 		LoadConfig: loadConfig,
+		Hostname:   os.Hostname,
 		NewDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
 		},
@@ -93,7 +110,14 @@ func productionRuntime() runtime {
 			}
 			return store, store, nil
 		},
-		Notifier: systemdNotifier{},
+		OpenClusterStore: func(state config.PostgreSQLStateConfig) (clusterState, error) {
+			return cluster.NewStoreFromConfig(state), nil
+		},
+		ProviderHealthy: func(ctx context.Context, scaleSet config.ScaleSetConfig) error {
+			return validateScaleSetProvider(ctx, scaleSet, productionProviderRuntime())
+		},
+		BuildReconciler: buildReconciler,
+		Notifier:        systemdNotifier{},
 		StartScaleSet: func(
 			ctx context.Context,
 			logger *slog.Logger,
@@ -212,6 +236,17 @@ func withRuntimeDefaults(daemonRuntime runtime) runtime {
 		daemonRuntime.OpenDemandStore = func(string) (scaler.DemandStore, io.Closer, error) {
 			return scaler.NewMemoryDemandStore(), noOpCloser{}, nil
 		}
+	}
+	if daemonRuntime.OpenClusterStore == nil {
+		daemonRuntime.OpenClusterStore = func(state config.PostgreSQLStateConfig) (clusterState, error) {
+			return cluster.NewStoreFromConfig(state), nil
+		}
+	}
+	if daemonRuntime.ProviderHealthy == nil {
+		daemonRuntime.ProviderHealthy = func(context.Context, config.ScaleSetConfig) error { return nil }
+	}
+	if daemonRuntime.BuildReconciler == nil {
+		daemonRuntime.BuildReconciler = buildReconciler
 	}
 	return daemonRuntime
 }

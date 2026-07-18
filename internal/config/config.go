@@ -22,7 +22,30 @@ type Config struct {
 }
 
 type StateConfig struct {
-	Path string `yaml:"path"`
+	Path     string                 `yaml:"path"`
+	Postgres *PostgreSQLStateConfig `yaml:"postgres"`
+}
+
+type PostgreSQLStateConfig struct {
+	DSN      string                     `yaml:"dsn"`
+	Host     string                     `yaml:"host"`
+	Port     string                     `yaml:"port"`
+	Name     string                     `yaml:"name"`
+	User     string                     `yaml:"user"`
+	Password string                     `yaml:"password"`
+	Role     string                     `yaml:"role"`
+	Direct   PostgreSQLConnectionConfig `yaml:"direct"`
+}
+
+// PostgreSQLConnectionConfig describes an optional session-affine endpoint.
+// Empty structured fields inherit their primary PostgreSQL setting.
+type PostgreSQLConnectionConfig struct {
+	DSN      string `yaml:"dsn"`
+	Host     string `yaml:"host"`
+	Port     string `yaml:"port"`
+	Name     string `yaml:"name"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
 }
 
 type GitHubConfig struct {
@@ -104,10 +127,64 @@ func (loadedConfig *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported log.level %q", loadedConfig.Log.Level)
 	}
-	if strings.TrimSpace(loadedConfig.State.Path) == "" {
-		return errors.New("state.path is required")
+	if err := loadedConfig.State.validate(); err != nil {
+		return err
 	}
 	return loadedConfig.validateScaleSets()
+}
+
+func (stateConfig StateConfig) validate() error {
+	hasSQLite := strings.TrimSpace(stateConfig.Path) != ""
+	hasPostgreSQL := stateConfig.Postgres != nil
+	if hasSQLite && hasPostgreSQL {
+		return errors.New("state.path and state.postgres are mutually exclusive")
+	}
+	if !hasSQLite && !hasPostgreSQL {
+		return errors.New("state.path is required when state.postgres is not configured")
+	}
+	if !hasPostgreSQL {
+		return nil
+	}
+	return stateConfig.Postgres.validate()
+}
+
+func (postgresConfig PostgreSQLStateConfig) validate() error {
+	if strings.TrimSpace(postgresConfig.Role) == "" {
+		return errors.New("state.postgres.role is required")
+	}
+	hasDSN := strings.TrimSpace(postgresConfig.DSN) != ""
+	hasStructuredSettings := (PostgreSQLConnectionConfig{
+		Host: postgresConfig.Host, Port: postgresConfig.Port, Name: postgresConfig.Name,
+		User: postgresConfig.User, Password: postgresConfig.Password,
+	}).hasStructuredValues()
+	if hasDSN && hasStructuredSettings {
+		return errors.New("state.postgres.dsn cannot be combined with structured PostgreSQL settings")
+	}
+	direct := postgresConfig.Direct
+	directHasDSN := strings.TrimSpace(direct.DSN) != ""
+	directHasStructuredSettings := direct.hasStructuredValues()
+	if directHasDSN && directHasStructuredSettings {
+		return errors.New("state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings")
+	}
+	if hasDSN && directHasStructuredSettings {
+		return errors.New("state.postgres.direct.dsn is required when overriding a primary DSN")
+	}
+	return nil
+}
+
+func (connectionConfig PostgreSQLConnectionConfig) hasStructuredValues() bool {
+	for _, value := range []string{
+		connectionConfig.Host,
+		connectionConfig.Port,
+		connectionConfig.Name,
+		connectionConfig.User,
+		connectionConfig.Password,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (githubConfig *GitHubConfig) validate() error {

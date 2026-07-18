@@ -49,6 +49,36 @@ func buildReconcilerWithRuntime(
 	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
 
+func validateScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig, providers providerRuntime) error {
+	if scaleSetConfig.Docker != nil {
+		provider := dockerprovider.ComposeProvider{
+			CommandRunner: providers.DockerCommandRunner,
+			Config: dockerprovider.ComposeConfig{
+				ComposeFile: scaleSetConfig.Docker.ComposeFile,
+				Service:     scaleSetConfig.Docker.Service,
+			},
+		}
+		if err := provider.Validate(ctx); err != nil {
+			return fmt.Errorf("validate docker provider: %w", err)
+		}
+		return nil
+	}
+	if scaleSetConfig.Libvirt != nil {
+		provider := libvirtprovider.Provider{
+			CommandRunner: providers.LibvirtCommandRunner,
+			Config: libvirtprovider.Config{
+				ConnectionURI:     scaleSetConfig.Libvirt.ConnectionURI,
+				DomainXMLTemplate: scaleSetConfig.Libvirt.DomainXMLTemplate,
+			},
+		}
+		if err := provider.Validate(ctx); err != nil {
+			return fmt.Errorf("validate libvirt provider: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
+}
+
 func buildDockerReconciler(
 	ctx context.Context,
 	repositoryURL string,

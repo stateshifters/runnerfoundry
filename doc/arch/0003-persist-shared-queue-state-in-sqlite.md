@@ -4,7 +4,7 @@ Date: 2026-07-12
 
 ## Status
 
-Accepted
+Superseded by [4. Coordinate multi-host scaling in PostgreSQL](0004-coordinate-multi-host-scaling-in-postgresql.md)
 
 Supersedes [2. Use GitHub App installations and shared runner capacity](0002-use-github-app-installations-and-shared-runner-capacity.md)
 

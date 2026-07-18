@@ -7,5 +7,5 @@ import (
 var exitProcess = os.Exit
 
 func main() {
-	exitProcess(runMain(os.Args[1:], os.Stderr))
+	exitProcess(runMain(os.Args[1:], os.Stdout, os.Stderr))
 }

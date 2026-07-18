@@ -20,6 +20,34 @@ func TestBuildReconcilerRejectsMissingProvider(t *testing.T) {
 	}
 }
 
+func TestValidateScaleSetProviderReportsHealth(t *testing.T) {
+	ctx := context.Background()
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+	}, providerRuntime{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+	}, providerRuntime{DockerCommandRunner: dockerRunnerStub{err: errors.New("failed")}}); err == nil {
+		t.Fatal("expected docker health failure")
+	}
+	template := writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`)
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: template},
+	}, providerRuntime{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "missing"},
+	}, providerRuntime{LibvirtCommandRunner: &libvirtRunnerStub{}}); err == nil {
+		t.Fatal("expected libvirt health failure")
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{Name: "missing"}, providerRuntime{}); err == nil {
+		t.Fatal("expected missing provider health failure")
+	}
+}
+
 func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
 	reconciler, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:       "linux",
