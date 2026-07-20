@@ -114,11 +114,30 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "failed")
 }
 
+func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
+	logs := &bytes.Buffer{}
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	daemon.nodeID = "spock"
+	daemon.logger = newClusterLogSnapshotLogger(logs)
+	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	session := stoppedSession(
+		repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"},
+		&fakeScaleSetClient{},
+		&fakeMessageClient{closeErr: errors.New("close failed")},
+	)
+
+	leader.stopSession(context.Background(), session, retainGitHubScaleSet)
+
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"ERROR","msg":"close leader message session failed","hostname":"spock","error":"close message session: close failed"}`)
+}
+
 func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemon.nodeID = "spock"
+	daemon.logger = newClusterLogSnapshotLogger(logs)
 	lease := &fakeClusterLease{closeErr: errors.New("failed")}
 	leader := newClusterLeader(&daemon, lease)
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
@@ -128,9 +147,8 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	if len(leader.sessions) != 0 || len(leader.scheduler.sessions) != 0 || !lease.closed {
 		t.Fatalf("sessions=%v scheduled=%v leaseClosed=%t", leader.sessions, leader.scheduler.sessions, lease.closed)
 	}
-	if !strings.Contains(logs.String(), "close leader lease failed") {
-		t.Fatalf("lease close failure was not logged: %q", logs.String())
-	}
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"WARN","msg":"close leader lease failed","hostname":"spock","error":"failed"}`)
 }
 
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {

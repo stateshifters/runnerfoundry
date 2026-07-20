@@ -15,7 +15,8 @@ func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		daemon.logger.Error("leader election failed", slog.String("error", err.Error()))
+		daemon.logger.Error("leader election failed",
+			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 		return
 	}
 	if lease == nil {
@@ -58,7 +59,8 @@ func (daemon *clusteredDaemon) notifyStatus(ctx context.Context, status clusterS
 		return
 	}
 	if err := notifier.Status(ctx, status); err != nil {
-		daemon.logger.Warn("notify clustered service status failed", slog.String("error", err.Error()))
+		daemon.logger.Warn("notify clustered service status failed",
+			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 	}
 }
 
@@ -103,7 +105,8 @@ func (daemon *clusteredDaemon) contendForLeadership(
 		if ctx.Err() != nil {
 			return
 		}
-		daemon.logger.Error("leader contender failed", slog.String("error", err.Error()))
+		daemon.logger.Error("leader contender failed",
+			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 		if !waitForLeadershipRetry(ctx, daemon.leadershipRetryDelay) {
 			return
 		}
@@ -119,7 +122,8 @@ func (daemon *clusteredDaemon) deliverLeadership(
 	case results <- leadershipResult{lease: lease}:
 	case <-ctx.Done():
 		if err := lease.Close(context.WithoutCancel(ctx)); err != nil {
-			daemon.logger.Warn("close canceled leader lease failed")
+			daemon.logger.Warn("close canceled leader lease failed",
+				slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 		}
 	}
 }
@@ -154,7 +158,8 @@ func (daemon *clusteredDaemon) stopLeadershipContender(ctx context.Context) {
 	select {
 	case result := <-results:
 		if err := result.lease.Close(context.WithoutCancel(ctx)); err != nil {
-			daemon.logger.Warn("close unclaimed leader lease failed")
+			daemon.logger.Warn("close unclaimed leader lease failed",
+				slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 		}
 	default:
 	}

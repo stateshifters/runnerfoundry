@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -123,30 +126,36 @@ func TestCanceledLeadershipContenderStopsWithoutAcquiring(t *testing.T) {
 }
 
 func TestCanceledLeadershipDeliveryClosesLease(t *testing.T) {
+	logs := &bytes.Buffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	lease := &fakeClusterLease{closeErr: errors.New("close failed")}
-	daemon := clusteredDaemon{logger: slog.Default()}
+	daemon := clusteredDaemon{nodeID: "spock", logger: newClusterLogSnapshotLogger(logs)}
 	daemon.deliverLeadership(ctx, make(chan leadershipResult), lease)
 	if !lease.closed {
 		t.Fatal("canceled delivery did not close lease")
 	}
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"WARN","msg":"close canceled leader lease failed","hostname":"spock","error":"close failed"}`)
 }
 
 func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
+	logs := &bytes.Buffer{}
 	lease := &fakeClusterLease{closeErr: errors.New("close failed")}
 	done := make(chan struct{})
 	close(done)
 	results := make(chan leadershipResult, 1)
 	results <- leadershipResult{lease: lease}
 	daemon := clusteredDaemon{
-		logger: slog.Default(), leadershipResults: results,
+		nodeID: "spock", logger: newClusterLogSnapshotLogger(logs), leadershipResults: results,
 		stopContender: func() {}, contenderDone: done,
 	}
 	daemon.stopLeadershipContender(context.Background())
 	if !lease.closed {
 		t.Fatal("unclaimed lease was not closed")
 	}
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"WARN","msg":"close unclaimed leader lease failed","hostname":"spock","error":"close failed"}`)
 	daemon.stopLeadershipContender(context.Background())
 }
 
@@ -189,11 +198,36 @@ func TestLeadershipContenderStopsWhenCanceledDuringRetry(t *testing.T) {
 	daemon.contendForLeadership(ctx, make(chan leadershipResult, 1), make(chan struct{}))
 }
 
+func TestLeadershipContenderFailureLogsNodeIdentity(t *testing.T) {
+	logs := &bytes.Buffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	state := &fakeClusterState{waitForLeader: func(context.Context) (cluster.Lease, error) {
+		return nil, errors.New("temporary failure")
+	}}
+	daemon := clusteredDaemon{
+		nodeID: "spock", waitForLeader: fakeWaitForLeader(state),
+		logger: newClusterLogSnapshotLogger(cancelingWriter{cancel: cancel, writer: logs}),
+	}
+
+	daemon.contendForLeadership(ctx, make(chan leadershipResult, 1), make(chan struct{}))
+
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"ERROR","msg":"leader contender failed","hostname":"spock","error":"temporary failure"}`)
+}
+
 type cancelingWriter struct {
 	cancel context.CancelFunc
+	writer io.Writer
 }
 
 func (writer cancelingWriter) Write(contents []byte) (int, error) {
 	writer.cancel()
+	if writer.writer != nil {
+		written, err := writer.writer.Write(contents)
+		if err != nil {
+			return written, fmt.Errorf("capture cluster log: %w", err)
+		}
+		return written, nil
+	}
 	return len(contents), nil
 }

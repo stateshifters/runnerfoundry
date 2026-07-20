@@ -58,14 +58,16 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	configuration := leader.daemon.configurationSnapshot()
 	discovery, err := configuration.discoverer.Discover(reconcileCtx)
 	if err != nil {
-		leader.daemon.logger.Error("leader repository discovery failed", slog.String("error", err.Error()))
+		leader.daemon.logger.Error("leader repository discovery failed",
+			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
 		return false
 	}
 	statusCtx, cancelStatus := context.WithTimeout(reconcileCtx, clusterCoordinationTimeout)
 	statuses, err := leader.daemon.nodes.ScaleSets(statusCtx, time.Now(), clusterNodeLifetime)
 	cancelStatus()
 	if err != nil {
-		leader.daemon.logger.Error("leader scale-set aggregation failed", slog.String("error", err.Error()))
+		leader.daemon.logger.Error("leader scale-set aggregation failed",
+			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
 		return false
 	}
 	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
@@ -200,7 +202,8 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 	session.stopPolling()
 	<-session.pollerDone
 	if err := session.messageClient.Close(ctx); err != nil {
-		leader.daemon.logger.Error("close leader message session failed", slog.String("error", err.Error()))
+		leader.daemon.logger.Error("close leader message session failed",
+			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
 	}
 	if removal == removeGitHubScaleSet {
 		_ = deleteRunnerScaleSet( //nolint:errcheck,gosec // Cluster withdrawal cleanup is best effort; the helper logs failures.
@@ -219,7 +222,8 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
 	leader.scheduler.clear()
 	if err := leader.lease.Close(ctx); err != nil {
-		leader.daemon.logger.Warn("close leader lease failed", slog.String("error", err.Error()))
+		leader.daemon.logger.Warn("close leader lease failed",
+			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
 	}
 }
 
