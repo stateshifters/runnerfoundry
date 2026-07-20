@@ -4,7 +4,6 @@ import (
 	"os"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func TestForwardReloadSignalsCoalescesRequests(t *testing.T) {
@@ -25,10 +24,4 @@ func TestForwardReloadSignalsCoalescesRequests(t *testing.T) {
 		t.Fatal("expected coalesced reload request")
 	default:
 	}
-}
-
-func TestReloadSignalRequestsCanStop(t *testing.T) {
-	_, stop := reloadSignalRequests()
-	stop()
-	time.Sleep(time.Millisecond)
 }

@@ -20,7 +20,7 @@ PostgreSQL credentials may be conventional long-lived values or opaque credentia
 
 Standalone operation will retain the exclusively locked SQLite store and its existing behavior. Clustered operation will use PostgreSQL for node contributions, health and heartbeat state, the global demand queue, assignments, and advisory-lock leader election.
 
-Each host will publish the scale sets in its own configuration. `scale_sets[].max_runners` remains a per-host, per-scale-set limit; there is no configured cluster-wide limit. The leader will sum only live, healthy, configuration-compatible contributions and will assign the oldest demand to a contributor with unused local capacity. Hosts sharing a scale-set name must agree on Github-facing settings such as the runner group. Provider configuration remains local and is never copied into the cluster definition.
+Each host will publish the scale sets in its own configuration. `scale_sets[].max_runners` remains a per-host, per-scale-set limit; there is no configured cluster-wide limit. The leader will sum only live, healthy, configuration-compatible contributions and will assign the oldest demand to a contributor with unused local capacity. Compatibility will consider only live, healthy hosts, so a stale or unhealthy conflicting declaration cannot disable compatible live capacity. Hosts sharing a scale-set name must agree on Github-facing settings such as the runner group. Provider configuration remains local and is never copied into the cluster definition.
 
 Each host will use its operating-system hostname as its cluster identity. Cluster identity will not be user-configurable.
 
@@ -28,7 +28,7 @@ The leader will manage the union of declared scale sets and discovered repositor
 
 PostgreSQL may use its standard environment configuration or a DSN. It may instead use separate `host`, `port`, `name`, `user`, and `password` settings. Every DSN or structured value may be literal, `env://NAME`, or `file:///path`. A DSN cannot be combined with structured settings; omitted structured values retain pgx/PostgreSQL environment defaults. The legacy `dsn_env` and `dsn_file` keys are rejected.
 
-Every clustered connection will assume one required stable PostgreSQL role supplied by `state.postgres.role`. Login identities may rotate, but each must be a member of the stable role. The role will own scaler objects and migration metadata and will apply to ordinary state calls, migrations, migration locks, leader leases, and waiting contenders.
+Every clustered connection will assume one required stable PostgreSQL role supplied by `state.postgres.role`. Login identities may rotate, but each must be a member of the stable role. The role will own scaler objects and migration metadata and will apply to ordinary state calls, migrations, migration locks, leader leases, and waiting contenders. Operators will provision this role with `NOLOGIN`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, and `NOREPLICATION`, and constrain its ownership and privileges to the scaler database or schema. The application will not create or inspect roles, attributes, memberships, or grants.
 
 Deployments may provide a separate `state.postgres.direct` endpoint for migrations and session advisory locks while ordinary traffic uses the primary endpoint. Direct structured fields inherit primary structured fields. A distinct endpoint for an opaque primary DSN requires a complete direct DSN. Without a direct endpoint, the primary connection must preserve session affinity.
 
@@ -40,11 +40,23 @@ Rollback will be an explicit command run with the currently deployed binary befo
 
 After migration and contribution publication, each node will try the leader lock immediately. Non-leaders will wait on the session advisory lock using a dedicated direct connection. PostgreSQL lock release will therefore hand leadership to a waiter without an availability-polling interval.
 
+Cluster assignments will use the explicit lifecycle `reserved -> acquiring -> ready -> starting -> running -> complete`. Every transition will name its expected source state and owner where applicable. The leader will persist acquisition intent before contacting Github and will not make an assignment executable until Github confirms the requested identity. A database failure after that confirmation will retry only the database transition. After process failure, a replacement leader may reacquire only when Github confirms the requested identity. Executors will repair `starting` assignments by checking the stable request-derived runner name before starting another runner. Non-complete assignments will continue to consume the selected host's capacity.
+
+Coordination, heartbeat, local execution, and leader reconciliation will run independently with bounded external operations. Slow Github or provider work will not delay node publication or leadership handoff. Reload will replace the host's contribution and immediately trigger reconciliation when that host is leader.
+
+`READY=1` will describe local process readiness after migration and publication, not successful Github reconciliation. Systemd `STATUS=` will separately report `standby`, `leader reconciling`, `leader operational`, or `leader degraded`. A Github outage will not retract readiness.
+
+Operational diagnostics will identify non-secret nodes, scale sets, repositories, requests, assignments, operations, migration versions, and PostgreSQL SQLSTATE classes. Logs and command errors will not expose connection settings, stable role names, reference paths, credentials, JIT secrets, generated connection strings, SQL bodies, or raw pgx connection errors.
+
 ## Consequences
 
 Spock contributing 10 runners and Serenity contributing 2 runners to the same compatible scale set yields 12 effective runners while preserving limits of 10 and 2 at assignment time. Hosts can also contribute unrelated scale sets, and the leader need not have a provider for every scale set it manages. PostgreSQL transactions serialize FIFO assignment and advisory locking limits active management to one leader.
 
 Clustered deployments now depend on a highly available PostgreSQL service and database connectivity. Temporary node loss reduces capacity and may cause an acquired request whose runner never started to be retried after the node expires; stable request-derived runner names continue to provide provider-side recovery identity. Github acquisition, provider startup, and PostgreSQL still cannot form one atomic transaction, so recovery favors retaining or retrying demand over claiming exactly-once execution.
+
+The stable role deliberately owns both runtime state and migration objects. This gives rotating login users one consistent permission boundary and stable ownership, but it also means runtime sessions inherit schema-owner privileges. Restricting the role to the scaler database or schema and denying login and administrative attributes bounds that accepted trade-off. Separating migration and runtime roles would violate the required single-role model and is not part of this decision.
+
+Readiness and leader operability are separate signals. Service managers can rely on `READY=1` for local startup completion and use `STATUS=` plus structured logs to distinguish standby, operational leadership, and degraded Github reconciliation.
 
 File-backed credential rotation applies to new connections. The scaler does not force existing connections closed when a file changes, and the leader lease connection remains valid until PostgreSQL or the scaler closes it.
 

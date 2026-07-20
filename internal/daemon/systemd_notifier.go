@@ -9,6 +9,15 @@ import (
 
 type systemdNotifier struct{}
 
+type clusterServiceStatus string
+
+const (
+	clusterServiceStatusStandby           clusterServiceStatus = "standby"
+	clusterServiceStatusLeaderReconciling clusterServiceStatus = "leader reconciling"
+	clusterServiceStatusLeaderOperational clusterServiceStatus = "leader operational"
+	clusterServiceStatusLeaderDegraded    clusterServiceStatus = "leader degraded"
+)
+
 func (notifier systemdNotifier) Ready(ctx context.Context) error {
 	return notifySystemd(ctx, daemon.SdNotifyReady)
 }
@@ -16,6 +25,10 @@ func (notifier systemdNotifier) Ready(ctx context.Context) error {
 func (notifier systemdNotifier) Reloading(ctx context.Context) error {
 	state := daemon.SdNotifyReloading + "\n" + daemon.SdNotifyMonotonicUsec()
 	return notifySystemd(ctx, state)
+}
+
+func (notifier systemdNotifier) Status(ctx context.Context, status clusterServiceStatus) error {
+	return notifySystemd(ctx, "STATUS="+string(status))
 }
 
 func notifySystemd(ctx context.Context, state string) error {

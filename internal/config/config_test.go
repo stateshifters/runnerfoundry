@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
@@ -39,6 +41,43 @@ func TestLoadAcceptsGitHubAppConfiguration(t *testing.T) {
 	}
 	if _, err := (GitHubConfig{DiscoveryInterval: "invalid"}).DiscoveryDuration(); err == nil {
 		t.Fatal("expected invalid unvalidated discovery duration error")
+	}
+}
+
+func TestLoadPostgreSQLStateIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
+	postgresConfig, err := LoadPostgreSQLState(strings.NewReader(`github: invalid
+state:
+  postgres:
+    role: github_scaler
+    host: database.internal
+scale_sets: invalid
+`))
+	if err != nil {
+		t.Fatalf("load PostgreSQL state: %v", err)
+	}
+	if postgresConfig.Role != "github_scaler" || postgresConfig.Host != "database.internal" {
+		t.Fatalf("PostgreSQL state = %#v", postgresConfig)
+	}
+}
+
+func TestLoadPostgreSQLStateRejectsInvalidPostgreSQLConfiguration(t *testing.T) {
+	tests := map[string]string{
+		"empty document":      "",
+		"malformed document":  "state: [",
+		"missing state":       "github: invalid\n",
+		"missing postgres":    "state: {}\n",
+		"unknown primary key": "state:\n  postgres:\n    role: github_scaler\n    unknown: value\n",
+		"unknown direct key":  "state:\n  postgres:\n    role: github_scaler\n    direct:\n      unknown: value\n",
+		"missing role":        "state:\n  postgres: {}\n",
+		"conflicting settings": "state:\n  postgres:\n    role: github_scaler\n    dsn: postgres://database\n" +
+			"    host: database.internal\n",
+	}
+	for name, configText := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadPostgreSQLState(strings.NewReader(configText)); err == nil {
+				t.Fatal("expected invalid PostgreSQL configuration to fail")
+			}
+		})
 	}
 }
 
@@ -119,8 +158,8 @@ func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
 		t.Run(testName, func(t *testing.T) {
 			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "state:\n"+testCase.state, 1)
 			_, err := Load(strings.NewReader(configText))
-			if err == nil || err.Error() != testCase.expectedError {
-				t.Fatalf("expected %q, got %v", testCase.expectedError, err)
+			if err == nil || !strings.Contains(err.Error(), testCase.expectedError) {
+				t.Fatalf("Load() error = %v, want an error containing %q", err, testCase.expectedError)
 			}
 		})
 	}
@@ -137,6 +176,18 @@ func TestLoadRejectsLegacyPostgreSQLCredentialKeys(t *testing.T) {
 				t.Fatalf("legacy PostgreSQL key error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadPostgreSQLStateRejectsEmptyDocument(t *testing.T) {
+	if _, err := LoadPostgreSQLState(strings.NewReader("")); err == nil {
+		t.Fatal("empty migration configuration was accepted")
+	}
+}
+
+func TestDecodePostgreSQLStateNodeRejectsInvalidYAMLNode(t *testing.T) {
+	if _, err := decodePostgreSQLStateNode(&yaml.Node{Kind: yaml.Kind(99)}); err == nil {
+		t.Fatal("invalid PostgreSQL YAML node was accepted")
 	}
 }
 

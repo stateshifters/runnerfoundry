@@ -14,6 +14,9 @@ func TestSystemdNotifierIgnoresMissingNotifySocket(t *testing.T) {
 	if err := notifier.Reloading(context.Background()); err != nil {
 		t.Fatalf("expected reloading notification without socket to be ignored, got %v", err)
 	}
+	if err := notifier.Status(context.Background(), clusterServiceStatusLeaderOperational); err != nil {
+		t.Fatalf("expected status notification without socket to be ignored, got %v", err)
+	}
 }
 
 func TestSystemdNotifierSurfacesCancelledContext(t *testing.T) {

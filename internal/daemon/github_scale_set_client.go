@@ -25,6 +25,9 @@ func newGitHubClient(repositoryURL string, installationID int64, credentials con
 	if err != nil {
 		return githubScaleSetClient{}, fmt.Errorf("create scaleset client: %w", err)
 	}
+	if _, targetErr := parseRepositoryTarget(repositoryURL); targetErr != nil {
+		return githubScaleSetClient{}, fmt.Errorf("validate repository target: %w", targetErr)
+	}
 	registry, err := newGitHubScaleSetRegistry(repositoryURL, installationID, credentials)
 	if err != nil {
 		return githubScaleSetClient{}, fmt.Errorf("create scaleset registry: %w", err)

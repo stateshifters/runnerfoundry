@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/tern/v2/migrate"
 )
 
@@ -34,72 +34,87 @@ type MigrationStatus struct {
 
 // Migrate serializes startup migration, applies only known forward migrations,
 // and accepts a newer schema only when its compatibility floor includes this binary.
-func (store *Store) Migrate(ctx context.Context) error {
+func (store *Store) Migrate(ctx context.Context) (resultErr error) {
 	connection, err := store.connectDirectPostgreSQL(ctx)
 	if err != nil {
 		return err
 	}
-	defer closePostgreSQLConnection(ctx, connection)
+	defer func() {
+		resultErr = errors.Join(resultErr, closePostgreSQLConnection(ctx, connection))
+	}()
 	migrator, err := store.lockedMigrator(ctx, connection)
 	if err != nil {
-		return errors.New("initialize PostgreSQL migrations")
+		return safePostgreSQLError("initialize PostgreSQL migrations", err)
 	}
 	current, err := migrator.GetCurrentVersion(ctx)
 	if err != nil {
-		return errors.New("read PostgreSQL migration version")
+		return safePostgreSQLError("read PostgreSQL migration version", err)
 	}
 	target := migrationTarget(migrator)
 	if current > target {
 		return validateCompatibility(ctx, connection, target)
 	}
 	if err = migrator.MigrateTo(ctx, target); err != nil {
-		return errors.New("apply PostgreSQL migrations")
+		return safePostgreSQLError("apply PostgreSQL migrations", err)
 	}
 	return validateCompatibility(ctx, connection, target)
 }
 
-// MigrationStatus reports the database version without changing domain objects.
-// Tern may create its internal version table when inspecting an empty database.
-func (store *Store) MigrationStatus(ctx context.Context) (MigrationStatus, error) {
-	connection, err := store.connectDirectPostgreSQL(ctx)
+// MigrationStatus reports the database version without creating migration metadata or domain objects.
+func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus, resultErr error) {
+	connection, err := store.directConnector(ctx)
 	if err != nil {
 		return MigrationStatus{}, err
 	}
-	defer closePostgreSQLConnection(ctx, connection)
-	migrator, err := store.newMigrator(ctx, connection)
+	defer func() {
+		resultErr = errors.Join(resultErr, closePostgreSQLConnection(ctx, connection))
+	}()
+	catalog, err := store.migrationCatalog()
 	if err != nil {
-		return MigrationStatus{}, errors.New("initialize PostgreSQL migrations")
+		return MigrationStatus{}, safePostgreSQLError("load PostgreSQL migrations", err)
 	}
-	current, err := migrator.GetCurrentVersion(ctx)
-	if err != nil {
-		return MigrationStatus{}, errors.New("read PostgreSQL migration version")
+	status.Target = migrationTarget(catalog)
+	var versionTableExists bool
+	if err = connection.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, migrationVersionTable).Scan(&versionTableExists); err != nil {
+		return MigrationStatus{}, safePostgreSQLError("inspect PostgreSQL migration metadata", err)
 	}
-	target := migrationTarget(migrator)
-	status := MigrationStatus{Current: current, Target: target}
-	if current == 0 {
+	if !versionTableExists {
+		return status, nil
+	}
+	if err = connection.QueryRow(ctx, `SELECT version FROM `+migrationVersionTable).Scan(&status.Current); err != nil {
+		return MigrationStatus{}, safePostgreSQLError("read PostgreSQL migration version", err)
+	}
+	if status.Current == 0 {
 		return status, nil
 	}
 	if err = connection.QueryRow(ctx, `SELECT oldest_binary_schema_generation FROM scaler_schema_compatibility WHERE singleton`).Scan(&status.CompatibilityFloor); err != nil {
-		return MigrationStatus{}, errors.New("read PostgreSQL schema compatibility")
+		return MigrationStatus{}, safePostgreSQLError("read PostgreSQL schema compatibility", err)
 	}
 	return status, nil
 }
 
 // MigrateDown rolls back to a known version while holding the migration and
 // leader locks. It refuses rollback until every published node heartbeat expires.
-func (store *Store) MigrateDown(ctx context.Context, target int32, now time.Time, liveFor time.Duration) error {
+func (store *Store) MigrateDown(
+	ctx context.Context,
+	target int32,
+	now time.Time,
+	liveFor time.Duration,
+) (resultErr error) {
 	connection, err := store.connectDirectPostgreSQL(ctx)
 	if err != nil {
 		return err
 	}
-	defer closePostgreSQLConnection(ctx, connection)
+	defer func() {
+		resultErr = errors.Join(resultErr, closePostgreSQLConnection(ctx, connection))
+	}()
 	migrator, err := store.lockedMigrator(ctx, connection)
 	if err != nil {
-		return errors.New("initialize PostgreSQL migrations")
+		return safePostgreSQLError("initialize PostgreSQL migrations", err)
 	}
 	current, err := migrator.GetCurrentVersion(ctx)
 	if err != nil {
-		return errors.New("read PostgreSQL migration version")
+		return safePostgreSQLError("read PostgreSQL migration version", err)
 	}
 	if err = validateRollbackTarget(target, current); err != nil || target == current {
 		return err
@@ -108,7 +123,7 @@ func (store *Store) MigrateDown(ctx context.Context, target int32, now time.Time
 		return err
 	}
 	if err = migrator.MigrateTo(ctx, target); err != nil {
-		return errors.New("roll back PostgreSQL migrations")
+		return safePostgreSQLError("roll back PostgreSQL migrations", err)
 	}
 	return nil
 }
@@ -157,17 +172,29 @@ func (store *Store) newMigrator(ctx context.Context, connection *pgx.Conn) (*mig
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL migrator: %w", err)
 	}
-	migrationFiles, err := fs.Sub(store.migrationFiles, "migrations")
-	if err != nil {
-		return nil, fmt.Errorf("open embedded PostgreSQL migrations: %w", err)
-	}
-	if err = migrator.LoadMigrations(migrationFiles); err != nil {
-		return nil, fmt.Errorf("load embedded PostgreSQL migrations: %w", err)
-	}
-	if err = validateReversibleMigrations(migrator); err != nil {
+	if err = store.loadMigrations(migrator); err != nil {
 		return nil, err
 	}
 	return migrator, nil
+}
+
+func (store *Store) migrationCatalog() (*migrate.Migrator, error) {
+	catalog := &migrate.Migrator{}
+	if err := store.loadMigrations(catalog); err != nil {
+		return nil, err
+	}
+	return catalog, nil
+}
+
+func (store *Store) loadMigrations(migrator *migrate.Migrator) error {
+	migrationFiles, err := fs.Sub(store.migrationFiles, "migrations")
+	if err != nil {
+		return fmt.Errorf("open embedded PostgreSQL migrations: %w", err)
+	}
+	if err = migrator.LoadMigrations(migrationFiles); err != nil {
+		return fmt.Errorf("load embedded PostgreSQL migrations: %w", err)
+	}
+	return validateReversibleMigrations(migrator)
 }
 
 func validateReversibleMigrations(migrator *migrate.Migrator) error {
@@ -194,8 +221,17 @@ type postgreSQLCloser interface {
 	Close(ctx context.Context) error
 }
 
-func closePostgreSQLConnection(ctx context.Context, connection postgreSQLCloser) {
+func closePostgreSQLConnection(ctx context.Context, connection postgreSQLCloser) error {
 	if err := connection.Close(context.WithoutCancel(ctx)); err != nil {
-		slog.Warn("close PostgreSQL migration connection failed")
+		return fmt.Errorf("close PostgreSQL migration connection: %w", err)
 	}
+	return nil
+}
+
+func safePostgreSQLError(operation string, err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		return fmt.Errorf("%s (SQLSTATE %s)", operation, postgresError.Code)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }

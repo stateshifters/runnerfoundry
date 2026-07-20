@@ -45,14 +45,10 @@ func TestPollerDoesNotAcknowledgeFailedHandling(t *testing.T) {
 	}
 }
 
-func TestPollerHandlesNilMessageAndValidationFailures(t *testing.T) {
+func TestPollerRequiresClientAndHandler(t *testing.T) {
 	tests := map[string]Poller{
 		"missing client":  {Handler: &recordingMessageHandler{}},
 		"missing handler": {Client: &recordingMessageClient{}},
-		"nil statistics": {
-			Client:  &recordingMessageClient{messages: []*upstream.RunnerScaleSetMessage{{MessageID: 1}}},
-			Handler: &recordingMessageHandler{},
-		},
 	}
 	for testName, poller := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -61,17 +57,32 @@ func TestPollerHandlesNilMessageAndValidationFailures(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestPollerRejectsMessageWithoutStatistics(t *testing.T) {
+	poller := Poller{
+		Client:  &recordingMessageClient{messages: []*upstream.RunnerScaleSetMessage{{MessageID: 1}}},
+		Handler: &recordingMessageHandler{},
+	}
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected missing statistics error")
+	}
+}
+
+func TestPollerTreatsNoMessageAsSuccess(t *testing.T) {
 	poller := Poller{Client: &recordingMessageClient{}, Handler: &recordingMessageHandler{}}
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatalf("expected nil message success, got %v", err)
 	}
 }
 
-func TestPollerSurfacesClientAndAcknowledgementFailures(t *testing.T) {
+func TestPollerReportsMessageReceiveFailure(t *testing.T) {
 	if err := (&Poller{Client: failingMessageClient{}, Handler: &recordingMessageHandler{}}).PollOnce(context.Background()); err == nil {
 		t.Fatal("expected get message error")
 	}
+}
+
+func TestPollerReportsAcknowledgementFailure(t *testing.T) {
 	client := &recordingMessageClient{
 		messages:    []*upstream.RunnerScaleSetMessage{{MessageID: 7, Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}},
 		deleteFails: true,

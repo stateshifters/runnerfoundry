@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -16,83 +17,91 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
-func TestClusteredStartupReportsEveryPreflightFailure(t *testing.T) {
-	configured := clusteredConfig(t)
+func TestClusteredStartupRequiresOperatingSystemHostname(t *testing.T) {
 	failure := errors.New("failed")
-	tests := []struct {
-		name      string
-		configure func(*config.Config, *runtime, *fakeClusterState)
-	}{
-		{name: "missing postgres", configure: func(configured *config.Config, _ *runtime, _ *fakeClusterState) { configured.State.Postgres = nil }},
-		{name: "hostname dependency", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.Hostname = nil
-		}},
-		{name: "hostname lookup", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.Hostname = func() (string, error) { return "", failure }
-		}},
-		{name: "empty hostname", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.Hostname = func() (string, error) { return "  ", nil }
-		}},
-		{name: "open state", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.OpenClusterStore = func(config.PostgreSQLStateConfig) (clusterState, error) { return nil, failure }
-		}},
-		{name: "migrate", configure: func(_ *config.Config, _ *runtime, state *fakeClusterState) { state.migrateErr = failure }},
-		{name: "migration status", configure: func(_ *config.Config, _ *runtime, state *fakeClusterState) { state.migrationStatusErr = failure }},
-		{name: "credentials", configure: func(configured *config.Config, _ *runtime, _ *fakeClusterState) {
-			configured.GitHub.App.PrivateKeyFile = "missing-private-key"
-		}},
-		{name: "discoverer", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.NewDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return nil, failure }
-		}},
-		{name: "publish", configure: func(_ *config.Config, _ *runtime, state *fakeClusterState) { state.publishErr = failure }},
-		{name: "notifier", configure: func(_ *config.Config, daemonRuntime *runtime, _ *fakeClusterState) {
-			daemonRuntime.Notifier = failingNotifier{readyErr: failure}
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			state := &fakeClusterState{}
-			daemonRuntime := clusteredRuntime(state)
-			candidate := configured
-			test.configure(&candidate, &daemonRuntime, state)
-			if err := runClusteredDaemon(context.Background(), Options{}, daemonRuntime, candidate); err == nil {
-				t.Fatal("expected clustered startup failure")
-			}
+	for name, hostname := range map[string]func() (string, error){
+		"missing reader": nil,
+		"lookup failure": func() (string, error) { return "", failure },
+		"empty hostname": func() (string, error) { return "  ", nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertClusteredStartupFailure(t, func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
+				daemon.hostname = hostname
+			})
 		})
 	}
 }
 
-func TestRunWithRuntimeRoutesBothStateBackends(t *testing.T) {
-	failure := errors.New("load failed")
-	if err := runWithRuntime(context.Background(), Options{}, runtime{LoadConfig: func(string) (config.Config, error) {
-		return config.Config{}, failure
-	}}); !errors.Is(err, failure) {
-		t.Fatalf("load failure = %v", err)
+func TestClusteredStartupRequiresMigratedPostgreSQLState(t *testing.T) {
+	failure := errors.New("failed")
+	tests := map[string]func(*config.Config, *clusteredDaemon, *fakeClusterState){
+		"configured backend": func(configured *config.Config, _ *clusteredDaemon, _ *fakeClusterState) {
+			configured.State.Postgres = nil
+		},
+		"open connection": func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
+			daemon.openStore = func(config.PostgreSQLStateConfig) (
+				clusterState,
+				func(context.Context) (cluster.Lease, error),
+				func(context.Context) (cluster.Lease, error),
+				error,
+			) {
+				return nil, nil, nil, failure
+			}
+		},
+		"migration status": func(_ *config.Config, _ *clusteredDaemon, state *fakeClusterState) {
+			state.migrationStatusErr = failure
+		},
+		"upward migration": func(_ *config.Config, _ *clusteredDaemon, state *fakeClusterState) {
+			state.migrateErr = failure
+		},
 	}
-
-	clustered := clusteredConfig(t)
-	state := &fakeClusterState{migrateErr: failure}
-	daemonRuntime := clusteredRuntime(state)
-	daemonRuntime.LoadConfig = func(string) (config.Config, error) { return clustered, nil }
-	if err := runWithRuntime(context.Background(), Options{}, daemonRuntime); err == nil {
-		t.Fatal("expected clustered route to reach migration")
-	}
-
-	standalone := runnableConfig(t)
-	standalone.State.Path = "state.db"
-	ctx, cancel := context.WithCancel(context.Background())
-	daemonRuntime = withRuntimeDefaults(runtime{
-		LoadConfig:    func(string) (config.Config, error) { return standalone, nil },
-		NewDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
-		NewLogger:     func(string, string) *slog.Logger { return slog.Default() },
-		Notifier:      cancellingNotifier{cancel: cancel},
-	})
-	if err := runWithRuntime(ctx, Options{}, daemonRuntime); err != nil {
-		t.Fatalf("standalone route failed: %v", err)
+	for name, configure := range tests {
+		t.Run(name, func(t *testing.T) { assertClusteredStartupFailure(t, configure) })
 	}
 }
 
-func TestClusterEventLoopHandlesEveryEvent(t *testing.T) {
+func TestClusteredStartupRequiresGitHubCredentials(t *testing.T) {
+	assertClusteredStartupFailure(t, func(configured *config.Config, _ *clusteredDaemon, _ *fakeClusterState) {
+		configured.GitHub.App.PrivateKeyFile = "missing-private-key"
+	})
+}
+
+func TestClusteredStartupRequiresRepositoryDiscovery(t *testing.T) {
+	assertClusteredStartupFailure(t, func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
+		daemon.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+			return nil, errors.New("failed")
+		}
+	})
+}
+
+func TestClusteredStartupRequiresPublicationBeforeReadiness(t *testing.T) {
+	failure := errors.New("failed")
+	tests := map[string]func(*config.Config, *clusteredDaemon, *fakeClusterState){
+		"publication": func(_ *config.Config, _ *clusteredDaemon, state *fakeClusterState) { state.publishErr = failure },
+		"readiness": func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
+			daemon.notifier = failingNotifier{readyErr: failure}
+		},
+	}
+	for name, configure := range tests {
+		t.Run(name, func(t *testing.T) { assertClusteredStartupFailure(t, configure) })
+	}
+}
+
+func assertClusteredStartupFailure(
+	t *testing.T,
+	configure func(*config.Config, *clusteredDaemon, *fakeClusterState),
+) {
+	t.Helper()
+	configured := clusteredConfig(t)
+	state := &fakeClusterState{}
+	daemon := clusteredDaemonForTest(state)
+	configure(&configured, daemon, state)
+	if err := runClusteredDaemon(context.Background(), Options{}, daemon, configured); err == nil {
+		t.Fatal("expected clustered startup failure")
+	}
+}
+
+func TestClusterEventLoopDispatchesIndependentWorkers(t *testing.T) {
 	configured := clusteredConfig(t)
 	tests := []struct {
 		name      string
@@ -120,7 +129,9 @@ func TestClusterEventLoopHandlesEveryEvent(t *testing.T) {
 			state := &fakeClusterState{}
 			daemon := clusteredDaemon{
 				config: configured, discoverer: staticDiscoverer{}, logger: slog.Default(),
-				runtime: clusteredRuntime(state), store: state,
+				loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
+				newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
+				buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			test.configure(state, cancel)
@@ -129,86 +140,143 @@ func TestClusterEventLoopHandlesEveryEvent(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestClusterEventLoopReturnsReloadFailure(t *testing.T) {
 	reloadRequests := make(chan struct{}, 1)
 	reloadRequests <- struct{}{}
+	state := &fakeClusterState{}
 	daemon := clusteredDaemon{
-		config: configured, logger: slog.Default(), store: &fakeClusterState{},
-		runtime: runtime{LoadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("reload failed") }},
+		config: clusteredConfig(t), logger: slog.Default(), nodes: state, assignments: state,
+		loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("reload failed") },
 	}
 	if err := daemon.runEvents(context.Background(), Options{ReloadRequests: reloadRequests}, clusterEvents{}); err == nil {
 		t.Fatal("expected reload event failure")
 	}
 }
 
-func TestClusterHeartbeatAndLeadershipFailuresRemainRetryable(t *testing.T) {
-	logs := &bytes.Buffer{}
-	state := &fakeClusterState{publishErr: errors.New("heartbeat failed"), tryLeaderErr: errors.New("election failed")}
+func TestSlowProviderHealthDoesNotBlockAssignmentExecution(t *testing.T) {
+	healthCheckStarted := make(chan struct{})
+	releaseHealthCheck := make(chan struct{})
+	assignmentClaimed := make(chan struct{})
+	state := &fakeClusterState{onClaimReady: func() { close(assignmentClaimed) }}
+	daemonUnderTest := clusteredDaemonForTest(state)
+	daemonUnderTest.providerHealthy = func(ctx context.Context, _ config.ScaleSetConfig) error {
+		close(healthCheckStarted)
+		select {
+		case <-releaseHealthCheck:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	daemon := clusteredDaemon{
-		config: clusteredConfig(t), discoverer: staticDiscoverer{err: errors.New("discovery failed")},
-		logger: slog.New(slog.NewTextHandler(logs, nil)), runtime: clusteredRuntime(state), store: state,
+		config: clusteredConfig(t), discoverer: staticDiscoverer{}, logger: slog.Default(),
+		loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
+		newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
+		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
-	daemon.leader = newClusterLeader(&daemon, &fakeClusterLease{alive: true})
-	daemon.heartbeat(context.Background())
-	daemon.leader = nil
-	daemon.tryLeadership(context.Background())
-	if !strings.Contains(logs.String(), "cluster heartbeat failed") || !strings.Contains(logs.String(), "leader election failed") {
-		t.Fatalf("retryable failures were not logged: %q", logs.String())
+	heartbeatEvents := make(chan time.Time, 1)
+	executorEvents := make(chan time.Time, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.runEvents(ctx, Options{}, clusterEvents{heartbeat: heartbeatEvents, executor: executorEvents})
+	}()
+	heartbeatEvents <- time.Now()
+	<-healthCheckStarted
+	executorEvents <- time.Now()
+	select {
+	case <-assignmentClaimed:
+	case <-time.After(time.Second):
+		t.Fatal("assignment execution was blocked by provider health")
 	}
+	close(releaseHealthCheck)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
+func TestBlockedReconciliationStopsWithDaemonContext(t *testing.T) {
+	reconciliationStarted := make(chan struct{})
+	state := &fakeClusterState{}
+	daemon := clusteredDaemon{
+		config: clusteredConfig(t), logger: slog.Default(), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
+		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
+		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		discoverer: blockingDiscoverer{started: reconciliationStarted},
+		nodes:      state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+	}
+	leadership := make(chan leadershipResult, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.runEvents(ctx, Options{}, clusterEvents{leadership: leadership})
+	}()
+	leadership <- leadershipResult{lease: &fakeClusterLease{alive: true}}
+	<-reconciliationStarted
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked reconciliation prevented daemon shutdown")
+	}
+}
+
+type blockingDiscoverer struct {
+	started chan<- struct{}
+}
+
+func (discoverer blockingDiscoverer) Discover(ctx context.Context) (githubapp.DiscoveryResult, error) {
+	close(discoverer.started)
+	<-ctx.Done()
+	return githubapp.DiscoveryResult{}, fmt.Errorf("blocked discovery: %w", ctx.Err())
+}
+
+func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
+	logs := &bytes.Buffer{}
+	state := &fakeClusterState{publishErr: errors.New("heartbeat failed")}
+	daemon := clusteredDaemon{
+		config: clusteredConfig(t), discoverer: staticDiscoverer{},
+		logger: slog.New(slog.NewTextHandler(logs, nil)), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
+		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
+		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+	}
+	daemon.heartbeat(context.Background())
+	if !strings.Contains(logs.String(), "cluster heartbeat failed") {
+		t.Fatalf("heartbeat failure was not logged: %q", logs.String())
+	}
+}
+
+func TestClusterLeadershipFailureRemainsRetryable(t *testing.T) {
+	logs := &bytes.Buffer{}
+	state := &fakeClusterState{tryLeaderErr: errors.New("election failed")}
+	daemon := clusteredDaemon{
+		logger:    slog.New(slog.NewTextHandler(logs, nil)),
+		tryLeader: fakeTryLeader(state),
+	}
+	daemon.tryLeadership(context.Background())
+	if daemon.leader != nil || !strings.Contains(logs.String(), "leader election failed") {
+		t.Fatalf("expected retryable election failure, leader=%#v logs=%q", daemon.leader, logs.String())
+	}
+}
+
+func TestClusterHeartbeatPreservesLiveLeaderLease(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := clusteredDaemon{
+		config: clusteredConfig(t), logger: slog.Default(), nodes: state,
+		providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
+	}
 	lease := &fakeClusterLease{alive: true}
 	daemon.leader = newClusterLeader(&daemon, lease)
 	daemon.heartbeat(context.Background())
 	if lease.closed {
 		t.Fatal("live leader lease was replaced")
-	}
-}
-
-func TestClusterExecutorReportsAndRetriesFailures(t *testing.T) {
-	failure := errors.New("failed")
-	configured := clusteredConfig(t)
-	localAssignment := &cluster.Assignment{ID: 1, ScaleSet: "linux", Repository: "repo", RequestID: 2}
-	tests := []struct {
-		name      string
-		state     *fakeClusterState
-		configure func(*runtime)
-	}{
-		{name: "claim", state: &fakeClusterState{claimErr: failure}},
-		{name: "release removed", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{{ID: 1, ScaleSet: "remote"}}, releaseErr: failure}},
-		{name: "client", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.NewGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) { return nil, failure }
-		}},
-		{name: "build", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.BuildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
-				return scaler.Reconciler{}, failure
-			}
-		}},
-		{name: "start", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.BuildReconciler = reconcilerWithProvider(&fakeScalerProvider{listErr: failure})
-		}},
-		{name: "missing runner", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.BuildReconciler = reconcilerWithProvider(&fakeScalerProvider{})
-		}},
-		{name: "record started", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}, startedErr: failure}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.BuildReconciler = reconcilerWithProvider(&fakeScalerProvider{trackStarted: true})
-		}},
-		{name: "retry", state: &fakeClusterState{readyAssignments: []*cluster.Assignment{localAssignment}, retryErr: failure}, configure: func(daemonRuntime *runtime) {
-			daemonRuntime.BuildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
-				return scaler.Reconciler{}, failure
-			}
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			daemonRuntime := clusteredRuntime(test.state)
-			if test.configure != nil {
-				test.configure(&daemonRuntime)
-			}
-			daemon := clusteredDaemon{
-				config: configured, credentials: testAppCredentials(t), logger: slog.Default(), runtime: daemonRuntime, store: test.state,
-			}
-			daemon.executeNextAssignment(context.Background())
-		})
 	}
 }
 
@@ -234,13 +302,16 @@ func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			state := &fakeClusterState{publishErr: test.publishErr}
-			daemonRuntime := clusteredRuntime(state)
-			daemonRuntime.LoadConfig = func(string) (config.Config, error) { return test.loaded, test.loadErr }
-			daemonRuntime.NewDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+			daemonUnderTest := clusteredDaemonForTest(state)
+			daemonUnderTest.loadConfig = func(string) (config.Config, error) { return test.loaded, test.loadErr }
+			daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 				return staticDiscoverer{}, test.discovererErr
 			}
 			daemon := clusteredDaemon{
-				config: configured, credentials: testAppCredentials(t), logger: slog.Default(), runtime: daemonRuntime, store: state,
+				config: configured, credentials: testAppCredentials(t), logger: slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
+				newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
+				buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier,
+				nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}
 			err := daemon.reload(context.Background(), "config.yaml")
 			if test.wantErr != (err != nil) {
@@ -250,182 +321,225 @@ func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {
 	}
 }
 
-func TestClusterLeaderAndSchedulerErrorPaths(t *testing.T) {
-	failure := errors.New("failed")
-	configured := clusteredConfig(t)
+func TestLeaderReconciliationReportsDiscoveryFailure(t *testing.T) {
+	assertLeaderReconciliationFailure(t, staticDiscoverer{err: errors.New("failed")}, &fakeClusterState{}, "leader repository discovery failed")
+}
+
+func TestLeaderReconciliationReportsCapacityAggregationFailure(t *testing.T) {
+	assertLeaderReconciliationFailure(t, staticDiscoverer{}, &fakeClusterState{statusesErr: errors.New("failed")}, "leader scale-set aggregation failed")
+}
+
+func assertLeaderReconciliationFailure(
+	t *testing.T,
+	discoverer repositoryDiscoverer,
+	state *fakeClusterState,
+	expectedLog string,
+) {
+	t.Helper()
 	logs := &bytes.Buffer{}
-	state := &fakeClusterState{statusesErr: failure}
-	daemon := clusteredDaemon{
-		config: configured, discoverer: staticDiscoverer{result: githubapp.DiscoveryResult{}},
-		logger: slog.New(slog.NewTextHandler(logs, nil)), runtime: clusteredRuntime(state), store: state,
+	daemon := activeClusteredDaemon(t, state)
+	daemon.discoverer = discoverer
+	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	if newClusterLeader(&daemon, &fakeClusterLease{}).reconcile(context.Background()) {
+		t.Fatal("expected reconciliation failure")
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
-	leader.reconcile(context.Background())
-	daemon.discoverer = staticDiscoverer{err: failure}
-	leader.reconcile(context.Background())
-
-	daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{URL: "repo"}}}}
-	state.statusesErr = nil
-	state.statuses = []cluster.ScaleSetStatus{{Name: "linux", RunnerGroup: "Default", Compatible: true, EffectiveCapacity: 1}}
-	daemon.runtime.NewGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) { return nil, failure }
-	leader.startMissingManagers(context.Background(), map[clusterManagerKey]cluster.ScaleSetStatus{
-		{repository: "repo", scaleSet: "linux"}: state.statuses[0],
-	}, map[string]githubapp.Repository{"repo": {URL: "repo"}})
-
-	key := clusterManagerKey{repository: "repo", scaleSet: "linux"}
-	state.assignments = []*cluster.Assignment{{ID: 1, Repository: "repo", ScaleSet: "linux", RequestID: 2}}
-	scheduler := &clusterScheduler{store: state, managers: map[clusterManagerKey]*clusterManager{}}
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err != nil {
-		t.Fatal(err)
-	}
-	state.assignErr = failure
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
-		t.Fatal("expected assignment failure")
-	}
-	state.assignErr = nil
-	state.assignments = []*cluster.Assignment{{ID: 2, Repository: "repo", ScaleSet: "linux", RequestID: 3}}
-	state.releaseErr = failure
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
-		t.Fatal("expected release failure")
-	}
-	state.releaseErr = nil
-	messageClient := &fakeMessageClient{acquireErr: failure}
-	scheduler.managers[key] = &clusterManager{
-		key: key, messageClient: scaleSetMessageClient{Client: messageClient}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 1},
-	}
-	state.assignments = []*cluster.Assignment{{ID: 3, Repository: "repo", ScaleSet: "linux", RequestID: 4}}
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
-		t.Fatal("expected acquisition failure")
-	}
-	state.assignments = []*cluster.Assignment{{ID: 4, Repository: "repo", ScaleSet: "linux", RequestID: 5}}
-	state.readyErr = failure
-	messageClient.acquireErr = nil
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
-		t.Fatal("expected ready failure")
+	if !strings.Contains(logs.String(), expectedLog) {
+		t.Fatalf("expected %q log, got %q", expectedLog, logs.String())
 	}
 }
 
-func TestClusterMessageValidationAndPersistenceFailures(t *testing.T) {
-	failure := errors.New("failed")
-	manager := &clusterManager{key: clusterManagerKey{repository: "repo", scaleSet: "linux"}}
-	tests := []struct {
-		name    string
-		state   *fakeClusterState
-		message *upstream.RunnerScaleSetMessage
-	}{
-		{name: "statistics", state: &fakeClusterState{}, message: &upstream.RunnerScaleSetMessage{}},
-		{name: "available identity", state: &fakeClusterState{}, message: clusterMessage(&upstream.JobAvailable{})},
-		{name: "enqueue", state: &fakeClusterState{enqueueErr: failure}, message: clusterMessage(&upstream.JobAvailable{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}})},
-		{name: "started", state: &fakeClusterState{removeErr: failure}, message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1}}}}},
-		{name: "completed", state: &fakeClusterState{removeErr: failure}, message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{}, JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1}}}}},
+func TestLeaderLeavesFailedRepositorySessionAbsent(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		return nil, errors.New("failed")
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			scheduler := &clusterScheduler{store: test.state, managers: map[clusterManagerKey]*clusterManager{}}
-			handler := clusterMessageHandler{store: test.state, scheduler: scheduler, manager: manager}
-			if err := handler.HandleMessage(context.Background(), test.message); err == nil {
-				t.Fatal("expected message handling failure")
+	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+		key: {Name: "linux", RunnerGroup: "Default", Compatible: true, EffectiveCapacity: 1},
+	}, map[string]githubapp.Repository{"repo": {URL: "repo"}})
+	if _, exists := leader.sessions[key]; exists {
+		t.Fatal("failed repository session was retained")
+	}
+}
+
+func TestSchedulerReleasesAssignmentWithoutRepositorySession(t *testing.T) {
+	state := &fakeClusterState{assignments: []*cluster.Assignment{{ID: 1, Repository: "repo", ScaleSet: "linux", RequestID: 2}}}
+	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
+	outcome, err := scheduler.scheduleOne(context.Background(), "linux")
+	if err != nil || outcome != scheduleProgressed || len(state.released) != 1 || state.released[0] != 1 {
+		t.Fatalf("release outcome=%v released=%v error=%v", outcome, state.released, err)
+	}
+}
+
+func TestSchedulerReportsAssignmentSelectionFailure(t *testing.T) {
+	scheduler := &clusterScheduler{store: &fakeClusterState{assignErr: errors.New("failed")}}
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
+		t.Fatal("expected assignment selection failure")
+	}
+}
+
+func TestSchedulerReportsOrphanedAssignmentReleaseFailure(t *testing.T) {
+	state := &fakeClusterState{
+		assignments: []*cluster.Assignment{{ID: 2, Repository: "repo", ScaleSet: "linux", RequestID: 3}},
+		releaseErr:  errors.New("failed"),
+	}
+	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil {
+		t.Fatal("expected orphaned assignment release failure")
+	}
+}
+
+func TestSchedulerReportsGitHubAcquisitionFailure(t *testing.T) {
+	failure := errors.New("failed")
+	state := &fakeClusterState{assignments: []*cluster.Assignment{{ID: 3, Repository: "repo", ScaleSet: "linux", RequestID: 4}}}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{
+		key: {key: key, messageClient: scaleSetMessageClient{Client: &fakeMessageClient{acquireErr: failure}}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 1}},
+	}}
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); !errors.Is(err, failure) {
+		t.Fatalf("expected acquisition failure, got %v", err)
+	}
+}
+
+func TestSchedulerRetriesOnlyAcquisitionConfirmation(t *testing.T) {
+	failure := errors.New("failed")
+	state := &fakeClusterState{
+		assignments:              []*cluster.Assignment{{ID: 4, Repository: "repo", ScaleSet: "linux", RequestID: 5}},
+		confirmFailuresRemaining: 1,
+		confirmFailure:           failure,
+	}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	messageClient := &fakeMessageClient{}
+	scheduler := &clusterScheduler{
+		store: state, acquisitionConfirmationWait: time.Nanosecond,
+		sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{
+			key: {key: key, messageClient: scaleSetMessageClient{Client: messageClient}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 1}},
+		},
+	}
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err != nil {
+		t.Fatalf("expected acquisition confirmation recovery, got %v", err)
+	}
+	if len(messageClient.acquiredIDs) != 1 || messageClient.acquiredIDs[0] != 5 {
+		t.Fatalf("GitHub acquisitions = %v, want [5]", messageClient.acquiredIDs)
+	}
+}
+
+func TestClusterMessageRequiresStatisticsAndPositiveRequestIdentity(t *testing.T) {
+	state := &fakeClusterState{}
+	handler := clusterMessageHandlerForTest(state)
+	tests := map[string]*upstream.RunnerScaleSetMessage{
+		"statistics":         {},
+		"available identity": clusterMessage(&upstream.JobAvailable{}),
+		"nil started":        {Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{nil}},
+		"empty started":      {Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{{}}},
+		"nil completed":      {Statistics: &upstream.RunnerScaleSetStatistic{}, JobCompletedMessages: []*upstream.JobCompleted{nil}},
+		"empty completed":    {Statistics: &upstream.RunnerScaleSetStatistic{}, JobCompletedMessages: []*upstream.JobCompleted{{}}},
+	}
+	for name, message := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := handler.HandleMessage(context.Background(), message); err == nil {
+				t.Fatal("expected malformed message to be rejected")
 			}
 		})
 	}
-
-	state := &fakeClusterState{}
-	handler := clusterMessageHandler{store: state, scheduler: &clusterScheduler{store: state, managers: map[clusterManagerKey]*clusterManager{}}, manager: manager}
-	message := &upstream.RunnerScaleSetMessage{
-		Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{nil, {}},
-		JobCompletedMessages: []*upstream.JobCompleted{nil, {}},
-	}
-	if err := handler.HandleMessage(context.Background(), message); err != nil {
-		t.Fatal(err)
-	}
 }
 
-func TestProductionClusterRuntimeWiringAndDefaults(t *testing.T) {
-	production := productionRuntime()
-	state, err := production.OpenClusterStore(config.PostgreSQLStateConfig{Password: "file:///secret-file"})
-	if err != nil || state == nil {
-		t.Fatalf("production cluster store = %#v, %v", state, err)
-	}
-	if healthErr := production.ProviderHealthy(context.Background(), config.ScaleSetConfig{Name: "missing"}); healthErr == nil {
-		t.Fatal("production provider health did not validate configuration")
-	}
-	defaults := withRuntimeDefaults(runtime{})
-	state, err = defaults.OpenClusterStore(config.PostgreSQLStateConfig{})
-	if err != nil || state == nil {
-		t.Fatalf("default cluster store = %#v, %v", state, err)
-	}
-	if err := runDaemon(context.Background(), Options{}, runtime{
-		LoadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("load failed") },
-	}); err == nil {
-		t.Fatal("expected standalone configuration load failure")
-	}
-}
-
-func TestRemainingClusterCleanupAndRecoveryBranches(t *testing.T) {
+func TestClusterMessageReportsDemandPersistenceFailure(t *testing.T) {
 	failure := errors.New("failed")
-	configured := clusteredConfig(t)
-	state := &fakeClusterState{}
-	daemon := clusteredDaemon{
-		config: configured, discoverer: staticDiscoverer{}, logger: slog.Default(), runtime: clusteredRuntime(state), store: state,
+	tests := map[string]struct {
+		state   *fakeClusterState
+		message *upstream.RunnerScaleSetMessage
+	}{
+		"available": {
+			state: &fakeClusterState{enqueueErr: failure},
+			message: clusterMessage(&upstream.JobAvailable{JobMessageBase: upstream.JobMessageBase{
+				RunnerRequestID: 1, QueueTime: time.Now(),
+			}}),
+		},
+		"started": {
+			state: &fakeClusterState{removeErr: failure},
+			message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{},
+				JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1}}}},
+		},
+		"completed": {
+			state: &fakeClusterState{removeErr: failure},
+			message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{},
+				JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1}}}},
+		},
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
-	daemon.leader = leader
-	daemon.heartbeat(context.Background())
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := clusterMessageHandlerForTest(test.state).HandleMessage(context.Background(), test.message); !errors.Is(err, failure) {
+				t.Fatalf("expected persistence failure, got %v", err)
+			}
+		})
+	}
+}
 
-	daemon.leader = nil
-	state.leases = []cluster.Lease{nil}
+func clusterMessageHandlerForTest(state *fakeClusterState) clusterMessageHandler {
+	return clusterMessageHandler{
+		store: state,
+		scheduler: &clusterScheduler{
+			store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
+		},
+		session: &repositoryScaleSetSession{
+			key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"},
+		},
+	}
+}
+
+func TestLeadershipIgnoresNilLease(t *testing.T) {
+	state := &fakeClusterState{leases: []cluster.Lease{nil}}
+	daemon := clusteredDaemon{logger: slog.Default(), tryLeader: fakeTryLeader(state)}
 	daemon.tryLeadership(context.Background())
 	if daemon.leader != nil {
 		t.Fatal("nil lease unexpectedly elected a leader")
 	}
+}
 
-	provider := &sequenceListProvider{listResults: []sequenceListResult{{}, {err: failure}}}
-	daemon.runtime.BuildReconciler = reconcilerWithProvider(provider)
+func TestAssignmentStartReportsPostStartInspectionFailure(t *testing.T) {
+	failure := errors.New("failed")
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	provider := &postStartInspectionFailureProvider{failure: failure}
+	daemon.buildReconciler = reconcilerWithProvider(provider)
 	if err := daemon.executeAssignment(context.Background(), &cluster.Assignment{
 		ScaleSet: "linux", Repository: "repo", RequestID: 1,
-	}); err == nil || !strings.Contains(err.Error(), "verify assigned runner") {
+	}); err == nil || !strings.Contains(err.Error(), "verify assigned runner after start") {
 		t.Fatalf("expected runner verification failure, got %v", err)
 	}
+}
 
-	lease := &fakeClusterLease{closeErr: failure}
-	leader = newClusterLeader(&daemon, lease)
-	messageClient := &fakeMessageClient{closeErr: failure}
-	githubClient := &fakeScaleSetClient{deleteScaleSetErr: failure}
-	manager := &clusterManager{
-		key: clusterManagerKey{repository: "repo", scaleSet: "linux"}, capacity: 1,
-		client: githubClient, messageClient: scaleSetMessageClient{Client: messageClient},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 1}, stopPolling: func() {}, pollerDone: closedChannel(),
+func TestLeaderKeepsSessionWhenCapacityIsUnchanged(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	session := &repositoryScaleSetSession{
+		key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, capacity: 1,
 	}
-	leader.managers[manager.key] = manager
-	leader.stopOutdatedManagers(context.Background(), map[clusterManagerKey]cluster.ScaleSetStatus{
-		manager.key: {Name: "linux", EffectiveCapacity: 1},
+	leader.sessions[session.key] = session
+	leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+		session.key: {Name: "linux", EffectiveCapacity: 1},
 	}, []cluster.ScaleSetStatus{{Name: "linux"}})
-	if len(leader.managers) != 1 {
-		t.Fatal("unchanged manager was restarted")
+	if leader.sessions[session.key] != session {
+		t.Fatal("unchanged session was replaced")
 	}
-	leader.startMissingManagers(context.Background(), map[clusterManagerKey]cluster.ScaleSetStatus{
-		manager.key: {Name: "linux"},
-	}, map[string]githubapp.Repository{"repo": {URL: "repo"}})
-	if !hasClusterStatus([]cluster.ScaleSetStatus{{Name: "linux"}}, "linux") {
-		t.Fatal("declared scale set was not found")
-	}
-	leader.stopManager(context.Background(), manager, removeGitHubScaleSet)
-	leader.managers = map[clusterManagerKey]*clusterManager{}
-	leader.stop(context.Background())
-	if !lease.closed {
-		t.Fatal("leader lease close was not attempted")
-	}
+}
 
-	state.publishErr = failure
-	daemon.leader = newClusterLeader(&daemon, &fakeClusterLease{})
-	daemon.shutdown(context.Background())
-
-	state.assignments = []*cluster.Assignment{{ID: 1, Repository: "repo", ScaleSet: "linux", RequestID: 1}}
-	state.releaseErr = failure
-	scheduler := &clusterScheduler{store: state, managers: map[clusterManagerKey]*clusterManager{
-		{repository: "repo", scaleSet: "linux"}: {
-			key:           clusterManagerKey{repository: "repo", scaleSet: "linux"},
-			messageClient: scaleSetMessageClient{Client: &fakeMessageClient{acquireErr: failure}},
+func TestSchedulerReportsAcquisitionAndReleaseFailure(t *testing.T) {
+	failure := errors.New("failed")
+	state := &fakeClusterState{
+		assignments: []*cluster.Assignment{{ID: 1, Repository: "repo", ScaleSet: "linux", RequestID: 1}},
+		releaseErr:  failure,
+	}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{
+		key: {
+			key:            key,
+			messageClient:  scaleSetMessageClient{Client: &fakeMessageClient{acquireErr: failure}},
+			runnerScaleSet: &upstream.RunnerScaleSet{ID: 1},
 		},
 	}}
 	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil || !strings.Contains(err.Error(), "release unacquired") {
@@ -433,20 +547,35 @@ func TestRemainingClusterCleanupAndRecoveryBranches(t *testing.T) {
 	}
 }
 
-func TestClusterManagerSessionFailureIsReturned(t *testing.T) {
+func TestRepositoryScaleSetSessionFailureIsReturned(t *testing.T) {
 	state := &fakeClusterState{}
-	daemonRuntime := clusteredRuntime(state)
-	daemonRuntime.NewGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemonUnderTest := clusteredDaemonForTest(state)
+	daemonUnderTest.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, nil
 	}
 	daemon := clusteredDaemon{
-		config: clusteredConfig(t), credentials: testAppCredentials(t), logger: slog.Default(), runtime: daemonRuntime, store: state,
+		config: clusteredConfig(t), credentials: testAppCredentials(t), logger: slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
+		newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
+		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier,
+		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
-	if _, err := leader.startManager(context.Background(), githubapp.Repository{URL: "repo"}, cluster.ScaleSetStatus{
+	if _, err := leader.startSession(context.Background(), githubapp.Repository{URL: "repo"}, cluster.ScaleSetStatus{
 		Name: "linux", RunnerGroup: "Default", Compatible: true,
 	}); err == nil {
-		t.Fatal("expected manager session failure")
+		t.Fatal("expected session failure")
+	}
+}
+
+func activeClusteredDaemon(t *testing.T, state *fakeClusterState) clusteredDaemon {
+	t.Helper()
+	boundaries := clusteredDaemonForTest(state)
+	return clusteredDaemon{
+		config: clusteredConfig(t), credentials: testAppCredentials(t), discoverer: staticDiscoverer{}, logger: slog.Default(),
+		loadConfig: boundaries.loadConfig, newDiscoverer: boundaries.newDiscoverer,
+		newGitHubClient: boundaries.newGitHubClient, providerHealthy: boundaries.providerHealthy,
+		buildReconciler: boundaries.buildReconciler, notifier: boundaries.notifier,
+		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 }
 
@@ -458,27 +587,26 @@ func reconcilerWithProvider(provider scaler.Provider) func(context.Context, stri
 	}
 }
 
-type sequenceListResult struct {
-	instances []scaler.RunnerInstance
-	err       error
+type postStartInspectionFailureProvider struct {
+	started bool
+	failure error
 }
 
-type sequenceListProvider struct {
-	listResults []sequenceListResult
+func (provider *postStartInspectionFailureProvider) List(context.Context, string) ([]scaler.RunnerInstance, error) {
+	if provider.started {
+		return nil, provider.failure
+	}
+	return nil, nil
 }
 
-func (provider *sequenceListProvider) List(context.Context, string) ([]scaler.RunnerInstance, error) {
-	result := provider.listResults[0]
-	provider.listResults = provider.listResults[1:]
-	return result.instances, result.err
-}
-
-func (provider *sequenceListProvider) Start(_ context.Context, request scaler.RunnerStartRequest) error {
-	provider.listResults[0].instances = []scaler.RunnerInstance{{RunnerName: request.RunnerName, State: scaler.RunnerStateRunning}}
+func (provider *postStartInspectionFailureProvider) Start(context.Context, scaler.RunnerStartRequest) error {
+	provider.started = true
 	return nil
 }
 
-func (*sequenceListProvider) Destroy(context.Context, scaler.RunnerInstance) error { return nil }
+func (*postStartInspectionFailureProvider) Destroy(context.Context, scaler.RunnerInstance) error {
+	return nil
+}
 
 func withPostgreSQLDSN(configured config.Config, dsn string) config.Config {
 	configured.State.Postgres = &config.PostgreSQLStateConfig{DSN: dsn}

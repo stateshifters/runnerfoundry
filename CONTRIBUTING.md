@@ -60,6 +60,32 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
 
+### PostgreSQL integration tests
+
+Fast unit tests use in-memory fakes and do not provision PostgreSQL. Tests that require real migrations, roles, transactions, or advisory-lock behavior use the `integration` build tag and the pinned embedded PostgreSQL binary. Containers and a Dev Container are not required.
+
+`make lint` also runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at or below 100; the command reports each violating path and value. This is a backstop, not a substitute for cohesive functions, explicit boundaries, and behavior-focused tests.
+
+The embedded binary is cached under the operating system's user cache directory at `github-scaler/embedded-postgres`, using Go's `os.UserCacheDir`. Set `GITHUB_SCALER_POSTGRES_CACHE` to use another absolute directory; CI uses `/cache/embedded-postgres`. A cold integration run populates this cache, while later runs reuse the pinned binary.
+
+The cluster integration package starts one PostgreSQL server for the package and creates a separate database for each test. This keeps real PostgreSQL process, role, transaction, migration, and advisory-lock behavior while isolating test data without repeatedly restarting the server.
+
+Run the fast suite during normal development:
+
+```sh
+make test
+```
+
+Run PostgreSQL behavior explicitly before review:
+
+```sh
+make test-integration
+```
+
+`make coverage` and `make test-race` include the integration tag. `make smoke` builds the executable, exercises the clustered daemon lifecycle and migration command surfaces, then uses real PostgreSQL to verify multi-host capacity, leader failover, demand continuity, and reversible migration behavior.
+
+### Complete verification suite
+
 V1 code must maintain 100% Go test coverage.
 
 ```sh
@@ -67,10 +93,11 @@ make lint
 make fmt-check
 make vet
 make test
+make test-integration
 make coverage
 make test-race
 make smoke
 ```
 
 - The coverage total must report `100.0%`.
-- The code must not use build tags with the only exception being the `ruleguard/rules-team.go` file.
+- Build tags are limited to PostgreSQL integration tests and `ruleguard/rules-team.go`. Production Go files must not use build tags.

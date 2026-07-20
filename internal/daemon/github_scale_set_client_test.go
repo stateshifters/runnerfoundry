@@ -29,7 +29,14 @@ func TestNewGitHubClientBuildsOfficialClientAndRegistry(t *testing.T) {
 func TestNewGitHubClientRejectsInvalidRepositoryURL(t *testing.T) {
 	_, err := newGitHubClient("://github.com/meza/agent-playground", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
 	if err == nil || !strings.Contains(err.Error(), "create scaleset client") {
-		t.Fatalf("expected client creation error, got %v", err)
+		t.Fatalf("expected client URL validation error, got %v", err)
+	}
+}
+
+func TestNewGitHubClientRequiresHTTPSRepository(t *testing.T) {
+	_, err := newGitHubClient("http://github.com/meza/agent-playground", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
+	if err == nil || !strings.Contains(err.Error(), "validate repository target") {
+		t.Fatalf("expected secure repository validation error, got %v", err)
 	}
 }
 

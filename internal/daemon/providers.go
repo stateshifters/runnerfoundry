@@ -17,28 +17,32 @@ func buildReconciler(
 	client scaleSetClient,
 	scaleSetID int,
 ) (scaler.Reconciler, error) {
-	return buildReconcilerWithRuntime(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderRuntime())
+	return buildReconcilerWithCommands(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderCommands())
 }
 
-type providerRuntime struct {
+type providerCommands struct {
 	DockerCommandRunner  dockerprovider.CommandRunner
 	LibvirtCommandRunner libvirtprovider.CommandRunner
 }
 
-func productionProviderRuntime() providerRuntime {
-	return providerRuntime{
+func productionProviderCommands() providerCommands {
+	return providerCommands{
 		DockerCommandRunner:  dockerprovider.ExecCommandRunner{},
 		LibvirtCommandRunner: libvirtprovider.ExecCommandRunner{},
 	}
 }
 
-func buildReconcilerWithRuntime(
+func validateProductionScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig) error {
+	return validateScaleSetProvider(ctx, scaleSetConfig, productionProviderCommands())
+}
+
+func buildReconcilerWithCommands(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	client scaleSetClient,
 	scaleSetID int,
-	providers providerRuntime,
+	providers providerCommands,
 ) (scaler.Reconciler, error) {
 	if scaleSetConfig.Docker != nil {
 		return buildDockerReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.DockerCommandRunner)
@@ -49,7 +53,7 @@ func buildReconcilerWithRuntime(
 	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
 
-func validateScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig, providers providerRuntime) error {
+func validateScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig, providers providerCommands) error {
 	if scaleSetConfig.Docker != nil {
 		provider := dockerprovider.ComposeProvider{
 			CommandRunner: providers.DockerCommandRunner,

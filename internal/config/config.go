@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/meza/github-scaler/internal/postgresconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,27 +28,9 @@ type StateConfig struct {
 	Postgres *PostgreSQLStateConfig `yaml:"postgres"`
 }
 
-type PostgreSQLStateConfig struct {
-	DSN      string                     `yaml:"dsn"`
-	Host     string                     `yaml:"host"`
-	Port     string                     `yaml:"port"`
-	Name     string                     `yaml:"name"`
-	User     string                     `yaml:"user"`
-	Password string                     `yaml:"password"`
-	Role     string                     `yaml:"role"`
-	Direct   PostgreSQLConnectionConfig `yaml:"direct"`
-}
+type PostgreSQLStateConfig = postgresconfig.Settings
 
-// PostgreSQLConnectionConfig describes an optional session-affine endpoint.
-// Empty structured fields inherit their primary PostgreSQL setting.
-type PostgreSQLConnectionConfig struct {
-	DSN      string `yaml:"dsn"`
-	Host     string `yaml:"host"`
-	Port     string `yaml:"port"`
-	Name     string `yaml:"name"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-}
+type PostgreSQLConnectionConfig = postgresconfig.Endpoint
 
 type GitHubConfig struct {
 	App               GitHubAppConfig `yaml:"app"`
@@ -108,6 +92,51 @@ func Load(reader io.Reader) (Config, error) {
 	return loadedConfig, nil
 }
 
+// LoadPostgreSQLState decodes only the clustered state settings needed by the
+// migration commands. Other daemon settings are deliberately ignored, while
+// the PostgreSQL subtree retains the same strict keys and validation as Load.
+func LoadPostgreSQLState(reader io.Reader) (PostgreSQLStateConfig, error) {
+	var document yaml.Node
+	if err := yaml.NewDecoder(reader).Decode(&document); err != nil {
+		return PostgreSQLStateConfig{}, fmt.Errorf("decode migration config: %w", err)
+	}
+	stateNode := yamlMappingValue(document.Content[0], "state")
+	postgresNode := yamlMappingValue(stateNode, "postgres")
+	if postgresNode == nil {
+		return PostgreSQLStateConfig{}, errors.New("PostgreSQL clustered state is required")
+	}
+	return decodePostgreSQLStateNode(postgresNode)
+}
+
+func decodePostgreSQLStateNode(postgresNode *yaml.Node) (PostgreSQLStateConfig, error) {
+	postgresContents, err := yaml.Marshal(postgresNode)
+	if err != nil {
+		return PostgreSQLStateConfig{}, fmt.Errorf("read PostgreSQL migration config: %w", err)
+	}
+	var postgresConfig PostgreSQLStateConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(postgresContents))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&postgresConfig); err != nil {
+		return PostgreSQLStateConfig{}, fmt.Errorf("decode PostgreSQL migration config: %w", err)
+	}
+	if err := postgresconfig.Validate(postgresConfig); err != nil {
+		return PostgreSQLStateConfig{}, fmt.Errorf("validate PostgreSQL migration config: %w", err)
+	}
+	return postgresConfig, nil
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
 // Validate applies defaults and rejects unsafe startup state.
 func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.GitHub.validate(); err != nil {
@@ -145,46 +174,10 @@ func (stateConfig StateConfig) validate() error {
 	if !hasPostgreSQL {
 		return nil
 	}
-	return stateConfig.Postgres.validate()
-}
-
-func (postgresConfig PostgreSQLStateConfig) validate() error {
-	if strings.TrimSpace(postgresConfig.Role) == "" {
-		return errors.New("state.postgres.role is required")
-	}
-	hasDSN := strings.TrimSpace(postgresConfig.DSN) != ""
-	hasStructuredSettings := (PostgreSQLConnectionConfig{
-		Host: postgresConfig.Host, Port: postgresConfig.Port, Name: postgresConfig.Name,
-		User: postgresConfig.User, Password: postgresConfig.Password,
-	}).hasStructuredValues()
-	if hasDSN && hasStructuredSettings {
-		return errors.New("state.postgres.dsn cannot be combined with structured PostgreSQL settings")
-	}
-	direct := postgresConfig.Direct
-	directHasDSN := strings.TrimSpace(direct.DSN) != ""
-	directHasStructuredSettings := direct.hasStructuredValues()
-	if directHasDSN && directHasStructuredSettings {
-		return errors.New("state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings")
-	}
-	if hasDSN && directHasStructuredSettings {
-		return errors.New("state.postgres.direct.dsn is required when overriding a primary DSN")
+	if err := postgresconfig.Validate(*stateConfig.Postgres); err != nil {
+		return fmt.Errorf("validate PostgreSQL state: %w", err)
 	}
 	return nil
-}
-
-func (connectionConfig PostgreSQLConnectionConfig) hasStructuredValues() bool {
-	for _, value := range []string{
-		connectionConfig.Host,
-		connectionConfig.Port,
-		connectionConfig.Name,
-		connectionConfig.User,
-		connectionConfig.Password,
-	} {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func (githubConfig *GitHubConfig) validate() error {

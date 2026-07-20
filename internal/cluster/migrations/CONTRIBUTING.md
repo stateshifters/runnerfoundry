@@ -4,7 +4,7 @@ This directory is the authoritative history of the clustered PostgreSQL schema. 
 
 ## Create a migration
 
-Migration history is sequential and append-only after release. Name files `NNN_description.sql`, beginning with the next integer after the highest existing prefix. Do not leave gaps, reuse a number, renumber released files, or edit a released migration.
+Migration history is sequential and append-only after release. Name files `NNN_description.sql`, beginning with the next integer after the highest existing prefix. Do not leave gaps, reuse a number, renumber released files, or edit a released migration. The PostgreSQL schema has not reached production, so the unreleased `001_initial.sql` remains the one exception: amend it to keep a fresh installation equivalent to the first released model. Once a release contains it, all later changes require a new migration.
 
 Each file uses tern's mandatory reversible format:
 
@@ -52,6 +52,8 @@ The `scaler_schema_compatibility` row records the oldest binary schema generatio
 
 Every migration runs after the session assumes `state.postgres.role`. Tables, sequences, indexes, and tern metadata must therefore remain owned by that stable role. Do not grant scaler objects directly to transient login users. Operators grant rotating login identities membership in the stable role instead.
 
+Provision the stable role with `NOLOGIN`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, and `NOREPLICATION`, and limit its ownership and privileges to the scaler database or schema. The login identities need database connectivity and membership in this role. Migration SQL must not create, alter, grant, revoke, or inspect PostgreSQL roles or memberships.
+
 The scaler reserves separate session advisory-lock keys for migration orchestration (`0x6769746875626d67`), tern's internal migration lock (`9628173550095224` in tern v2.4.1), and leader election (`0x6769746875627363`). Migrations must not acquire or reuse those keys.
 
 ## Understand installation, upgrade, and rollback
@@ -78,9 +80,13 @@ Follow vertical red-green-refactor slices. Add the behavioral test first, prove 
 Run focused tests while developing:
 
 ```sh
-go test ./internal/cluster -run PostgreSQLMigration -count=1
+go test -tags=integration ./internal/cluster -run PostgreSQLMigration -count=1
 go test ./cmd/github-scaler -run Migration -count=1
 ```
+
+PostgreSQL integration tests use the pinned embedded PostgreSQL binary and its deterministic cache. They are the only tests that may require that binary; `make test` remains independent of PostgreSQL provisioning. The cache defaults to `github-scaler/embedded-postgres` beneath Go's `os.UserCacheDir`; set `GITHUB_SCALER_POSTGRES_CACHE` to use another absolute directory. See the root [contribution guide](../../../CONTRIBUTING.md#postgresql-integration-tests) for the clustered smoke workflow.
+
+The integration package shares one PostgreSQL server process and provisions an isolated database for each test. Migration tests must use that helper instead of starting their own server or sharing schema state with another test.
 
 Before review, run the complete repository suite:
 
@@ -89,6 +95,7 @@ make lint
 make fmt-check
 make vet
 make test
+make test-integration
 make coverage
 make test-race
 make smoke
@@ -97,6 +104,7 @@ make smoke
 Review must confirm all of the following:
 
 - The filename is the next sequence and released history is unchanged.
+- An edit to `001_initial.sql` is made only while it remains unreleased; otherwise the change uses a new migration.
 - Up and Down are both present, transactional, and dependency-safe.
 - Schema and representative data return to the previous state after Down.
 - The migration supports the N/N-1 rolling window and updates the compatibility floor only when appropriate.

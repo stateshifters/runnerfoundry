@@ -113,63 +113,55 @@ func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestDockerProviderSurfacesCommandAndJSONFailures(t *testing.T) {
-	tests := map[string]func(t *testing.T){
-		"start": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
-				t.Fatal("expected start error")
-			}
-		},
-		"list command": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list command error")
-			}
-		},
-		"list array json": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `[`}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list json error")
-			}
-		},
-		"list line json": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `{`}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list json line error")
-			}
-		},
-		"destroy": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
-				t.Fatal("expected destroy error")
-			}
-		},
-		"validate": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected validate error")
-			}
-		},
-		"validate missing service": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{
-				CommandRunner: &recordingCommandRunner{output: "other\n"},
-				Config:        ComposeConfig{Service: "runner"},
-			}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected missing service error")
-			}
-		},
+func TestDockerProviderReportsStartCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+		t.Fatal("expected start error")
 	}
-	for testName, testCase := range tests {
-		t.Run(testName, testCase)
+}
+
+func TestDockerProviderReportsListCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list command error")
+	}
+}
+
+func TestDockerProviderRejectsMalformedJSONArray(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `[`}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list json error")
+	}
+}
+
+func TestDockerProviderRejectsMalformedLineDelimitedJSON(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `{`}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list json line error")
+	}
+}
+
+func TestDockerProviderReportsDestroyCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
+		t.Fatal("expected destroy error")
+	}
+}
+
+func TestDockerProviderReportsValidationCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected validate error")
+	}
+}
+
+func TestDockerProviderValidationRequiresConfiguredService(t *testing.T) {
+	provider := ComposeProvider{
+		CommandRunner: &recordingCommandRunner{output: "other\n"},
+		Config:        ComposeConfig{Service: "runner"},
+	}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected missing service error")
 	}
 }
 
