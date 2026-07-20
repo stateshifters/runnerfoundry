@@ -10,6 +10,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// Enqueue records demand unless the same scale set, repository, and request ID
+// is already queued. Duplicate observations are successful no-ops and preserve
+// the first observation's queue time. It returns ErrInvalidDemand for a blank
+// scale set or repository, a non-positive request ID, or a zero queue time;
+// callers should correct or discard that input rather than retry it unchanged.
 func (store *Store) Enqueue(ctx context.Context, demand Demand) error {
 	if strings.TrimSpace(demand.ScaleSet) == "" || strings.TrimSpace(demand.Repository) == "" || demand.RequestID <= 0 || demand.QueueTime.IsZero() {
 		return ErrInvalidDemand
@@ -30,6 +35,14 @@ func (store *Store) Enqueue(ctx context.Context, demand Demand) error {
 	return nil
 }
 
+// AssignOldest atomically reserves the oldest unassigned demand for scaleSet,
+// ordered by queue time and then observation order. It selects only a live,
+// healthy, compatible contributor with unused local capacity and, in the same
+// transaction, completes active assignments owned by expired nodes.
+//
+// AssignOldest returns ErrInvalidDemand for a blank scale set. It returns
+// ErrNoAssignment when no demand or eligible contributor is available; callers
+// should use errors.Is to distinguish either sentinel from store failures.
 func (store *Store) AssignOldest(
 	ctx context.Context,
 	scaleSet string,

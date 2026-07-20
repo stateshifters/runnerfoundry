@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// Publish atomically updates a node's heartbeat and health and replaces all of
+// its scale-set contributions. Omitting a previous contribution withdraws it;
+// an empty list withdraws every contribution from the node. After replacement,
+// Publish removes demand and associated assignments for scale sets that no node
+// declares. No part of the publication is committed if any step fails.
+//
+// Publish returns ErrInvalidPublication for a blank node ID, a blank scale-set
+// or runner-group name, or a negative maximum. Callers should correct the
+// publication rather than retrying the same invalid input as a transient error.
 func (store *Store) Publish(
 	ctx context.Context,
 	nodeID string,
@@ -104,6 +113,11 @@ func removeWithdrawnDemand(ctx context.Context, transaction databaseTransaction)
 	return nil
 }
 
+// ScaleSets returns every declared scale set ordered by name. Effective capacity
+// sums contributions that are healthy, belong to healthy nodes whose heartbeat
+// is no older than now minus liveFor, and agree on their runner group. A scale
+// set with conflicting eligible runner groups is incompatible and has zero
+// effective capacity; stale or unhealthy declarations remain listed.
 func (store *Store) ScaleSets(ctx context.Context, now time.Time, liveFor time.Duration) ([]ScaleSetStatus, error) {
 	connection, err := store.connector(ctx)
 	if err != nil {

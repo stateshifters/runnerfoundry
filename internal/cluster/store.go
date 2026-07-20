@@ -18,23 +18,41 @@ const leaderAdvisoryLockKey int64 = 0x6769746875627363
 const NodeLifetime = 30 * time.Second
 
 var (
-	ErrNoAssignment       = errors.New("no schedulable demand")
-	ErrNoReadyAssignment  = errors.New("no local assignment is ready")
-	ErrNotLeader          = errors.New("cluster leader lease is held elsewhere")
-	ErrInvalidDemand      = errors.New("invalid scale-set demand")
+	ErrNoAssignment      = errors.New("no schedulable demand")
+	ErrNoReadyAssignment = errors.New("no local assignment is ready")
+	ErrNotLeader         = errors.New("cluster leader lease is held elsewhere")
+	// ErrInvalidDemand reports invalid demand input. Callers should use
+	// errors.Is and correct or discard the input rather than retry it unchanged.
+	ErrInvalidDemand = errors.New("invalid scale-set demand")
+	// ErrInvalidPublication reports invalid node or contribution input. Callers
+	// should use errors.Is and correct the publication rather than retry it.
 	ErrInvalidPublication = errors.New("invalid node contribution publication")
+	// ErrAssignmentConflict reports that an assignment no longer has the state
+	// or owner required for a transition. Callers should use errors.Is and
+	// reconcile current state; errors.As exposes AssignmentTransitionError details.
 	ErrAssignmentConflict = errors.New("assignment state changed")
 )
 
+// AssignmentState identifies a persisted stage in an assignment's lifecycle.
 type AssignmentState string
 
 const (
-	AssignmentReserved  AssignmentState = "reserved"
+	// AssignmentReserved has selected a demand and node but has not recorded a
+	// GitHub acquisition attempt.
+	AssignmentReserved AssignmentState = "reserved"
+	// AssignmentAcquiring has persisted the GitHub identifiers for an acquisition
+	// that has not yet been confirmed.
 	AssignmentAcquiring AssignmentState = "acquiring"
-	AssignmentReady     AssignmentState = "ready"
-	AssignmentStarting  AssignmentState = "starting"
-	AssignmentRunning   AssignmentState = "running"
-	AssignmentComplete  AssignmentState = "complete"
+	// AssignmentReady has a confirmed GitHub acquisition and can be claimed by
+	// its owning node for provider startup.
+	AssignmentReady AssignmentState = "ready"
+	// AssignmentStarting has been claimed by its owning node and requires provider
+	// startup or recovery.
+	AssignmentStarting AssignmentState = "starting"
+	// AssignmentRunning has been observed running by its owning node.
+	AssignmentRunning AssignmentState = "running"
+	// AssignmentComplete is terminal and no longer consumes contributor capacity.
+	AssignmentComplete AssignmentState = "complete"
 )
 
 // AssignmentTransitionError reports that an assignment no longer has the
@@ -50,18 +68,31 @@ func (transitionErr *AssignmentTransitionError) Error() string {
 
 func (transitionErr *AssignmentTransitionError) Unwrap() error { return ErrAssignmentConflict }
 
+// Contribution declares one node's capacity and health for a scale set.
 type Contribution struct {
-	ScaleSet    string
+	// ScaleSet identifies the shared scale set receiving this contribution.
+	ScaleSet string
+	// RunnerGroup is the GitHub-facing setting that must agree across eligible
+	// contributors to the same scale set.
 	RunnerGroup string
-	MaxRunners  int
-	Healthy     bool
+	// MaxRunners limits concurrent active assignments on this node and scale set.
+	// Zero publishes a declaration without contributing capacity.
+	MaxRunners int
+	// Healthy controls whether this contribution is eligible for capacity and
+	// assignment while retaining its declaration.
+	Healthy bool
 }
 
+// NodeHealth controls whether any of a node's contributions are eligible. Its
+// zero value is NodeUnhealthy; health changes do not withdraw declarations.
 type NodeHealth bool
 
 const (
+	// NodeUnhealthy excludes all contributions from capacity and assignment.
 	NodeUnhealthy NodeHealth = false
-	NodeHealthy   NodeHealth = true
+	// NodeHealthy allows individually healthy contributions from a live node to
+	// participate in capacity and assignment.
+	NodeHealthy NodeHealth = true
 )
 
 type ScaleSetStatus struct {
