@@ -21,11 +21,15 @@ type scaleSetClient interface {
 	scaleSetRunnerClient
 }
 
+type scaleSetDeletionClient interface {
+	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
+}
+
 type scaleSetAdministrationClient interface {
+	scaleSetDeletionClient
 	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
-	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
 }
 
 type scaleSetRunnerClient interface {
@@ -40,9 +44,9 @@ type scaleSetRunnerClient interface {
 }
 
 type scaleSetPruneClient interface {
+	scaleSetDeletionClient
 	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
 	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
-	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
 }
 
 type scaleSetMessageClient struct {

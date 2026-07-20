@@ -49,7 +49,7 @@ func deleteRunnerScaleSet(
 	logger *slog.Logger,
 	repositoryURL string,
 	scaleSetName string,
-	client scaleSetAdministrationClient,
+	client scaleSetDeletionClient,
 	runnerScaleSet *upstream.RunnerScaleSet,
 ) error {
 	logAction(ctx, logger, slog.LevelDebug, "runner_scale_set_delete", "started",

@@ -46,19 +46,11 @@ func pruneScaleSetTarget(
 		if desiredNames[runnerScaleSet.Name] {
 			continue
 		}
-		logger.Info("pruning unmanaged runner scale set",
-			slog.String("action", "runner_scale_set_prune"),
-			slog.String("phase", "started"),
-			slog.String("repository", target.RepositoryURL),
-			slog.String("scaleSet", runnerScaleSet.Name),
-		)
-		if err := client.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); err != nil {
+		if err := deleteRunnerScaleSet(
+			ctx, logger, target.RepositoryURL, runnerScaleSet.Name, client, &runnerScaleSet,
+		); err != nil {
 			return fmt.Errorf("delete runner scale set %q: %w", runnerScaleSet.Name, err)
 		}
-		logAction(ctx, logger, slog.LevelInfo, "runner_scale_set_prune", "completed",
-			slog.String("repository", target.RepositoryURL),
-			slog.String("scaleSet", runnerScaleSet.Name),
-		)
 	}
 	return nil
 }

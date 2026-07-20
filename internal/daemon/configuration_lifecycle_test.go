@@ -117,7 +117,8 @@ func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
 		runnerGroup:     &upstream.RunnerGroup{ID: 5},
 		runnerScaleSets: []upstream.RunnerScaleSet{{ID: 1, Name: "linux"}, {ID: 2, Name: "stale"}},
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
 	if err := pruneRepository(context.Background(), logger, client, "https://github.com/acme/repo", []config.ScaleSetConfig{{
 		Name: "linux", RunnerGroup: "default",
 	}}); err != nil {
@@ -126,6 +127,8 @@ func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
 	if len(client.deletedScaleSetIDs) != 1 || client.deletedScaleSetIDs[0] != 2 {
 		t.Fatalf("expected stale scale set deletion, got %#v", client.deletedScaleSetIDs)
 	}
+	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "started")
+	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "completed")
 }
 
 func TestPruneRepositoryRejectsUnsupportedClient(t *testing.T) {

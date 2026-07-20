@@ -99,7 +99,7 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemon.logger = newLoggerForWriter(logs, "json", "debug")
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := stoppedSession(
@@ -108,10 +108,10 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 		&fakeMessageClient{closeErr: errors.New("close failed")},
 	)
 	leader.stopSession(context.Background(), session, removeGitHubScaleSet)
-	if !strings.Contains(logs.String(), "close leader message session failed") ||
-		!strings.Contains(logs.String(), "remove withdrawn runner scale set failed") {
-		t.Fatalf("expected both cleanup failures, got %q", logs.String())
+	if !strings.Contains(logs.String(), "close leader message session failed") {
+		t.Fatalf("expected message session close failure, got %q", logs.String())
 	}
+	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "failed")
 }
 
 func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {

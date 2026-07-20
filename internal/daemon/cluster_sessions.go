@@ -203,9 +203,9 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 		leader.daemon.logger.Error("close leader message session failed", slog.String("error", err.Error()))
 	}
 	if removal == removeGitHubScaleSet {
-		if err := session.client.DeleteRunnerScaleSet(ctx, session.runnerScaleSet.ID); err != nil {
-			leader.daemon.logger.Error("remove withdrawn runner scale set failed", slog.String("error", err.Error()))
-		}
+		_ = deleteRunnerScaleSet( //nolint:errcheck,gosec // Cluster withdrawal cleanup is best effort; the helper logs failures.
+			ctx, leader.daemon.logger, session.key.repository, session.key.scaleSet, session.client, session.runnerScaleSet,
+		)
 	}
 }
 
