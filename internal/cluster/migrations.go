@@ -230,8 +230,8 @@ func closePostgreSQLConnection(ctx context.Context, connection postgreSQLCloser)
 
 func safePostgreSQLError(operation string, err error) error {
 	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) {
+	if errors.As(err, &postgresError) && postgresError.Code != "" {
 		return fmt.Errorf("%s (SQLSTATE %s)", operation, postgresError.Code)
 	}
-	return fmt.Errorf("%s: %w", operation, err)
+	return errors.New(operation)
 }

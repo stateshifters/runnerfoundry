@@ -59,6 +59,31 @@ func TestPostgreSQLMigrationErrorsRetainSQLStateWithoutServerDetails(t *testing.
 	}
 }
 
+func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
+	operation := "apply PostgreSQL migrations"
+	sensitiveError := errors.New(
+		"postgres://secret-user:secret-password@postgres.internal/github_scaler: SELECT * FROM secret_table",
+	)
+	err := safePostgreSQLError(operation, sensitiveError)
+	if err.Error() != operation {
+		t.Fatalf("migration error = %q, want %q", err, operation)
+	}
+	for _, forbidden := range []string{
+		"secret-user",
+		"secret-password",
+		"postgres.internal",
+		"github_scaler",
+		"SELECT * FROM secret_table",
+	} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("migration error exposed sensitive value %q: %q", forbidden, err)
+		}
+	}
+	if errors.Is(err, sensitiveError) {
+		t.Fatal("migration error retained the sensitive underlying error")
+	}
+}
+
 func TestNewMigratorRejectsInvalidMigrationFiles(t *testing.T) {
 	store := NewStore(ConnectionSettings{Role: "github_scaler"})
 	store.migrationFiles = failingSubFS{}
