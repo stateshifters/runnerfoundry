@@ -127,24 +127,13 @@ func selectContributor(
 	liveAfter time.Time,
 	assignment *Assignment,
 ) error {
-	err := transaction.QueryRow(ctx, `
+	err := transaction.QueryRow(ctx, contributorEligibilitySQL+`
 		SELECT contribution.node_id
 		FROM scaler_contributions contribution
-		JOIN scaler_nodes node ON node.node_id = contribution.node_id
-		WHERE contribution.scale_set = $1
-		  AND contribution.healthy
-		  AND node.healthy
-		  AND node.heartbeat_at >= $2
-		  AND NOT EXISTS (
-		      SELECT 1
-		      FROM scaler_contributions conflicting
-		      JOIN scaler_nodes conflicting_node ON conflicting_node.node_id = conflicting.node_id
-		      WHERE conflicting.scale_set = contribution.scale_set
-		        AND conflicting.runner_group <> contribution.runner_group
-		        AND conflicting.healthy
-		        AND conflicting_node.healthy
-		        AND conflicting_node.heartbeat_at >= $2
-		  )
+		JOIN eligible_contributions eligible_contribution
+		  ON eligible_contribution.node_id = contribution.node_id
+		 AND eligible_contribution.scale_set = contribution.scale_set
+		WHERE contribution.scale_set = $2
 		  AND contribution.max_runners > (
 		      SELECT COUNT(*)
 		      FROM scaler_assignments assignment
@@ -155,7 +144,7 @@ func selectContributor(
 		  )
 		ORDER BY contribution.node_id
 		LIMIT 1
-		FOR UPDATE OF contribution`, scaleSet, liveAfter).Scan(&assignment.NodeID)
+		FOR UPDATE OF contribution`, liveAfter, scaleSet).Scan(&assignment.NodeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoAssignment
 	}

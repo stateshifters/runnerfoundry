@@ -110,24 +110,25 @@ func (store *Store) ScaleSets(ctx context.Context, now time.Time, liveFor time.D
 		return nil, err
 	}
 	defer closeConnection(ctx, connection)
-	rows, err := connection.Query(ctx, `
-		SELECT contributions.scale_set,
+	rows, err := connection.Query(ctx, contributorEligibilitySQL+`
+		SELECT contribution.scale_set,
 		       COALESCE(
-		           MIN(contributions.runner_group) FILTER (
-		               WHERE nodes.healthy AND contributions.healthy AND nodes.heartbeat_at >= $1
-		           ),
-		           MIN(contributions.runner_group)
+		           MIN(live_contribution.runner_group),
+		           MIN(contribution.runner_group)
 		       ),
-		       COUNT(DISTINCT contributions.runner_group) FILTER (
-		           WHERE nodes.healthy AND contributions.healthy AND nodes.heartbeat_at >= $1
-		       ) <= 1,
-		       COALESCE(SUM(contributions.max_runners) FILTER (
-		           WHERE nodes.healthy AND contributions.healthy AND nodes.heartbeat_at >= $1
-		       ), 0)
-		FROM scaler_contributions contributions
-		JOIN scaler_nodes nodes ON nodes.node_id = contributions.node_id
-		GROUP BY contributions.scale_set
-		ORDER BY contributions.scale_set`, now.Add(-liveFor))
+		       COALESCE(BOOL_AND(compatibility.compatible), true),
+		       COALESCE(SUM(eligible_contribution.max_runners), 0)
+		FROM scaler_contributions contribution
+		LEFT JOIN live_contributions live_contribution
+		  ON live_contribution.node_id = contribution.node_id
+		 AND live_contribution.scale_set = contribution.scale_set
+		LEFT JOIN scale_set_compatibility compatibility
+		  ON compatibility.scale_set = contribution.scale_set
+		LEFT JOIN eligible_contributions eligible_contribution
+		  ON eligible_contribution.node_id = contribution.node_id
+		 AND eligible_contribution.scale_set = contribution.scale_set
+		GROUP BY contribution.scale_set
+		ORDER BY contribution.scale_set`, now.Add(-liveFor))
 	if err != nil {
 		return nil, fmt.Errorf("load scale-set contributions: %w", err)
 	}
