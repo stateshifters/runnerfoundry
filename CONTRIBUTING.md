@@ -60,6 +60,17 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
 
+### Test suite boundaries
+
+Unit tests MUST NOT perform filesystem, database, network, process, or other external I/O. Prefer injected dependencies,
+fakes, and in-memory stores so the default test suite remains fast, deterministic, and isolated.
+
+The `integration` build tag is the only build tag permitted for tests. It MAY be used only when real boundary behavior is
+the subject of the test and replacing that boundary with an in-memory substitute would invalidate the behavior being
+verified. Qualifying behavior includes database-engine semantics, durable close-and-reopen recovery, and the production
+composition entry point. Slowness, complexity, cross-package composition, or inconvenient setup alone do not justify the
+tag. Production Go files MUST NOT use build tags.
+
 ### PostgreSQL integration tests
 
 Fast unit tests use in-memory fakes and do not provision PostgreSQL. Tests that require real migrations, roles, transactions, or advisory-lock behavior use the `integration` build tag and the pinned embedded PostgreSQL binary. Containers and a Dev Container are not required.
@@ -76,7 +87,7 @@ Run the fast suite during normal development:
 make test
 ```
 
-Run PostgreSQL behavior explicitly before review:
+Run integration behavior explicitly before review:
 
 ```sh
 make test-integration
@@ -100,4 +111,4 @@ make smoke
 ```
 
 - The coverage total must report `100.0%`.
-- Build tags are limited to PostgreSQL integration tests and `ruleguard/rules-team.go`. Production Go files must not use build tags.
+- Outside tests, build tags are limited to `ruleguard/rules-team.go`.
