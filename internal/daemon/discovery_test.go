@@ -369,3 +369,42 @@ func TestStartRepositoryRollsBackEarlierScaleSetsWhenLaterStartupFails(t *testin
 		t.Fatalf("expected earlier scale set rollback, stopped=%t shutdown=%t", stopped, shutdown)
 	}
 }
+
+func TestApplyDiscoveryRejectsLocalScaleSetNameCollision(t *testing.T) {
+	activeConfig := testActiveConfiguration()
+	discovery := githubapp.DiscoveryResult{
+		Repositories: []githubapp.Repository{
+			{InstallationID: 1, URL: "https://github.com/acme/repo.a"},
+			{InstallationID: 1, URL: "https://github.com/acme/repo-a"},
+		},
+		InstallationFailures: map[int64]error{},
+	}
+	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, discovery); err == nil {
+		t.Fatal("expected local name collision")
+	}
+}
+
+func TestRemoveRepositoryImmediatelyReportsLifecycleCleanupFailure(t *testing.T) {
+	activeConfig := testActiveConfiguration()
+	repository := managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+		StopPolling:   func() {},
+		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
+		Shutdown:      func(context.Context) error { return errors.New("shutdown failed") },
+	}}}
+	activeConfig.Repositories["repo"] = repository
+	if err := removeRepositoryImmediately(context.Background(), &activeConfig, "repo", repository); err == nil {
+		t.Fatal("expected immediate removal failure")
+	}
+}
+
+func TestRollbackRepositoryStartupReportsLifecycleCleanupFailure(t *testing.T) {
+	activeConfig := testActiveConfiguration()
+	repository := managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+		StopPolling:   func() {},
+		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
+		Shutdown:      func(context.Context) error { return errors.New("shutdown failed") },
+	}}}
+	if err := rollbackRepositoryStartup(context.Background(), &activeConfig, "repo", repository); err == nil {
+		t.Fatal("expected rollback failure")
+	}
+}

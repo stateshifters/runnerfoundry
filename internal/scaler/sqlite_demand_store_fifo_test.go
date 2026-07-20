@@ -81,7 +81,7 @@ func TestSQLiteDemandStoreRejectsSecondOwner(t *testing.T) {
 	}
 }
 
-func TestSQLiteDemandStoreMutationsAreDurableAndIdempotent(t *testing.T) {
+func TestSQLiteDemandStoreApplyDeduplicatesObservedDemand(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
 	store, openErr := OpenSQLiteDemandStore(databasePath)
 	if openErr != nil {
@@ -89,8 +89,26 @@ func TestSQLiteDemandStoreMutationsAreDurableAndIdempotent(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	demand := JobDemand{Repository: "repo", RequestID: 7, QueueTime: time.Now()}
+	demand := JobDemand{Repository: "repo", RequestID: 7, QueueTime: time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)}
 	if err := store.Apply(ctx, "linux", []JobDemand{demand, demand}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := store.Ordered(ctx, "linux")
+	if err != nil || len(ordered) != 1 || ordered[0].RequestID != demand.RequestID {
+		t.Fatalf("expected one deduplicated demand, got %#v, %v", ordered, err)
+	}
+}
+
+func TestSQLiteDemandStoreApplyMarksExistingDemandAcquired(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	demand := JobDemand{Repository: "repo", RequestID: 7, QueueTime: time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)}
+	if err := store.Apply(ctx, "linux", []JobDemand{demand}, nil); err != nil {
 		t.Fatal(err)
 	}
 	demand.Acquired = true
@@ -99,21 +117,79 @@ func TestSQLiteDemandStoreMutationsAreDurableAndIdempotent(t *testing.T) {
 	}
 	ordered, err := store.Ordered(ctx, "linux")
 	if err != nil || len(ordered) != 1 || !ordered[0].Acquired {
-		t.Fatalf("expected acquired deduplicated demand, got %#v, %v", ordered, err)
+		t.Fatalf("expected existing demand to become acquired, got %#v, %v", ordered, err)
+	}
+}
+
+func TestSQLiteDemandStoreDeleteRemovesSelectedDemand(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.Apply(ctx, "linux", []JobDemand{
+		{Repository: "repo", RequestID: 7, QueueTime: queueTime},
+		{Repository: "repo", RequestID: 8, QueueTime: queueTime.Add(time.Minute)},
+	}, nil); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.Delete(ctx, "linux", "repo", 7); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Apply(ctx, "linux", []JobDemand{demand}, nil); err != nil {
+	ordered, err := store.Ordered(ctx, "linux")
+	if err != nil || len(ordered) != 1 || ordered[0].RequestID != 8 {
+		t.Fatalf("expected only unselected demand to remain, got %#v, %v", ordered, err)
+	}
+}
+
+func TestSQLiteDemandStoreRemoveRepositoryRemovesOnlyMatchingRepository(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.Apply(ctx, "linux", []JobDemand{
+		{Repository: "removed", RequestID: 7, QueueTime: queueTime},
+		{Repository: "retained", RequestID: 8, QueueTime: queueTime.Add(time.Minute)},
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RemoveRepository(ctx, "linux", "repo"); err != nil {
+	if err := store.RemoveRepository(ctx, "linux", "removed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Apply(ctx, "linux", []JobDemand{demand}, nil); err != nil {
+	ordered, err := store.Ordered(ctx, "linux")
+	if err != nil || len(ordered) != 1 || ordered[0].Repository != "retained" {
+		t.Fatalf("expected only other repository demand to remain, got %#v, %v", ordered, err)
+	}
+}
+
+func TestSQLiteDemandStoreRemoveScaleSetRemovesOnlyMatchingScaleSet(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, openErr := OpenSQLiteDemandStore(databasePath)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.Apply(ctx, "linux", []JobDemand{{Repository: "repo", RequestID: 7, QueueTime: queueTime}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Apply(ctx, "gpu", []JobDemand{{Repository: "repo", RequestID: 8, QueueTime: queueTime}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RemoveScaleSet(ctx, "linux"); err != nil {
 		t.Fatal(err)
+	}
+	removed, removedErr := store.Ordered(ctx, "linux")
+	retained, retainedErr := store.Ordered(ctx, "gpu")
+	if removedErr != nil || retainedErr != nil || len(removed) != 0 || len(retained) != 1 || retained[0].RequestID != 8 {
+		t.Fatalf("expected only other scale set demand to remain, removed=%#v retained=%#v errors=%v/%v", removed, retained, removedErr, retainedErr)
 	}
 }

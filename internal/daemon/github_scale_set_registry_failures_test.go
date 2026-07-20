@@ -8,75 +8,44 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/meza/github-scaler/internal/config"
 )
 
-func TestGitHubScaleSetRegistryHelperFunctions(t *testing.T) {
-	owner, repository, err := repositoryOwnerAndName("https://github.com/meza/github-scaler/")
-	if err != nil {
-		t.Fatalf("expected repository identity success, got %v", err)
-	}
-	if owner != "meza" || repository != "github-scaler" {
-		t.Fatalf("expected owner and repository, got %q %q", owner, repository)
-	}
-	_, _, err = repositoryOwnerAndName("https://github.com/meza")
-	if err == nil {
+func TestRepositoryOwnerAndNameRejectsInvalidPath(t *testing.T) {
+	if _, _, err := repositoryOwnerAndName("https://github.com/meza"); err == nil {
 		t.Fatal("expected invalid repository url")
-	}
-	_, _, err = repositoryOwnerAndName("http://github.com/meza/repo")
-	if err == nil {
-		t.Fatal("expected non-https repository url error")
-	}
-	_, _, err = repositoryOwnerAndName("http://[::1/meza/repo")
-	if err == nil {
-		t.Fatal("expected repository url parse error")
-	}
-	apiEndpoint, err := apiURL("https://github.com/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token")
-	if err != nil {
-		t.Fatalf("expected api url success, got %v", err)
-	}
-	if !strings.HasPrefix(apiEndpoint, "https://api.github.com/") {
-		t.Fatalf("expected hosted api endpoint, got %q", apiEndpoint)
-	}
-	enterpriseEndpoint, err := apiURL("https://ghe.example.com/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token")
-	if err != nil {
-		t.Fatalf("expected enterprise api url success, got %v", err)
-	}
-	if !strings.Contains(enterpriseEndpoint, "/api/v3/repos/") {
-		t.Fatalf("expected enterprise api path, got %q", enterpriseEndpoint)
-	}
-	_, err = apiURL("http://[::1/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token")
-	if err == nil {
-		t.Fatal("expected api url parse error")
-	}
-	_, err = runnerRegistrationURL("http://[::1/meza/github-scaler")
-	if err == nil {
-		t.Fatal("expected runner registration url parse error")
-	}
-	_, err = runnerRegistrationURL("http://github.com/meza/github-scaler")
-	if err == nil {
-		t.Fatal("expected non-https runner registration url error")
 	}
 }
 
-func TestRunnerRegistrationURLUsesGitHubAPIHost(t *testing.T) {
-	registrationEndpoint, err := runnerRegistrationURL("https://ghe.example.com/meza/github-scaler")
-	if err != nil {
-		t.Fatalf("expected runner registration url success, got %v", err)
+func TestRepositoryOwnerAndNameRejectsNonHTTPSURL(t *testing.T) {
+	if _, _, err := repositoryOwnerAndName("http://github.com/meza/repo"); err == nil {
+		t.Fatal("expected non-https repository url error")
 	}
-	if registrationEndpoint != "https://ghe.example.com/api/v3/actions/runner-registration" {
-		t.Fatalf("expected runner registration endpoint, got %q", registrationEndpoint)
-	}
+}
 
-	hostedRegistrationEndpoint, err := runnerRegistrationURL("https://github.com/meza/github-scaler")
-	if err != nil {
-		t.Fatalf("expected hosted runner registration url success, got %v", err)
+func TestRepositoryOwnerAndNameReportsMalformedURL(t *testing.T) {
+	if _, _, err := repositoryOwnerAndName("http://[::1/meza/repo"); err == nil {
+		t.Fatal("expected repository url parse error")
 	}
-	if hostedRegistrationEndpoint != "https://api.github.com/actions/runner-registration" {
-		t.Fatalf("expected hosted runner registration endpoint, got %q", hostedRegistrationEndpoint)
+}
+
+func TestAPIURLReportsMalformedRepositoryURL(t *testing.T) {
+	if _, err := apiURL("http://[::1/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token"); err == nil {
+		t.Fatal("expected api url parse error")
+	}
+}
+
+func TestRunnerRegistrationURLReportsMalformedRepositoryURL(t *testing.T) {
+	if _, err := runnerRegistrationURL("http://[::1/meza/github-scaler"); err == nil {
+		t.Fatal("expected runner registration url parse error")
+	}
+}
+
+func TestRunnerRegistrationURLRejectsNonHTTPSURL(t *testing.T) {
+	if _, err := runnerRegistrationURL("http://github.com/meza/github-scaler"); err == nil {
+		t.Fatal("expected non-https runner registration url error")
 	}
 }
 

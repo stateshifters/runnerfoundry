@@ -19,21 +19,13 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
-func TestLifecycleFailurePathsRemainExplicit(t *testing.T) {
-	if _, err := loadConfiguration("config", standaloneDaemon{
-		loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("load failed") },
-	}); err == nil {
-		t.Fatal("expected load failure")
-	}
+func TestShutdownWithTimeoutReportsLifecycleCleanupFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
 		StopPolling:   func() {},
 		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
 		Shutdown:      func(context.Context) error { return errors.New("shutdown failed") },
 	}}}
-	if err := removeRepositoryImmediately(context.Background(), &activeConfig, "repo", activeConfig.Repositories["repo"]); err == nil {
-		t.Fatal("expected immediate removal failure")
-	}
 	if err := shutdownWithTimeout(context.Background(), activeConfig, immediateShutdown); err == nil {
 		t.Fatal("expected forced shutdown failure")
 	}
@@ -109,52 +101,6 @@ func TestStartRepositorySurfacesPruneFailure(t *testing.T) {
 	}}
 	if _, err := startRepository(context.Background(), daemonUnderTest, &activeConfig, githubapp.Repository{InstallationID: 1, URL: "repo"}); err == nil {
 		t.Fatal("expected prune failure")
-	}
-}
-
-func TestValidationAndPruneFailurePaths(t *testing.T) {
-	activeConfig := testActiveConfiguration()
-	discovery := githubapp.DiscoveryResult{
-		Repositories: []githubapp.Repository{
-			{InstallationID: 1, URL: "https://github.com/acme/repo.a"},
-			{InstallationID: 1, URL: "https://github.com/acme/repo-a"},
-		},
-		InstallationFailures: map[int64]error{},
-	}
-	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, discovery); err == nil {
-		t.Fatal("expected local name collision")
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := pruneRepository(context.Background(), logger, nonPruningScaleSetClient{}, "repo", []config.ScaleSetConfig{{Name: "linux"}}); err == nil {
-		t.Fatal("expected unsupported prune client error")
-	}
-	invalidConfigPath := filepath.Join(t.TempDir(), "invalid.yaml")
-	if err := os.WriteFile(invalidConfigPath, []byte("github: ["), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(invalidConfigPath); err == nil {
-		t.Fatal("expected invalid config error")
-	}
-}
-
-func TestDrainCancellationAndRollbackFailure(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	activeConfig := testActiveConfiguration()
-	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		Drain: func(context.Context) (int, error) { return 1, nil },
-	}}}
-	if err := drainConfiguration(ctx, activeConfig, time.Hour); err == nil {
-		t.Fatal("expected cancelled drain")
-	}
-	rollbackConfig := testActiveConfiguration()
-	rollback := managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		StopPolling:   func() {},
-		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
-		Shutdown:      func(context.Context) error { return errors.New("shutdown failed") },
-	}}}
-	if err := rollbackRepositoryStartup(context.Background(), &rollbackConfig, "repo", rollback); err == nil {
-		t.Fatal("expected rollback failure")
 	}
 }
 

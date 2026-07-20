@@ -21,6 +21,14 @@ func TestStandaloneDefaultsSupplyNotifierAndDrainInterval(t *testing.T) {
 	}
 }
 
+func TestLoadConfigurationReturnsConfigLoadFailure(t *testing.T) {
+	if _, err := loadConfiguration("config", standaloneDaemon{
+		loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("load failed") },
+	}); err == nil {
+		t.Fatal("expected load failure")
+	}
+}
+
 func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := false

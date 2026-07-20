@@ -39,6 +39,28 @@ func TestDrainConfigurationWaitsForActiveRunnerAndSurfacesFailures(t *testing.T)
 	}
 }
 
+func TestDrainConfigurationReturnsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	activeConfig := testActiveConfiguration()
+	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+		Drain: func(context.Context) (int, error) { return 1, nil },
+	}}}
+	if err := drainConfiguration(ctx, activeConfig, time.Hour); err == nil {
+		t.Fatal("expected cancelled drain")
+	}
+}
+
+func TestLoadConfigRejectsInvalidYAML(t *testing.T) {
+	invalidConfigPath := filepath.Join(t.TempDir(), "invalid.yaml")
+	if err := os.WriteFile(invalidConfigPath, []byte("github: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(invalidConfigPath); err == nil {
+		t.Fatal("expected invalid config error")
+	}
+}
+
 func TestLoadConfigReadsValidatedFileAndLoggerFormats(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -103,6 +125,13 @@ func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
 	}
 	if len(client.deletedScaleSetIDs) != 1 || client.deletedScaleSetIDs[0] != 2 {
 		t.Fatalf("expected stale scale set deletion, got %#v", client.deletedScaleSetIDs)
+	}
+}
+
+func TestPruneRepositoryRejectsUnsupportedClient(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := pruneRepository(context.Background(), logger, nonPruningScaleSetClient{}, "repo", []config.ScaleSetConfig{{Name: "linux"}}); err == nil {
+		t.Fatal("expected unsupported prune client error")
 	}
 }
 

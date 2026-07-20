@@ -8,6 +8,56 @@ import (
 	"testing"
 )
 
+func TestRepositoryOwnerAndNameReturnsRepositoryIdentity(t *testing.T) {
+	owner, repository, err := repositoryOwnerAndName("https://github.com/meza/github-scaler/")
+	if err != nil {
+		t.Fatalf("expected repository identity success, got %v", err)
+	}
+	if owner != "meza" || repository != "github-scaler" {
+		t.Fatalf("expected owner and repository, got %q %q", owner, repository)
+	}
+}
+
+func TestAPIURLUsesGitHubHostedAPI(t *testing.T) {
+	apiEndpoint, err := apiURL("https://github.com/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token")
+	if err != nil {
+		t.Fatalf("expected API URL success, got %v", err)
+	}
+	if apiEndpoint != "https://api.github.com/repos/meza/github-scaler/actions/runners/registration-token" {
+		t.Fatalf("expected hosted API endpoint, got %q", apiEndpoint)
+	}
+}
+
+func TestAPIURLUsesGitHubEnterpriseAPI(t *testing.T) {
+	apiEndpoint, err := apiURL("https://ghe.example.com/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token")
+	if err != nil {
+		t.Fatalf("expected enterprise API URL success, got %v", err)
+	}
+	if apiEndpoint != "https://ghe.example.com/api/v3/repos/meza/github-scaler/actions/runners/registration-token" {
+		t.Fatalf("expected enterprise API endpoint, got %q", apiEndpoint)
+	}
+}
+
+func TestRunnerRegistrationURLUsesGitHubHostedAPI(t *testing.T) {
+	registrationEndpoint, err := runnerRegistrationURL("https://github.com/meza/github-scaler")
+	if err != nil {
+		t.Fatalf("expected hosted runner registration URL success, got %v", err)
+	}
+	if registrationEndpoint != "https://api.github.com/actions/runner-registration" {
+		t.Fatalf("expected hosted runner registration endpoint, got %q", registrationEndpoint)
+	}
+}
+
+func TestRunnerRegistrationURLUsesGitHubEnterpriseAPI(t *testing.T) {
+	registrationEndpoint, err := runnerRegistrationURL("https://ghe.example.com/meza/github-scaler")
+	if err != nil {
+		t.Fatalf("expected enterprise runner registration URL success, got %v", err)
+	}
+	if registrationEndpoint != "https://ghe.example.com/api/v3/actions/runner-registration" {
+		t.Fatalf("expected enterprise runner registration endpoint, got %q", registrationEndpoint)
+	}
+}
+
 func TestGitHubScaleSetRegistryListsScaleSets(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
