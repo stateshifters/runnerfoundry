@@ -8,6 +8,9 @@ import (
 	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
 )
 
+const pollRetryDelay = 5 * time.Second
+const sustainedPollFailureThreshold = 3
+
 func pollUntilShutdown(
 	ctx context.Context,
 	logger *slog.Logger,

@@ -13,15 +13,6 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
-type Options struct {
-	ConfigPath     string
-	ReloadRequests <-chan struct{}
-}
-
-type repositoryDiscoverer interface {
-	Discover(ctx context.Context) (githubapp.DiscoveryResult, error)
-}
-
 type standaloneDaemon struct {
 	loadConfig      func(configPath string) (config.Config, error)
 	newDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
@@ -39,11 +30,6 @@ type standaloneDaemon struct {
 	) (scaleSetLifecycle, error)
 	drainInterval            time.Duration
 	reconciliationRetryDelay time.Duration
-}
-
-type serviceNotifier interface {
-	Ready(ctx context.Context) error
-	Reloading(ctx context.Context) error
 }
 
 type noopNotifier struct{}
@@ -66,17 +52,6 @@ type activeConfiguration struct {
 	DemandStore           scaler.DemandStore
 	StateCloser           io.Closer
 	ReconciliationPending bool
-}
-
-func Run(ctx context.Context, options Options) error {
-	configured, err := loadConfig(options.ConfigPath)
-	if err != nil {
-		return err
-	}
-	if configured.State.Postgres != nil {
-		return runClusteredDaemon(ctx, options, newClusteredDaemon(), configured)
-	}
-	return runDaemon(ctx, options, newStandaloneDaemon())
 }
 
 func newStandaloneDaemon() standaloneDaemon {

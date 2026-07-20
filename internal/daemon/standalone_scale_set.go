@@ -24,6 +24,19 @@ type scaleSetSessionOperations struct {
 	PollRetryDelay time.Duration
 }
 
+func startCoordinatedScaleSet(
+	ctx context.Context,
+	logger *slog.Logger,
+	client scaleSetClient,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	coordinator *scaler.Coordinator,
+) (scaleSetLifecycle, error) {
+	return runCoordinatedScaleSet(
+		ctx, logger, client, repositoryURL, scaleSetConfig, coordinator, productionScaleSetSessionOperations(),
+	)
+}
+
 func productionScaleSetSessionOperations() scaleSetSessionOperations {
 	return scaleSetSessionOperations{
 		BuildReconciler: buildReconciler,

@@ -5,10 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/config"
 )
+
+var operatingSystemHostname = os.Hostname
+
+type scaleSetLifecycle struct {
+	StopPolling   func()
+	Drain         func(ctx context.Context) (int, error)
+	DestroyActive func(ctx context.Context) error
+	Shutdown      func(ctx context.Context) error
+}
 
 func shutdownScaleSet(
 	ctx context.Context,
