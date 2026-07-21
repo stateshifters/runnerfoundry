@@ -31,6 +31,7 @@ func TestPostgreSQLMigrationOrchestrationReportsInvalidDatabaseStates(t *testing
 	}
 	t.Cleanup(func() { closePostgreSQLConnection(ctx, admin) })
 	assertInvalidVersionMetadata(t, store, admin)
+	assertUnsupportedVersionMetadataObject(t, store, admin)
 	assertUnavailableSchemaObjects(t, store, dsn, admin)
 }
 
@@ -66,6 +67,29 @@ func assertInvalidVersionMetadata(t *testing.T, store *Store, admin *pgx.Conn) {
 		t.Fatal("expected rollback version read failure")
 	}
 	if _, err := admin.Exec(ctx, `UPDATE scaler_schema_version SET version = '1'; ALTER TABLE scaler_schema_version ALTER COLUMN version TYPE integer USING version::integer`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertUnsupportedVersionMetadataObject(t *testing.T, store *Store, admin *pgx.Conn) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := admin.Exec(ctx, `DROP TABLE scaler_schema_version; CREATE VIEW scaler_schema_version AS SELECT 1::integer AS version`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err == nil {
+		t.Fatal("expected startup to reject unsupported version metadata")
+	}
+	if _, err := store.MigrationStatus(ctx); err == nil {
+		t.Fatal("expected status to reject unsupported version metadata")
+	}
+	if err := store.MigrateDown(ctx, 0, time.Now(), time.Minute); err == nil {
+		t.Fatal("expected rollback to reject unsupported version metadata")
+	}
+	if _, err := admin.Exec(ctx, `
+DROP VIEW scaler_schema_version;
+CREATE TABLE scaler_schema_version (version integer NOT NULL PRIMARY KEY);
+INSERT INTO scaler_schema_version (version) VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
 }

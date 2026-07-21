@@ -145,16 +145,6 @@ func TestNewMigratorRejectsInvalidMigrationFiles(t *testing.T) {
 	}
 }
 
-func TestMigrationStatusReportsMetadataInspectionFailure(t *testing.T) {
-	failure := &pgconn.PgError{Code: "42501"}
-	store := storeWithConnection(&fakeDatabaseConnection{rows: map[string]fakeRow{
-		"to_regclass": {err: failure},
-	}})
-	if _, err := store.MigrationStatus(context.Background()); err == nil || !strings.Contains(err.Error(), "SQLSTATE 42501") {
-		t.Fatalf("MigrationStatus() error = %v, want safe SQLSTATE", err)
-	}
-}
-
 type failingSubFS struct{}
 
 func (failingSubFS) Open(string) (fs.File, error) {

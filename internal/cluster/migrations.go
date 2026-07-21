@@ -62,7 +62,7 @@ func (store *Store) Migrate(ctx context.Context) (resultErr error) {
 
 // MigrationStatus reports the database version without creating migration metadata or domain objects.
 func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus, resultErr error) {
-	connection, err := store.directConnector(ctx)
+	connection, err := store.connectDirectPostgreSQL(ctx)
 	if err != nil {
 		return MigrationStatus{}, err
 	}
@@ -81,8 +81,8 @@ func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus
 	if !versionTableExists {
 		return status, nil
 	}
-	if err = connection.QueryRow(ctx, `SELECT version FROM `+migrationVersionTable).Scan(&status.Current); err != nil {
-		return MigrationStatus{}, safePostgreSQLError("read PostgreSQL migration version", err)
+	if status.Current, err = inspectMigrationVersion(ctx, connection); err != nil {
+		return MigrationStatus{}, err
 	}
 	if status.Current == 0 {
 		return status, nil
@@ -91,6 +91,18 @@ func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus
 		return MigrationStatus{}, safePostgreSQLError("read PostgreSQL schema compatibility", err)
 	}
 	return status, nil
+}
+
+func inspectMigrationVersion(ctx context.Context, connection *pgx.Conn) (int32, error) {
+	migrator, err := migrate.NewMigrator(ctx, connection, migrationVersionTable)
+	if err != nil {
+		return 0, safePostgreSQLError("initialize PostgreSQL migration metadata", err)
+	}
+	current, err := migrator.GetCurrentVersion(ctx)
+	if err != nil {
+		return 0, safePostgreSQLError("read PostgreSQL migration version", err)
+	}
+	return current, nil
 }
 
 // MigrateDown rolls back to a known version while holding the migration and
