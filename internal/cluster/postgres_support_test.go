@@ -17,6 +17,7 @@ import (
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 var postgreSQLIntegrationDSN string
@@ -84,16 +85,16 @@ func postgreSQLTableExists(t *testing.T, dsn string, table string) bool {
 	return exists
 }
 
-func assertPrimaryPostgreSQLSessionRole(t *testing.T, settings ConnectionSettings, expectedSessionUser string) {
+func assertPrimaryPostgreSQLSessionRole(t *testing.T, settings postgresconfig.Settings, expectedSessionUser string) {
 	t.Helper()
-	connectionConfig, err := settings.Primary()
+	connectionConfig, err := settings.PrimaryConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertPostgreSQLSessionRole(t, connectionConfig, expectedSessionUser)
 }
 
-func assertDirectPostgreSQLSessionRole(t *testing.T, settings ConnectionSettings, expectedSessionUser string) {
+func assertDirectPostgreSQLSessionRole(t *testing.T, settings postgresconfig.Settings, expectedSessionUser string) {
 	t.Helper()
 	connectionConfig, err := settings.DirectConfig()
 	if err != nil {
@@ -144,7 +145,7 @@ func postgreSQLDomainTables() []string {
 func postgreSQLTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dsn := postgreSQLTestDSN(t)
-	store := NewStore(ConnectionSettings{DSN: dsn, Role: "postgres"})
+	store := NewStore(postgresconfig.Settings{DSN: dsn, Role: "postgres"})
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}

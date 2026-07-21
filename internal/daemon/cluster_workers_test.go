@@ -12,6 +12,7 @@ import (
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
@@ -136,7 +137,7 @@ func TestStaleLeadershipAndStatusFailureDoNotChangeDaemonState(t *testing.T) {
 func clusteredConfig(t *testing.T) config.Config {
 	t.Helper()
 	configured := runnableConfig(t)
-	configured.State.Postgres = &config.PostgreSQLStateConfig{DSN: "postgres://unused", Role: "github_scaler"}
+	configured.State.Postgres = &postgresconfig.Settings{DSN: "postgres://unused", Role: "github_scaler"}
 	configured.ScaleSets[0].RunnerGroup = "Default"
 	configured.ScaleSets[0].MaxRunners = 10
 	return configured
@@ -151,7 +152,7 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
-		openStore: func(config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+		openStore: func(postgresconfig.Settings) (clusterStoreConnection, error) {
 			return clusterStoreConnection{
 				state: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}, nil

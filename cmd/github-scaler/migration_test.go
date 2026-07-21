@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
@@ -48,7 +48,7 @@ func TestExecuteMigrationUsesOnlyPostgreSQLConfiguration(t *testing.T) {
 	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
 	status, err := executeMigration(t.Context(), migrationRequest{
 		action: migrationStatusAction, configPath: configPath,
-	}, func(postgresConfig config.PostgreSQLStateConfig) migrationStore {
+	}, func(postgresConfig postgresconfig.Settings) migrationStore {
 		if postgresConfig.Role != "github_scaler" {
 			t.Fatalf("PostgreSQL config = %#v", postgresConfig)
 		}
@@ -63,7 +63,7 @@ func TestExecuteMigrationReportsInvalidConfiguration(t *testing.T) {
 	store := &fakeMigrationStore{}
 	_, err := executeMigration(t.Context(), migrationRequest{
 		action: migrationStatusAction, configPath: filepath.Join(t.TempDir(), "missing.yaml"),
-	}, func(config.PostgreSQLStateConfig) migrationStore { return store })
+	}, func(postgresconfig.Settings) migrationStore { return store })
 	if err == nil {
 		t.Fatal("expected invalid migration config")
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 const leaderAdvisoryLockKey int64 = 0x6769746875627363
@@ -129,13 +130,13 @@ type Assignment struct {
 }
 
 type Store struct {
-	settings        ConnectionSettings
+	settings        postgresconfig.Settings
 	connector       func(ctx context.Context) (*databaseConnection, error)
 	directConnector func(ctx context.Context) (leaderConnection, error)
 	migrationFiles  fs.FS
 }
 
-func NewStore(settings ConnectionSettings) *Store {
+func NewStore(settings postgresconfig.Settings) *Store {
 	store := &Store{settings: settings}
 	store.connector = store.connectPostgreSQL
 	store.directConnector = func(ctx context.Context) (leaderConnection, error) {
@@ -297,7 +298,7 @@ func newPostgreSQLDatabaseConnection(connection *pgx.Conn) *databaseConnection {
 }
 
 func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection, error) {
-	config, err := store.settings.Primary()
+	config, err := store.settings.PrimaryConfig()
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
 	}

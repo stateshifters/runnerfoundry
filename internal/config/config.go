@@ -24,13 +24,9 @@ type Config struct {
 }
 
 type StateConfig struct {
-	Path     string                 `yaml:"path"`
-	Postgres *PostgreSQLStateConfig `yaml:"postgres"`
+	Path     string                   `yaml:"path"`
+	Postgres *postgresconfig.Settings `yaml:"postgres"`
 }
-
-type PostgreSQLStateConfig = postgresconfig.Settings
-
-type PostgreSQLConnectionConfig = postgresconfig.Endpoint
 
 type GitHubConfig struct {
 	App               GitHubAppConfig `yaml:"app"`
@@ -95,32 +91,32 @@ func Load(reader io.Reader) (Config, error) {
 // LoadPostgreSQLState decodes only the clustered state settings needed by the
 // migration commands. Other daemon settings are deliberately ignored, while
 // the PostgreSQL subtree retains the same strict keys and validation as Load.
-func LoadPostgreSQLState(reader io.Reader) (PostgreSQLStateConfig, error) {
+func LoadPostgreSQLState(reader io.Reader) (postgresconfig.Settings, error) {
 	var document yaml.Node
 	if err := yaml.NewDecoder(reader).Decode(&document); err != nil {
-		return PostgreSQLStateConfig{}, fmt.Errorf("decode migration config: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("decode migration config: %w", err)
 	}
 	stateNode := yamlMappingValue(document.Content[0], "state")
 	postgresNode := yamlMappingValue(stateNode, "postgres")
 	if postgresNode == nil {
-		return PostgreSQLStateConfig{}, errors.New("PostgreSQL clustered state is required")
+		return postgresconfig.Settings{}, errors.New("PostgreSQL clustered state is required")
 	}
 	return decodePostgreSQLStateNode(postgresNode)
 }
 
-func decodePostgreSQLStateNode(postgresNode *yaml.Node) (PostgreSQLStateConfig, error) {
+func decodePostgreSQLStateNode(postgresNode *yaml.Node) (postgresconfig.Settings, error) {
 	postgresContents, err := yaml.Marshal(postgresNode)
 	if err != nil {
-		return PostgreSQLStateConfig{}, fmt.Errorf("read PostgreSQL migration config: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("read PostgreSQL migration config: %w", err)
 	}
-	var postgresConfig PostgreSQLStateConfig
+	var postgresConfig postgresconfig.Settings
 	decoder := yaml.NewDecoder(bytes.NewReader(postgresContents))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&postgresConfig); err != nil {
-		return PostgreSQLStateConfig{}, fmt.Errorf("decode PostgreSQL migration config: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("decode PostgreSQL migration config: %w", err)
 	}
 	if err := postgresconfig.Validate(postgresConfig); err != nil {
-		return PostgreSQLStateConfig{}, fmt.Errorf("validate PostgreSQL migration config: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("validate PostgreSQL migration config: %w", err)
 	}
 	return postgresConfig, nil
 }

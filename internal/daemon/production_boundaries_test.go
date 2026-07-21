@@ -10,6 +10,7 @@ import (
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestStandaloneRepositoryStartupRejectsAnInvalidRepositoryURL(t *testing.T) {
@@ -68,7 +69,7 @@ func setValidGitHubCredentials(t *testing.T, configured *config.Config) {
 
 func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *testing.T) {
 	daemon := newClusteredDaemon()
-	connection, err := daemon.openStore(config.PostgreSQLStateConfig{
+	connection, err := daemon.openStore(postgresconfig.Settings{
 		Role: "github_scaler", Password: "env://GITHUB_SCALER_MISSING_POSTGRES_PASSWORD",
 	})
 	if err != nil {

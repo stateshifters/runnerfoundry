@@ -11,8 +11,9 @@ import (
 )
 
 // Settings describes primary and optional session-affine PostgreSQL endpoints.
-// Each non-empty value may be literal, env://NAME, or file:///path. Primary and
-// Direct resolve references on every call so callers never cache credential values.
+// Each non-empty value may be literal, env://NAME, or file:///path.
+// PrimaryConfig and DirectConfig resolve references on every call so callers
+// never cache credential values.
 type Settings struct {
 	DSN      string    `yaml:"dsn"`
 	Host     string    `yaml:"host"`
@@ -57,8 +58,8 @@ func Validate(settings Settings) error {
 	return nil
 }
 
-// Primary resolves the configured primary endpoint and forces the stable role.
-func (settings Settings) Primary() (*pgx.ConnConfig, error) {
+// PrimaryConfig resolves the configured primary endpoint and forces the stable role.
+func (settings Settings) PrimaryConfig() (*pgx.ConnConfig, error) {
 	if settings.Role == "" {
 		return nil, errors.New("PostgreSQL role is required")
 	}
@@ -74,10 +75,10 @@ func (settings Settings) Primary() (*pgx.ConnConfig, error) {
 	return config, nil
 }
 
-// Direct resolves the session-affine endpoint, inheriting structured primary values.
+// DirectConfig resolves the session-affine endpoint, inheriting structured primary values.
 func (settings Settings) DirectConfig() (*pgx.ConnConfig, error) {
 	if settings.Direct == nil {
-		return settings.Primary()
+		return settings.PrimaryConfig()
 	}
 	direct := Settings{
 		DSN: settings.Direct.DSN, Host: settings.Direct.Host, Port: settings.Direct.Port,
@@ -89,19 +90,19 @@ func (settings Settings) DirectConfig() (*pgx.ConnConfig, error) {
 			return nil, errors.New("direct PostgreSQL DSN is required when overriding a primary DSN")
 		}
 		if direct.DSN == "" {
-			return settings.Primary()
+			return settings.PrimaryConfig()
 		}
-		return direct.Primary()
+		return direct.PrimaryConfig()
 	}
 	if direct.DSN != "" {
-		return direct.Primary()
+		return direct.PrimaryConfig()
 	}
 	direct.Host = inheritSetting(direct.Host, settings.Host)
 	direct.Port = inheritSetting(direct.Port, settings.Port)
 	direct.Name = inheritSetting(direct.Name, settings.Name)
 	direct.User = inheritSetting(direct.User, settings.User)
 	direct.Password = inheritSetting(direct.Password, settings.Password)
-	return direct.Primary()
+	return direct.PrimaryConfig()
 }
 
 func (settings Settings) configWithoutRole() (*pgx.ConnConfig, error) {

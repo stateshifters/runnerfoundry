@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestPostgreSQLConnectionsUseStableRoleAcrossRotatingLogins(t *testing.T) {
@@ -64,10 +65,10 @@ func TestPostgreSQLConnectionsUseStableRoleAcrossRotatingLogins(t *testing.T) {
 	writeCredential(passwordPath, "password-one")
 	writeCredential(rolePath, "github_scaler")
 	t.Setenv("PGOPTIONS", "-c role=wrong_scaler_role")
-	settings := ConnectionSettings{
+	settings := postgresconfig.Settings{
 		Host: "localhost", Port: parsedDSN.Port(), Name: strings.TrimPrefix(parsedDSN.Path, "/"),
 		User: credentialFileURL(userPath), Password: credentialFileURL(passwordPath), Role: credentialFileURL(rolePath),
-		Direct: &ConnectionEndpoint{Host: "localhost"},
+		Direct: &postgresconfig.Endpoint{Host: "localhost"},
 	}
 	dynamicStore := NewStore(settings)
 	if err = dynamicStore.Migrate(ctx); err != nil {

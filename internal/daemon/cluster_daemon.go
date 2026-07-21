@@ -13,6 +13,7 @@ import (
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
@@ -107,7 +108,7 @@ type clusterStoreConnection struct {
 	waitForLeader func(context.Context) (leadershipResult, error)
 }
 
-type clusterStateOpener func(config.PostgreSQLStateConfig) (clusterStoreConnection, error)
+type clusterStateOpener func(postgresconfig.Settings) (clusterStoreConnection, error)
 
 func newClusteredDaemon() *clusteredDaemon {
 	return &clusteredDaemon{
@@ -126,7 +127,7 @@ func newClusteredDaemon() *clusteredDaemon {
 	}
 }
 
-func openClusterStore(state config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+func openClusterStore(state postgresconfig.Settings) (clusterStoreConnection, error) {
 	store := cluster.NewStore(state)
 	return clusterStoreConnection{
 		state:         store,

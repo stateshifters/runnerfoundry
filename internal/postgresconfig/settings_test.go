@@ -38,7 +38,7 @@ func TestValidateRejectsConflictingSettings(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsResolveEveryStructuredFieldSource(t *testing.T) {
+func TestSettingsResolveEveryStructuredFieldSource(t *testing.T) {
 	type fieldCase struct {
 		name string
 		set  func(*Settings, string)
@@ -73,7 +73,7 @@ func TestConnectionSettingsResolveEveryStructuredFieldSource(t *testing.T) {
 					}
 					settings := Settings{Role: "github_scaler"}
 					field.set(&settings, configuredValue)
-					resolved, err := settings.Primary()
+					resolved, err := settings.PrimaryConfig()
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -86,7 +86,7 @@ func TestConnectionSettingsResolveEveryStructuredFieldSource(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsResolveEveryDSNSource(t *testing.T) {
+func TestSettingsResolveEveryDSNSource(t *testing.T) {
 	const dsn = "postgres://scaler:secret@database.internal:6432/github_scaler"
 	t.Setenv("SCALER_TEST_DSN", dsn)
 	secretPath := filepath.Join(t.TempDir(), "dsn")
@@ -100,7 +100,7 @@ func TestConnectionSettingsResolveEveryDSNSource(t *testing.T) {
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
-			resolved, err := (Settings{DSN: source, Role: "github_scaler"}).Primary()
+			resolved, err := (Settings{DSN: source, Role: "github_scaler"}).PrimaryConfig()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +111,7 @@ func TestConnectionSettingsResolveEveryDSNSource(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsResolveRoleForEveryConnection(t *testing.T) {
+func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
 	t.Setenv("SCALER_TEST_ROLE", "github_scaler")
 	rolePath := filepath.Join(t.TempDir(), "role")
 	if err := os.WriteFile(rolePath, []byte("github_scaler\n"), 0o600); err != nil {
@@ -123,7 +123,7 @@ func TestConnectionSettingsResolveRoleForEveryConnection(t *testing.T) {
 		t.Run(sourceName, func(t *testing.T) {
 			resolved, err := (Settings{
 				DSN: "postgres://login@primary/scaler?role=wrong", Role: roleSource,
-			}).Primary()
+			}).PrimaryConfig()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,7 +134,7 @@ func TestConnectionSettingsResolveRoleForEveryConnection(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsBuildDirectConnection(t *testing.T) {
+func TestSettingsBuildDirectConnection(t *testing.T) {
 	settings := Settings{
 		Host: "pool", Port: "6432", Name: "scaler", User: "login", Password: "secret", Role: "github_scaler",
 		Direct: &Endpoint{Host: "database", Port: "5432"},
@@ -151,7 +151,7 @@ func TestConnectionSettingsBuildDirectConnection(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsBuildEveryDirectConnectionShape(t *testing.T) {
+func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 	const primaryDSN = "postgres://primary-user@primary:5432/primary"
 	const directDSN = "postgres://direct-user@direct:6432/direct"
 	tests := map[string]struct {
@@ -185,7 +185,7 @@ func TestConnectionSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) {
+func TestSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) {
 	const directDSN = "postgres://direct-user@direct:6432/direct"
 	if _, err := (Settings{
 		Host: "primary", Role: "github_scaler",
@@ -195,7 +195,7 @@ func TestConnectionSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) 
 	}
 }
 
-func TestConnectionSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T) {
+func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T) {
 	for name, settings := range map[string]Settings{
 		"missing role": {Host: "database"},
 		"opaque DSN partial direct override": {
@@ -210,20 +210,20 @@ func TestConnectionSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t 
 	}
 }
 
-func TestConnectionSettingsReadsFilesAtPointOfUse(t *testing.T) {
+func TestSettingsReadFilesAtPointOfUse(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "password")
 	if err := os.WriteFile(secretPath, []byte("first"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	settings := Settings{Password: credentialFileURL(secretPath), Role: "github_scaler"}
-	first, firstErr := settings.Primary()
+	first, firstErr := settings.PrimaryConfig()
 	if firstErr != nil {
 		t.Fatal(firstErr)
 	}
 	if err := os.WriteFile(secretPath, []byte("second"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second, secondErr := settings.Primary()
+	second, secondErr := settings.PrimaryConfig()
 	if secondErr != nil {
 		t.Fatal(secondErr)
 	}
@@ -232,13 +232,13 @@ func TestConnectionSettingsReadsFilesAtPointOfUse(t *testing.T) {
 	}
 }
 
-func TestConnectionSettingsUsesStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
+func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
 	t.Setenv("PGHOST", "environment-host")
 	t.Setenv("PGPORT", "6543")
 	t.Setenv("PGDATABASE", "environment-name")
 	t.Setenv("PGUSER", "environment-user")
 	t.Setenv("PGPASSWORD", "environment-password")
-	resolved, err := (Settings{Role: "github_scaler"}).Primary()
+	resolved, err := (Settings{Role: "github_scaler"}).PrimaryConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestConnectionSettingsUsesStandardPostgreSQLEnvironmentDefaults(t *testing.
 	}
 }
 
-func TestConnectionSettingsRejectInvalidReferencesAndPortsWithoutDisclosure(t *testing.T) {
+func TestSettingsRejectInvalidReferencesAndPortsWithoutDisclosure(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "secret-location")
 	if err := os.Mkdir(secretPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestConnectionSettingsRejectInvalidReferencesAndPortsWithoutDisclosure(t *t
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := settings.Primary()
+			_, err := settings.PrimaryConfig()
 			if err == nil {
 				t.Fatal("expected connection settings to fail")
 			}

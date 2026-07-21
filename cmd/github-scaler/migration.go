@@ -10,6 +10,7 @@ import (
 
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 type migrationStatus = cluster.MigrationStatus
@@ -20,10 +21,10 @@ type migrationStore interface {
 	MigrateDown(ctx context.Context, target int32, now time.Time, liveFor time.Duration) error
 }
 
-type migrationStoreFactory func(config.PostgreSQLStateConfig) migrationStore
+type migrationStoreFactory func(postgresconfig.Settings) migrationStore
 
 func runPostgreSQLMigration(ctx context.Context, request migrationRequest) (migrationStatus, error) {
-	return executeMigration(ctx, request, func(postgresConfig config.PostgreSQLStateConfig) migrationStore {
+	return executeMigration(ctx, request, func(postgresConfig postgresconfig.Settings) migrationStore {
 		return cluster.NewStore(postgresConfig)
 	})
 }
@@ -40,19 +41,19 @@ func executeMigration(
 	return executeStoreMigration(ctx, newStore(configured), request)
 }
 
-func loadMigrationConfig(configPath string) (config.PostgreSQLStateConfig, error) {
+func loadMigrationConfig(configPath string) (postgresconfig.Settings, error) {
 	configRoot, err := os.OpenRoot(filepath.Dir(configPath))
 	if err != nil {
-		return config.PostgreSQLStateConfig{}, fmt.Errorf("open config directory: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("open config directory: %w", err)
 	}
 	configFile, err := configRoot.Open(filepath.Base(configPath))
 	if err != nil {
-		return config.PostgreSQLStateConfig{}, errors.Join(fmt.Errorf("open config: %w", err), configRoot.Close())
+		return postgresconfig.Settings{}, errors.Join(fmt.Errorf("open config: %w", err), configRoot.Close())
 	}
 	configured, loadErr := config.LoadPostgreSQLState(configFile)
 	closeErr := errors.Join(configFile.Close(), configRoot.Close())
 	if err = errors.Join(loadErr, closeErr); err != nil {
-		return config.PostgreSQLStateConfig{}, fmt.Errorf("load migration config: %w", err)
+		return postgresconfig.Settings{}, fmt.Errorf("load migration config: %w", err)
 	}
 	return configured, nil
 }

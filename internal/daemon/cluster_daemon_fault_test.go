@@ -14,6 +14,7 @@ import (
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
@@ -39,7 +40,7 @@ func TestClusteredStartupRequiresMigratedPostgreSQLState(t *testing.T) {
 			configured.State.Postgres = nil
 		},
 		"open connection": func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
-			daemon.openStore = func(config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+			daemon.openStore = func(postgresconfig.Settings) (clusterStoreConnection, error) {
 				return clusterStoreConnection{}, failure
 			}
 		},
@@ -624,7 +625,7 @@ func (*postStartInspectionFailureProvider) Destroy(context.Context, scaler.Runne
 }
 
 func withPostgreSQLDSN(configured config.Config, dsn string) config.Config {
-	configured.State.Postgres = &config.PostgreSQLStateConfig{DSN: dsn}
+	configured.State.Postgres = &postgresconfig.Settings{DSN: dsn}
 	return configured
 }
 

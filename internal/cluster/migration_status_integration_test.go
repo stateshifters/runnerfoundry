@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestMigrationStatusLeavesAnEmptyDatabaseEmpty(t *testing.T) {
 	dsn := postgreSQLTestDSN(t)
-	store := NewStore(ConnectionSettings{DSN: dsn, Role: "postgres"})
+	store := NewStore(postgresconfig.Settings{DSN: dsn, Role: "postgres"})
 	status, err := store.MigrationStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)

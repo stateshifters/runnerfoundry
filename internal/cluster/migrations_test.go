@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/tern/v2/migrate"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
@@ -37,7 +38,7 @@ func TestMigrationConnectionCloseReportsFailure(t *testing.T) {
 }
 
 func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
-	store := NewStore(ConnectionSettings{Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Role: "github_scaler"})
 	catalog, err := store.migrationCatalog()
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +127,7 @@ func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
 }
 
 func TestNewMigratorRejectsInvalidMigrationFiles(t *testing.T) {
-	store := NewStore(ConnectionSettings{Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Role: "github_scaler"})
 	store.migrationFiles = failingSubFS{}
 	if _, err := store.migrationCatalog(); err == nil {
 		t.Fatal("expected migration filesystem error")

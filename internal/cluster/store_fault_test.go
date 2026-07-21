@@ -9,11 +9,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestStoreSurfacesConnectionFailuresWithoutCredentials(t *testing.T) {
 	connectionErr := errors.New("connection failed")
-	store := NewStore(ConnectionSettings{})
+	store := NewStore(postgresconfig.Settings{})
 	store.connector = func(context.Context) (*databaseConnection, error) { return nil, connectionErr }
 	store.directConnector = func(context.Context) (leaderConnection, error) { return nil, connectionErr }
 	ctx := context.Background()
@@ -44,15 +45,15 @@ func TestStoreSurfacesConnectionFailuresWithoutCredentials(t *testing.T) {
 
 func TestPostgreSQLConnectorRedactsResolutionAndConnectionFailures(t *testing.T) {
 	for _, test := range []struct {
-		settings  ConnectionSettings
+		settings  postgresconfig.Settings
 		forbidden []string
 	}{
 		{
-			settings:  ConnectionSettings{Password: "file:///missing-postgresql-secret", Role: "github_scaler"},
+			settings:  postgresconfig.Settings{Password: "file:///missing-postgresql-secret", Role: "github_scaler"},
 			forbidden: []string{"missing-postgresql-secret", "github_scaler"},
 		},
 		{
-			settings: ConnectionSettings{
+			settings: postgresconfig.Settings{
 				DSN: "postgres://secret-user:secret-password@127.0.0.1:1/database?connect_timeout=1", Role: "github_scaler",
 			},
 			forbidden: []string{"secret-user", "secret-password", "github_scaler", "postgres://"},
@@ -79,7 +80,7 @@ func TestPostgreSQLConnectorRedactsResolutionAndConnectionFailures(t *testing.T)
 }
 
 func TestStoreDefaultConnectorsRejectInvalidSettings(t *testing.T) {
-	store := NewStore(ConnectionSettings{Password: "env://MISSING_PRIMARY_PASSWORD", Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Password: "env://MISSING_PRIMARY_PASSWORD", Role: "github_scaler"})
 	if _, err := store.connectPostgreSQL(context.Background()); err == nil {
 		t.Fatal("expected primary connector resolution failure")
 	}
@@ -109,7 +110,7 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := NewStore(ConnectionSettings{})
+			store := NewStore(postgresconfig.Settings{})
 			store.connector = func(context.Context) (*databaseConnection, error) {
 				t.Fatal("invalid demand reached the database connector")
 				return nil, errors.New("unreachable connector")
@@ -119,7 +120,7 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 			}
 		})
 	}
-	store := NewStore(ConnectionSettings{})
+	store := NewStore(postgresconfig.Settings{})
 	store.connector = func(context.Context) (*databaseConnection, error) {
 		t.Fatal("invalid demand operation reached the database connector")
 		return nil, errors.New("unreachable connector")
@@ -145,7 +146,7 @@ func TestPublishRejectsInvalidContributionsBeforeConnecting(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := NewStore(ConnectionSettings{})
+			store := NewStore(postgresconfig.Settings{})
 			store.connector = func(context.Context) (*databaseConnection, error) {
 				t.Fatal("invalid publication reached the database connector")
 				return nil, errors.New("unreachable connector")
@@ -438,7 +439,7 @@ func TestAssignmentTransitionRejectsMissingOrStaleRows(t *testing.T) {
 }
 
 func storeWithConnection(connection *fakeDatabaseConnection) *Store {
-	store := NewStore(ConnectionSettings{})
+	store := NewStore(postgresconfig.Settings{})
 	store.connector = func(context.Context) (*databaseConnection, error) { return connection.databaseConnection(), nil }
 	store.directConnector = func(context.Context) (leaderConnection, error) { return connection, nil }
 	return store

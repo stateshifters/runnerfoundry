@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
 func TestPostgreSQLReadsFileBackedCredentialsForEveryConnection(t *testing.T) {
@@ -24,7 +26,7 @@ func TestPostgreSQLReadsFileBackedCredentialsForEveryConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store := NewStore(ConnectionSettings{
+	store := NewStore(postgresconfig.Settings{
 		Host: "localhost", Port: parsedDSN.Port(), Name: strings.TrimPrefix(parsedDSN.Path, "/"),
 		User: credentialFileURL(userPath), Password: credentialFileURL(passwordPath), Role: "postgres",
 	})
