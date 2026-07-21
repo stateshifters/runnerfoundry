@@ -32,13 +32,13 @@ func (store *Store) ConfirmAcquisition(ctx context.Context, assignmentID int64) 
 }
 
 // ClaimForStart atomically claims the oldest ready assignment owned by nodeID.
-func (store *Store) ClaimForStart(ctx context.Context, nodeID string) (*Assignment, error) {
+func (store *Store) ClaimForStart(ctx context.Context, nodeID string) (assignment *Assignment, resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer closeConnection(ctx, connection)
-	var assignment Assignment
+	defer finishConnection(ctx, connection, &resultErr)
+	var claimed Assignment
 	err = connection.QueryRow(ctx, `
 		UPDATE scaler_assignments assignment
 		SET state = 'starting'
@@ -55,9 +55,9 @@ func (store *Store) ClaimForStart(ctx context.Context, nodeID string) (*Assignme
 		RETURNING assignment.assignment_id, assignment.node_id, demand.scale_set,
 		          demand.repository, demand.request_id, demand.queue_time,
 		          assignment.installation_id, assignment.github_scale_set_id, assignment.state`, nodeID).Scan(
-		&assignment.ID, &assignment.NodeID, &assignment.ScaleSet, &assignment.Repository,
-		&assignment.RequestID, &assignment.QueueTime, &assignment.InstallationID, &assignment.GitHubScaleSetID,
-		&assignment.State,
+		&claimed.ID, &claimed.NodeID, &claimed.ScaleSet, &claimed.Repository,
+		&claimed.RequestID, &claimed.QueueTime, &claimed.InstallationID, &claimed.GitHubScaleSetID,
+		&claimed.State,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoReadyAssignment
@@ -65,7 +65,7 @@ func (store *Store) ClaimForStart(ctx context.Context, nodeID string) (*Assignme
 	if err != nil {
 		return nil, fmt.Errorf("claim local runner assignment: %w", err)
 	}
-	return &assignment, nil
+	return &claimed, nil
 }
 
 // PendingAcquisitions returns assignments whose GitHub acquisition has not
@@ -85,12 +85,12 @@ func (store *Store) loadAssignments(
 	statePredicate string,
 	nodeID string,
 	operation string,
-) ([]Assignment, error) {
+) (assignments []Assignment, resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	statement := `
 		SELECT assignment.assignment_id, assignment.node_id, demand.scale_set,
 		       demand.repository, demand.request_id, demand.queue_time,
@@ -113,7 +113,7 @@ func (store *Store) loadAssignments(
 	return scanAssignments(rows)
 }
 
-func scanAssignments(rows databaseRows) ([]Assignment, error) {
+func scanAssignments(rows *databaseRows) ([]Assignment, error) {
 	assignments := make([]Assignment, 0)
 	for rows.Next() {
 		var assignment Assignment
@@ -158,12 +158,12 @@ func (store *Store) transitionAssignment(
 	expectedState AssignmentState,
 	statement string,
 	arguments ...any,
-) error {
+) (resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	arguments = append([]any{assignmentID}, arguments...)
 	commandTag, err := connection.Exec(ctx, statement, arguments...)
 	if err != nil {
@@ -177,7 +177,7 @@ func (store *Store) transitionAssignment(
 
 // CompleteDemand transactionally completes active assignments and removes the
 // corresponding demand. Repeated completion is a successful no-op.
-func (store *Store) CompleteDemand(ctx context.Context, scaleSet string, repository string, requestID int64) error {
+func (store *Store) CompleteDemand(ctx context.Context, scaleSet string, repository string, requestID int64) (resultErr error) {
 	if strings.TrimSpace(scaleSet) == "" || strings.TrimSpace(repository) == "" || requestID <= 0 {
 		return ErrInvalidDemand
 	}
@@ -185,13 +185,31 @@ func (store *Store) CompleteDemand(ctx context.Context, scaleSet string, reposit
 	if err != nil {
 		return err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin demand completion: %w", err)
 	}
-	defer rollbackTransaction(ctx, transaction)
-	if _, err = transaction.Exec(ctx, `
+	transactionOpen := true
+	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
+	if err = completeDemandInTransaction(ctx, transaction, scaleSet, repository, requestID); err != nil {
+		return err
+	}
+	transactionOpen = false
+	if err = transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit demand completion: %w", err)
+	}
+	return nil
+}
+
+func completeDemandInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet string,
+	repository string,
+	requestID int64,
+) error {
+	if _, err := transaction.Exec(ctx, `
 		UPDATE scaler_assignments assignment SET state = 'complete'
 		FROM scaler_demand demand
 		WHERE demand.demand_id = assignment.demand_id
@@ -199,13 +217,10 @@ func (store *Store) CompleteDemand(ctx context.Context, scaleSet string, reposit
 		  AND assignment.state <> 'complete'`, scaleSet, repository, requestID); err != nil {
 		return fmt.Errorf("complete demand assignments: %w", err)
 	}
-	if _, err = transaction.Exec(ctx, `
+	if _, err := transaction.Exec(ctx, `
 		DELETE FROM scaler_demand
 		WHERE scale_set = $1 AND repository = $2 AND request_id = $3`, scaleSet, repository, requestID); err != nil {
 		return fmt.Errorf("remove completed scale-set demand: %w", err)
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit demand completion: %w", err)
 	}
 	return nil
 }

@@ -121,7 +121,7 @@ func TestCoordinatorSchedulesDurableFIFOBeforeAssignedCapacity(t *testing.T) {
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("fifo", &recordingWorker{repository: "fifo", startOrder: &startOrder})
 	coordinator.AddRepository("assigned", &recordingWorker{repository: "assigned", startOrder: &startOrder})
-	coordinator.Observe(JobDemand{Repository: "fifo", RequestID: 1, QueueTime: time.Now(), Acquired: true})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{Repository: "fifo", RequestID: 1, QueueTime: time.Now(), Acquired: true}}, nil)
 
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -71,9 +72,18 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 		return false
 	}
 	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
-	leader.stopOutdatedSessions(reconcileCtx, desired, statuses)
+	stopErr := leader.stopOutdatedSessions(reconcileCtx, desired, statuses)
 	leader.startMissingSessions(reconcileCtx, desired, repositories)
-	return true
+	return leader.reportReconciliationResult(stopErr)
+}
+
+func (leader *clusterLeader) reportReconciliationResult(err error) bool {
+	if err == nil {
+		return true
+	}
+	leader.daemon.logger.Error("stop outdated leader sessions failed",
+		slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+	return false
 }
 
 func (leader *clusterLeader) desiredSessions(
@@ -99,7 +109,8 @@ func (leader *clusterLeader) stopOutdatedSessions(
 	ctx context.Context,
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 	statuses []cluster.ScaleSetStatus,
-) {
+) error {
+	var resultErr error
 	for key, session := range leader.sessions {
 		status, wanted := desired[key]
 		if wanted && session.capacity == status.EffectiveCapacity {
@@ -110,10 +121,11 @@ func (leader *clusterLeader) stopOutdatedSessions(
 		if !scaleSetStillDeclared {
 			removal = removeGitHubScaleSet
 		}
-		leader.stopSession(ctx, session, removal)
+		resultErr = errors.Join(resultErr, leader.stopSession(ctx, session, removal))
 		delete(leader.sessions, key)
 		leader.scheduler.remove(key)
 	}
+	return resultErr
 }
 
 func (leader *clusterLeader) startMissingSessions(
@@ -198,18 +210,21 @@ const (
 	removeGitHubScaleSet
 )
 
-func (leader *clusterLeader) stopSession(ctx context.Context, session *repositoryScaleSetSession, removal scaleSetSessionRemoval) {
+func (leader *clusterLeader) stopSession(ctx context.Context, session *repositoryScaleSetSession, removal scaleSetSessionRemoval) error {
 	session.stopPolling()
 	<-session.pollerDone
-	if err := session.messageClient.Close(ctx); err != nil {
+	closeErr := session.messageClient.Close(ctx)
+	if closeErr != nil {
 		leader.daemon.logger.Error("close leader message session failed",
-			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", leader.daemon.nodeID), slog.String("error", closeErr.Error()))
 	}
+	var deleteErr error
 	if removal == removeGitHubScaleSet {
-		_ = deleteRunnerScaleSet( //nolint:errcheck,gosec // Cluster withdrawal cleanup is best effort; the helper logs failures.
+		deleteErr = deleteRunnerScaleSet(
 			ctx, leader.daemon.logger, session.key.repository, session.key.scaleSet, session.client, session.runnerScaleSet,
 		)
 	}
+	return errors.Join(closeErr, deleteErr)
 }
 
 func (leader *clusterLeader) stop(ctx context.Context) {
@@ -217,7 +232,10 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.operationMutex.Lock()
 	defer leader.operationMutex.Unlock()
 	for _, session := range leader.sessions {
-		leader.stopSession(ctx, session, retainGitHubScaleSet)
+		if err := leader.stopSession(ctx, session, retainGitHubScaleSet); err != nil {
+			leader.daemon.logger.Error("stop leader session failed",
+				slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+		}
 	}
 	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
 	leader.scheduler.clear()

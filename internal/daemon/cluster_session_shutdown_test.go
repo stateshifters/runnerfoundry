@@ -84,9 +84,11 @@ func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	githubClient := &fakeScaleSetClient{}
 	leader.sessions[key] = stoppedSession(key, githubClient, &fakeMessageClient{})
-	leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+	if err := leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		key: {Name: "linux", EffectiveCapacity: 2},
-	}, []cluster.ScaleSetStatus{{Name: "linux"}})
+	}, []cluster.ScaleSetStatus{{Name: "linux"}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, exists := leader.sessions[key]; exists {
 		t.Fatal("outdated capacity session was retained")
 	}
@@ -97,6 +99,8 @@ func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
 
 func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.T) {
 	logs := &bytes.Buffer{}
+	closeErr := errors.New("close failed")
+	deleteErr := errors.New("delete failed")
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
 	daemon.logger = newLoggerForWriter(logs, "json", "debug")
@@ -104,10 +108,13 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := stoppedSession(
 		key,
-		&fakeScaleSetClient{deleteScaleSetErr: errors.New("delete failed")},
-		&fakeMessageClient{closeErr: errors.New("close failed")},
+		&fakeScaleSetClient{deleteScaleSetErr: deleteErr},
+		&fakeMessageClient{closeErr: closeErr},
 	)
-	leader.stopSession(context.Background(), session, removeGitHubScaleSet)
+	err := leader.stopSession(context.Background(), session, removeGitHubScaleSet)
+	if !errors.Is(err, closeErr) || !errors.Is(err, deleteErr) {
+		t.Fatalf("session shutdown error = %v, want close and delete failures", err)
+	}
 	if !strings.Contains(logs.String(), "close leader message session failed") {
 		t.Fatalf("expected message session close failure, got %q", logs.String())
 	}
@@ -126,7 +133,9 @@ func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 		&fakeMessageClient{closeErr: errors.New("close failed")},
 	)
 
-	leader.stopSession(context.Background(), session, retainGitHubScaleSet)
+	if err := leader.stopSession(context.Background(), session, retainGitHubScaleSet); err == nil {
+		t.Fatal("expected session close failure")
+	}
 
 	assertClusterLogSnapshot(t, logs,
 		`{"level":"ERROR","msg":"close leader message session failed","hostname":"spock","error":"close message session: close failed"}`)
@@ -149,6 +158,45 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	}
 	assertClusterLogSnapshot(t, logs,
 		`{"level":"WARN","msg":"close leader lease failed","hostname":"spock","error":"failed"}`)
+}
+
+func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
+	logs := &bytes.Buffer{}
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	daemon.nodeID = "spock"
+	daemon.logger = newClusterLogSnapshotLogger(logs)
+	leader := newClusterLeader(&daemon, &fakeClusterLease{closeErr: errors.New("lease failed")})
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	leader.sessions[key] = stoppedSession(
+		key,
+		&fakeScaleSetClient{},
+		&fakeMessageClient{closeErr: errors.New("session failed")},
+	)
+
+	leader.stop(context.Background())
+
+	assertClusterLogSnapshot(t, logs,
+		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"spock\",\"error\":\"close message session: session failed\"}\n"+
+			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"spock\",\"error\":\"close message session: session failed\"}\n"+
+			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"spock\",\"error\":\"lease failed\"}")
+}
+
+func TestSuccessfulReconciliationResultReturnsTrue(t *testing.T) {
+	leader := newClusterLeader(&clusteredDaemon{logger: slog.Default()}, &fakeClusterLease{})
+	if !leader.reportReconciliationResult(nil) {
+		t.Fatal("successful reconciliation result returned false")
+	}
+}
+
+func TestFailedReconciliationResultLogsAndReturnsFalse(t *testing.T) {
+	logs := &bytes.Buffer{}
+	daemon := &clusteredDaemon{nodeID: "spock", logger: newClusterLogSnapshotLogger(logs)}
+	leader := newClusterLeader(daemon, &fakeClusterLease{})
+	if leader.reportReconciliationResult(errors.New("shutdown failed")) {
+		t.Fatal("failed reconciliation result returned true")
+	}
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"ERROR","msg":"stop outdated leader sessions failed","hostname":"spock","error":"shutdown failed"}`)
 }
 
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {

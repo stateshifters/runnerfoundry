@@ -174,7 +174,7 @@ func runnerScaleSetListRequest(
 }
 
 func (registry githubScaleSetRegistry) doJSON(request *http.Request, expectedStatus int, target any) (err error) {
-	response, err := registry.httpClient.Do(request) //nolint:gosec // The URL is the GitHub Actions service URL returned by GitHub's runner-registration broker.
+	response, err := registry.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("issue request: %w", err)
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {
-	lease, err := daemon.tryLeader(ctx)
+	result, err := daemon.tryLeader(ctx)
 	if errors.Is(err, cluster.ErrNotLeader) {
 		return
 	}
@@ -19,10 +19,10 @@ func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {
 			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
 		return
 	}
-	if lease == nil {
+	if result.lease == nil {
 		return
 	}
-	daemon.acceptLeadership(ctx, lease)
+	daemon.acceptLeadership(ctx, result.lease)
 }
 
 func (daemon *clusteredDaemon) acceptLeadership(ctx context.Context, lease cluster.Lease) {
@@ -97,9 +97,9 @@ func (daemon *clusteredDaemon) contendForLeadership(
 ) {
 	defer close(done)
 	for {
-		lease, err := daemon.waitForLeader(ctx)
+		result, err := daemon.waitForLeader(ctx)
 		if err == nil {
-			daemon.deliverLeadership(ctx, results, lease)
+			daemon.deliverLeadership(ctx, results, result.lease)
 			return
 		}
 		if ctx.Err() != nil {

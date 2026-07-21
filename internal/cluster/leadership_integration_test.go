@@ -72,10 +72,11 @@ func TestPostgreSQLLeaderLeaseFailsOver(t *testing.T) {
 	if err = connection.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = (postgreSQLConnection{Conn: connection}).Begin(ctx); err == nil {
+	databaseConnection := newPostgreSQLDatabaseConnection(connection)
+	if _, err = databaseConnection.Begin(ctx); err == nil {
 		t.Fatal("expected a closed PostgreSQL connection to reject transactions")
 	}
-	if _, err = (postgreSQLConnection{Conn: connection}).Query(ctx, "SELECT 1"); err == nil {
+	if _, err = databaseConnection.Query(ctx, "SELECT 1"); err == nil {
 		t.Fatal("expected a closed PostgreSQL connection to reject queries")
 	}
 }

@@ -68,14 +68,16 @@ func TestSQLiteDemandStoreReleasesLockWhenDatabaseOpenFails(t *testing.T) {
 
 func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 	t.Run("database configuration", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		mock.ExpectExec("PRAGMA journal_mode").WillReturnError(errors.New("configure failed"))
 		if err := store.migrate(context.Background()); err == nil {
 			t.Fatal("expected database configuration error")
 		}
 	})
 	t.Run("schema version read", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery("PRAGMA user_version").WillReturnError(errors.New("read failed"))
 		if err := store.migrate(context.Background()); err == nil {
@@ -83,7 +85,8 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 		}
 	})
 	t.Run("migration begin", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		expectSchemaVersion(mock, 0)
 		mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
 		if err := store.migrate(context.Background()); err == nil {
@@ -91,18 +94,23 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 		}
 	})
 	t.Run("schema version write", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
+		writeErr := errors.New("write failed")
+		rollbackErr := errors.New("rollback failed")
 		expectSchemaVersion(mock, 0)
 		mock.ExpectBegin()
 		mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("PRAGMA user_version").WillReturnError(errors.New("write failed"))
-		mock.ExpectRollback()
-		if err := store.migrate(context.Background()); err == nil {
-			t.Fatal("expected schema write error")
+		mock.ExpectExec("PRAGMA user_version").WillReturnError(writeErr)
+		mock.ExpectRollback().WillReturnError(rollbackErr)
+		err := store.migrate(context.Background())
+		if !errors.Is(err, writeErr) || !errors.Is(err, rollbackErr) {
+			t.Fatalf("migration error = %v, want write and rollback failures", err)
 		}
 	})
 	t.Run("migration commit", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		expectSchemaVersion(mock, 0)
 		mock.ExpectBegin()
 		mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -136,7 +144,8 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 	}
 	for testName, configureFailure := range legacyMigrationFailures {
 		t.Run(testName, func(t *testing.T) {
-			store, mock := mockDemandStore(t)
+			fixture := mockDemandStore(t)
+			store, mock := fixture.store, fixture.mock
 			expectSchemaVersion(mock, 1)
 			configureFailure(mock)
 			if err := store.migrate(context.Background()); err == nil {
@@ -145,7 +154,8 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 		})
 	}
 	t.Run("demand commit", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		mock.ExpectBegin()
 		mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 		if err := store.Apply(context.Background(), "linux", nil, nil); err == nil {
@@ -153,15 +163,20 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 		}
 	})
 	t.Run("demand scan", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
-		rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).AddRow("repo", "invalid", 0, false, 1)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
+		closeErr := errors.New("close failed")
+		rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
+			AddRow("repo", "invalid", 0, false, 1).
+			CloseError(closeErr)
 		mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
-		if _, err := store.Ordered(context.Background(), "linux"); err == nil {
-			t.Fatal("expected scan error")
+		if _, err := store.Ordered(context.Background(), "linux"); !errors.Is(err, closeErr) {
+			t.Fatalf("scan error = %v, want row close failure", err)
 		}
 	})
 	t.Run("demand iteration", func(t *testing.T) {
-		store, mock := mockDemandStore(t)
+		fixture := mockDemandStore(t)
+		store, mock := fixture.store, fixture.mock
 		rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).AddRow("repo", 1, 0, false, 1).RowError(0, errors.New("iteration failed"))
 		mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
 		if _, err := store.Ordered(context.Background(), "linux"); err == nil {
@@ -170,7 +185,12 @@ func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
 	})
 }
 
-func mockDemandStore(t *testing.T) (*SQLiteDemandStore, sqlmock.Sqlmock) { //nolint:ireturn // sqlmock exposes its expectation API through this interface.
+type demandStoreMock struct {
+	store *SQLiteDemandStore
+	mock  sqlmock.Sqlmock
+}
+
+func mockDemandStore(t *testing.T) demandStoreMock {
 	t.Helper()
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -181,8 +201,11 @@ func mockDemandStore(t *testing.T) (*SQLiteDemandStore, sqlmock.Sqlmock) { //nol
 		if err := database.Close(); err != nil {
 			t.Error(err)
 		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
 	})
-	return &SQLiteDemandStore{database: database}, mock
+	return demandStoreMock{store: &SQLiteDemandStore{database: database}, mock: mock}
 }
 
 func expectSchemaVersion(mock sqlmock.Sqlmock, version int) {

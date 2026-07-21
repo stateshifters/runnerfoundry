@@ -68,19 +68,30 @@ func setValidGitHubCredentials(t *testing.T, configured *config.Config) {
 
 func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *testing.T) {
 	daemon := newClusteredDaemon()
-	_, tryLeader, waitForLeader, err := daemon.openStore(config.PostgreSQLStateConfig{
+	connection, err := daemon.openStore(config.PostgreSQLStateConfig{
 		Role: "github_scaler", Password: "env://GITHUB_SCALER_MISSING_POSTGRES_PASSWORD",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tryLeader(context.Background()); err == nil {
+	if _, err = connection.tryLeader(context.Background()); err == nil {
 		t.Fatal("expected immediate leadership connection failure")
 	}
-	if _, err = waitForLeader(context.Background()); err == nil {
+	if _, err = connection.waitForLeader(context.Background()); err == nil {
 		t.Fatal("expected blocking leadership connection failure")
 	}
 	if errors.Is(err, cluster.ErrNotLeader) {
 		t.Fatalf("credential failure was reported as lease contention: %v", err)
+	}
+}
+
+func TestClusterLeadershipResultRetainsConcreteLeaseCapability(t *testing.T) {
+	lease := &fakeClusterLease{alive: true}
+	result, err := clusterLeadershipResult("try cluster leadership", lease, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.lease != lease || !result.lease.Alive(context.Background()) {
+		t.Fatalf("leadership result lease = %#v, want injected lease", result.lease)
 	}
 }

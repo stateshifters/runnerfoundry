@@ -22,7 +22,7 @@ func (store *Store) Publish(
 	health NodeHealth,
 	contributions []Contribution,
 	now time.Time,
-) error {
+) (resultErr error) {
 	if err := validatePublication(nodeID, contributions); err != nil {
 		return err
 	}
@@ -30,25 +30,38 @@ func (store *Store) Publish(
 	if err != nil {
 		return err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin contribution publication: %w", err)
 	}
-	defer rollbackTransaction(ctx, transaction)
-	if err = publishNode(ctx, transaction, nodeID, health, now); err != nil {
+	transactionOpen := true
+	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
+	if err = publishInTransaction(ctx, transaction, nodeID, health, contributions, now); err != nil {
 		return err
 	}
-	if err = replaceContributions(ctx, transaction, nodeID, contributions); err != nil {
-		return err
-	}
-	if err = removeWithdrawnDemand(ctx, transaction); err != nil {
-		return err
-	}
+	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit contribution publication: %w", err)
 	}
 	return nil
+}
+
+func publishInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	nodeID string,
+	health NodeHealth,
+	contributions []Contribution,
+	now time.Time,
+) error {
+	if err := publishNode(ctx, transaction, nodeID, health, now); err != nil {
+		return err
+	}
+	if err := replaceContributions(ctx, transaction, nodeID, contributions); err != nil {
+		return err
+	}
+	return removeWithdrawnDemand(ctx, transaction)
 }
 
 func validatePublication(nodeID string, contributions []Contribution) error {
@@ -65,7 +78,7 @@ func validatePublication(nodeID string, contributions []Contribution) error {
 
 func publishNode(
 	ctx context.Context,
-	transaction databaseTransaction,
+	transaction *databaseTransaction,
 	nodeID string,
 	health NodeHealth,
 	now time.Time,
@@ -82,7 +95,7 @@ func publishNode(
 
 func replaceContributions(
 	ctx context.Context,
-	transaction databaseTransaction,
+	transaction *databaseTransaction,
 	nodeID string,
 	contributions []Contribution,
 ) error {
@@ -101,7 +114,7 @@ func replaceContributions(
 	return nil
 }
 
-func removeWithdrawnDemand(ctx context.Context, transaction databaseTransaction) error {
+func removeWithdrawnDemand(ctx context.Context, transaction *databaseTransaction) error {
 	if _, err := transaction.Exec(ctx, `
 		DELETE FROM scaler_demand demand
 		WHERE NOT EXISTS (
@@ -118,12 +131,12 @@ func removeWithdrawnDemand(ctx context.Context, transaction databaseTransaction)
 // is no older than now minus liveFor, and agree on their runner group. A scale
 // set with conflicting eligible runner groups is incompatible and has zero
 // effective capacity; stale or unhealthy declarations remain listed.
-func (store *Store) ScaleSets(ctx context.Context, now time.Time, liveFor time.Duration) ([]ScaleSetStatus, error) {
+func (store *Store) ScaleSets(ctx context.Context, now time.Time, liveFor time.Duration) (statuses []ScaleSetStatus, resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	rows, err := connection.Query(ctx, contributorEligibilitySQL+`
 		SELECT contribution.scale_set,
 		       COALESCE(
@@ -150,7 +163,7 @@ func (store *Store) ScaleSets(ctx context.Context, now time.Time, liveFor time.D
 	return scanScaleSetStatuses(rows)
 }
 
-func scanScaleSetStatuses(rows databaseRows) ([]ScaleSetStatus, error) {
+func scanScaleSetStatuses(rows *databaseRows) ([]ScaleSetStatus, error) {
 	statuses := make([]ScaleSetStatus, 0)
 	for rows.Next() {
 		var status ScaleSetStatus

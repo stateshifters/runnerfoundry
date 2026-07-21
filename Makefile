@@ -23,7 +23,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix vet test test-integration test-race coverage build smoke notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test test-integration test-race coverage build smoke notices sbom package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -35,7 +35,7 @@ endif
 
 lint lint-config lint-fix: export GOTOOLCHAIN := $(GOLANGCI_LINT_TOOLCHAIN)
 
-lint: lint-config
+lint: lint-no-nolint lint-config
 	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
 ifeq ($(OSFAMILY),Windows)
 	@$$violations = go tool github.com/boyter/scc/v3 --by-file --include-ext go --no-gen --format csv . | ConvertFrom-Csv | Where-Object { [int]$$_.Complexity -gt 100 }; if ($$violations) { $$violations | ForEach-Object { Write-Host "$$($$_.Provider) complexity=$$($$_.Complexity)" }; exit 1 }
@@ -45,6 +45,13 @@ endif
 
 lint-config:
 	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint config verify
+
+lint-no-nolint:
+ifeq ($(OSFAMILY),Windows)
+	@$$violations = git grep -n '//nolint' -- '*.go'; if ($$violations) { $$violations; Write-Host '//nolint directives are forbidden'; exit 1 }; exit 0
+else
+	@if violations=$$(git grep -n '//nolint' -- '*.go'); then echo "$$violations"; echo '//nolint directives are forbidden'; exit 1; fi
+endif
 
 lint-fix:
 	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix

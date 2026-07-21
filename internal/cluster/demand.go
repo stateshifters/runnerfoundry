@@ -15,7 +15,7 @@ import (
 // the first observation's queue time. It returns ErrInvalidDemand for a blank
 // scale set or repository, a non-positive request ID, or a zero queue time;
 // callers should correct or discard that input rather than retry it unchanged.
-func (store *Store) Enqueue(ctx context.Context, demand Demand) error {
+func (store *Store) Enqueue(ctx context.Context, demand Demand) (resultErr error) {
 	if strings.TrimSpace(demand.ScaleSet) == "" || strings.TrimSpace(demand.Repository) == "" || demand.RequestID <= 0 || demand.QueueTime.IsZero() {
 		return ErrInvalidDemand
 	}
@@ -23,7 +23,7 @@ func (store *Store) Enqueue(ctx context.Context, demand Demand) error {
 	if err != nil {
 		return err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	if _, err = connection.Exec(ctx, `
 		INSERT INTO scaler_demand (scale_set, repository, request_id, queue_time)
 		VALUES ($1, $2, $3, $4)
@@ -48,7 +48,7 @@ func (store *Store) AssignOldest(
 	scaleSet string,
 	now time.Time,
 	liveFor time.Duration,
-) (*Assignment, error) {
+) (assignment *Assignment, resultErr error) {
 	if strings.TrimSpace(scaleSet) == "" {
 		return nil, ErrInvalidDemand
 	}
@@ -56,16 +56,18 @@ func (store *Store) AssignOldest(
 	if err != nil {
 		return nil, err
 	}
-	defer closeConnection(ctx, connection)
+	defer finishConnection(ctx, connection, &resultErr)
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin FIFO assignment: %w", err)
 	}
-	defer rollbackTransaction(ctx, transaction)
-	assignment, err := assignOldestInTransaction(ctx, transaction, scaleSet, now, liveFor)
+	transactionOpen := true
+	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
+	assignment, err = assignOldestInTransaction(ctx, transaction, scaleSet, now, liveFor)
 	if err != nil {
 		return nil, err
 	}
+	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit FIFO assignment: %w", err)
 	}
@@ -74,7 +76,7 @@ func (store *Store) AssignOldest(
 
 func assignOldestInTransaction(
 	ctx context.Context,
-	transaction databaseTransaction,
+	transaction *databaseTransaction,
 	scaleSet string,
 	now time.Time,
 	liveFor time.Duration,
@@ -100,7 +102,7 @@ func assignOldestInTransaction(
 	return assignment, nil
 }
 
-func releaseUnavailableAssignments(ctx context.Context, transaction databaseTransaction, expiredBefore time.Time) error {
+func releaseUnavailableAssignments(ctx context.Context, transaction *databaseTransaction, expiredBefore time.Time) error {
 	if _, err := transaction.Exec(ctx, `
 		UPDATE scaler_assignments assignment
 		SET state = 'complete'
@@ -113,7 +115,7 @@ func releaseUnavailableAssignments(ctx context.Context, transaction databaseTran
 	return nil
 }
 
-func loadOldestDemand(ctx context.Context, transaction databaseTransaction, scaleSet string) (int64, *Assignment, error) {
+func loadOldestDemand(ctx context.Context, transaction *databaseTransaction, scaleSet string) (int64, *Assignment, error) {
 	var demandID int64
 	var assignment Assignment
 	err := transaction.QueryRow(ctx, `
@@ -135,7 +137,7 @@ func loadOldestDemand(ctx context.Context, transaction databaseTransaction, scal
 
 func selectContributor(
 	ctx context.Context,
-	transaction databaseTransaction,
+	transaction *databaseTransaction,
 	scaleSet string,
 	liveAfter time.Time,
 	assignment *Assignment,

@@ -123,7 +123,7 @@ type Assignment struct {
 
 type Store struct {
 	settings        ConnectionSettings
-	connector       func(ctx context.Context) (databaseConnection, error)
+	connector       func(ctx context.Context) (*databaseConnection, error)
 	directConnector func(ctx context.Context) (leaderConnection, error)
 	migrationFiles  fs.FS
 }
@@ -136,18 +136,38 @@ func NewStore(settings ConnectionSettings) *Store {
 		if err != nil {
 			return nil, err
 		}
-		return postgreSQLConnection{Conn: connection}, nil
+		return &postgreSQLLeaderConnection{Conn: connection}, nil
 	}
 	store.migrationFiles = embeddedMigrations
 	return store
 }
 
-type databaseConnection interface {
-	Begin(ctx context.Context) (databaseTransaction, error)
-	Close(ctx context.Context) error
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, arguments ...any) (databaseRows, error)
-	QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow
+type databaseConnection struct {
+	begin    func(context.Context) (*databaseTransaction, error)
+	close    func(context.Context) error
+	exec     func(context.Context, string, ...any) (pgconn.CommandTag, error)
+	query    func(context.Context, string, ...any) (*databaseRows, error)
+	queryRow func(context.Context, string, ...any) databaseRow
+}
+
+func (connection *databaseConnection) Begin(ctx context.Context) (*databaseTransaction, error) {
+	return connection.begin(ctx)
+}
+
+func (connection *databaseConnection) Close(ctx context.Context) error {
+	return connection.close(ctx)
+}
+
+func (connection *databaseConnection) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return connection.exec(ctx, sql, arguments...)
+}
+
+func (connection *databaseConnection) Query(ctx context.Context, sql string, arguments ...any) (*databaseRows, error) {
+	return connection.query(ctx, sql, arguments...)
+}
+
+func (connection *databaseConnection) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
+	return connection.queryRow(ctx, sql, arguments...)
 }
 
 type leaderConnection interface {
@@ -158,18 +178,53 @@ type leaderConnection interface {
 	QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow
 }
 
-type databaseTransaction interface {
-	Commit(ctx context.Context) error
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow
-	Rollback(ctx context.Context) error
+type databaseTransaction struct {
+	commit   func(context.Context) error
+	exec     func(context.Context, string, ...any) (pgconn.CommandTag, error)
+	queryRow func(context.Context, string, ...any) databaseRow
+	rollback func(context.Context) error
 }
 
-type databaseRows interface {
+func (transaction *databaseTransaction) Commit(ctx context.Context) error {
+	return transaction.commit(ctx)
+}
+
+func (transaction *databaseTransaction) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return transaction.exec(ctx, sql, arguments...)
+}
+
+func (transaction *databaseTransaction) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
+	return transaction.queryRow(ctx, sql, arguments...)
+}
+
+func (transaction *databaseTransaction) Rollback(ctx context.Context) error {
+	return transaction.rollback(ctx)
+}
+
+type rowIterator interface {
 	Close()
 	Err() error
 	Next() bool
 	Scan(destinations ...any) error
+}
+
+type databaseRows struct {
+	iterator rowIterator
+}
+
+func (rows *databaseRows) Close() { rows.iterator.Close() }
+func (rows *databaseRows) Err() error {
+	if err := rows.iterator.Err(); err != nil {
+		return fmt.Errorf("read PostgreSQL rows: %w", err)
+	}
+	return nil
+}
+func (rows *databaseRows) Next() bool { return rows.iterator.Next() }
+func (rows *databaseRows) Scan(destinations ...any) error {
+	if err := rows.iterator.Scan(destinations...); err != nil {
+		return fmt.Errorf("scan PostgreSQL rows: %w", err)
+	}
+	return nil
 }
 
 type rowScanner interface {
@@ -180,6 +235,14 @@ type databaseRow struct {
 	scanner rowScanner
 }
 
+type postgreSQLLeaderConnection struct {
+	*pgx.Conn
+}
+
+func (connection *postgreSQLLeaderConnection) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
+	return databaseRow{scanner: connection.Conn.QueryRow(ctx, sql, arguments...)}
+}
+
 func (row databaseRow) Scan(destinations ...any) error {
 	if err := row.scanner.Scan(destinations...); err != nil {
 		return fmt.Errorf("scan PostgreSQL row: %w", err)
@@ -187,44 +250,46 @@ func (row databaseRow) Scan(destinations ...any) error {
 	return nil
 }
 
-type postgreSQLConnection struct {
-	*pgx.Conn
+func newDatabaseRows(iterator rowIterator) *databaseRows {
+	return &databaseRows{iterator: iterator}
 }
 
-type postgreSQLTransaction struct {
-	pgx.Tx
-}
-
-func (connection postgreSQLConnection) Begin(ctx context.Context) (databaseTransaction, error) { //nolint:ireturn // The store uses only the transaction contract.
-	transaction, err := connection.Conn.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin PostgreSQL transaction: %w", err)
+func newPostgreSQLTransaction(transaction pgx.Tx) *databaseTransaction {
+	return &databaseTransaction{
+		commit: transaction.Commit,
+		exec:   transaction.Exec,
+		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
+			return databaseRow{scanner: transaction.QueryRow(ctx, sql, arguments...)}
+		},
+		rollback: transaction.Rollback,
 	}
-	return postgreSQLTransaction{Tx: transaction}, nil
 }
 
-//nolint:ireturn // The store reads only the portable row iterator contract.
-func (connection postgreSQLConnection) Query(
-	ctx context.Context,
-	sql string,
-	arguments ...any,
-) (databaseRows, error) {
-	rows, err := connection.Conn.Query(ctx, sql, arguments...)
-	if err != nil {
-		return nil, fmt.Errorf("query PostgreSQL: %w", err)
+func newPostgreSQLDatabaseConnection(connection *pgx.Conn) *databaseConnection {
+	return &databaseConnection{
+		begin: func(ctx context.Context) (*databaseTransaction, error) {
+			transaction, err := connection.Begin(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("begin PostgreSQL transaction: %w", err)
+			}
+			return newPostgreSQLTransaction(transaction), nil
+		},
+		close: connection.Close,
+		exec:  connection.Exec,
+		query: func(ctx context.Context, sql string, arguments ...any) (*databaseRows, error) {
+			rows, err := connection.Query(ctx, sql, arguments...)
+			if err != nil {
+				return nil, fmt.Errorf("query PostgreSQL: %w", err)
+			}
+			return newDatabaseRows(rows), nil
+		},
+		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
+			return databaseRow{scanner: connection.QueryRow(ctx, sql, arguments...)}
+		},
 	}
-	return rows, nil
 }
 
-func (connection postgreSQLConnection) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
-	return databaseRow{scanner: connection.Conn.QueryRow(ctx, sql, arguments...)}
-}
-
-func (transaction postgreSQLTransaction) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
-	return databaseRow{scanner: transaction.Tx.QueryRow(ctx, sql, arguments...)}
-}
-
-func (store *Store) connectPostgreSQL(ctx context.Context) (databaseConnection, error) { //nolint:ireturn // Connection behavior is abstracted for deterministic fault tests.
+func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection, error) {
 	config, err := store.settings.Primary()
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
@@ -233,7 +298,7 @@ func (store *Store) connectPostgreSQL(ctx context.Context) (databaseConnection, 
 	if err != nil {
 		return nil, errors.New("connect to PostgreSQL")
 	}
-	return postgreSQLConnection{Conn: connection}, nil
+	return newPostgreSQLDatabaseConnection(connection), nil
 }
 
 func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, error) {

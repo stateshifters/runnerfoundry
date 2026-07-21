@@ -48,8 +48,8 @@ type clusteredDaemon struct {
 	notifier             serviceNotifier
 	nodes                clusterNodeState
 	assignments          clusterAssignmentState
-	tryLeader            func(context.Context) (cluster.Lease, error)
-	waitForLeader        func(context.Context) (cluster.Lease, error)
+	tryLeader            func(context.Context) (leadershipResult, error)
+	waitForLeader        func(context.Context) (leadershipResult, error)
 	leader               *clusterLeader
 	leadershipResults    chan leadershipResult
 	stopContender        context.CancelFunc
@@ -101,28 +101,18 @@ type clusterState interface {
 	clusterAssignmentState
 }
 
-type clusterStateOpener func(config.PostgreSQLStateConfig) (
-	state clusterState,
-	tryLeader func(context.Context) (cluster.Lease, error),
-	waitForLeader func(context.Context) (cluster.Lease, error),
-	err error,
-)
+type clusterStoreConnection struct {
+	state         clusterState
+	tryLeader     func(context.Context) (leadershipResult, error)
+	waitForLeader func(context.Context) (leadershipResult, error)
+}
+
+type clusterStateOpener func(config.PostgreSQLStateConfig) (clusterStoreConnection, error)
 
 func newClusteredDaemon() *clusteredDaemon {
 	return &clusteredDaemon{
 		hostname: os.Hostname, newLogger: newLogger, loadConfig: loadConfig,
-		openStore: func(state config.PostgreSQLStateConfig) (
-			clusterState,
-			func(context.Context) (cluster.Lease, error),
-			func(context.Context) (cluster.Lease, error),
-			error,
-		) {
-			store := cluster.NewStore(state)
-			return store,
-				func(ctx context.Context) (cluster.Lease, error) { return store.TryLeader(ctx) },
-				func(ctx context.Context) (cluster.Lease, error) { return store.WaitForLeader(ctx) },
-				nil
-		},
+		openStore: openClusterStore,
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
 		},
@@ -134,6 +124,32 @@ func newClusteredDaemon() *clusteredDaemon {
 		notifier:             systemdNotifier{},
 		leadershipRetryDelay: clusterLeadershipRetryDelay,
 	}
+}
+
+func openClusterStore(state config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+	store := cluster.NewStore(state)
+	return clusterStoreConnection{
+		state:         store,
+		tryLeader:     func(ctx context.Context) (leadershipResult, error) { return tryClusterLeadership(ctx, store) },
+		waitForLeader: func(ctx context.Context) (leadershipResult, error) { return waitForClusterLeadership(ctx, store) },
+	}, nil
+}
+
+func tryClusterLeadership(ctx context.Context, store *cluster.Store) (leadershipResult, error) {
+	lease, err := store.TryLeader(ctx)
+	return clusterLeadershipResult("try cluster leadership", lease, err)
+}
+
+func waitForClusterLeadership(ctx context.Context, store *cluster.Store) (leadershipResult, error) {
+	lease, err := store.WaitForLeader(ctx)
+	return clusterLeadershipResult("wait for cluster leadership", lease, err)
+}
+
+func clusterLeadershipResult(operation string, lease cluster.Lease, err error) (leadershipResult, error) {
+	if err != nil {
+		return leadershipResult{}, fmt.Errorf("%s: %w", operation, err)
+	}
+	return leadershipResult{lease: lease}, nil
 }
 
 func runClusteredDaemon(
@@ -187,17 +203,17 @@ func (daemon *clusteredDaemon) connectState(ctx context.Context, configured conf
 	if configured.State.Postgres == nil {
 		return errors.New("PostgreSQL clustered state is required")
 	}
-	store, tryLeader, waitForLeader, err := daemon.openStore(*configured.State.Postgres)
+	connection, err := daemon.openStore(*configured.State.Postgres)
 	if err != nil {
 		return fmt.Errorf("open PostgreSQL clustered state: %w", err)
 	}
-	if err = migrateClusteredStore(ctx, logger, store); err != nil {
+	if err = migrateClusteredStore(ctx, logger, connection.state); err != nil {
 		return err
 	}
-	daemon.nodes = store
-	daemon.assignments = store
-	daemon.tryLeader = tryLeader
-	daemon.waitForLeader = waitForLeader
+	daemon.nodes = connection.state
+	daemon.assignments = connection.state
+	daemon.tryLeader = connection.tryLeader
+	daemon.waitForLeader = connection.waitForLeader
 	return nil
 }
 

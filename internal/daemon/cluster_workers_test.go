@@ -148,13 +148,10 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
-		openStore: func(config.PostgreSQLStateConfig) (
-			clusterState,
-			func(context.Context) (cluster.Lease, error),
-			func(context.Context) (cluster.Lease, error),
-			error,
-		) {
-			return state, fakeTryLeader(state), fakeWaitForLeader(state), nil
+		openStore: func(config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+			return clusterStoreConnection{
+				state: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+			}, nil
 		},
 		providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
 		buildReconciler: buildReconciler,
@@ -330,30 +327,31 @@ func (state *fakeClusterState) CompleteAssignment(
 	return state.releaseErr
 }
 
-func fakeTryLeader(state *fakeClusterState) func(context.Context) (cluster.Lease, error) {
-	return func(context.Context) (cluster.Lease, error) {
+func fakeTryLeader(state *fakeClusterState) func(context.Context) (leadershipResult, error) {
+	return func(context.Context) (leadershipResult, error) {
 		if state.onTryLeader != nil {
 			state.onTryLeader()
 		}
 		if state.tryLeaderErr != nil {
-			return nil, state.tryLeaderErr
+			return leadershipResult{}, state.tryLeaderErr
 		}
 		if len(state.leases) == 0 {
-			return nil, cluster.ErrNotLeader
+			return leadershipResult{}, cluster.ErrNotLeader
 		}
 		lease := state.leases[0]
 		state.leases = state.leases[1:]
-		return lease, nil
+		return leadershipResult{lease: lease}, nil
 	}
 }
 
-func fakeWaitForLeader(state *fakeClusterState) func(context.Context) (cluster.Lease, error) {
-	return func(ctx context.Context) (cluster.Lease, error) {
+func fakeWaitForLeader(state *fakeClusterState) func(context.Context) (leadershipResult, error) {
+	return func(ctx context.Context) (leadershipResult, error) {
 		if state.waitForLeader != nil {
-			return state.waitForLeader(ctx)
+			lease, err := state.waitForLeader(ctx)
+			return leadershipResult{lease: lease}, err
 		}
 		<-ctx.Done()
-		return nil, fmt.Errorf("wait for leader: %w", ctx.Err())
+		return leadershipResult{}, fmt.Errorf("wait for leader: %w", ctx.Err())
 	}
 }
 

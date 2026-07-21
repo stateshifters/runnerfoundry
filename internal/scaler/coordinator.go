@@ -91,10 +91,6 @@ func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository
 	return nil
 }
 
-func (coordinator *Coordinator) Observe(demand JobDemand) {
-	_ = coordinator.Apply(context.Background(), []JobDemand{demand}, nil) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
-}
-
 func (coordinator *Coordinator) Apply(ctx context.Context, observed []JobDemand, removed []DemandRemoval) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
@@ -102,10 +98,6 @@ func (coordinator *Coordinator) Apply(ctx context.Context, observed []JobDemand,
 		return fmt.Errorf("apply demand changes: %w", err)
 	}
 	return nil
-}
-
-func (coordinator *Coordinator) Remove(repository string, requestID int64) {
-	_ = coordinator.Apply(context.Background(), nil, []DemandRemoval{{Repository: repository, RequestID: requestID}}) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
 }
 
 // ObserveAssigned replaces a repository's authoritative GitHub assigned-job count.

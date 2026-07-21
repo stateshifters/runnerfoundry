@@ -17,8 +17,10 @@ func TestCoordinatorStartsOldestObservedJobWithoutExceedingSharedCapacity(t *tes
 	coordinator.AddRepository("newer", workers["newer"])
 	coordinator.AddRepository("older", workers["older"])
 	queueTime := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
-	coordinator.Observe(JobDemand{RequestID: 2, Repository: "newer", QueueTime: queueTime.Add(time.Minute)})
-	coordinator.Observe(JobDemand{RequestID: 1, Repository: "older", QueueTime: queueTime})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{
+		{RequestID: 2, Repository: "newer", QueueTime: queueTime.Add(time.Minute)},
+		{RequestID: 1, Repository: "older", QueueTime: queueTime},
+	}, nil)
 
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatalf("expected scheduling to succeed, got %v", err)
@@ -43,9 +45,7 @@ func TestCoordinatorDeduplicatesAndRemovesDemand(t *testing.T) {
 	coordinator := NewCoordinator(2)
 	coordinator.AddRepository("repo", worker)
 	demand := JobDemand{RequestID: 7, Repository: "repo", QueueTime: time.Now()}
-	coordinator.Observe(demand)
-	coordinator.Observe(demand)
-	coordinator.Remove("repo", 7)
+	applyCoordinatorDemand(t, coordinator, []JobDemand{demand, demand}, []DemandRemoval{{Repository: "repo", RequestID: 7}})
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -60,9 +60,9 @@ func TestCoordinatorUpdatesDuplicateDemandWhenGitHubReportsItAcquired(t *testing
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("repo", worker)
 	demand := JobDemand{RequestID: 7, Repository: "repo", QueueTime: time.Now()}
-	coordinator.Observe(demand)
+	applyCoordinatorDemand(t, coordinator, []JobDemand{demand}, nil)
 	demand.Acquired = true
-	coordinator.Observe(demand)
+	applyCoordinatorDemand(t, coordinator, []JobDemand{demand}, nil)
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestCoordinatorRemovesRepositoryDemand(t *testing.T) {
 	worker := &recordingWorker{repository: "removed", startOrder: &startOrder}
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("removed", worker)
-	coordinator.Observe(JobDemand{RequestID: 1, Repository: "removed", QueueTime: time.Now()})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{RequestID: 1, Repository: "removed", QueueTime: time.Now()}}, nil)
 	if err := coordinator.RemoveRepository(context.Background(), "removed"); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestCoordinatorSkipsDemandForRemovedWorkers(t *testing.T) {
 	if err := coordinator.RemoveRepository(context.Background(), "removed"); err != nil {
 		t.Fatal(err)
 	}
-	coordinator.Observe(JobDemand{RequestID: 1, Repository: "removed", QueueTime: time.Now()})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{RequestID: 1, Repository: "removed", QueueTime: time.Now()}}, nil)
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatalf("expected removed worker demand to be skipped, got %v", err)
 	}
@@ -111,7 +111,7 @@ func TestCoordinatorSkipsDemandForRemovedWorkers(t *testing.T) {
 func TestCoordinatorReportsWorkerStartFailure(t *testing.T) {
 	coordinator := NewCoordinator(2)
 	coordinator.AddRepository("start-fails", failingWorker{startErr: errors.New("start failed")})
-	coordinator.Observe(JobDemand{RequestID: 2, Repository: "start-fails", QueueTime: time.Now()})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{RequestID: 2, Repository: "start-fails", QueueTime: time.Now()}}, nil)
 	if err := coordinator.Schedule(context.Background()); err == nil {
 		t.Fatal("expected start failure")
 	}
@@ -121,7 +121,7 @@ func TestCoordinatorLeavesDemandQueuedWhenAcquisitionFails(t *testing.T) {
 	coordinator := NewCoordinator(1)
 	worker := &failingWorker{acquireErr: errors.New("acquire failed")}
 	coordinator.AddRepository("repo", worker)
-	coordinator.Observe(JobDemand{RequestID: 1, Repository: "repo", QueueTime: time.Now()})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{RequestID: 1, Repository: "repo", QueueTime: time.Now()}}, nil)
 	if err := coordinator.Schedule(context.Background()); err == nil {
 		t.Fatal("expected acquisition failure")
 	}
@@ -137,8 +137,10 @@ func TestCoordinatorUsesObservationOrderForEqualQueueTimes(t *testing.T) {
 	coordinator.AddRepository("first", &recordingWorker{repository: "first", startOrder: &startOrder})
 	coordinator.AddRepository("second", &recordingWorker{repository: "second", startOrder: &startOrder})
 	queueTime := time.Now()
-	coordinator.Observe(JobDemand{RequestID: 1, Repository: "first", QueueTime: queueTime})
-	coordinator.Observe(JobDemand{RequestID: 2, Repository: "second", QueueTime: queueTime})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{
+		{RequestID: 1, Repository: "first", QueueTime: queueTime},
+		{RequestID: 2, Repository: "second", QueueTime: queueTime},
+	}, nil)
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -166,12 +168,19 @@ func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
 func TestCoordinatorReportsRecoveryFailure(t *testing.T) {
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("repo", failingWorker{existsErr: errors.New("inspect failed")})
-	coordinator.Observe(JobDemand{Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+	applyCoordinatorDemand(t, coordinator, []JobDemand{{Repository: "repo", RequestID: 1, QueueTime: time.Now()}}, nil)
 	if err := coordinator.Schedule(context.Background()); err == nil {
 		t.Fatal("expected recovery failure")
 	}
 	store := NewMemoryDemandStore()
 	if err := store.RemoveScaleSet(context.Background(), "linux"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func applyCoordinatorDemand(t *testing.T, coordinator *Coordinator, observed []JobDemand, removed []DemandRemoval) {
+	t.Helper()
+	if err := coordinator.Apply(context.Background(), observed, removed); err != nil {
 		t.Fatal(err)
 	}
 }

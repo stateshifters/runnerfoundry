@@ -39,13 +39,8 @@ func TestClusteredStartupRequiresMigratedPostgreSQLState(t *testing.T) {
 			configured.State.Postgres = nil
 		},
 		"open connection": func(_ *config.Config, daemon *clusteredDaemon, _ *fakeClusterState) {
-			daemon.openStore = func(config.PostgreSQLStateConfig) (
-				clusterState,
-				func(context.Context) (cluster.Lease, error),
-				func(context.Context) (cluster.Lease, error),
-				error,
-			) {
-				return nil, nil, nil, failure
+			daemon.openStore = func(config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
+				return clusterStoreConnection{}, failure
 			}
 		},
 		"migration status": func(_ *config.Config, _ *clusteredDaemon, state *fakeClusterState) {
@@ -535,9 +530,11 @@ func TestLeaderKeepsSessionWhenCapacityIsUnchanged(t *testing.T) {
 		key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, capacity: 1,
 	}
 	leader.sessions[session.key] = session
-	leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+	if err := leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		session.key: {Name: "linux", EffectiveCapacity: 1},
-	}, []cluster.ScaleSetStatus{{Name: "linux"}})
+	}, []cluster.ScaleSetStatus{{Name: "linux"}}); err != nil {
+		t.Fatal(err)
+	}
 	if leader.sessions[session.key] != session {
 		t.Fatal("unchanged session was replaced")
 	}

@@ -403,6 +403,13 @@ linters:
         linters:
           - gosec
         text: "G101"
+      - path: internal[\\/]scaleset[\\/]poller_test\.go
+        linters:
+          - nilnil
+      - path: internal[\\/]daemon[\\/]scale_set_registry\.go
+        linters:
+          - gosec
+        text: "G704"
       - path: internal[\\/]provider[\\/]docker[\\/]compose\.go
         linters:
           - gosec

@@ -96,6 +96,27 @@ func TestPollUntilShutdownDoesNotLogShutdownCancellation(t *testing.T) {
 	}
 }
 
+func TestPollUntilShutdownTreatsNoMessageAsSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{onGetMessage: cancel}, Handler: scaleSetHandler{}}
+
+	pollUntilShutdown(ctx, slog.Default(), "repo", "linux", poller, time.Nanosecond)
+}
+
+func TestWaitForPollRetryReturnsFalseForCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForPollRetry(ctx, time.Hour) {
+		t.Fatal("retry wait succeeded after cancellation")
+	}
+}
+
+func TestWaitForPollRetryReturnsTrueWhenDelayExpires(t *testing.T) {
+	if !waitForPollRetry(context.Background(), 0) {
+		t.Fatal("retry wait failed after delay expired")
+	}
+}
+
 func TestPollUntilShutdownLogsPollActionsAtDebugLevel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	logs := &bytes.Buffer{}

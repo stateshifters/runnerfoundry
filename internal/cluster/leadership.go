@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -31,12 +32,10 @@ func (store *Store) TryLeader(ctx context.Context) (*LeaderLease, error) {
 	}
 	var acquired bool
 	if err = connection.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderAdvisoryLockKey).Scan(&acquired); err != nil {
-		closeConnection(ctx, connection)
-		return nil, fmt.Errorf("try clustered leader lease: %w", err)
+		return nil, errors.Join(fmt.Errorf("try clustered leader lease: %w", err), closeConnection(ctx, connection))
 	}
 	if !acquired {
-		closeConnection(ctx, connection)
-		return nil, ErrNotLeader
+		return nil, errors.Join(ErrNotLeader, closeConnection(ctx, connection))
 	}
 	return &LeaderLease{connection: connection}, nil
 }
@@ -49,11 +48,10 @@ func (store *Store) WaitForLeader(ctx context.Context) (*LeaderLease, error) {
 		return nil, err
 	}
 	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, leaderAdvisoryLockKey); err != nil {
-		closeConnection(ctx, connection)
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("wait for clustered leader lease: %w", ctx.Err())
+			return nil, errors.Join(fmt.Errorf("wait for clustered leader lease: %w", ctx.Err()), closeConnection(ctx, connection))
 		}
-		return nil, fmt.Errorf("wait for clustered leader lease: %w", err)
+		return nil, errors.Join(fmt.Errorf("wait for clustered leader lease: %w", err), closeConnection(ctx, connection))
 	}
 	return &LeaderLease{connection: connection}, nil
 }
@@ -72,12 +70,32 @@ func (lease *LeaderLease) Close(ctx context.Context) error {
 
 func closeConnection(ctx context.Context, connection interface {
 	Close(ctx context.Context) error
-}) {
-	_ = connection.Close(context.WithoutCancel(ctx)) //nolint:errcheck,gosec // Deferred connection cleanup is best effort.
+}) error {
+	if err := connection.Close(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("close PostgreSQL connection: %w", err)
+	}
+	return nil
 }
 
-func rollbackTransaction(ctx context.Context, transaction databaseTransaction) {
-	_ = transaction.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck,gosec // Rollback is best effort after commit or failure.
+func finishConnection(ctx context.Context, connection interface {
+	Close(ctx context.Context) error
+}, resultErr *error) {
+	*resultErr = errors.Join(*resultErr, closeConnection(ctx, connection))
+}
+
+func rollbackTransaction(ctx context.Context, transaction *databaseTransaction) error {
+	if err := transaction.Rollback(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("rollback PostgreSQL transaction: %w", err)
+	}
+	return nil
+}
+
+func finishTransaction(ctx context.Context, transaction *databaseTransaction, transactionOpen *bool, resultErr *error) {
+	if !*transactionOpen {
+		return
+	}
+	*transactionOpen = false
+	*resultErr = errors.Join(*resultErr, rollbackTransaction(ctx, transaction))
 }
 
 // Alive reports whether the lease's connection is open and responds to a

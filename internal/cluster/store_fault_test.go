@@ -14,7 +14,7 @@ import (
 func TestStoreSurfacesConnectionFailuresWithoutCredentials(t *testing.T) {
 	connectionErr := errors.New("connection failed")
 	store := NewStore(ConnectionSettings{})
-	store.connector = func(context.Context) (databaseConnection, error) { return nil, connectionErr }
+	store.connector = func(context.Context) (*databaseConnection, error) { return nil, connectionErr }
 	store.directConnector = func(context.Context) (leaderConnection, error) { return nil, connectionErr }
 	ctx := context.Background()
 	operations := []func() error{
@@ -110,7 +110,7 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := NewStore(ConnectionSettings{})
-			store.connector = func(context.Context) (databaseConnection, error) {
+			store.connector = func(context.Context) (*databaseConnection, error) {
 				t.Fatal("invalid demand reached the database connector")
 				return nil, errors.New("unreachable connector")
 			}
@@ -120,7 +120,7 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 		})
 	}
 	store := NewStore(ConnectionSettings{})
-	store.connector = func(context.Context) (databaseConnection, error) {
+	store.connector = func(context.Context) (*databaseConnection, error) {
 		t.Fatal("invalid demand operation reached the database connector")
 		return nil, errors.New("unreachable connector")
 	}
@@ -146,7 +146,7 @@ func TestPublishRejectsInvalidContributionsBeforeConnecting(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := NewStore(ConnectionSettings{})
-			store.connector = func(context.Context) (databaseConnection, error) {
+			store.connector = func(context.Context) (*databaseConnection, error) {
 				t.Fatal("invalid publication reached the database connector")
 				return nil, errors.New("unreachable connector")
 			}
@@ -291,10 +291,10 @@ func TestAssignmentTransactionReportsEveryFailure(t *testing.T) {
 
 func TestScaleSetStatusReportsRowFailures(t *testing.T) {
 	databaseErr := errors.New("database failed")
-	if _, err := scanScaleSetStatuses(&fakeDatabaseRows{scanErr: databaseErr, remaining: 1}); err == nil {
+	if _, err := scanScaleSetStatuses(newDatabaseRows(&fakeDatabaseRows{scanErr: databaseErr, remaining: 1})); err == nil {
 		t.Fatal("expected scale-set scan failure")
 	}
-	if _, err := scanScaleSetStatuses(&fakeDatabaseRows{rowsErr: databaseErr}); err == nil {
+	if _, err := scanScaleSetStatuses(newDatabaseRows(&fakeDatabaseRows{rowsErr: databaseErr})); err == nil {
 		t.Fatal("expected scale-set row iteration failure")
 	}
 }
@@ -337,6 +337,44 @@ func TestLeaderLeaseReflectsConnectionHealthAndClosure(t *testing.T) {
 	}
 }
 
+func TestStoreReturnsConnectionCloseFailure(t *testing.T) {
+	closeErr := errors.New("close failed")
+	store := storeWithConnection(&fakeDatabaseConnection{closeErr: closeErr})
+	err := store.Enqueue(context.Background(), Demand{
+		ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now(),
+	})
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("enqueue error = %v, want connection close failure", err)
+	}
+}
+
+func TestStoreJoinsTransactionRollbackFailure(t *testing.T) {
+	operationErr := errors.New("publish failed")
+	rollbackErr := errors.New("rollback failed")
+	transaction := &fakeDatabaseTransaction{
+		execFailure: databaseFailure("INSERT INTO scaler_nodes", operationErr),
+		rollbackErr: rollbackErr,
+	}
+	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
+	err := store.Publish(context.Background(), "node", NodeHealthy, nil, time.Now())
+	if !errors.Is(err, operationErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("publish error = %v, want operation and rollback failures", err)
+	}
+}
+
+func TestStoreDoesNotRollbackAfterCommitBegins(t *testing.T) {
+	commitErr := errors.New("commit failed")
+	transaction := &fakeDatabaseTransaction{commitErr: commitErr}
+	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
+	err := store.Publish(context.Background(), "node", NodeHealthy, nil, time.Now())
+	if !errors.Is(err, commitErr) {
+		t.Fatalf("publish error = %v, want commit failure", err)
+	}
+	if transaction.rollbackCalls != 0 {
+		t.Fatalf("rollback calls = %d, want zero after commit begins", transaction.rollbackCalls)
+	}
+}
+
 func TestEmptyLeaderLeaseIsClosedAndSafeToClose(t *testing.T) {
 	if (&LeaderLease{}).Alive(context.Background()) || (*LeaderLease)(nil).Alive(context.Background()) {
 		t.Fatal("empty lease reported alive")
@@ -350,7 +388,7 @@ func TestAssignmentRecoveryReportsRowFailures(t *testing.T) {
 	databaseErr := errors.New("database failed")
 	tests := []struct {
 		name string
-		rows databaseRows
+		rows rowIterator
 	}{
 		{name: "scan", rows: &fakeDatabaseRows{remaining: 1, scanErr: databaseErr}},
 		{name: "iteration", rows: &fakeDatabaseRows{rowsErr: databaseErr}},
@@ -379,9 +417,19 @@ func TestAssignmentTransitionRejectsMissingOrStaleRows(t *testing.T) {
 
 func storeWithConnection(connection *fakeDatabaseConnection) *Store {
 	store := NewStore(ConnectionSettings{})
-	store.connector = func(context.Context) (databaseConnection, error) { return connection, nil }
+	store.connector = func(context.Context) (*databaseConnection, error) { return connection.databaseConnection(), nil }
 	store.directConnector = func(context.Context) (leaderConnection, error) { return connection, nil }
 	return store
+}
+
+func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnection {
+	return &databaseConnection{
+		begin:    connection.Begin,
+		close:    connection.Close,
+		exec:     connection.Exec,
+		query:    connection.Query,
+		queryRow: connection.QueryRow,
+	}
 }
 
 type fakeDatabaseConnection struct {
@@ -390,7 +438,7 @@ type fakeDatabaseConnection struct {
 	execFailure databaseOperationFailure
 	execTag     pgconn.CommandTag
 	queryErr    error
-	rowsResult  databaseRows
+	rowsResult  rowIterator
 	rowFailure  databaseOperationFailure
 	rows        map[string]fakeRow
 	closeErr    error
@@ -398,14 +446,14 @@ type fakeDatabaseConnection struct {
 	closed      bool
 }
 
-func (connection *fakeDatabaseConnection) Begin(context.Context) (databaseTransaction, error) { //nolint:ireturn // Test fake implements the production boundary.
+func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTransaction, error) {
 	if connection.beginErr != nil {
 		return nil, connection.beginErr
 	}
 	if connection.transaction == nil {
 		connection.transaction = &fakeDatabaseTransaction{}
 	}
-	return connection.transaction, nil
+	return connection.transaction.databaseTransaction(), nil
 }
 
 func (connection *fakeDatabaseConnection) Close(context.Context) error {
@@ -427,14 +475,14 @@ func (connection *fakeDatabaseConnection) IsClosed() bool { return connection.cl
 
 func (connection *fakeDatabaseConnection) Ping(context.Context) error { return connection.pingErr }
 
-func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any) (databaseRows, error) { //nolint:ireturn // Test fake implements the production boundary.
+func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any) (*databaseRows, error) {
 	if connection.queryErr != nil {
 		return nil, connection.queryErr
 	}
 	if connection.rowsResult == nil {
 		connection.rowsResult = &fakeDatabaseRows{}
 	}
-	return connection.rowsResult, nil
+	return newDatabaseRows(connection.rowsResult), nil
 }
 
 func (connection *fakeDatabaseConnection) QueryRow(_ context.Context, statement string, _ ...any) databaseRow {
@@ -450,10 +498,20 @@ func (connection *fakeDatabaseConnection) QueryRow(_ context.Context, statement 
 }
 
 type fakeDatabaseTransaction struct {
-	execFailure databaseOperationFailure
-	rows        map[string]fakeRow
-	commitErr   error
-	rollbackErr error
+	execFailure   databaseOperationFailure
+	rows          map[string]fakeRow
+	commitErr     error
+	rollbackErr   error
+	rollbackCalls int
+}
+
+func (transaction *fakeDatabaseTransaction) databaseTransaction() *databaseTransaction {
+	return &databaseTransaction{
+		commit:   transaction.Commit,
+		exec:     transaction.Exec,
+		queryRow: transaction.QueryRow,
+		rollback: transaction.Rollback,
+	}
 }
 
 func (transaction *fakeDatabaseTransaction) Commit(context.Context) error {
@@ -477,6 +535,7 @@ func (transaction *fakeDatabaseTransaction) QueryRow(_ context.Context, statemen
 }
 
 func (transaction *fakeDatabaseTransaction) Rollback(context.Context) error {
+	transaction.rollbackCalls++
 	return transaction.rollbackErr
 }
 
