@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -52,6 +53,11 @@ DROP TABLE partial_migration_marker;
 	if err = store.Migrate(ctx); err == nil {
 		t.Fatal("expected failing Up migration")
 	}
+	for _, diagnostic := range []string{"function missing_up_migration_function() does not exist", "SQLSTATE 42883"} {
+		if !strings.Contains(err.Error(), diagnostic) {
+			t.Fatalf("failed Up migration error = %q, want %q", err, diagnostic)
+		}
+	}
 	status, err := store.MigrationStatus(ctx)
 	if err != nil || status.Current != 1 {
 		t.Fatalf("status after failed Up = %#v, %v", status, err)
@@ -73,6 +79,11 @@ SELECT missing_down_migration_function();
 	}
 	if err = store.MigrateDown(ctx, 1, time.Now(), time.Minute); err == nil {
 		t.Fatal("expected failing Down migration")
+	}
+	for _, diagnostic := range []string{"function missing_down_migration_function() does not exist", "SQLSTATE 42883"} {
+		if !strings.Contains(err.Error(), diagnostic) {
+			t.Fatalf("failed Down migration error = %q, want %q", err, diagnostic)
+		}
 	}
 	status, err = store.MigrationStatus(ctx)
 	if err != nil || status.Current != 2 {

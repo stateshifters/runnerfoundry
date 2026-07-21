@@ -24,6 +24,31 @@ func TestRunMainWritesExecutionErrorsToStderr(t *testing.T) {
 	}
 }
 
+func TestRunMainWritesPostgreSQLMigrationDiagnosticSnapshot(t *testing.T) {
+	runMigration := func(context.Context, migrationRequest) (migrationStatus, error) {
+		return migrationStatus{}, errors.New(
+			"apply PostgreSQL migrations: syntax error at or near \"INVALID\" (SQLSTATE 42601); " +
+				"hint: Check the migration statement.",
+		)
+	}
+	var stderr bytes.Buffer
+	exitCode := runMain(
+		[]string{"migrate", "up", "--config", "config.yaml"},
+		io.Discard,
+		&stderr,
+		nil,
+		runMigration,
+	)
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	expected := "run PostgreSQL migration command: apply PostgreSQL migrations: " +
+		"syntax error at or near \"INVALID\" (SQLSTATE 42601); hint: Check the migration statement.\n"
+	if stderr.String() != expected {
+		t.Fatalf("stderr snapshot mismatch\nexpected: %q\nactual:   %q", expected, stderr.String())
+	}
+}
+
 func TestRunMainReturnsFailureWhenStderrCannotBeWritten(t *testing.T) {
 	runDaemon := func(context.Context, daemon.Options) error { return errors.New("daemon failed") }
 	if exitCode := runMain([]string{"--config", "config.yaml"}, io.Discard, failingWriter{}, runDaemon, nil); exitCode != 1 {

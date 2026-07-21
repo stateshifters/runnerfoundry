@@ -84,6 +84,15 @@ func assertUnavailableSchemaObjects(t *testing.T, store *Store, dsn string, admi
 	}
 	if _, err := store.MigrationStatus(ctx); err == nil {
 		t.Fatal("expected status compatibility read failure")
+	} else {
+		for _, diagnostic := range []string{
+			`relation "scaler_schema_compatibility" does not exist`,
+			"SQLSTATE 42P01",
+		} {
+			if !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("migration status error = %q, want %q", err, diagnostic)
+			}
+		}
 	}
 	if _, err := admin.Exec(ctx, `ALTER TABLE unavailable_schema_compatibility RENAME TO scaler_schema_compatibility`); err != nil {
 		t.Fatal(err)

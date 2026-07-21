@@ -231,7 +231,25 @@ func closePostgreSQLConnection(ctx context.Context, connection postgreSQLCloser)
 func safePostgreSQLError(operation string, err error) error {
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) && postgresError.Code != "" {
-		return fmt.Errorf("%s (SQLSTATE %s)", operation, postgresError.Code)
+		message := operation
+		if postgresError.Message != "" {
+			message += ": " + postgresError.Message
+		}
+		message += fmt.Sprintf(" (SQLSTATE %s)", postgresError.Code)
+		for _, diagnostic := range []struct {
+			label string
+			value string
+		}{
+			{label: "detail", value: postgresError.Detail},
+			{label: "hint", value: postgresError.Hint},
+			{label: "table", value: postgresError.TableName},
+			{label: "constraint", value: postgresError.ConstraintName},
+		} {
+			if diagnostic.value != "" {
+				message += "; " + diagnostic.label + ": " + diagnostic.value
+			}
+		}
+		return errors.New(message)
 	}
 	return errors.New(operation)
 }

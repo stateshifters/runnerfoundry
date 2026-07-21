@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -46,16 +47,56 @@ func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLMigrationErrorsRetainSQLStateWithoutServerDetails(t *testing.T) {
-	serverError := &pgconn.PgError{Code: "42501", Message: "secret role cannot alter secret table"}
-	err := safePostgreSQLError("apply PostgreSQL migrations", serverError)
-	if !strings.Contains(err.Error(), "SQLSTATE 42501") {
-		t.Fatalf("migration error = %q, want SQLSTATE", err)
+func TestPostgreSQLMigrationErrorsRetainAllowedServerDiagnostics(t *testing.T) {
+	serverError := &pgconn.PgError{
+		Severity:         "ERROR",
+		Code:             "23505",
+		Message:          "duplicate key value violates unique constraint",
+		Detail:           "Key (name)=(runner) already exists.",
+		Hint:             "Choose another runner name.",
+		Position:         17,
+		InternalPosition: 11,
+		InternalQuery:    "INSERT INTO scaler_assignments VALUES ('secret')",
+		Where:            "SQL statement in migration 2",
+		SchemaName:       "public",
+		TableName:        "scaler_assignments",
+		ColumnName:       "name",
+		DataTypeName:     "text",
+		ConstraintName:   "scaler_assignments_name_key",
+		File:             "nbtinsert.c",
+		Line:             664,
+		Routine:          "_bt_check_unique",
 	}
-	for _, forbidden := range []string{"secret role", "secret table"} {
-		if strings.Contains(err.Error(), forbidden) {
-			t.Fatalf("migration error exposed server details: %q", err)
-		}
+	err := safePostgreSQLError("apply PostgreSQL migrations", fmt.Errorf("wrapped PostgreSQL error: %w", serverError))
+	expected := "apply PostgreSQL migrations: duplicate key value violates unique constraint (SQLSTATE 23505); " +
+		"detail: Key (name)=(runner) already exists.; hint: Choose another runner name.; " +
+		"table: scaler_assignments; constraint: scaler_assignments_name_key"
+	if err.Error() != expected {
+		t.Fatalf("migration error snapshot mismatch\nexpected: %q\nactual:   %q", expected, err)
+	}
+}
+
+func TestPostgreSQLMigrationErrorsOmitEmptyDiagnostics(t *testing.T) {
+	serverError := &pgconn.PgError{Code: "42601", Message: "syntax error at or near \"INVALID\""}
+	err := safePostgreSQLError("apply PostgreSQL migrations", serverError)
+	expected := "apply PostgreSQL migrations: syntax error at or near \"INVALID\" (SQLSTATE 42601)"
+	if err.Error() != expected {
+		t.Fatalf("migration error = %q, want %q", err, expected)
+	}
+}
+
+func TestPostgreSQLMigrationErrorsWithoutSQLStateDiscardServerDetails(t *testing.T) {
+	operation := "apply PostgreSQL migrations"
+	serverError := &pgconn.PgError{
+		Message:        "diagnostic without SQLSTATE",
+		Detail:         "server detail",
+		Hint:           "server hint",
+		TableName:      "server_table",
+		ConstraintName: "server_constraint",
+	}
+	err := safePostgreSQLError(operation, serverError)
+	if err.Error() != operation {
+		t.Fatalf("migration error = %q, want %q", err, operation)
 	}
 }
 
