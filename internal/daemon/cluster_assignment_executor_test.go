@@ -64,7 +64,7 @@ func TestClusteredExecutorUsesOnlyLocalScaleSets(t *testing.T) {
 	provider := &fakeScalerProvider{trackStarted: true}
 	daemonUnderTest := clusteredDaemonForTest(state)
 	daemonUnderTest.buildReconciler = func(
-		context.Context, string, config.ScaleSetConfig, scaleSetClient, int,
+		context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int,
 	) (scaler.Reconciler, error) {
 		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 			Name: "linux", MaxRunners: 10, Provider: provider, JITConfig: fakeJITConfigGenerator{},
@@ -99,10 +99,16 @@ func TestClusterLeaderManagesRemoteScaleSetAndRetainsItDuringFailover(t *testing
 	lease := &fakeClusterLease{alive: true}
 	state.leases = []cluster.Lease{lease}
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	githubClient := &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
-		messageClient: scaleSetMessageClient{Client: messageClient},
-	}
+	githubClient := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	deletedScaleSetIDs := []int{}
+	githubClient.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
+		deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
+		return nil
+	}}
 	daemonUnderTest := clusteredDaemonForTest(state)
 	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return githubClient, nil
@@ -129,8 +135,8 @@ func TestClusterLeaderManagesRemoteScaleSetAndRetainsItDuringFailover(t *testing
 	daemon.heartbeat(ctx)
 	cancel()
 	daemon.stopLeadershipContender(ctx)
-	if len(githubClient.deletedScaleSetIDs) != 0 {
-		t.Fatalf("leader failover deleted a declared scale set: %#v", githubClient.deletedScaleSetIDs)
+	if len(deletedScaleSetIDs) != 0 {
+		t.Fatalf("leader failover deleted a declared scale set: %#v", deletedScaleSetIDs)
 	}
 	if !lease.closed {
 		t.Fatal("leader failover did not close its lease")
@@ -157,7 +163,11 @@ func TestClusterLeaderRejectsConflictsAndDeletesFinalWithdrawal(t *testing.T) {
 	}
 
 	messageClient := &fakeMessageClient{}
-	githubClient := &fakeScaleSetClient{messageClient: scaleSetMessageClient{Client: messageClient}}
+	deletedScaleSetIDs := []int{}
+	githubClient := fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
+		deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
+		return nil
+	}}
 	session := &repositoryScaleSetSession{
 		key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, client: githubClient,
 		messageClient: scaleSetMessageClient{Client: messageClient}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
@@ -166,7 +176,7 @@ func TestClusterLeaderRejectsConflictsAndDeletesFinalWithdrawal(t *testing.T) {
 	leader.sessions[session.key] = session
 	state.statuses = nil
 	leader.reconcile(context.Background())
-	if len(githubClient.deletedScaleSetIDs) != 1 || githubClient.deletedScaleSetIDs[0] != 20 {
-		t.Fatalf("final explicit withdrawal did not delete scale set: %#v", githubClient.deletedScaleSetIDs)
+	if len(deletedScaleSetIDs) != 1 || deletedScaleSetIDs[0] != 20 {
+		t.Fatalf("final explicit withdrawal did not delete scale set: %#v", deletedScaleSetIDs)
 	}
 }

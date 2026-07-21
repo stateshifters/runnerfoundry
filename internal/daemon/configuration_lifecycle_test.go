@@ -113,9 +113,18 @@ func TestLogActionIgnoresNilLogger(t *testing.T) {
 }
 
 func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
-	client := &fakeScaleSetClient{
-		runnerGroup:     &upstream.RunnerGroup{ID: 5},
-		runnerScaleSets: []upstream.RunnerScaleSet{{ID: 1, Name: "linux"}, {ID: 2, Name: "stale"}},
+	deletedScaleSetIDs := []int{}
+	client := fakeScaleSetPruneClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return &upstream.RunnerGroup{ID: 5}, nil
+		}},
+		fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+			return []upstream.RunnerScaleSet{{ID: 1, Name: "linux"}, {ID: 2, Name: "stale"}}, nil
+		}},
+		fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
+			deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
+			return nil
+		}},
 	}
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "debug")
@@ -124,29 +133,47 @@ func TestPruneRepositoryDeletesOnlyUnconfiguredScaleSets(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("expected prune success, got %v", err)
 	}
-	if len(client.deletedScaleSetIDs) != 1 || client.deletedScaleSetIDs[0] != 2 {
-		t.Fatalf("expected stale scale set deletion, got %#v", client.deletedScaleSetIDs)
+	if len(deletedScaleSetIDs) != 1 || deletedScaleSetIDs[0] != 2 {
+		t.Fatalf("expected stale scale set deletion, got %#v", deletedScaleSetIDs)
 	}
 	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "started")
 	assertStructuredAction(t, logs.Bytes(), "runner_scale_set_delete", "completed")
 }
 
 func TestPruneRepositoryRejectsUnsupportedClient(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := pruneRepository(context.Background(), logger, nonPruningScaleSetClient{}, "repo", []config.ScaleSetConfig{{Name: "linux"}}); err == nil {
+	activeConfig := testActiveConfiguration()
+	activeConfig.Config.Prune = true
+	activeConfig.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := pruneRepositoryWhenEnabled(context.Background(), &activeConfig, nonPruningScaleSetClient{}, "repo"); err == nil {
 		t.Fatal("expected unsupported prune client error")
 	}
 }
 
 func TestPruneRepositorySurfacesGitHubFailures(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tests := map[string]*fakeScaleSetClient{
-		"runner group": {runnerGroupErr: errors.New("group failed")},
-		"list":         {runnerGroup: &upstream.RunnerGroup{ID: 1}, listScaleSetsErr: errors.New("list failed")},
+	successfulRunnerGroupClient := fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+		return &upstream.RunnerGroup{ID: 1}, nil
+	}}
+	tests := map[string]fakeScaleSetPruneClient{
+		"runner group": {
+			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+				return nil, errors.New("group failed")
+			}},
+		},
+		"list": {
+			fakeRunnerGroupClient: successfulRunnerGroupClient,
+			fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+				return nil, errors.New("list failed")
+			}},
+		},
 		"delete": {
-			runnerGroup:       &upstream.RunnerGroup{ID: 1},
-			runnerScaleSets:   []upstream.RunnerScaleSet{{ID: 2, Name: "stale"}},
-			deleteScaleSetErr: errors.New("delete failed"),
+			fakeRunnerGroupClient: successfulRunnerGroupClient,
+			fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+				return []upstream.RunnerScaleSet{{ID: 2, Name: "stale"}}, nil
+			}},
+			fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+				return errors.New("delete failed")
+			}},
 		},
 	}
 	for testName, client := range tests {

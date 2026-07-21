@@ -17,7 +17,7 @@ type scaleSetSessionOperations struct {
 		ctx context.Context,
 		repositoryURL string,
 		scaleSetConfig config.ScaleSetConfig,
-		client scaleSetClient,
+		client scaleSetJITClient,
 		scaleSetID int,
 	) (scaler.Reconciler, error)
 	RunnerHostname func() string
@@ -77,7 +77,7 @@ func runCoordinatedScaleSet(
 
 type coordinatedLifecycleConfig struct {
 	Logger         *slog.Logger
-	Client         scaleSetClient
+	Client         scaleSetDeletionClient
 	RepositoryURL  string
 	ScaleSetConfig config.ScaleSetConfig
 	Coordinator    *scaler.Coordinator

@@ -13,7 +13,7 @@ import (
 func prepareScaleSetSession(
 	ctx context.Context,
 	logger *slog.Logger,
-	client scaleSetClient,
+	client scaleSetSessionClient,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	runnerHostname string,
@@ -36,7 +36,7 @@ func prepareScaleSetSession(
 func lookupRunnerGroup(
 	ctx context.Context,
 	logger *slog.Logger,
-	client scaleSetClient,
+	client runnerGroupClient,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 ) (*upstream.RunnerGroup, error) {
@@ -66,7 +66,7 @@ func lookupRunnerGroup(
 func ensureConfiguredRunnerScaleSet(
 	ctx context.Context,
 	logger *slog.Logger,
-	client scaleSetClient,
+	client scaleSetRegistrationClient,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	runnerGroupID int,
@@ -90,7 +90,7 @@ func ensureConfiguredRunnerScaleSet(
 func createMessageSession(
 	ctx context.Context,
 	logger *slog.Logger,
-	client scaleSetClient,
+	client scaleSetMessageSessionClient,
 	repositoryURL string,
 	scaleSetName string,
 	runnerHostname string,

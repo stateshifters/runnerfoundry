@@ -15,7 +15,7 @@ import (
 )
 
 func TestBuildReconcilerRejectsMissingProvider(t *testing.T) {
-	if _, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1, providerCommands{}); err == nil {
+	if _, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, fakeScaleSetJITClient{}, 1, providerCommands{}); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }
@@ -53,7 +53,7 @@ func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
 		Name:       "linux",
 		MaxRunners: 2,
 		Docker:     &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
-	}, &fakeScaleSetClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}})
 	if err != nil {
 		t.Fatalf("expected docker reconciler, got %v", err)
 	}
@@ -66,7 +66,7 @@ func TestBuildDockerReconcilerSurfacesValidationFailure(t *testing.T) {
 	_, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:   "linux",
 		Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
-	}, &fakeScaleSetClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "other\n"}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "other\n"}})
 	if err == nil || !strings.Contains(err.Error(), "validate docker provider") {
 		t.Fatalf("expected docker validation error, got %v", err)
 	}
@@ -80,7 +80,7 @@ func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
 			ConnectionURI:     "qemu:///system",
 			DomainXMLTemplate: writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`),
 		},
-	}, &fakeScaleSetClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}})
 	if err != nil {
 		t.Fatalf("expected libvirt reconciler, got %v", err)
 	}
@@ -96,14 +96,14 @@ func TestBuildLibvirtReconcilerSurfacesValidationFailure(t *testing.T) {
 			ConnectionURI:     "qemu:///system",
 			DomainXMLTemplate: filepath.Join(t.TempDir(), "missing.xml"),
 		},
-	}, &fakeScaleSetClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{}})
 	if err == nil || !strings.Contains(err.Error(), "validate libvirt provider") {
 		t.Fatalf("expected libvirt validation error, got %v", err)
 	}
 }
 
 func TestBuildReconcilerRejectsScaleSetWithoutProvider(t *testing.T) {
-	if _, err := buildReconciler(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1); err == nil {
+	if _, err := buildReconciler(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, fakeScaleSetJITClient{}, 1); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }

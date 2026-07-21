@@ -46,9 +46,14 @@ func TestScaleSetMessageClientWrapsErrors(t *testing.T) {
 }
 
 func TestEnsureRunnerScaleSetReturnsExistingOrCreatesNew(t *testing.T) {
-	existing, err := ensureRunnerScaleSet(context.Background(), &fakeScaleSetClient{
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 1},
-	}, 10, config.ScaleSetConfig{Name: "linux"})
+	registrationClient := fakeScaleSetRegistrationClient{getRunnerScaleSet: func(
+		context.Context,
+		int,
+		string,
+	) (*upstream.RunnerScaleSet, error) {
+		return &upstream.RunnerScaleSet{ID: 1}, nil
+	}}
+	existing, err := ensureRunnerScaleSet(context.Background(), registrationClient, 10, config.ScaleSetConfig{Name: "linux"})
 	if err != nil {
 		t.Fatalf("expected existing success, got %v", err)
 	}
@@ -56,7 +61,15 @@ func TestEnsureRunnerScaleSetReturnsExistingOrCreatesNew(t *testing.T) {
 		t.Fatalf("expected existing scale set, got %#v", existing)
 	}
 
-	client := &fakeScaleSetClient{createdScaleSet: &upstream.RunnerScaleSet{ID: 2}}
+	var missingScaleSet *upstream.RunnerScaleSet
+	client := fakeScaleSetRegistrationClient{
+		getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+			return missingScaleSet, nil
+		},
+		createRunnerScaleSet: func(context.Context, *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
+			return &upstream.RunnerScaleSet{ID: 2}, nil
+		},
+	}
 	created, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{Name: "linux"})
 	if err != nil {
 		t.Fatalf("expected create success, got %v", err)
@@ -67,12 +80,22 @@ func TestEnsureRunnerScaleSetReturnsExistingOrCreatesNew(t *testing.T) {
 }
 
 func TestEnsureRunnerScaleSetUsesConfiguredLabels(t *testing.T) {
-	client := &fakeScaleSetClient{createdScaleSet: &upstream.RunnerScaleSet{ID: 2}}
+	var missingScaleSet *upstream.RunnerScaleSet
+	var createdScaleSetRequest *upstream.RunnerScaleSet
+	client := fakeScaleSetRegistrationClient{
+		getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+			return missingScaleSet, nil
+		},
+		createRunnerScaleSet: func(_ context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
+			createdScaleSetRequest = runnerScaleSet
+			return &upstream.RunnerScaleSet{ID: 2}, nil
+		},
+	}
 	_, err := ensureRunnerScaleSet(context.Background(), client, 10, config.ScaleSetConfig{Name: "linux"})
 	if err != nil {
 		t.Fatalf("expected create success, got %v", err)
 	}
-	assertScaleSetLabels(t, client.createdScaleSetRequest.Labels, []string{"linux"})
+	assertScaleSetLabels(t, createdScaleSetRequest.Labels, []string{"linux"})
 }
 
 func TestRunnerHostnameReturnsHostName(t *testing.T) {

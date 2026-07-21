@@ -11,14 +11,10 @@ import (
 func pruneRepository(
 	ctx context.Context,
 	logger *slog.Logger,
-	client scaleSetClient,
+	client scaleSetPruneClient,
 	repositoryURL string,
 	scaleSets []config.ScaleSetConfig,
 ) error {
-	pruneClient, ok := client.(scaleSetPruneClient)
-	if !ok {
-		return fmt.Errorf("GitHub client for %q does not support pruning", repositoryURL)
-	}
 	byGroup := map[string]map[string]bool{}
 	for _, scaleSetConfig := range scaleSets {
 		if byGroup[scaleSetConfig.RunnerGroup] == nil {
@@ -27,7 +23,7 @@ func pruneRepository(
 		byGroup[scaleSetConfig.RunnerGroup][scaleSetConfig.Name] = true
 	}
 	for runnerGroup, names := range byGroup {
-		if err := pruneScaleSetTarget(ctx, logger, pruneClient, pruneTarget{RepositoryURL: repositoryURL, RunnerGroup: runnerGroup}, names); err != nil {
+		if err := pruneScaleSetTarget(ctx, logger, client, pruneTarget{RepositoryURL: repositoryURL, RunnerGroup: runnerGroup}, names); err != nil {
 			return err
 		}
 	}

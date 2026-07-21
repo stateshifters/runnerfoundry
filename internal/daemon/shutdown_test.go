@@ -97,7 +97,11 @@ func TestStartRepositorySurfacesPruneFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	activeConfig.Config.Prune = true
 	daemonUnderTest := standaloneDaemon{newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-		return &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, nil
+		return &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+				return nil, errors.New("group failed")
+			}},
+		}}, nil
 	}}
 	if _, err := startRepository(context.Background(), daemonUnderTest, &activeConfig, githubapp.Repository{InstallationID: 1, URL: "repo"}); err == nil {
 		t.Fatal("expected prune failure")

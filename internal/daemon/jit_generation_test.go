@@ -9,10 +9,17 @@ import (
 )
 
 func TestJITGeneratorUsesScaleSetClient(t *testing.T) {
-	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{
-		jitConfig: "encoded",
-		jitRunner: &upstream.RunnerReference{ID: 99, Name: "linux-1"},
-	}, ScaleSetID: 12}
+	client := fakeScaleSetJITClient{generateJitRunnerConfig: func(
+		context.Context,
+		*upstream.RunnerScaleSetJitRunnerSetting,
+		int,
+	) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
+		return &upstream.RunnerScaleSetJitRunnerConfig{
+			EncodedJITConfig: "encoded",
+			Runner:           &upstream.RunnerReference{ID: 99, Name: "linux-1"},
+		}, nil
+	}}
+	generator := scalesetJITGenerator{Client: client, ScaleSetID: 12}
 	jitConfig, err := generator.Generate(context.Background(), "linux-1")
 	if err != nil {
 		t.Fatalf("expected jit success, got %v", err)
@@ -26,7 +33,14 @@ func TestJITGeneratorUsesScaleSetClient(t *testing.T) {
 }
 
 func TestJITGeneratorSurfacesClientFailure(t *testing.T) {
-	generator := scalesetJITGenerator{Client: &fakeScaleSetClient{jitErr: errors.New("jit failed")}}
+	client := fakeScaleSetJITClient{generateJitRunnerConfig: func(
+		context.Context,
+		*upstream.RunnerScaleSetJitRunnerSetting,
+		int,
+	) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
+		return nil, errors.New("jit failed")
+	}}
+	generator := scalesetJITGenerator{Client: client}
 	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
 		t.Fatal("expected jit error")
 	}

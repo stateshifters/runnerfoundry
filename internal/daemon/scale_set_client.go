@@ -77,23 +77,35 @@ func (client githubScaleSetClient) MessageSessionClient(
 }
 
 type scaleSetClient interface {
-	scaleSetAdministrationClient
-	scaleSetRunnerClient
+	scaleSetSessionClient
+	scaleSetDeletionClient
+	scaleSetJITClient
 }
 
 type scaleSetDeletionClient interface {
 	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
 }
 
-type scaleSetAdministrationClient interface {
-	scaleSetDeletionClient
+type scaleSetSessionClient interface {
+	runnerGroupClient
+	scaleSetRegistrationClient
+	scaleSetMessageSessionClient
+}
+
+type runnerGroupClient interface {
 	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
+}
+
+type scaleSetRegistrationClient interface {
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
 }
 
-type scaleSetRunnerClient interface {
+type scaleSetMessageSessionClient interface {
 	MessageSessionClient(ctx context.Context, runnerScaleSetID int, runnerName string) (scaleSetMessageClient, error)
+}
+
+type scaleSetJITClient interface {
 	GenerateJitRunnerConfig(
 		ctx context.Context,
 		setting *upstream.RunnerScaleSetJitRunnerSetting,
@@ -105,7 +117,7 @@ type scaleSetRunnerClient interface {
 
 type scaleSetPruneClient interface {
 	scaleSetDeletionClient
-	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
+	runnerGroupClient
 	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
 }
 

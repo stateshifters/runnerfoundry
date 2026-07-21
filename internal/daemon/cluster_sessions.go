@@ -34,7 +34,7 @@ type repositoryScaleSetSession struct {
 	key            repositoryScaleSetSessionKey
 	installationID githubapp.InstallationID
 	capacity       int
-	client         scaleSetClient
+	client         scaleSetDeletionClient
 	messageClient  scaleSetMessageClient
 	runnerScaleSet *upstream.RunnerScaleSet
 	stopPolling    context.CancelFunc

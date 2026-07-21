@@ -10,7 +10,7 @@ import (
 )
 
 type scalesetJITGenerator struct {
-	Client     scaleSetClient
+	Client     scaleSetJITClient
 	ScaleSetID int
 }
 

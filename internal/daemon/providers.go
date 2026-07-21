@@ -14,7 +14,7 @@ func buildReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) (scaler.Reconciler, error) {
 	return buildReconcilerWithCommands(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderCommands())
@@ -40,7 +40,7 @@ func buildReconcilerWithCommands(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 	providers providerCommands,
 ) (scaler.Reconciler, error) {
@@ -87,7 +87,7 @@ func buildDockerReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 	commandRunner dockerprovider.CommandRunner,
 ) (scaler.Reconciler, error) {
@@ -107,7 +107,7 @@ func buildLibvirtReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 	commandRunner libvirtprovider.CommandRunner,
 ) (scaler.Reconciler, error) {
@@ -127,7 +127,7 @@ func newReconciler(
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	provider scaler.Provider,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) scaler.Reconciler {
 	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -145,7 +145,7 @@ func validatedReconciler(
 	provider scaler.Provider,
 	validate func(ctx context.Context) error,
 	providerName string,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) (scaler.Reconciler, error) {
 	if err := validate(ctx); err != nil {

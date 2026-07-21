@@ -26,7 +26,7 @@ func shutdownScaleSet(
 	repositoryURL string,
 	scaleSetName string,
 	messageClient scaleSetMessageClient,
-	client scaleSetAdministrationClient,
+	client scaleSetDeletionClient,
 	runnerScaleSet *upstream.RunnerScaleSet,
 ) error {
 	closeErr := closeScaleSetMessageSession(ctx, logger, repositoryURL, scaleSetName, messageClient)
@@ -86,7 +86,7 @@ func deleteRunnerScaleSet(
 
 func ensureRunnerScaleSet(
 	ctx context.Context,
-	client scaleSetAdministrationClient,
+	client scaleSetRegistrationClient,
 	runnerGroupID int,
 	scaleSetConfig config.ScaleSetConfig,
 ) (*upstream.RunnerScaleSet, error) {

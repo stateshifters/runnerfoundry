@@ -20,10 +20,11 @@ func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 	}
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
 	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-		return &fakeScaleSetClient{
-			runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-			messageClient: scaleSetMessageClient{Client: messageClient},
-		}, nil
+		return fakeExistingScaleSetClient(
+			&upstream.RunnerGroup{ID: 1},
+			&upstream.RunnerScaleSet{ID: 2},
+			scaleSetMessageClient{Client: messageClient},
+		), nil
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
 	operationCtx, cancelOperation := context.WithCancel(context.Background())
@@ -85,7 +86,11 @@ func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
 	daemon := activeClusteredDaemon(t, state)
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
-	githubClient := &fakeScaleSetClient{}
+	deletedScaleSetIDs := []int{}
+	githubClient := fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
+		deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
+		return nil
+	}}
 	leader.sessions[key] = stoppedSession(key, githubClient, &fakeMessageClient{})
 	if err := leader.stopOutdatedSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		key: {Name: "linux", EffectiveCapacity: 2},
@@ -95,8 +100,8 @@ func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
 	if _, exists := leader.sessions[key]; exists {
 		t.Fatal("outdated capacity session was retained")
 	}
-	if len(githubClient.deletedScaleSetIDs) != 0 {
-		t.Fatalf("declared scale set was deleted: %v", githubClient.deletedScaleSetIDs)
+	if len(deletedScaleSetIDs) != 0 {
+		t.Fatalf("declared scale set was deleted: %v", deletedScaleSetIDs)
 	}
 }
 
@@ -111,7 +116,7 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := stoppedSession(
 		key,
-		&fakeScaleSetClient{deleteScaleSetErr: deleteErr},
+		fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error { return deleteErr }},
 		&fakeMessageClient{closeErr: closeErr},
 	)
 	err := leader.stopSession(context.Background(), session, removeGitHubScaleSet)
@@ -132,7 +137,7 @@ func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
 	session := stoppedSession(
 		repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"},
-		&fakeScaleSetClient{},
+		fakeScaleSetDeletionClient{},
 		&fakeMessageClient{closeErr: errors.New("close failed")},
 	)
 
@@ -153,7 +158,7 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	lease := &fakeClusterLease{closeErr: errors.New("failed")}
 	leader := newClusterLeader(&daemon, lease)
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
-	leader.sessions[key] = stoppedSession(key, &fakeScaleSetClient{}, &fakeMessageClient{})
+	leader.sessions[key] = stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{})
 	leader.scheduler.sessions[key] = leader.sessions[key]
 	leader.stop(context.Background())
 	if len(leader.sessions) != 0 || len(leader.scheduler.sessions) != 0 || !lease.closed {
@@ -172,7 +177,7 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	leader.sessions[key] = stoppedSession(
 		key,
-		&fakeScaleSetClient{},
+		fakeScaleSetDeletionClient{},
 		&fakeMessageClient{closeErr: errors.New("session failed")},
 	)
 
@@ -215,7 +220,7 @@ func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {
 
 func stoppedSession(
 	key repositoryScaleSetSessionKey,
-	client *fakeScaleSetClient,
+	client scaleSetDeletionClient,
 	messageClient *fakeMessageClient,
 ) *repositoryScaleSetSession {
 	return &repositoryScaleSetSession{

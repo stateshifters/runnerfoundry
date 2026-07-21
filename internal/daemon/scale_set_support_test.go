@@ -26,123 +26,173 @@ func runTestScaleSet(
 	)
 }
 
-type fakeScaleSetClient struct {
-	runnerGroup            *upstream.RunnerGroup
-	runnerGroupErr         error
-	runnerScaleSet         *upstream.RunnerScaleSet
-	runnerScaleSetErr      error
-	runnerScaleSets        []upstream.RunnerScaleSet
-	listScaleSetsErr       error
-	createdScaleSet        *upstream.RunnerScaleSet
-	createdScaleSetRequest *upstream.RunnerScaleSet
-	createScaleSetErr      error
-	deletedScaleSetIDs     []int
-	deleteScaleSetErr      error
-	messageClient          scaleSetMessageClient
-	messageRunnerName      string
-	messageSessionErr      error
-	jitConfig              string
-	jitRunner              *upstream.RunnerReference
-	jitErr                 error
-	jitRunnerAlreadyExists bool
-	jitRetryErr            error
-	jitAttempts            int
-	generatedRunnerNames   []string
-	runnerByName           *upstream.RunnerReference
-	runnerByNameErr        error
-	runnerNameLookups      []string
-	removedRunnerIDs       []int64
-	removeRunnerErr        error
-}
-
-func (client *fakeScaleSetClient) GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error) {
-	if client.runnerGroupErr != nil {
-		return nil, client.runnerGroupErr
-	}
-	return client.runnerGroup, nil
-}
-
-func (client *fakeScaleSetClient) GetRunnerScaleSet(ctx context.Context, runnerGroupID int, scaleSetName string) (*upstream.RunnerScaleSet, error) {
-	if client.runnerScaleSetErr != nil {
-		return nil, client.runnerScaleSetErr
-	}
-	return client.runnerScaleSet, nil
-}
-
-func (client *fakeScaleSetClient) ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error) {
-	if client.listScaleSetsErr != nil {
-		return nil, client.listScaleSetsErr
-	}
-	return client.runnerScaleSets, nil
-}
-
-func (client *fakeScaleSetClient) CreateRunnerScaleSet(
-	ctx context.Context,
+func fakeExistingScaleSetClient(
+	runnerGroup *upstream.RunnerGroup,
 	runnerScaleSet *upstream.RunnerScaleSet,
-) (*upstream.RunnerScaleSet, error) {
-	client.createdScaleSetRequest = runnerScaleSet
-	if client.createScaleSetErr != nil {
-		return nil, client.createScaleSetErr
-	}
-	return client.createdScaleSet, nil
+	messageClient scaleSetMessageClient,
+) *fakeScaleSetClient {
+	return &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return runnerGroup, nil
+		}},
+		fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+			return runnerScaleSet, nil
+		}},
+		fakeScaleSetMessageSessionClient: fakeScaleSetMessageSessionClient{messageSessionClient: func(context.Context, int, string) (scaleSetMessageClient, error) {
+			return messageClient, nil
+		}},
+	}}
 }
 
-func (client *fakeScaleSetClient) DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error {
-	if client.deleteScaleSetErr != nil {
-		return client.deleteScaleSetErr
-	}
-	client.deletedScaleSetIDs = append(client.deletedScaleSetIDs, runnerScaleSetID)
-	return nil
+type fakeScaleSetClient struct {
+	fakeScaleSetSessionClient
+	fakeScaleSetDeletionClient
+	fakeScaleSetJITClient
+	fakeScaleSetListClient
 }
 
-func (client *fakeScaleSetClient) MessageSessionClient(
+type fakeScaleSetSessionClient struct {
+	fakeRunnerGroupClient
+	fakeScaleSetRegistrationClient
+	fakeScaleSetMessageSessionClient
+}
+
+type fakeScaleSetPruneClient struct {
+	fakeRunnerGroupClient
+	fakeScaleSetListClient
+	fakeScaleSetDeletionClient
+}
+
+type fakeRunnerGroupClient struct {
+	getRunnerGroupByName func(ctx context.Context, name string) (*upstream.RunnerGroup, error)
+}
+
+func (client fakeRunnerGroupClient) GetRunnerGroupByName(
+	ctx context.Context,
+	name string,
+) (*upstream.RunnerGroup, error) {
+	if client.getRunnerGroupByName == nil {
+		return nil, errors.New("unexpected GetRunnerGroupByName call")
+	}
+	return client.getRunnerGroupByName(ctx, name)
+}
+
+type fakeScaleSetListClient struct {
+	listRunnerScaleSets func(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
+}
+
+func (client fakeScaleSetListClient) ListRunnerScaleSets(
+	ctx context.Context,
+	runnerGroupID int,
+) ([]upstream.RunnerScaleSet, error) {
+	if client.listRunnerScaleSets == nil {
+		return nil, errors.New("unexpected ListRunnerScaleSets call")
+	}
+	return client.listRunnerScaleSets(ctx, runnerGroupID)
+}
+
+type fakeScaleSetDeletionClient struct {
+	deleteRunnerScaleSet func(ctx context.Context, runnerScaleSetID int) error
+}
+
+func (client fakeScaleSetDeletionClient) DeleteRunnerScaleSet(
+	ctx context.Context,
+	runnerScaleSetID int,
+) error {
+	if client.deleteRunnerScaleSet == nil {
+		return errors.New("unexpected DeleteRunnerScaleSet call")
+	}
+	return client.deleteRunnerScaleSet(ctx, runnerScaleSetID)
+}
+
+type fakeScaleSetMessageSessionClient struct {
+	messageSessionClient func(
+		ctx context.Context,
+		runnerScaleSetID int,
+		runnerName string,
+	) (scaleSetMessageClient, error)
+}
+
+func (client fakeScaleSetMessageSessionClient) MessageSessionClient(
 	ctx context.Context,
 	runnerScaleSetID int,
 	runnerName string,
 ) (scaleSetMessageClient, error) {
-	client.messageRunnerName = runnerName
-	if client.messageSessionErr != nil {
-		return scaleSetMessageClient{}, client.messageSessionErr
+	if client.messageSessionClient == nil {
+		return scaleSetMessageClient{}, errors.New("unexpected MessageSessionClient call")
 	}
-	return client.messageClient, nil
+	return client.messageSessionClient(ctx, runnerScaleSetID, runnerName)
 }
 
-func (client *fakeScaleSetClient) GenerateJitRunnerConfig(
+type fakeScaleSetJITClient struct {
+	generateJitRunnerConfig func(
+		ctx context.Context,
+		setting *upstream.RunnerScaleSetJitRunnerSetting,
+		runnerScaleSetID int,
+	) (*upstream.RunnerScaleSetJitRunnerConfig, error)
+	getRunnerByName func(ctx context.Context, runnerName string) (*upstream.RunnerReference, error)
+	removeRunner    func(ctx context.Context, runnerID int64) error
+}
+
+type fakeScaleSetRegistrationClient struct {
+	getRunnerScaleSet func(
+		ctx context.Context,
+		runnerGroupID int,
+		scaleSetName string,
+	) (*upstream.RunnerScaleSet, error)
+	createRunnerScaleSet func(
+		ctx context.Context,
+		runnerScaleSet *upstream.RunnerScaleSet,
+	) (*upstream.RunnerScaleSet, error)
+}
+
+func (client fakeScaleSetRegistrationClient) GetRunnerScaleSet(
+	ctx context.Context,
+	runnerGroupID int,
+	scaleSetName string,
+) (*upstream.RunnerScaleSet, error) {
+	if client.getRunnerScaleSet == nil {
+		return nil, errors.New("unexpected GetRunnerScaleSet call")
+	}
+	return client.getRunnerScaleSet(ctx, runnerGroupID, scaleSetName)
+}
+
+func (client fakeScaleSetRegistrationClient) CreateRunnerScaleSet(
+	ctx context.Context,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (*upstream.RunnerScaleSet, error) {
+	if client.createRunnerScaleSet == nil {
+		return nil, errors.New("unexpected CreateRunnerScaleSet call")
+	}
+	return client.createRunnerScaleSet(ctx, runnerScaleSet)
+}
+
+func (client fakeScaleSetJITClient) GenerateJitRunnerConfig(
 	ctx context.Context,
 	setting *upstream.RunnerScaleSetJitRunnerSetting,
 	runnerScaleSetID int,
 ) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
-	client.generatedRunnerNames = append(client.generatedRunnerNames, setting.Name)
-	client.jitAttempts++
-	if client.jitRunnerAlreadyExists && client.jitAttempts == 1 {
-		return nil, upstream.RunnerExistsError
+	if client.generateJitRunnerConfig == nil {
+		return nil, errors.New("unexpected GenerateJitRunnerConfig call")
 	}
-	if client.jitAttempts > 1 && client.jitRetryErr != nil {
-		return nil, client.jitRetryErr
-	}
-	if client.jitErr != nil {
-		return nil, client.jitErr
-	}
-	return &upstream.RunnerScaleSetJitRunnerConfig{
-		Runner:           client.jitRunner,
-		EncodedJITConfig: client.jitConfig,
-	}, nil
+	return client.generateJitRunnerConfig(ctx, setting, runnerScaleSetID)
 }
 
-func (client *fakeScaleSetClient) GetRunnerByName(ctx context.Context, runnerName string) (*upstream.RunnerReference, error) {
-	client.runnerNameLookups = append(client.runnerNameLookups, runnerName)
-	if client.runnerByNameErr != nil {
-		return nil, client.runnerByNameErr
+func (client fakeScaleSetJITClient) GetRunnerByName(
+	ctx context.Context,
+	runnerName string,
+) (*upstream.RunnerReference, error) {
+	if client.getRunnerByName == nil {
+		return nil, errors.New("unexpected GetRunnerByName call")
 	}
-	return client.runnerByName, nil
+	return client.getRunnerByName(ctx, runnerName)
 }
 
-func (client *fakeScaleSetClient) RemoveRunner(ctx context.Context, runnerID int64) error {
-	if client.removeRunnerErr != nil {
-		return client.removeRunnerErr
+func (client fakeScaleSetJITClient) RemoveRunner(ctx context.Context, runnerID int64) error {
+	if client.removeRunner == nil {
+		return errors.New("unexpected RemoveRunner call")
 	}
-	client.removedRunnerIDs = append(client.removedRunnerIDs, runnerID)
-	return nil
+	return client.removeRunner(ctx, runnerID)
 }
 
 type fakeMessageClient struct {

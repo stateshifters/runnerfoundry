@@ -59,7 +59,7 @@ func TestAssignmentExecutorReportsReconcilerFailure(t *testing.T) {
 	failure := errors.New("failed")
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 		return scaler.Reconciler{}, failure
 	}
 	if err := daemon.executeAssignment(context.Background(), localAssignment()); !errors.Is(err, failure) {

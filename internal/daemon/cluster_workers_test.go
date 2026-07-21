@@ -79,11 +79,11 @@ func TestRepositorySessionStartFailureRecoversLeaderOperationalStatus(t *testing
 		InstallationID: 1, URL: "https://github.com/acme/retry",
 	}}}}
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	successfulClient := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 1},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageClient:  scaleSetMessageClient{Client: messageClient},
-	}
+	successfulClient := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: messageClient},
+	)
 	startAttempts := 0
 	daemon.newGitHubClient = func(
 		string,

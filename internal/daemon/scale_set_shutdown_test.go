@@ -27,7 +27,7 @@ func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
 			ctx context.Context,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetClient,
+			client scaleSetJITClient,
 			scaleSetID int,
 		) (scaler.Reconciler, error) {
 			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -39,11 +39,14 @@ func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
 		},
 		PollRetryDelay: time.Nanosecond,
 	}
-	client := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 10},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
-		messageClient:  scaleSetMessageClient{Client: messageClient},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 10},
+		&upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+		return nil
+	}}
 	scaleSet, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",

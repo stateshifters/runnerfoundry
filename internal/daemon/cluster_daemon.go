@@ -45,7 +45,7 @@ type clusteredDaemon struct {
 	newDiscoverer        func(config.GitHubAppCredentials) (repositoryDiscoverer, error)
 	newGitHubClient      func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error)
 	providerHealthy      func(context.Context, config.ScaleSetConfig) error
-	buildReconciler      func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error)
+	buildReconciler      func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error)
 	notifier             serviceNotifier
 	nodes                clusterNodeState
 	assignments          clusterAssignmentState

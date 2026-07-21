@@ -593,7 +593,11 @@ func TestRepositoryScaleSetSessionFailureIsReturned(t *testing.T) {
 	state := &fakeClusterState{}
 	daemonUnderTest := clusteredDaemonForTest(state)
 	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-		return &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, nil
+		return &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+				return nil, errors.New("group failed")
+			}},
+		}}, nil
 	}
 	daemon := clusteredDaemon{
 		config: clusteredConfig(t), credentials: testAppCredentials(t), logger: slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
@@ -621,8 +625,8 @@ func activeClusteredDaemon(t *testing.T, state *fakeClusterState) clusteredDaemo
 	}
 }
 
-func reconcilerWithProvider(provider scaler.Provider) func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
-	return func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+func reconcilerWithProvider(provider scaler.Provider) func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+	return func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 			Name: "linux", MaxRunners: 10, Provider: provider, JITConfig: fakeJITConfigGenerator{},
 		}}, nil

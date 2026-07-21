@@ -269,7 +269,11 @@ func pruneRepositoryWhenEnabled(
 	if !activeConfig.Config.Prune {
 		return nil
 	}
-	return pruneRepository(ctx, activeConfig.Logger, client, repositoryURL, activeConfig.Config.ScaleSets)
+	pruneClient, ok := client.(scaleSetPruneClient)
+	if !ok {
+		return fmt.Errorf("GitHub client for %q does not support pruning", repositoryURL)
+	}
+	return pruneRepository(ctx, activeConfig.Logger, pruneClient, repositoryURL, activeConfig.Config.ScaleSets)
 }
 
 func rollbackRepositoryStartup(

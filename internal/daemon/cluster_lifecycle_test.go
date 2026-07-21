@@ -107,11 +107,11 @@ func TestClusteredLeaderStatusReflectsRepositorySessionStartFailure(t *testing.T
 		},
 	}
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	successfulClient := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 1},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageClient:  scaleSetMessageClient{Client: messageClient},
-	}
+	successfulClient := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: messageClient},
+	)
 	discovery := githubapp.DiscoveryResult{Repositories: []githubapp.Repository{
 		{InstallationID: 1, URL: "https://github.com/acme/working"},
 		{InstallationID: 2, URL: "https://github.com/acme/failing"},

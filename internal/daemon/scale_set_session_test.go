@@ -23,7 +23,7 @@ func TestRunScaleSetPassesRepositoryToReconciler(t *testing.T) {
 			ctx context.Context,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetClient,
+			client scaleSetJITClient,
 			scaleSetID int,
 		) (scaler.Reconciler, error) {
 			if repositoryURL != "https://github.com/meza/repo-a" {
@@ -33,11 +33,11 @@ func TestRunScaleSetPassesRepositoryToReconciler(t *testing.T) {
 		},
 	}
 	messageClient := &fakeMessageClient{}
-	client := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 1},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageClient:  scaleSetMessageClient{Client: messageClient},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: messageClient},
+	)
 	_, err := runTestScaleSet(context.Background(), slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
@@ -59,17 +59,17 @@ func TestRunScaleSetSurfacesCloseFailureAfterReconcilerFailure(t *testing.T) {
 			ctx context.Context,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetClient,
+			client scaleSetJITClient,
 			scaleSetID int,
 		) (scaler.Reconciler, error) {
 			return scaler.Reconciler{}, errors.New("build failed")
 		},
 	}
-	client := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 1},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageClient:  scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}},
+	)
 	_, err := runTestScaleSet(context.Background(), slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
@@ -81,7 +81,11 @@ func TestRunScaleSetSurfacesCloseFailureAfterReconcilerFailure(t *testing.T) {
 
 func TestStartCoordinatedScaleSetSurfacesRunnerGroupFailure(t *testing.T) {
 	_, err := startCoordinatedScaleSet(context.Background(), slog.Default(), &fakeScaleSetClient{
-		runnerGroupErr: errors.New("group failed"),
+		fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+				return nil, errors.New("group failed")
+			}},
+		},
 	}, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
@@ -104,7 +108,7 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 			ctx context.Context,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetClient,
+			client scaleSetJITClient,
 			scaleSetID int,
 		) (scaler.Reconciler, error) {
 			capturedScaleSetID = scaleSetID
@@ -117,10 +121,25 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 		},
 		PollRetryDelay: time.Nanosecond,
 	}
+	deletedScaleSetIDs := []int{}
+	messageRunnerName := ""
 	client := &fakeScaleSetClient{
-		runnerGroup:    &upstream.RunnerGroup{ID: 10},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
-		messageClient:  scaleSetMessageClient{Client: messageClient},
+		fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+				return &upstream.RunnerGroup{ID: 10}, nil
+			}},
+			fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+				return &upstream.RunnerScaleSet{ID: 20}, nil
+			}},
+			fakeScaleSetMessageSessionClient: fakeScaleSetMessageSessionClient{messageSessionClient: func(_ context.Context, _ int, runnerName string) (scaleSetMessageClient, error) {
+				messageRunnerName = runnerName
+				return scaleSetMessageClient{Client: messageClient}, nil
+			}},
+		},
+		fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
+			deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
+			return nil
+		}},
 	}
 
 	scaleSet, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
@@ -142,14 +161,14 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 	if !messageClient.closed {
 		t.Fatal("expected message session to close")
 	}
-	if len(client.deletedScaleSetIDs) != 1 || client.deletedScaleSetIDs[0] != 20 {
-		t.Fatalf("expected scale set deletion, got %#v", client.deletedScaleSetIDs)
+	if len(deletedScaleSetIDs) != 1 || deletedScaleSetIDs[0] != 20 {
+		t.Fatalf("expected scale set deletion, got %#v", deletedScaleSetIDs)
 	}
 	if capturedScaleSetID != 20 {
 		t.Fatalf("expected scale set ID 20, got %d", capturedScaleSetID)
 	}
-	if client.messageRunnerName != "host" {
-		t.Fatalf("expected runner hostname, got %q", client.messageRunnerName)
+	if messageRunnerName != "host" {
+		t.Fatalf("expected runner hostname, got %q", messageRunnerName)
 	}
 }
 
@@ -165,7 +184,7 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 			context.Context,
 			string,
 			config.ScaleSetConfig,
-			scaleSetClient,
+			scaleSetJITClient,
 			int,
 		) (scaler.Reconciler, error) {
 			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -174,10 +193,14 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 		},
 		PollRetryDelay: time.Nanosecond,
 	}
-	client := &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 10}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
-		messageClient: scaleSetMessageClient{Client: messageClient},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 10},
+		&upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+		return nil
+	}}
 	lifecycle, err := runCoordinatedScaleSet(
 		ctx, logger, client, "https://github.com/acme/repo", config.ScaleSetConfig{
 			Name: "linux", RunnerGroup: "default", MaxRunners: 2,
@@ -215,16 +238,17 @@ func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testi
 	messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
 	provider := &fakeScalerProvider{trackStarted: true}
 	coordinator := scaler.NewCoordinator(1)
-	client := &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 10}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 20},
-		messageClient: scaleSetMessageClient{Client: messageClient},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 10},
+		&upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
 	lifecycle, err := runCoordinatedScaleSet(
 		ctx, slog.Default(), client, "https://github.com/acme/repo", config.ScaleSetConfig{
 			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
 		}, coordinator, scaleSetSessionOperations{
 			RunnerHostname: func() string { return "host" },
-			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 				return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 					Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
 				}}, nil
@@ -247,13 +271,16 @@ func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testi
 func TestReconcilerPreparationFailureClosesMessageSession(t *testing.T) {
 	coordinator := scaler.NewCoordinator(1)
 	messageClient := &fakeMessageClient{}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: messageClient},
+	)
 	_, err := runCoordinatedScaleSet(
-		context.Background(), slog.Default(), &fakeScaleSetClient{
-			runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-			messageClient: scaleSetMessageClient{Client: messageClient},
-		}, "repo", config.ScaleSetConfig{Name: "linux", RunnerGroup: "default"}, coordinator, scaleSetSessionOperations{
+		context.Background(), slog.Default(), client,
+		"repo", config.ScaleSetConfig{Name: "linux", RunnerGroup: "default"}, coordinator, scaleSetSessionOperations{
 			RunnerHostname: func() string { return "host" },
-			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error) {
+			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 				return scaler.Reconciler{}, errors.New("build failed")
 			},
 		},
@@ -275,7 +302,7 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 			ctx context.Context,
 			repositoryURL string,
 			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetClient,
+			client scaleSetJITClient,
 			scaleSetID int,
 		) (scaler.Reconciler, error) {
 			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -287,11 +314,25 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 		},
 		PollRetryDelay: time.Nanosecond,
 	}
-	client := &fakeScaleSetClient{
-		runnerGroup:     &upstream.RunnerGroup{ID: 10},
-		createdScaleSet: &upstream.RunnerScaleSet{ID: 30},
-		messageClient:   scaleSetMessageClient{Client: messageClient},
-	}
+	var missingScaleSet *upstream.RunnerScaleSet
+	var createdScaleSetRequest *upstream.RunnerScaleSet
+	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return &upstream.RunnerGroup{ID: 10}, nil
+		}},
+		fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{
+			getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+				return missingScaleSet, nil
+			},
+			createRunnerScaleSet: func(_ context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
+				createdScaleSetRequest = runnerScaleSet
+				return &upstream.RunnerScaleSet{ID: 30}, nil
+			},
+		},
+		fakeScaleSetMessageSessionClient: fakeScaleSetMessageSessionClient{messageSessionClient: func(context.Context, int, string) (scaleSetMessageClient, error) {
+			return scaleSetMessageClient{Client: messageClient}, nil
+		}},
+	}}
 
 	_, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:        "linux",
@@ -302,13 +343,17 @@ func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
 	waitForPoll(t, messageClient)
-	if client.createdScaleSetRequest.Name != "linux" {
-		t.Fatalf("expected created scale set request, got %#v", client.createdScaleSetRequest)
+	if createdScaleSetRequest.Name != "linux" {
+		t.Fatalf("expected created scale set request, got %#v", createdScaleSetRequest)
 	}
 }
 
 func TestScaleSetShutdownReportsCloseAndDeleteFailures(t *testing.T) {
-	client := &fakeScaleSetClient{deleteScaleSetErr: errors.New("delete failed")}
+	deleteCalled := false
+	client := fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+		deleteCalled = true
+		return errors.New("delete failed")
+	}}
 	messageClient := scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}}
 
 	err := shutdownScaleSet(
@@ -318,41 +363,70 @@ func TestScaleSetShutdownReportsCloseAndDeleteFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "close message session") || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("expected joined close and delete errors, got %v", err)
 	}
-	if len(client.deletedScaleSetIDs) != 0 {
-		t.Fatalf("expected failed delete not to record success, got %#v", client.deletedScaleSetIDs)
+	if !deleteCalled {
+		t.Fatal("expected scale set deletion attempt")
 	}
 }
 
 func TestScaleSetSessionReportsRunnerGroupFailure(t *testing.T) {
-	assertScaleSetSessionFailure(t, &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, scaleSetSessionOperations{}, "get runner group")
+	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return nil, errors.New("group failed")
+		}},
+	}}
+	assertScaleSetSessionFailure(t, client, scaleSetSessionOperations{}, "get runner group")
 }
 
 func TestScaleSetSessionReportsScaleSetLookupFailure(t *testing.T) {
-	assertScaleSetSessionFailure(t, &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSetErr: errors.New("get failed"),
-	}, scaleSetSessionOperations{}, "ensure runner scale set")
+	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return &upstream.RunnerGroup{ID: 1}, nil
+		}},
+		fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+			return nil, errors.New("get failed")
+		}},
+	}}
+	assertScaleSetSessionFailure(t, client, scaleSetSessionOperations{}, "ensure runner scale set")
 }
 
 func TestScaleSetSessionReportsScaleSetCreationFailure(t *testing.T) {
-	assertScaleSetSessionFailure(t, &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 1}, createScaleSetErr: errors.New("create failed"),
-	}, scaleSetSessionOperations{}, "ensure runner scale set")
+	var missingScaleSet *upstream.RunnerScaleSet
+	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return &upstream.RunnerGroup{ID: 1}, nil
+		}},
+		fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{
+			getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+				return missingScaleSet, nil
+			},
+			createRunnerScaleSet: func(context.Context, *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
+				return nil, errors.New("create failed")
+			},
+		},
+	}}
+	assertScaleSetSessionFailure(t, client, scaleSetSessionOperations{}, "ensure runner scale set")
 }
 
 func TestScaleSetSessionReportsMessageSessionFailure(t *testing.T) {
-	assertScaleSetSessionFailure(t, &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageSessionErr: errors.New("message failed"),
-	}, scaleSetSessionOperations{}, "create message session")
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{},
+	)
+	client.fakeScaleSetMessageSessionClient = fakeScaleSetMessageSessionClient{messageSessionClient: func(context.Context, int, string) (scaleSetMessageClient, error) {
+		return scaleSetMessageClient{}, errors.New("message failed")
+	}}
+	assertScaleSetSessionFailure(t, client, scaleSetSessionOperations{}, "create message session")
 }
 
 func TestScaleSetSessionReportsReconcilerConstructionFailure(t *testing.T) {
-	client := &fakeScaleSetClient{
-		runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
-		messageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
-	}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1},
+		&upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: &fakeMessageClient{}},
+	)
 	operations := scaleSetSessionOperations{BuildReconciler: func(
-		context.Context, string, config.ScaleSetConfig, scaleSetClient, int,
+		context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int,
 	) (scaler.Reconciler, error) {
 		return scaler.Reconciler{}, errors.New("build failed")
 	}}
@@ -361,7 +435,7 @@ func TestScaleSetSessionReportsReconcilerConstructionFailure(t *testing.T) {
 
 func assertScaleSetSessionFailure(
 	t *testing.T,
-	client *fakeScaleSetClient,
+	client scaleSetClient,
 	operations scaleSetSessionOperations,
 	expected string,
 ) {
