@@ -86,7 +86,7 @@ build:
 
 smoke: build
 	go test ./internal/daemon -run TestClusteredLifecycleSmoke -count=1
-	go test ./cmd/github-scaler -run 'Test(MigrationStatusWritesMachineReadableStdout|MigrationUpAndDownRemainSilent|ExecuteStoreMigrationDispatchesTypedActions)' -count=1
+	go test ./cmd/github-scaler -run 'Test(MigrationStatusWritesMachineReadableStdout|MigrationUpPrintsCompletion|MigrationDownPrintsCompletion|ExecuteStoreMigrationDispatchesTypedActions)' -count=1
 	go test -tags=integration ./internal/cluster -run 'TestPostgreSQL(AggregatesSharedAndDisjointHostCapacity|PreservesGlobalFIFOWithinHostLimits|LeaderLeaseFailsOver|MigrationLifecycleIsReversible)' -count=1
 
 notices:

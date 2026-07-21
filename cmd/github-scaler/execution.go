@@ -48,7 +48,10 @@ func executeMigrationCommand(
 	if err != nil {
 		return fmt.Errorf("run PostgreSQL migration command: %w", err)
 	}
-	if request.action != migrationStatusAction {
+	if request.action == migrationUpAction || request.action == migrationDownAction {
+		if _, err := fmt.Fprintf(stdout, "Migration %s completed at version %d.\n", request.action, status.Current); err != nil {
+			return fmt.Errorf("write migration confirmation: %w", err)
+		}
 		return nil
 	}
 	if _, err := fmt.Fprintf(stdout, "current=%d target=%d compatibility_floor=%d known=%d..%d\n",

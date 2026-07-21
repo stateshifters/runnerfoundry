@@ -55,34 +55,35 @@ func TestMigrationStatusWritesMachineReadableStdout(t *testing.T) {
 	}
 }
 
-func TestMigrationUpRemainsSilent(t *testing.T) {
+func TestMigrationUpPrintsCompletion(t *testing.T) {
 	var captured migrationRequest
 	runMigration := func(_ context.Context, request migrationRequest) (migrationStatus, error) {
 		captured = request
-		return migrationStatus{}, nil
+		return migrationStatus{Current: 2}, nil
 	}
 	var stdout bytes.Buffer
 	if err := executeCommand(t.Context(), []string{"migrate", "up", "--config", "config.yaml"}, nil,
 		&stdout, io.Discard, nil, runMigration); err != nil {
 		t.Fatal(err)
 	}
-	if captured.action != migrationUpAction || stdout.Len() != 0 {
+	if captured.action != migrationUpAction || stdout.String() != "Migration up completed at version 2.\n" {
 		t.Fatalf("migration request = %#v, stdout = %q", captured, stdout.String())
 	}
 }
 
-func TestMigrationDownPassesTargetAndRemainsSilent(t *testing.T) {
+func TestMigrationDownPrintsCompletion(t *testing.T) {
 	var captured migrationRequest
 	runMigration := func(_ context.Context, request migrationRequest) (migrationStatus, error) {
 		captured = request
-		return migrationStatus{}, nil
+		return migrationStatus{Current: 1}, nil
 	}
 	var stdout bytes.Buffer
 	if err := executeCommand(t.Context(), []string{"migrate", "down", "--to", "1", "--config", "config.yaml"}, nil,
 		&stdout, io.Discard, nil, runMigration); err != nil {
 		t.Fatal(err)
 	}
-	if captured.action != migrationDownAction || captured.target != 1 || stdout.Len() != 0 {
+	if captured.action != migrationDownAction || captured.target != 1 ||
+		stdout.String() != "Migration down completed at version 1.\n" {
 		t.Fatalf("migration request = %#v, stdout = %q", captured, stdout.String())
 	}
 }
@@ -105,6 +106,17 @@ func TestMigrationStatusReportsOutputFailure(t *testing.T) {
 	if err := executeCommand(t.Context(), []string{"migrate", "status", "--config", "config.yaml"}, nil,
 		failingWriter{}, io.Discard, nil, runMigration); err == nil {
 		t.Fatal("expected status output failure")
+	}
+}
+
+func TestMigrationCompletionReportsOutputFailure(t *testing.T) {
+	runMigration := func(context.Context, migrationRequest) (migrationStatus, error) {
+		return migrationStatus{Current: 1}, nil
+	}
+	err := executeCommand(t.Context(), []string{"migrate", "up", "--config", "config.yaml"}, nil,
+		failingWriter{}, io.Discard, nil, runMigration)
+	if err == nil || !strings.Contains(err.Error(), "write migration confirmation") {
+		t.Fatalf("migration completion output error = %v", err)
 	}
 }
 

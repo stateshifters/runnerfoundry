@@ -88,6 +88,8 @@ func (daemon *clusteredDaemon) heartbeat(ctx context.Context) {
 	cancelLeaseCheck()
 	if leader != nil && !leaseAlive {
 		if daemon.clearLeadership(leader) {
+			logAction(context.WithoutCancel(ctx), daemon.logger, slog.LevelWarn, "leader_election", "lost",
+				slog.String("hostname", string(daemon.nodeID)))
 			leader.stop(context.WithoutCancel(ctx))
 		}
 		leader = nil

@@ -293,6 +293,29 @@ func TestClusterHeartbeatPreservesLiveLeaderLease(t *testing.T) {
 	}
 }
 
+func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
+	logs := &bytes.Buffer{}
+	state := &fakeClusterState{}
+	daemon := clusteredDaemon{
+		nodeID: "spock", config: clusteredConfig(t), logger: newClusterLogSnapshotLogger(logs),
+		nodes: state, providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
+		waitForLeader: fakeWaitForLeader(state),
+	}
+	lease := &fakeClusterLease{alive: false}
+	daemon.leader = newClusterLeader(&daemon, lease)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	daemon.heartbeat(ctx)
+	daemon.stopLeadershipContender(context.Background())
+
+	if daemon.currentLeader() != nil || !lease.closed {
+		t.Fatalf("leader=%#v leaseClosed=%t", daemon.currentLeader(), lease.closed)
+	}
+	assertClusterLogSnapshot(t, logs,
+		`{"level":"WARN","msg":"leader_election","action":"leader_election","phase":"lost","hostname":"spock"}`)
+}
+
 func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {
 	configured := clusteredConfig(t)
 	failure := errors.New("failed")
