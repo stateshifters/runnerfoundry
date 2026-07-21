@@ -8,15 +8,16 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
 	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
 )
 
-func newGitHubClient(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (githubScaleSetClient, error) {
+func newGitHubClient(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (githubScaleSetClient, error) {
 	client, err := upstream.NewClientWithGitHubApp(upstream.ClientWithGitHubAppConfig{
 		GitHubConfigURL: repositoryURL,
 		GitHubAppAuth: upstream.GitHubAppAuth{
 			ClientID:       strconv.FormatInt(credentials.AppID, 10),
-			InstallationID: installationID,
+			InstallationID: int64(installationID),
 			PrivateKey:     credentials.PrivateKey,
 		},
 		SystemInfo: upstream.SystemInfo{

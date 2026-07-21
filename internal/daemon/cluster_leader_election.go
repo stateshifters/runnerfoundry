@@ -16,7 +16,7 @@ func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {
 	}
 	if err != nil {
 		daemon.logger.Error("leader election failed",
-			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		return
 	}
 	if result.lease == nil {
@@ -30,7 +30,7 @@ func (daemon *clusteredDaemon) acceptLeadership(ctx context.Context, lease clust
 	daemon.leader = newClusterLeader(daemon, lease)
 	daemon.leadershipMutex.Unlock()
 	logAction(ctx, daemon.logger, slog.LevelInfo, "leader_election", "acquired",
-		slog.String("hostname", daemon.nodeID))
+		slog.String("hostname", string(daemon.nodeID)))
 }
 
 func (daemon *clusteredDaemon) currentLeader() *clusterLeader {
@@ -60,7 +60,7 @@ func (daemon *clusteredDaemon) notifyStatus(ctx context.Context, status clusterS
 	}
 	if err := notifier.Status(ctx, status); err != nil {
 		daemon.logger.Warn("notify clustered service status failed",
-			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 	}
 }
 
@@ -106,7 +106,7 @@ func (daemon *clusteredDaemon) contendForLeadership(
 			return
 		}
 		daemon.logger.Error("leader contender failed",
-			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		if !waitForLeadershipRetry(ctx, daemon.leadershipRetryDelay) {
 			return
 		}
@@ -123,7 +123,7 @@ func (daemon *clusteredDaemon) deliverLeadership(
 	case <-ctx.Done():
 		if err := lease.Close(context.WithoutCancel(ctx)); err != nil {
 			daemon.logger.Warn("close canceled leader lease failed",
-				slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+				slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		}
 	}
 }
@@ -159,7 +159,7 @@ func (daemon *clusteredDaemon) stopLeadershipContender(ctx context.Context) {
 	case result := <-results:
 		if err := result.lease.Close(context.WithoutCancel(ctx)); err != nil {
 			daemon.logger.Warn("close unclaimed leader lease failed",
-				slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+				slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		}
 	default:
 	}

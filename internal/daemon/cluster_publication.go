@@ -19,7 +19,7 @@ func (daemon *clusteredDaemon) publish(ctx context.Context, nodeHealth cluster.N
 		healthy := healthErr == nil
 		if !healthy {
 			daemon.logger.Error("scale-set provider is unhealthy",
-				slog.String("scaleSet", scaleSet.Name), slog.String("hostname", daemon.nodeID),
+				slog.String("scaleSet", scaleSet.Name), slog.String("hostname", string(daemon.nodeID)),
 				slog.String("error", healthErr.Error()))
 		}
 		contributions = append(contributions, cluster.Contribution{

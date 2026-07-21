@@ -16,7 +16,7 @@ import (
 type standaloneDaemon struct {
 	loadConfig      func(configPath string) (config.Config, error)
 	newDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
-	newGitHubClient func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error)
+	newGitHubClient func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error)
 	newLogger       func(format string, level string) *slog.Logger
 	openDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
 	notifier        serviceNotifier
@@ -38,7 +38,7 @@ func (noopNotifier) Ready(context.Context) error     { return nil }
 func (noopNotifier) Reloading(context.Context) error { return nil }
 
 type managedRepository struct {
-	InstallationID int64
+	InstallationID githubapp.InstallationID
 	Lifecycles     map[string]scaleSetLifecycle
 }
 
@@ -60,7 +60,7 @@ func newStandaloneDaemon() standaloneDaemon {
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
 		},
-		newGitHubClient: func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
 			return newGitHubClient(repositoryURL, installationID, credentials)
 		},
 		newLogger: newLogger,

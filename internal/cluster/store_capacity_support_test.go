@@ -34,7 +34,7 @@ func newCapacityTestCluster(t *testing.T) capacityTestCluster {
 	return fixture
 }
 
-func (fixture capacityTestCluster) publish(t *testing.T, nodeID string, health NodeHealth, contributions ...Contribution) {
+func (fixture capacityTestCluster) publish(t *testing.T, nodeID NodeID, health NodeHealth, contributions ...Contribution) {
 	t.Helper()
 	if err := fixture.store.Publish(fixture.ctx, nodeID, health, contributions, fixture.now); err != nil {
 		t.Fatal(err)

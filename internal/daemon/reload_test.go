@@ -46,7 +46,7 @@ func TestReloadLogsEveryLifecycleStage(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger:     func(string, string) *slog.Logger { return logger },
 		notifier:      noopNotifier{},
@@ -201,7 +201,7 @@ func successfulReloadDaemon(loadedConfig config.Config) standaloneDaemon {
 	return standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:  noopNotifier{}, drainInterval: time.Millisecond,
@@ -215,7 +215,7 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:  noopNotifier{}, drainInterval: time.Millisecond,

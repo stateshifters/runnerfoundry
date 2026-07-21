@@ -11,6 +11,13 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
+type assignmentExecutionPhase string
+
+const (
+	assignmentExecutionPhaseStart  assignmentExecutionPhase = "start"
+	assignmentExecutionPhaseRepair assignmentExecutionPhase = "repair"
+)
+
 func (daemon *clusteredDaemon) executeAssignments(ctx context.Context) {
 	starting, err := daemon.assignments.Starting(ctx, daemon.nodeID)
 	if err != nil {
@@ -18,7 +25,7 @@ func (daemon *clusteredDaemon) executeAssignments(ctx context.Context) {
 		return
 	}
 	for index := range starting {
-		if !daemon.executeClaimedAssignment(ctx, &starting[index], "repair") {
+		if !daemon.executeClaimedAssignment(ctx, &starting[index], assignmentExecutionPhaseRepair) {
 			return
 		}
 	}
@@ -38,24 +45,24 @@ func (daemon *clusteredDaemon) executeNextAssignment(ctx context.Context) bool {
 		daemon.logger.Error("claim runner assignment failed", slog.String("error", err.Error()))
 		return false
 	}
-	return daemon.executeClaimedAssignment(ctx, assignment, "start")
+	return daemon.executeClaimedAssignment(ctx, assignment, assignmentExecutionPhaseStart)
 }
 
 func (daemon *clusteredDaemon) executeClaimedAssignment(
 	ctx context.Context,
 	assignment *cluster.Assignment,
-	phase string,
+	phase assignmentExecutionPhase,
 ) bool {
 	err := daemon.executeAssignment(ctx, assignment)
 	if err == nil {
 		logAction(ctx, daemon.logger, slog.LevelInfo, "runner_assignment", "completed",
-			slog.String("phase", phase), slog.Int64("assignmentID", assignment.ID),
+			slog.String("phase", string(phase)), slog.Int64("assignmentID", int64(assignment.ID)),
 			slog.String("scaleSet", assignment.ScaleSet), slog.String("repository", assignment.Repository),
 			slog.Int64("requestID", assignment.RequestID))
 		return true
 	}
 	daemon.logger.Error("runner assignment failed",
-		slog.String("phase", phase), slog.Int64("assignmentID", assignment.ID),
+		slog.String("phase", string(phase)), slog.Int64("assignmentID", int64(assignment.ID)),
 		slog.String("scaleSet", assignment.ScaleSet), slog.String("repository", assignment.Repository),
 		slog.Int64("requestID", assignment.RequestID), slog.String("error", err.Error()))
 	return false

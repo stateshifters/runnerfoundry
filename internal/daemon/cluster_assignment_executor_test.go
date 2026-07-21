@@ -15,6 +15,15 @@ import (
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
+func TestAssignmentExecutionPhasesRetainStructuredLogValues(t *testing.T) {
+	if assignmentExecutionPhaseStart != "start" {
+		t.Fatalf("start phase = %q, want start", assignmentExecutionPhaseStart)
+	}
+	if assignmentExecutionPhaseRepair != "repair" {
+		t.Fatalf("repair phase = %q, want repair", assignmentExecutionPhaseRepair)
+	}
+}
+
 func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
 	configured := clusteredConfig(t)
 	configured.ScaleSets = append(configured.ScaleSets, config.ScaleSetConfig{
@@ -95,7 +104,9 @@ func TestClusterLeaderManagesRemoteScaleSetAndRetainsItDuringFailover(t *testing
 		messageClient: scaleSetMessageClient{Client: messageClient},
 	}
 	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) { return githubClient, nil }
+	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+		return githubClient, nil
+	}
 	daemon := clusteredDaemon{
 		config: configured, credentials: testAppCredentials(t),
 		discoverer: staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}}}},

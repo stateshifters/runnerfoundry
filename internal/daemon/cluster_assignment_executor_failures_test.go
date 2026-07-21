@@ -10,6 +10,7 @@ import (
 
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
@@ -45,7 +46,7 @@ func TestAssignmentExecutorLeavesRemovedScaleSetFailureInStarting(t *testing.T) 
 func TestAssignmentExecutorReportsGitHubClientFailure(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("failed")
 	}
 	err := daemon.executeAssignment(context.Background(), localAssignment())

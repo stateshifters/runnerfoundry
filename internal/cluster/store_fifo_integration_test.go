@@ -22,7 +22,7 @@ func TestPostgreSQLPreservesGlobalFIFOWithinHostLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	assignmentsByNode := map[string]int{}
+	assignmentsByNode := map[NodeID]int{}
 	for requestID := int64(1); requestID <= 12; requestID++ {
 		assignment, err := fixture.store.AssignOldest(fixture.ctx, "meza-ubuntu-slim", fixture.now, fixture.liveFor)
 		if err != nil {

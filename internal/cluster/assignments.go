@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/meza/github-scaler/internal/githubapp"
 )
 
 // BeginAcquisition records the GitHub identifiers before acquisition begins.
@@ -14,8 +15,8 @@ import (
 // ErrAssignmentConflict.
 func (store *Store) BeginAcquisition(
 	ctx context.Context,
-	assignmentID int64,
-	installationID int64,
+	assignmentID AssignmentID,
+	installationID githubapp.InstallationID,
 	githubScaleSetID int,
 ) error {
 	return store.transitionAssignment(ctx, assignmentID, AssignmentReserved, `
@@ -25,14 +26,14 @@ func (store *Store) BeginAcquisition(
 }
 
 // ConfirmAcquisition records that GitHub accepted the reserved request.
-func (store *Store) ConfirmAcquisition(ctx context.Context, assignmentID int64) error {
+func (store *Store) ConfirmAcquisition(ctx context.Context, assignmentID AssignmentID) error {
 	return store.transitionAssignment(ctx, assignmentID, AssignmentAcquiring, `
 		UPDATE scaler_assignments SET state = 'ready'
 		WHERE assignment_id = $1 AND state = 'acquiring'`)
 }
 
 // ClaimForStart atomically claims the oldest ready assignment owned by nodeID.
-func (store *Store) ClaimForStart(ctx context.Context, nodeID string) (assignment *Assignment, resultErr error) {
+func (store *Store) ClaimForStart(ctx context.Context, nodeID NodeID) (assignment *Assignment, resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return nil, err
@@ -76,14 +77,14 @@ func (store *Store) PendingAcquisitions(ctx context.Context) ([]Assignment, erro
 
 // Starting returns assignments owned by nodeID whose provider start must be
 // completed or repaired.
-func (store *Store) Starting(ctx context.Context, nodeID string) ([]Assignment, error) {
+func (store *Store) Starting(ctx context.Context, nodeID NodeID) ([]Assignment, error) {
 	return store.loadAssignments(ctx, "assignment.state = 'starting'", nodeID, "load starting assignments")
 }
 
 func (store *Store) loadAssignments(
 	ctx context.Context,
 	statePredicate string,
-	nodeID string,
+	nodeID NodeID,
 	operation string,
 ) (assignments []Assignment, resultErr error) {
 	connection, err := store.connector(ctx)
@@ -100,7 +101,7 @@ func (store *Store) loadAssignments(
 		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 		WHERE ` + statePredicate
 	arguments := []any{}
-	if nodeID != "" {
+	if nodeID != NodeID("") {
 		statement += " AND assignment.node_id = $1"
 		arguments = append(arguments, nodeID)
 	}
@@ -133,7 +134,7 @@ func scanAssignments(rows *databaseRows) ([]Assignment, error) {
 }
 
 // ConfirmRunning records that the owning node has observed its named runner.
-func (store *Store) ConfirmRunning(ctx context.Context, assignmentID int64, nodeID string) error {
+func (store *Store) ConfirmRunning(ctx context.Context, assignmentID AssignmentID, nodeID NodeID) error {
 	return store.transitionAssignment(ctx, assignmentID, AssignmentStarting, `
 		UPDATE scaler_assignments SET state = 'running'
 		WHERE assignment_id = $1 AND node_id = $2 AND state = 'starting'`, nodeID)
@@ -143,8 +144,8 @@ func (store *Store) ConfirmRunning(ctx context.Context, assignmentID int64, node
 // state match the caller's observation.
 func (store *Store) CompleteAssignment(
 	ctx context.Context,
-	assignmentID int64,
-	nodeID string,
+	assignmentID AssignmentID,
+	nodeID NodeID,
 	expectedState AssignmentState,
 ) error {
 	return store.transitionAssignment(ctx, assignmentID, expectedState, `
@@ -154,7 +155,7 @@ func (store *Store) CompleteAssignment(
 
 func (store *Store) transitionAssignment(
 	ctx context.Context,
-	assignmentID int64,
+	assignmentID AssignmentID,
 	expectedState AssignmentState,
 	statement string,
 	arguments ...any,

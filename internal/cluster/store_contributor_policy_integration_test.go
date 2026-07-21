@@ -15,7 +15,7 @@ func TestPostgreSQLScaleSetCapacityAndAssignmentAgreeOnContributorEligibility(t 
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	liveFor := time.Minute
 	publications := []struct {
-		nodeID        string
+		nodeID        NodeID
 		health        NodeHealth
 		publishedAt   time.Time
 		contributions []Contribution
@@ -53,7 +53,7 @@ func TestPostgreSQLScaleSetCapacityAndAssignmentAgreeOnContributorEligibility(t 
 		scaleSet          string
 		compatible        bool
 		effectiveCapacity int
-		assignedNodeID    string
+		assignedNodeID    NodeID
 	}{
 		{scaleSet: "eligible", compatible: true, effectiveCapacity: 1, assignedNodeID: "eligible-node"},
 		{scaleSet: "unhealthy-node", compatible: true},

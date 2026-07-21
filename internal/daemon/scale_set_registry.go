@@ -15,6 +15,7 @@ import (
 	upstream "github.com/actions/scaleset"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
 )
 
 const scaleSetEndpoint = "_apis/runtime/runnerscalesets"
@@ -50,10 +51,10 @@ var (
 
 func newGitHubScaleSetRegistry(
 	repositoryURL string,
-	installationID int64,
+	installationID githubapp.InstallationID,
 	credentials config.GitHubAppCredentials,
 ) (githubScaleSetRegistry, error) {
-	transport, err := ghinstallation.New(http.DefaultTransport, credentials.AppID, installationID, []byte(credentials.PrivateKey))
+	transport, err := ghinstallation.New(http.DefaultTransport, credentials.AppID, int64(installationID), []byte(credentials.PrivateKey))
 	if err != nil {
 		return githubScaleSetRegistry{}, fmt.Errorf("create installation transport: %w", err)
 	}

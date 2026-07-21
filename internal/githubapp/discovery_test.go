@@ -7,14 +7,16 @@ import (
 	"testing"
 )
 
+var _ InstallationID = Repository{}.InstallationID
+
 func TestDiscoverReturnsRepositoriesAcrossInstallationsAndIsolatesFailures(t *testing.T) {
 	discoverer := Discoverer{API: fakeDiscoveryAPI{
-		installationPages: [][]int64{{11}, {22, 33}},
-		repositoryPages: map[int64][][]string{
+		installationPages: [][]InstallationID{{11}, {22, 33}},
+		repositoryPages: map[InstallationID][][]string{
 			11: {{"https://github.com/acme/one"}, {"https://github.com/acme/two"}},
 			33: {{"https://github.com/other/three"}},
 		},
-		repositoryErrors: map[int64]error{22: errors.New("forbidden")},
+		repositoryErrors: map[InstallationID]error{22: errors.New("forbidden")},
 	}}
 	result, err := discoverer.Discover(context.Background())
 	if err != nil {
@@ -39,13 +41,13 @@ func TestDiscoverRejectsInstallationDiscoveryFailure(t *testing.T) {
 }
 
 type fakeDiscoveryAPI struct {
-	installationPages [][]int64
+	installationPages [][]InstallationID
 	installationError error
-	repositoryPages   map[int64][][]string
-	repositoryErrors  map[int64]error
+	repositoryPages   map[InstallationID][][]string
+	repositoryErrors  map[InstallationID]error
 }
 
-func (api fakeDiscoveryAPI) ListInstallations(_ context.Context, page int) ([]int64, int, error) {
+func (api fakeDiscoveryAPI) ListInstallations(_ context.Context, page int) ([]InstallationID, int, error) {
 	if api.installationError != nil {
 		return nil, 0, api.installationError
 	}
@@ -59,7 +61,7 @@ func (api fakeDiscoveryAPI) ListInstallations(_ context.Context, page int) ([]in
 	return api.installationPages[page-1], nextPage, nil
 }
 
-func (api fakeDiscoveryAPI) ListRepositories(_ context.Context, installationID int64, page int) ([]string, int, error) {
+func (api fakeDiscoveryAPI) ListRepositories(_ context.Context, installationID InstallationID, page int) ([]string, int, error) {
 	if err := api.repositoryErrors[installationID]; err != nil {
 		return nil, 0, err
 	}

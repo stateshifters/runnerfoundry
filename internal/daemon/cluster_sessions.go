@@ -32,7 +32,7 @@ type repositoryScaleSetSessionKey struct {
 
 type repositoryScaleSetSession struct {
 	key            repositoryScaleSetSessionKey
-	installationID int64
+	installationID githubapp.InstallationID
 	capacity       int
 	client         scaleSetClient
 	messageClient  scaleSetMessageClient
@@ -60,7 +60,7 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	discovery, err := configuration.discoverer.Discover(reconcileCtx)
 	if err != nil {
 		leader.daemon.logger.Error("leader repository discovery failed",
-			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 		return false
 	}
 	statusCtx, cancelStatus := context.WithTimeout(reconcileCtx, clusterCoordinationTimeout)
@@ -68,7 +68,7 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	cancelStatus()
 	if err != nil {
 		leader.daemon.logger.Error("leader scale-set aggregation failed",
-			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 		return false
 	}
 	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
@@ -82,7 +82,7 @@ func (leader *clusterLeader) reportReconciliationResult(err error) bool {
 		return true
 	}
 	leader.daemon.logger.Error("stop outdated leader sessions failed",
-		slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+		slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 	return false
 }
 
@@ -216,7 +216,7 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 	closeErr := session.messageClient.Close(ctx)
 	if closeErr != nil {
 		leader.daemon.logger.Error("close leader message session failed",
-			slog.String("hostname", leader.daemon.nodeID), slog.String("error", closeErr.Error()))
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", closeErr.Error()))
 	}
 	var deleteErr error
 	if removal == removeGitHubScaleSet {
@@ -234,14 +234,14 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 	for _, session := range leader.sessions {
 		if err := leader.stopSession(ctx, session, retainGitHubScaleSet); err != nil {
 			leader.daemon.logger.Error("stop leader session failed",
-				slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+				slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 		}
 	}
 	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
 	leader.scheduler.clear()
 	if err := leader.lease.Close(ctx); err != nil {
 		leader.daemon.logger.Warn("close leader lease failed",
-			slog.String("hostname", leader.daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 	}
 }
 

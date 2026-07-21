@@ -88,7 +88,7 @@ func TestApplyDiscoverySurfacesRemovalFailure(t *testing.T) {
 		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
 		Shutdown:      func(context.Context) error { return nil },
 	}}}
-	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}); err == nil {
+	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}); err == nil {
 		t.Fatal("expected removal failure")
 	}
 }
@@ -96,7 +96,7 @@ func TestApplyDiscoverySurfacesRemovalFailure(t *testing.T) {
 func TestStartRepositorySurfacesPruneFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	activeConfig.Config.Prune = true
-	daemonUnderTest := standaloneDaemon{newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemonUnderTest := standaloneDaemon{newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, nil
 	}}
 	if _, err := startRepository(context.Background(), daemonUnderTest, &activeConfig, githubapp.Repository{InstallationID: 1, URL: "repo"}); err == nil {

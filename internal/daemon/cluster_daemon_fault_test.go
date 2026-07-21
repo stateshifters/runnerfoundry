@@ -364,7 +364,7 @@ func TestLeaderReconciliationReportsCapacityAggregationFailure(t *testing.T) {
 func TestLeaderLeavesFailedRepositorySessionAbsent(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("failed")
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
@@ -565,7 +565,7 @@ func TestSchedulerReportsAcquisitionAndReleaseFailure(t *testing.T) {
 func TestRepositoryScaleSetSessionFailureIsReturned(t *testing.T) {
 	state := &fakeClusterState{}
 	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return &fakeScaleSetClient{runnerGroupErr: errors.New("group failed")}, nil
 	}
 	daemon := clusteredDaemon{

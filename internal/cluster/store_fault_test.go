@@ -135,7 +135,7 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 func TestPublishRejectsInvalidContributionsBeforeConnecting(t *testing.T) {
 	tests := []struct {
 		name         string
-		nodeID       string
+		nodeID       NodeID
 		contribution Contribution
 	}{
 		{name: "blank node", nodeID: " \t", contribution: Contribution{ScaleSet: "set", RunnerGroup: "group"}},
@@ -279,8 +279,8 @@ func TestAssignmentTransactionReportsEveryFailure(t *testing.T) {
 		*destination[int64](t, destinations[2]) = 2
 		*destination[time.Time](t, destinations[3]) = now
 	}}
-	contributor := fakeRow{scan: func(destinations ...any) { *destination[string](t, destinations[0]) = "node" }}
-	identifier := fakeRow{scan: func(destinations ...any) { *destination[int64](t, destinations[0]) = 3 }}
+	contributor := fakeRow{scan: func(destinations ...any) { *destination[NodeID](t, destinations[0]) = "node" }}
+	identifier := fakeRow{scan: func(destinations ...any) { *destination[AssignmentID](t, destinations[0]) = 3 }}
 	tests := []struct {
 		name        string
 		execErrors  []error

@@ -147,7 +147,7 @@ func (scheduler *clusterScheduler) acquireAssignment(
 	return scheduler.confirmAcquisition(ctx, assignment.ID)
 }
 
-func (scheduler *clusterScheduler) confirmAcquisition(ctx context.Context, assignmentID int64) error {
+func (scheduler *clusterScheduler) confirmAcquisition(ctx context.Context, assignmentID cluster.AssignmentID) error {
 	for {
 		confirmationCtx, cancelConfirmation := context.WithTimeout(ctx, clusterCoordinationTimeout)
 		err := scheduler.store.ConfirmAcquisition(confirmationCtx, assignmentID)

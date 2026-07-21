@@ -53,7 +53,7 @@ func TestDaemonReloadRetriesPersistedDemandWithReplacementWorker(t *testing.T) {
 					reloadRequests <- struct{}{}
 					return githubapp.DiscoveryResult{
 						Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-						InstallationFailures: map[int64]error{},
+						InstallationFailures: map[githubapp.InstallationID]error{},
 					}, nil
 				}), nil
 			}
@@ -64,11 +64,11 @@ func TestDaemonReloadRetriesPersistedDemandWithReplacementWorker(t *testing.T) {
 				}
 				return githubapp.DiscoveryResult{
 					Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-					InstallationFailures: map[int64]error{},
+					InstallationFailures: map[githubapp.InstallationID]error{},
 				}, nil
 			}), nil
 		},
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
@@ -140,10 +140,10 @@ func runRestartRecovery(t *testing.T, demand []scaler.JobDemand, worker scaler.R
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{
 				Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-				InstallationFailures: map[int64]error{},
+				InstallationFailures: map[githubapp.InstallationID]error{},
 			}}, nil
 		},
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },

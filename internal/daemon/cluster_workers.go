@@ -80,7 +80,7 @@ func (daemon *clusteredDaemon) waitForWorkers() {
 func (daemon *clusteredDaemon) heartbeat(ctx context.Context) {
 	if err := daemon.publish(ctx, cluster.NodeHealthy); err != nil {
 		daemon.logger.Error("cluster heartbeat failed",
-			slog.String("hostname", daemon.nodeID), slog.String("error", err.Error()))
+			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 	}
 	leader := daemon.currentLeader()
 	leaseCtx, cancelLeaseCheck := context.WithTimeout(ctx, clusterCoordinationTimeout)

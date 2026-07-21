@@ -17,7 +17,7 @@ import (
 func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.T) {
 	started := []string{}
 	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		startScaleSet: func(
@@ -35,7 +35,7 @@ func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.
 	activeConfig := testActiveConfiguration()
 	discovery := githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/one"}},
-		InstallationFailures: map[int64]error{2: errors.New("unavailable")},
+		InstallationFailures: map[githubapp.InstallationID]error{2: errors.New("unavailable")},
 	}
 	activeConfig.Repositories["https://github.com/kept/two"] = managedRepository{
 		InstallationID: 2,
@@ -54,7 +54,7 @@ func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	activeConfig.Logger = newLoggerForWriter(logs, "json", "debug")
 	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		startScaleSet: func(
@@ -70,7 +70,7 @@ func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
 	}
 	discovery := githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	}
 	if err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, discovery); err != nil {
 		t.Fatalf("expected repository reconciliation, got %v", err)
@@ -105,7 +105,7 @@ func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *tes
 
 	err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	})
 	if err != nil {
 		t.Fatalf("expected startup recovery, got %v", err)
@@ -117,7 +117,7 @@ func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *tes
 
 func recoveryDaemonForTest(worker scaler.RepositoryWorker) standaloneDaemon {
 	return standaloneDaemon{
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		startScaleSet: func(
@@ -150,7 +150,7 @@ func TestApplyDiscoveryAcquiresPersistedAvailableDemandBeforeProvisioning(t *tes
 
 	err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	})
 	if err != nil {
 		t.Fatalf("expected startup recovery, got %v", err)
@@ -175,7 +175,7 @@ func TestApplyDiscoveryReprovisionsProviderVisiblePromiseThatDisappearsBeforeJob
 
 	err := applyDiscovery(context.Background(), recoveryDaemonForTest(worker), &activeConfig, githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	})
 	if err != nil {
 		t.Fatalf("expected provider-visible recovery, got %v", err)
@@ -205,7 +205,7 @@ func TestApplyDiscoveryResumesAvailableRepositoriesAndRetainsUnavailableDemand(t
 	activeConfig.Config.ScaleSets[0].MaxRunners = 2
 	activeConfig.Coordinators["linux"] = coordinator
 	daemonUnderTest := recoveryDaemonForTest(healthyWorker)
-	daemonUnderTest.newGitHubClient = func(repositoryURL string, _ int64, _ config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemonUnderTest.newGitHubClient = func(repositoryURL string, _ githubapp.InstallationID, _ config.GitHubAppCredentials) (scaleSetClient, error) {
 		if repositoryURL == unavailableRepository {
 			return nil, errors.New("unavailable")
 		}
@@ -217,7 +217,7 @@ func TestApplyDiscoveryResumesAvailableRepositoriesAndRetainsUnavailableDemand(t
 			{InstallationID: 1, URL: unavailableRepository},
 			{InstallationID: 2, URL: healthyRepository},
 		},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	})
 	if err == nil {
 		t.Fatal("expected unavailable repository startup failure")
@@ -249,7 +249,7 @@ func TestReconcileDiscoveryRetriesPersistedDemandAfterRecoveryFailure(t *testing
 	activeConfig.Coordinators["linux"] = coordinator
 	activeConfig.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: repositoryURL}},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	}}
 	daemonUnderTest := recoveryDaemonForTest(worker)
 
@@ -282,7 +282,7 @@ func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 			Shutdown:      func(context.Context) error { shutdown = true; return nil },
 		}},
 	}
-	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}); err != nil {
+	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}); err != nil {
 		t.Fatalf("expected removal, got %v", err)
 	}
 	if !stopped || !destroyed || !shutdown || len(activeConfig.Repositories) != 0 {
@@ -299,7 +299,7 @@ func TestApplyDiscoveryIsolatesRepositoryStartupFailureAndLogsItsIdentity(t *tes
 	activeConfig := testActiveConfiguration()
 	activeConfig.Logger = slog.New(slog.NewTextHandler(logs, nil))
 	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(repositoryURL string, _ int64, _ config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(repositoryURL string, _ githubapp.InstallationID, _ config.GitHubAppCredentials) (scaleSetClient, error) {
 			if repositoryURL == "https://github.com/acme/failing" {
 				return nil, errors.New("client failed")
 			}
@@ -314,7 +314,7 @@ func TestApplyDiscoveryIsolatesRepositoryStartupFailureAndLogsItsIdentity(t *tes
 			{InstallationID: 1, URL: "https://github.com/acme/failing"},
 			{InstallationID: 2, URL: "https://github.com/acme/healthy"},
 		},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	})
 	if err == nil {
 		t.Fatal("expected repository startup failure")
@@ -337,7 +337,7 @@ func TestStartRepositoryRollsBackEarlierScaleSetsWhenLaterStartupFails(t *testin
 	activeConfig.Coordinators["windows"] = scaler.NewCoordinator(1)
 	startCalls := 0
 	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		startScaleSet: func(
@@ -377,7 +377,7 @@ func TestApplyDiscoveryRejectsLocalScaleSetNameCollision(t *testing.T) {
 			{InstallationID: 1, URL: "https://github.com/acme/repo.a"},
 			{InstallationID: 1, URL: "https://github.com/acme/repo-a"},
 		},
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	}
 	if err := applyDiscovery(context.Background(), standaloneDaemon{}, &activeConfig, discovery); err == nil {
 		t.Fatal("expected local name collision")

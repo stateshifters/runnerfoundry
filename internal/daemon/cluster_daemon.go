@@ -32,7 +32,7 @@ const (
 )
 
 type clusteredDaemon struct {
-	nodeID               string
+	nodeID               cluster.NodeID
 	config               config.Config
 	credentials          config.GitHubAppCredentials
 	discoverer           repositoryDiscoverer
@@ -42,7 +42,7 @@ type clusteredDaemon struct {
 	openStore            clusterStateOpener
 	loadConfig           func(string) (config.Config, error)
 	newDiscoverer        func(config.GitHubAppCredentials) (repositoryDiscoverer, error)
-	newGitHubClient      func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error)
+	newGitHubClient      func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error)
 	providerHealthy      func(context.Context, config.ScaleSetConfig) error
 	buildReconciler      func(context.Context, string, config.ScaleSetConfig, scaleSetClient, int) (scaler.Reconciler, error)
 	notifier             serviceNotifier
@@ -70,7 +70,7 @@ type clusterMigrationState interface {
 }
 
 type clusterNodeState interface {
-	Publish(ctx context.Context, nodeID string, health cluster.NodeHealth, contributions []cluster.Contribution, now time.Time) error
+	Publish(ctx context.Context, nodeID cluster.NodeID, health cluster.NodeHealth, contributions []cluster.Contribution, now time.Time) error
 	ScaleSets(ctx context.Context, now time.Time, liveFor time.Duration) ([]cluster.ScaleSetStatus, error)
 }
 
@@ -81,18 +81,18 @@ type clusterDemandState interface {
 
 type clusterSchedulingState interface {
 	AssignOldest(ctx context.Context, scaleSet string, now time.Time, liveFor time.Duration) (*cluster.Assignment, error)
-	BeginAcquisition(ctx context.Context, assignmentID int64, installationID int64, githubScaleSetID int) error
-	ConfirmAcquisition(ctx context.Context, assignmentID int64) error
+	BeginAcquisition(ctx context.Context, assignmentID cluster.AssignmentID, installationID githubapp.InstallationID, githubScaleSetID int) error
+	ConfirmAcquisition(ctx context.Context, assignmentID cluster.AssignmentID) error
 	PendingAcquisitions(ctx context.Context) ([]cluster.Assignment, error)
-	CompleteAssignment(ctx context.Context, assignmentID int64, nodeID string, expectedState cluster.AssignmentState) error
+	CompleteAssignment(ctx context.Context, assignmentID cluster.AssignmentID, nodeID cluster.NodeID, expectedState cluster.AssignmentState) error
 }
 
 type clusterAssignmentState interface {
 	clusterDemandState
 	clusterSchedulingState
-	ClaimForStart(ctx context.Context, nodeID string) (*cluster.Assignment, error)
-	Starting(ctx context.Context, nodeID string) ([]cluster.Assignment, error)
-	ConfirmRunning(ctx context.Context, assignmentID int64, nodeID string) error
+	ClaimForStart(ctx context.Context, nodeID cluster.NodeID) (*cluster.Assignment, error)
+	Starting(ctx context.Context, nodeID cluster.NodeID) ([]cluster.Assignment, error)
+	ConfirmRunning(ctx context.Context, assignmentID cluster.AssignmentID, nodeID cluster.NodeID) error
 }
 
 type clusterState interface {
@@ -116,7 +116,7 @@ func newClusteredDaemon() *clusteredDaemon {
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
 		},
-		newGitHubClient: func(repositoryURL string, installationID int64, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
 			return newGitHubClient(repositoryURL, installationID, credentials)
 		},
 		providerHealthy:      validateProductionScaleSetProvider,
@@ -176,7 +176,7 @@ func runClusteredDaemon(
 		return fmt.Errorf("notify ready: %w", err)
 	}
 	logAction(ctx, daemon.logger, slog.LevelInfo, "daemon", "ready",
-		slog.String("mode", "clustered"), slog.String("hostname", daemon.nodeID))
+		slog.String("mode", "clustered"), slog.String("hostname", string(daemon.nodeID)))
 	return daemon.run(ctx, options)
 }
 
@@ -231,7 +231,7 @@ func (daemon *clusteredDaemon) connectGitHub(configured config.Config) error {
 	return nil
 }
 
-func clusteredNodeID(hostname func() (string, error)) (string, error) {
+func clusteredNodeID(hostname func() (string, error)) (cluster.NodeID, error) {
 	if hostname == nil {
 		return "", errors.New("clustered host name reader is required")
 	}
@@ -243,7 +243,7 @@ func clusteredNodeID(hostname func() (string, error)) (string, error) {
 	if nodeID == "" {
 		return "", errors.New("clustered host name is empty")
 	}
-	return nodeID, nil
+	return cluster.NodeID(nodeID), nil
 }
 
 func migrateClusteredStore(ctx context.Context, logger *slog.Logger, store clusterMigrationState) error {

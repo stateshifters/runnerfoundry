@@ -146,7 +146,7 @@ func startDiscoveredRepositories(
 				slog.String("action", "repository_start"),
 				slog.String("phase", "failed"),
 				slog.String("repository", repositoryURL),
-				slog.Int64("installationID", repository.InstallationID),
+				slog.Int64("installationID", int64(repository.InstallationID)),
 				slog.String("error", err.Error()),
 			)
 			startupErr = errors.Join(startupErr, fmt.Errorf("start repository %q: %w", repositoryURL, err))
@@ -160,13 +160,18 @@ func startDiscoveredRepositories(
 	return startupErr
 }
 
-func logRepositoryReconciliationFailure(logger *slog.Logger, repositoryURL string, installationID int64, err error) {
+func logRepositoryReconciliationFailure(
+	logger *slog.Logger,
+	repositoryURL string,
+	installationID githubapp.InstallationID,
+	err error,
+) {
 	logger.Error(
 		"repository reconciliation failed",
 		slog.String("action", "repository_reconcile"),
 		slog.String("phase", "failed"),
 		slog.String("repository", repositoryURL),
-		slog.Int64("installationID", installationID),
+		slog.Int64("installationID", int64(installationID)),
 		slog.String("error", err.Error()),
 	)
 }
@@ -179,7 +184,7 @@ func startRepository(
 ) (managedRepository, error) {
 	initialAttributes := []slog.Attr{
 		slog.String("repository", repository.URL),
-		slog.Int64("installationID", repository.InstallationID),
+		slog.Int64("installationID", int64(repository.InstallationID)),
 	}
 	var managed managedRepository
 	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", initialAttributes, func() tracedOperationResult {
@@ -294,12 +299,12 @@ func removeRepositoryImmediately(
 ) (resultErr error) {
 	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_remove", "started",
 		slog.String("repository", repositoryURL),
-		slog.Int64("installationID", repository.InstallationID),
+		slog.Int64("installationID", int64(repository.InstallationID)),
 	)
 	defer func() {
 		attributes := []slog.Attr{
 			slog.String("repository", repositoryURL),
-			slog.Int64("installationID", repository.InstallationID),
+			slog.Int64("installationID", int64(repository.InstallationID)),
 		}
 		if resultErr != nil {
 			logActionFailure(ctx, activeConfig.Logger, "repository_remove", resultErr, attributes...)

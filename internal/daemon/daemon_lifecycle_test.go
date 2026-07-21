@@ -15,7 +15,7 @@ import (
 func TestRunDaemonReconcilesPeriodicDiscovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{
-		InstallationFailures: map[int64]error{},
+		InstallationFailures: map[githubapp.InstallationID]error{},
 	}, afterDiscover: func(call int) {
 		if call == 2 {
 			cancel()
@@ -41,7 +41,7 @@ func TestRunDaemonSurfacesReadyFailure(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:  failingNotifier{readyErr: errors.New("ready failed")},
@@ -76,7 +76,7 @@ func TestRunDaemonRejectsUnvalidatedDiscoveryInterval(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	}
@@ -94,7 +94,7 @@ func TestRunDaemonAppliesReloadRequest(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:  notifier, drainInterval: time.Millisecond,
@@ -114,7 +114,7 @@ func TestRunDaemonSurfacesReloadFailure(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}, nil
+			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:  failingNotifier{reloadErr: errors.New("reload failed")},

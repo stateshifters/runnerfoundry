@@ -95,7 +95,7 @@ func TestGitHubAPICreatesAndCachesInstallationClients(t *testing.T) {
 func TestGitHubAPIReportsInstallationClientAuthenticationFailure(t *testing.T) {
 	api := &githubAPI{
 		appID: 1, privateKey: []byte("invalid"), baseTransport: http.DefaultTransport,
-		installationClients: map[int64]*github.Client{},
+		installationClients: map[InstallationID]*github.Client{},
 	}
 	if _, _, err := api.ListRepositories(context.Background(), 12, 1); err == nil {
 		t.Fatal("expected installation client construction failure")

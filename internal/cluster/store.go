@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/github-scaler/internal/githubapp"
 )
 
 const leaderAdvisoryLockKey int64 = 0x6769746875627363
@@ -36,6 +37,12 @@ var (
 // AssignmentState identifies a persisted stage in an assignment's lifecycle.
 type AssignmentState string
 
+// AssignmentID identifies a persisted runner assignment.
+type AssignmentID int64
+
+// NodeID identifies a host participating in clustered coordination.
+type NodeID string
+
 const (
 	// AssignmentReserved has selected a demand and node but has not recorded a
 	// GitHub acquisition attempt.
@@ -58,7 +65,7 @@ const (
 // AssignmentTransitionError reports that an assignment no longer has the
 // state and owner required by a requested transition.
 type AssignmentTransitionError struct {
-	AssignmentID int64
+	AssignmentID AssignmentID
 	Expected     AssignmentState
 }
 
@@ -110,13 +117,13 @@ type Demand struct {
 }
 
 type Assignment struct {
-	ID               int64
-	NodeID           string
+	ID               AssignmentID
+	NodeID           NodeID
 	ScaleSet         string
 	Repository       string
 	RequestID        int64
 	QueueTime        time.Time
-	InstallationID   int64
+	InstallationID   githubapp.InstallationID
 	GitHubScaleSetID int
 	State            AssignmentState
 }

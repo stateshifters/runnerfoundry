@@ -11,6 +11,7 @@ import (
 
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
 	"github.com/meza/github-scaler/internal/scaler"
 )
 
@@ -108,7 +109,7 @@ func TestAssignmentRecoveryStopsAfterLoadOrRepairFailure(t *testing.T) {
 		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
 		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, assignments: state,
 	}
-	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("client unavailable")
 	}
 	daemon.executeAssignments(context.Background())
@@ -147,7 +148,7 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		newLogger:     func(string, string) *slog.Logger { return slog.Default() },
 		loadConfig:    loadConfig,
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		openStore: func(config.PostgreSQLStateConfig) (clusterStoreConnection, error) {
@@ -162,7 +163,7 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 }
 
 type clusterPublication struct {
-	nodeID        string
+	nodeID        cluster.NodeID
 	healthy       bool
 	contributions []cluster.Contribution
 }
@@ -183,12 +184,12 @@ type fakeClusterState struct {
 	pendingAssignments       []cluster.Assignment
 	readyAssignments         []*cluster.Assignment
 	startingAssignments      []cluster.Assignment
-	claimedNodeIDs           []string
-	begun                    []int64
-	ready                    []int64
-	retried                  []int64
-	started                  []int64
-	released                 []int64
+	claimedNodeIDs           []cluster.NodeID
+	begun                    []cluster.AssignmentID
+	ready                    []cluster.AssignmentID
+	retried                  []cluster.AssignmentID
+	started                  []cluster.AssignmentID
+	released                 []cluster.AssignmentID
 	leases                   []cluster.Lease
 	tryLeaderErr             error
 	migrateErr               error
@@ -228,7 +229,7 @@ func (state *fakeClusterState) MigrationStatus(context.Context) (cluster.Migrati
 
 func (state *fakeClusterState) Publish(
 	_ context.Context,
-	nodeID string,
+	nodeID cluster.NodeID,
 	health cluster.NodeHealth,
 	contributions []cluster.Contribution,
 	_ time.Time,
@@ -267,12 +268,17 @@ func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, 
 	return assignment, nil
 }
 
-func (state *fakeClusterState) BeginAcquisition(_ context.Context, assignmentID int64, _ int64, _ int) error {
+func (state *fakeClusterState) BeginAcquisition(
+	_ context.Context,
+	assignmentID cluster.AssignmentID,
+	_ githubapp.InstallationID,
+	_ int,
+) error {
 	state.begun = append(state.begun, assignmentID)
 	return state.readyErr
 }
 
-func (state *fakeClusterState) ConfirmAcquisition(_ context.Context, assignmentID int64) error {
+func (state *fakeClusterState) ConfirmAcquisition(_ context.Context, assignmentID cluster.AssignmentID) error {
 	state.ready = append(state.ready, assignmentID)
 	if state.confirmFailuresRemaining > 0 {
 		state.confirmFailuresRemaining--
@@ -285,12 +291,16 @@ func (state *fakeClusterState) PendingAcquisitions(context.Context) ([]cluster.A
 	return append([]cluster.Assignment(nil), state.pendingAssignments...), state.pendingErr
 }
 
-func (state *fakeClusterState) ConfirmRunning(_ context.Context, assignmentID int64, _ string) error {
+func (state *fakeClusterState) ConfirmRunning(
+	_ context.Context,
+	assignmentID cluster.AssignmentID,
+	_ cluster.NodeID,
+) error {
 	state.started = append(state.started, assignmentID)
 	return state.startedErr
 }
 
-func (state *fakeClusterState) ClaimForStart(_ context.Context, nodeID string) (*cluster.Assignment, error) {
+func (state *fakeClusterState) ClaimForStart(_ context.Context, nodeID cluster.NodeID) (*cluster.Assignment, error) {
 	state.claimedNodeIDs = append(state.claimedNodeIDs, nodeID)
 	if state.onClaimReady != nil {
 		state.onClaimReady()
@@ -306,7 +316,7 @@ func (state *fakeClusterState) ClaimForStart(_ context.Context, nodeID string) (
 	return assignment, nil
 }
 
-func (state *fakeClusterState) Starting(context.Context, string) ([]cluster.Assignment, error) {
+func (state *fakeClusterState) Starting(context.Context, cluster.NodeID) ([]cluster.Assignment, error) {
 	state.startingCalls++
 	if state.onStarting != nil {
 		state.onStarting()
@@ -321,8 +331,8 @@ func (state *fakeClusterState) CompleteDemand(_ context.Context, scaleSet string
 
 func (state *fakeClusterState) CompleteAssignment(
 	_ context.Context,
-	assignmentID int64,
-	_ string,
+	assignmentID cluster.AssignmentID,
+	_ cluster.NodeID,
 	_ cluster.AssignmentState,
 ) error {
 	state.released = append(state.released, assignmentID)

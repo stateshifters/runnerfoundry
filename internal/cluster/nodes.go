@@ -18,7 +18,7 @@ import (
 // publication rather than retrying the same invalid input as a transient error.
 func (store *Store) Publish(
 	ctx context.Context,
-	nodeID string,
+	nodeID NodeID,
 	health NodeHealth,
 	contributions []Contribution,
 	now time.Time,
@@ -50,7 +50,7 @@ func (store *Store) Publish(
 func publishInTransaction(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	nodeID string,
+	nodeID NodeID,
 	health NodeHealth,
 	contributions []Contribution,
 	now time.Time,
@@ -64,8 +64,8 @@ func publishInTransaction(
 	return removeWithdrawnDemand(ctx, transaction)
 }
 
-func validatePublication(nodeID string, contributions []Contribution) error {
-	if strings.TrimSpace(nodeID) == "" {
+func validatePublication(nodeID NodeID, contributions []Contribution) error {
+	if strings.TrimSpace(string(nodeID)) == "" {
 		return ErrInvalidPublication
 	}
 	for _, contribution := range contributions {
@@ -79,7 +79,7 @@ func validatePublication(nodeID string, contributions []Contribution) error {
 func publishNode(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	nodeID string,
+	nodeID NodeID,
 	health NodeHealth,
 	now time.Time,
 ) error {
@@ -96,7 +96,7 @@ func publishNode(
 func replaceContributions(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	nodeID string,
+	nodeID NodeID,
 	contributions []Contribution,
 ) error {
 	if _, err := transaction.Exec(ctx, `DELETE FROM scaler_contributions WHERE node_id = $1`, nodeID); err != nil {

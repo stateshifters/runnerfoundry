@@ -39,10 +39,10 @@ func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{
 				Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
-				InstallationFailures: map[int64]error{},
+				InstallationFailures: map[githubapp.InstallationID]error{},
 			}}, nil
 		},
-		newGitHubClient: func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
@@ -76,7 +76,7 @@ func TestDaemonLogsLifecycleActions(t *testing.T) {
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "debug")
 	discoverer := &recordingDiscoverer{
-		result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}},
+		result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}},
 		afterDiscover: func(int) {
 			cancel()
 		},
@@ -134,7 +134,7 @@ func TestLoadConfigurationSurfacesLocalPreflightFailures(t *testing.T) {
 
 func TestLoadConfigurationDoesNotContactGitHub(t *testing.T) {
 	valid := runnableConfig(t)
-	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[int64]error{}}}
+	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}
 	activeConfig, err := loadConfiguration("config", standaloneDaemon{
 		loadConfig:    func(string) (config.Config, error) { return valid, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },

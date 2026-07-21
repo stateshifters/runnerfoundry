@@ -19,7 +19,7 @@ func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 		entered: make(chan struct{}), exited: make(chan struct{}), contexts: make(chan context.Context, 1),
 	}
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
-	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return &fakeScaleSetClient{
 			runnerGroup: &upstream.RunnerGroup{ID: 1}, runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
 			messageClient: scaleSetMessageClient{Client: messageClient},
@@ -62,7 +62,7 @@ func TestLeadershipLossCancelsBlockedReconciliation(t *testing.T) {
 func TestLeaderDoesNotRestartExistingRepositorySession(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
+	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("must not be called")
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
