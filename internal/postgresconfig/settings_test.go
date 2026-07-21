@@ -105,7 +105,7 @@ func TestConnectionSettingsResolveEveryDSNSource(t *testing.T) {
 				t.Fatal(err)
 			}
 			if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "github_scaler" || resolved.User != "scaler" || resolved.Password != "secret" {
-				t.Fatal("unexpected resolved DSN configuration")
+				t.Fatalf("resolved DSN configuration = %#v", resolved)
 			}
 		})
 	}
@@ -144,7 +144,7 @@ func TestConnectionSettingsBuildDirectConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resolved.Host != "database" || resolved.Port != 5432 || resolved.Database != "scaler" || resolved.User != "login" || resolved.Password != "secret" {
-		t.Fatal("direct structured settings did not inherit primary values")
+		t.Fatalf("direct structured settings = %#v", resolved)
 	}
 	if resolved.RuntimeParams["role"] != "github_scaler" {
 		t.Fatalf("direct role = %q", resolved.RuntimeParams["role"])
@@ -228,7 +228,7 @@ func TestConnectionSettingsReadsFilesAtPointOfUse(t *testing.T) {
 		t.Fatal(secondErr)
 	}
 	if first.Password != "first" || second.Password != "second" {
-		t.Fatal("expected the next connection configuration to use rotated file contents")
+		t.Fatalf("file-backed connection configurations = %#v, %#v", first, second)
 	}
 }
 
@@ -243,7 +243,7 @@ func TestConnectionSettingsUsesStandardPostgreSQLEnvironmentDefaults(t *testing.
 		t.Fatal(err)
 	}
 	if resolved.Host != "environment-host" || resolved.Port != 6543 || resolved.Database != "environment-name" || resolved.User != "environment-user" || resolved.Password != "environment-password" {
-		t.Fatal("standard PostgreSQL environment defaults were not preserved")
+		t.Fatalf("standard PostgreSQL environment configuration = %#v", resolved)
 	}
 }
 
