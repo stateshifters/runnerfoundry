@@ -168,19 +168,19 @@ func TestStoreSurfacesDatabaseOperationFailures(t *testing.T) {
 	}{
 		{name: "publish begin", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error { return store.Publish(ctx, "node", NodeHealthy, nil, time.Now()) }},
 		{name: "scale sets query", connection: &fakeDatabaseConnection{queryErr: databaseErr}, operation: func(store *Store) error { _, err := store.ScaleSets(ctx, time.Now(), time.Minute); return err }},
-		{name: "enqueue", connection: &fakeDatabaseConnection{execFailure: databaseFailure("INSERT INTO scaler_demand", databaseErr)}, operation: func(store *Store) error {
+		{name: "enqueue", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error {
 			return store.Enqueue(ctx, Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
 		}},
 		{name: "assignment begin", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error {
 			_, err := store.AssignOldest(ctx, "set", time.Now(), time.Minute)
 			return err
 		}},
-		{name: "claim ready", connection: &fakeDatabaseConnection{rowFailure: databaseFailure("UPDATE scaler_assignments assignment", databaseErr)}, operation: func(store *Store) error { _, err := store.ClaimForStart(ctx, "node"); return err }},
+		{name: "claim ready", connection: &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseErr}}}, operation: func(store *Store) error { _, err := store.ClaimForStart(ctx, "node"); return err }},
 		{name: "load recovery", connection: &fakeDatabaseConnection{queryErr: databaseErr}, operation: func(store *Store) error { _, err := store.PendingAcquisitions(ctx); return err }},
 		{name: "complete demand", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error { return store.CompleteDemand(ctx, "set", "repo", 1) }},
-		{name: "assignment update", connection: &fakeDatabaseConnection{execFailure: databaseFailure("SET state = 'ready'", databaseErr)}, operation: func(store *Store) error { return store.ConfirmAcquisition(ctx, 1) }},
-		{name: "leader query", connection: &fakeDatabaseConnection{rowFailure: databaseFailure("pg_try_advisory_lock", databaseErr)}, operation: func(store *Store) error { _, err := store.TryLeader(ctx); return err }},
-		{name: "leader wait", connection: &fakeDatabaseConnection{execFailure: databaseFailure("pg_advisory_lock", databaseErr)}, operation: func(store *Store) error { _, err := store.WaitForLeader(ctx); return err }},
+		{name: "assignment update", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error { return store.ConfirmAcquisition(ctx, 1) }},
+		{name: "leader query", connection: &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseErr}}}, operation: func(store *Store) error { _, err := store.TryLeader(ctx); return err }},
+		{name: "leader wait", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error { _, err := store.WaitForLeader(ctx); return err }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -192,10 +192,32 @@ func TestStoreSurfacesDatabaseOperationFailures(t *testing.T) {
 	}
 }
 
+func TestFakeDatabaseOperationsFollowScriptedCallOrder(t *testing.T) {
+	firstErr := errors.New("first database operation failed")
+	secondErr := errors.New("second database operation failed")
+	transaction := &fakeDatabaseTransaction{
+		execErrors: []error{firstErr, secondErr},
+		rowResults: []fakeRow{
+			{err: firstErr},
+			{err: secondErr},
+		},
+	}
+	for _, expectedErr := range []error{firstErr, secondErr} {
+		if _, err := transaction.Exec(context.Background(), "unchanged statement"); !errors.Is(err, expectedErr) {
+			t.Fatalf("Exec() error = %v, want %v", err, expectedErr)
+		}
+	}
+	for _, expectedErr := range []error{firstErr, secondErr} {
+		if err := transaction.QueryRow(context.Background(), "unchanged statement").Scan(); !errors.Is(err, expectedErr) {
+			t.Fatalf("QueryRow().Scan() error = %v, want %v", err, expectedErr)
+		}
+	}
+}
+
 func TestWaitForLeaderReportsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	store := storeWithConnection(&fakeDatabaseConnection{execFailure: databaseFailure("pg_advisory_lock", errors.New("database failed"))})
+	store := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{errors.New("database failed")}})
 	if _, err := store.WaitForLeader(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait error = %v", err)
 	}
@@ -205,19 +227,19 @@ func TestPublishReportsEveryTransactionalFailure(t *testing.T) {
 	databaseErr := errors.New("database failed")
 	contribution := []Contribution{{ScaleSet: "set", RunnerGroup: "group", MaxRunners: 1, Healthy: true}}
 	tests := []struct {
-		name      string
-		failure   databaseOperationFailure
-		commitErr error
+		name       string
+		execErrors []error
+		commitErr  error
 	}{
-		{name: "node", failure: databaseFailure("INSERT INTO scaler_nodes", databaseErr)},
-		{name: "replacement", failure: databaseFailure("DELETE FROM scaler_contributions", databaseErr)},
-		{name: "contribution", failure: databaseFailure("INSERT INTO scaler_contributions", databaseErr)},
-		{name: "withdrawn demand", failure: databaseFailure("DELETE FROM scaler_demand demand", databaseErr)},
+		{name: "node", execErrors: []error{databaseErr}},
+		{name: "replacement", execErrors: []error{nil, databaseErr}},
+		{name: "contribution", execErrors: []error{nil, nil, databaseErr}},
+		{name: "withdrawn demand", execErrors: []error{nil, nil, nil, databaseErr}},
 		{name: "commit", commitErr: databaseErr},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			transaction := &fakeDatabaseTransaction{execFailure: test.failure, commitErr: test.commitErr}
+			transaction := &fakeDatabaseTransaction{execErrors: test.execErrors, commitErr: test.commitErr}
 			store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 			if err := store.Publish(context.Background(), "node", NodeHealthy, contribution, time.Now()); err == nil {
 				t.Fatal("expected publication failure")
@@ -229,17 +251,17 @@ func TestPublishReportsEveryTransactionalFailure(t *testing.T) {
 func TestCompleteDemandReportsEveryTransactionalFailure(t *testing.T) {
 	databaseErr := errors.New("database failed")
 	tests := []struct {
-		name      string
-		failure   databaseOperationFailure
-		commitErr error
+		name       string
+		execErrors []error
+		commitErr  error
 	}{
-		{name: "assignment completion", failure: databaseFailure("UPDATE scaler_assignments assignment", databaseErr)},
-		{name: "demand removal", failure: databaseFailure("DELETE FROM scaler_demand", databaseErr)},
+		{name: "assignment completion", execErrors: []error{databaseErr}},
+		{name: "demand removal", execErrors: []error{nil, databaseErr}},
 		{name: "commit", commitErr: databaseErr},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			transaction := &fakeDatabaseTransaction{execFailure: test.failure, commitErr: test.commitErr}
+			transaction := &fakeDatabaseTransaction{execErrors: test.execErrors, commitErr: test.commitErr}
 			store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 			if err := store.CompleteDemand(context.Background(), "set", "repo", 1); err == nil {
 				t.Fatal("expected demand completion failure")
@@ -261,22 +283,22 @@ func TestAssignmentTransactionReportsEveryFailure(t *testing.T) {
 	identifier := fakeRow{scan: func(destinations ...any) { *destination[int64](t, destinations[0]) = 3 }}
 	tests := []struct {
 		name        string
-		execFailure databaseOperationFailure
-		rows        map[string]fakeRow
+		execErrors  []error
+		rowResults  []fakeRow
 		commitErr   error
 		expectedErr error
 	}{
-		{name: "release unavailable", execFailure: databaseFailure("UPDATE scaler_assignments assignment", databaseErr)},
-		{name: "oldest absent", rows: map[string]fakeRow{"SELECT demand_id": {err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
-		{name: "oldest query", rows: map[string]fakeRow{"SELECT demand_id": {err: databaseErr}}},
-		{name: "contributor absent", rows: map[string]fakeRow{"SELECT demand_id": oldest, "SELECT contribution.node_id": {err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
-		{name: "contributor query", rows: map[string]fakeRow{"SELECT demand_id": oldest, "SELECT contribution.node_id": {err: databaseErr}}},
-		{name: "assignment insert", rows: map[string]fakeRow{"SELECT demand_id": oldest, "SELECT contribution.node_id": contributor, "INSERT INTO scaler_assignments": {err: databaseErr}}},
-		{name: "commit", rows: map[string]fakeRow{"SELECT demand_id": oldest, "SELECT contribution.node_id": contributor, "INSERT INTO scaler_assignments": identifier}, commitErr: databaseErr},
+		{name: "release unavailable", execErrors: []error{databaseErr}},
+		{name: "oldest absent", rowResults: []fakeRow{{err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
+		{name: "oldest query", rowResults: []fakeRow{{err: databaseErr}}},
+		{name: "contributor absent", rowResults: []fakeRow{oldest, {err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
+		{name: "contributor query", rowResults: []fakeRow{oldest, {err: databaseErr}}},
+		{name: "assignment insert", rowResults: []fakeRow{oldest, contributor, {err: databaseErr}}},
+		{name: "commit", rowResults: []fakeRow{oldest, contributor, identifier}, commitErr: databaseErr},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			transaction := &fakeDatabaseTransaction{execFailure: test.execFailure, rows: test.rows, commitErr: test.commitErr}
+			transaction := &fakeDatabaseTransaction{execErrors: test.execErrors, rowResults: test.rowResults, commitErr: test.commitErr}
 			store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 			_, err := store.AssignOldest(context.Background(), "set", now, time.Minute)
 			if test.expectedErr != nil && !errors.Is(err, test.expectedErr) {
@@ -300,8 +322,8 @@ func TestScaleSetStatusReportsRowFailures(t *testing.T) {
 }
 
 func TestTryLeaderReportsAContendedLease(t *testing.T) {
-	store := storeWithConnection(&fakeDatabaseConnection{rows: map[string]fakeRow{
-		"pg_try_advisory_lock": {scan: func(destinations ...any) {
+	store := storeWithConnection(&fakeDatabaseConnection{rowResults: []fakeRow{
+		{scan: func(destinations ...any) {
 			*destination[bool](t, destinations[0]) = false
 		}},
 	}})
@@ -311,7 +333,7 @@ func TestTryLeaderReportsAContendedLease(t *testing.T) {
 }
 
 func TestClaimForStartReportsAnEmptyReadyQueue(t *testing.T) {
-	store := storeWithConnection(&fakeDatabaseConnection{rows: map[string]fakeRow{"UPDATE scaler_assignments assignment": {err: pgx.ErrNoRows}}})
+	store := storeWithConnection(&fakeDatabaseConnection{rowResults: []fakeRow{{err: pgx.ErrNoRows}}})
 	if _, err := store.ClaimForStart(context.Background(), "node"); !errors.Is(err, ErrNoReadyAssignment) {
 		t.Fatalf("empty ready queue result = %v", err)
 	}
@@ -352,7 +374,7 @@ func TestStoreJoinsTransactionRollbackFailure(t *testing.T) {
 	operationErr := errors.New("publish failed")
 	rollbackErr := errors.New("rollback failed")
 	transaction := &fakeDatabaseTransaction{
-		execFailure: databaseFailure("INSERT INTO scaler_nodes", operationErr),
+		execErrors:  []error{operationErr},
 		rollbackErr: rollbackErr,
 	}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
@@ -435,12 +457,11 @@ func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnecti
 type fakeDatabaseConnection struct {
 	transaction *fakeDatabaseTransaction
 	beginErr    error
-	execFailure databaseOperationFailure
+	execErrors  []error
 	execTag     pgconn.CommandTag
 	queryErr    error
 	rowsResult  rowIterator
-	rowFailure  databaseOperationFailure
-	rows        map[string]fakeRow
+	rowResults  []fakeRow
 	closeErr    error
 	pingErr     error
 	closed      bool
@@ -461,9 +482,9 @@ func (connection *fakeDatabaseConnection) Close(context.Context) error {
 	return connection.closeErr
 }
 
-func (connection *fakeDatabaseConnection) Exec(_ context.Context, statement string, _ ...any) (pgconn.CommandTag, error) {
-	if connection.execFailure.matches(statement) {
-		return pgconn.CommandTag{}, connection.execFailure.err
+func (connection *fakeDatabaseConnection) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	if err := nextScriptedError(&connection.execErrors); err != nil {
+		return pgconn.CommandTag{}, err
 	}
 	if connection.execTag.String() != "" {
 		return connection.execTag, nil
@@ -485,21 +506,13 @@ func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any)
 	return newDatabaseRows(connection.rowsResult), nil
 }
 
-func (connection *fakeDatabaseConnection) QueryRow(_ context.Context, statement string, _ ...any) databaseRow {
-	if connection.rowFailure.matches(statement) {
-		return databaseRow{scanner: fakeRow{err: connection.rowFailure.err}}
-	}
-	for statementContains, row := range connection.rows {
-		if strings.Contains(statement, statementContains) {
-			return databaseRow{scanner: row}
-		}
-	}
-	return databaseRow{scanner: fakeRow{err: pgx.ErrNoRows}}
+func (connection *fakeDatabaseConnection) QueryRow(context.Context, string, ...any) databaseRow {
+	return databaseRow{scanner: nextScriptedRow(&connection.rowResults)}
 }
 
 type fakeDatabaseTransaction struct {
-	execFailure   databaseOperationFailure
-	rows          map[string]fakeRow
+	execErrors    []error
+	rowResults    []fakeRow
 	commitErr     error
 	rollbackErr   error
 	rollbackCalls int
@@ -518,20 +531,15 @@ func (transaction *fakeDatabaseTransaction) Commit(context.Context) error {
 	return transaction.commitErr
 }
 
-func (transaction *fakeDatabaseTransaction) Exec(_ context.Context, statement string, _ ...any) (pgconn.CommandTag, error) {
-	if transaction.execFailure.matches(statement) {
-		return pgconn.CommandTag{}, transaction.execFailure.err
+func (transaction *fakeDatabaseTransaction) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	if err := nextScriptedError(&transaction.execErrors); err != nil {
+		return pgconn.CommandTag{}, err
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
-func (transaction *fakeDatabaseTransaction) QueryRow(_ context.Context, statement string, _ ...any) databaseRow {
-	for statementContains, row := range transaction.rows {
-		if strings.Contains(statement, statementContains) {
-			return databaseRow{scanner: row}
-		}
-	}
-	return databaseRow{scanner: fakeRow{err: pgx.ErrNoRows}}
+func (transaction *fakeDatabaseTransaction) QueryRow(context.Context, string, ...any) databaseRow {
+	return databaseRow{scanner: nextScriptedRow(&transaction.rowResults)}
 }
 
 func (transaction *fakeDatabaseTransaction) Rollback(context.Context) error {
@@ -574,17 +582,22 @@ func (rows *fakeDatabaseRows) Next() bool {
 
 func (rows *fakeDatabaseRows) Scan(...any) error { return rows.scanErr }
 
-type databaseOperationFailure struct {
-	statementContains string
-	err               error
+func nextScriptedError(scriptedErrors *[]error) error {
+	if len(*scriptedErrors) == 0 {
+		return nil
+	}
+	err := (*scriptedErrors)[0]
+	*scriptedErrors = (*scriptedErrors)[1:]
+	return err
 }
 
-func databaseFailure(statementContains string, err error) databaseOperationFailure {
-	return databaseOperationFailure{statementContains: statementContains, err: err}
-}
-
-func (failure databaseOperationFailure) matches(statement string) bool {
-	return failure.err != nil && strings.Contains(statement, failure.statementContains)
+func nextScriptedRow(scriptedRows *[]fakeRow) fakeRow {
+	if len(*scriptedRows) == 0 {
+		return fakeRow{err: pgx.ErrNoRows}
+	}
+	row := (*scriptedRows)[0]
+	*scriptedRows = (*scriptedRows)[1:]
+	return row
 }
 
 func destination[valueType any](t *testing.T, destinationValue any) *valueType {
