@@ -21,29 +21,21 @@ func coordinators(scaleSets []config.ScaleSetConfig, store scaler.DemandStore) m
 }
 
 func reconcileDiscovery(ctx context.Context, daemon standaloneDaemon, activeConfig *activeConfiguration) {
-	startedAt := time.Now()
-	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "discovery", "started")
-	discovery, err := activeConfig.Discoverer.Discover(ctx)
-	if err != nil {
-		activeConfig.ReconciliationPending = true
-		logActionFailure(ctx, activeConfig.Logger, "discovery", err, slog.Duration("duration", time.Since(startedAt)))
-		return
-	}
-	if err := applyDiscovery(ctx, daemon, activeConfig, discovery); err != nil {
-		activeConfig.ReconciliationPending = true
-		logActionFailure(ctx, activeConfig.Logger, "discovery", err,
+	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelInfo, "discovery", nil, func() tracedOperationResult {
+		discovery, discoveryErr := activeConfig.Discoverer.Discover(ctx)
+		if discoveryErr != nil {
+			return tracedOperationResult{terminalAttributes: nil, err: discoveryErr}
+		}
+		resultAttributes := []slog.Attr{
 			slog.Int("repositoryCount", len(discovery.Repositories)),
 			slog.Int("installationFailureCount", len(discovery.InstallationFailures)),
-			slog.Duration("duration", time.Since(startedAt)),
-		)
-		return
-	}
-	activeConfig.ReconciliationPending = false
-	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "discovery", "completed",
-		slog.Int("repositoryCount", len(discovery.Repositories)),
-		slog.Int("installationFailureCount", len(discovery.InstallationFailures)),
-		slog.Duration("duration", time.Since(startedAt)),
-	)
+		}
+		return tracedOperationResult{
+			terminalAttributes: resultAttributes,
+			err:                applyDiscovery(ctx, daemon, activeConfig, discovery),
+		}
+	})
+	activeConfig.ReconciliationPending = err != nil
 }
 
 func nextReconciliationDelay(activeConfig activeConfiguration, discoveryInterval time.Duration, retryDelay time.Duration) time.Duration {
@@ -75,34 +67,25 @@ func applyDiscovery(
 }
 
 func schedulePersistedDemand(ctx context.Context, activeConfig *activeConfiguration) error {
-	startedAt := time.Now()
-	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_recovery", "started")
-	var recoveryErr error
-	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
-		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "started",
-			slog.String("scaleSet", scaleSetConfig.Name),
-		)
-		if err := activeConfig.Coordinators[scaleSetConfig.Name].Schedule(ctx); err != nil {
-			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover scale set %q demand: %w", scaleSetConfig.Name, err))
-			logActionFailure(ctx, activeConfig.Logger, "demand_schedule", err,
+	return runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "demand_recovery", nil, func() tracedOperationResult {
+		var recoveryErr error
+		for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "started",
 				slog.String("scaleSet", scaleSetConfig.Name),
 			)
-			continue
+			if err := activeConfig.Coordinators[scaleSetConfig.Name].Schedule(ctx); err != nil {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recover scale set %q demand: %w", scaleSetConfig.Name, err))
+				logActionFailure(ctx, activeConfig.Logger, "demand_schedule", err,
+					slog.String("scaleSet", scaleSetConfig.Name),
+				)
+				continue
+			}
+			logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "completed",
+				slog.String("scaleSet", scaleSetConfig.Name),
+			)
 		}
-		logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_schedule", "completed",
-			slog.String("scaleSet", scaleSetConfig.Name),
-		)
-	}
-	if recoveryErr != nil {
-		logActionFailure(ctx, activeConfig.Logger, "demand_recovery", recoveryErr,
-			slog.Duration("duration", time.Since(startedAt)),
-		)
-		return recoveryErr
-	}
-	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "demand_recovery", "completed",
-		slog.Duration("duration", time.Since(startedAt)),
-	)
-	return nil
+		return tracedOperationResult{terminalAttributes: nil, err: recoveryErr}
+	})
 }
 
 func desiredRepositories(
@@ -193,45 +176,33 @@ func startRepository(
 	daemon standaloneDaemon,
 	activeConfig *activeConfiguration,
 	repository githubapp.Repository,
-) (managed managedRepository, resultErr error) {
-	startedAt := time.Now()
-	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", "started",
+) (managedRepository, error) {
+	initialAttributes := []slog.Attr{
 		slog.String("repository", repository.URL),
 		slog.Int64("installationID", repository.InstallationID),
-	)
-	defer func() { logRepositoryStartupResult(ctx, activeConfig.Logger, repository, startedAt, resultErr) }()
-	client, err := daemon.newGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
-	if err != nil {
-		return managedRepository{}, fmt.Errorf("create GitHub client for %q: %w", repository.URL, err)
 	}
-	if err := pruneRepositoryWhenEnabled(ctx, activeConfig, client, repository.URL); err != nil {
+	var managed managedRepository
+	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", initialAttributes, func() tracedOperationResult {
+		client, clientErr := daemon.newGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
+		if clientErr != nil {
+			return tracedOperationResult{
+				terminalAttributes: nil,
+				err:                fmt.Errorf("create GitHub client for %q: %w", repository.URL, clientErr),
+			}
+		}
+		if pruneErr := pruneRepositoryWhenEnabled(ctx, activeConfig, client, repository.URL); pruneErr != nil {
+			return tracedOperationResult{terminalAttributes: nil, err: pruneErr}
+		}
+		managed = managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
+		return tracedOperationResult{
+			terminalAttributes: nil,
+			err:                startRepositoryScaleSets(ctx, daemon, activeConfig, repository.URL, &managed, client),
+		}
+	})
+	if err != nil {
 		return managedRepository{}, err
 	}
-	managed = managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
-	resultErr = startRepositoryScaleSets(ctx, daemon, activeConfig, repository.URL, &managed, client)
-	if resultErr != nil {
-		return managedRepository{}, resultErr
-	}
 	return managed, nil
-}
-
-func logRepositoryStartupResult(
-	ctx context.Context,
-	logger *slog.Logger,
-	repository githubapp.Repository,
-	startedAt time.Time,
-	resultErr error,
-) {
-	attributes := []slog.Attr{
-		slog.String("repository", repository.URL),
-		slog.Int64("installationID", repository.InstallationID),
-		slog.Duration("duration", time.Since(startedAt)),
-	}
-	if resultErr != nil {
-		logActionFailure(ctx, logger, "repository_start", resultErr, attributes...)
-		return
-	}
-	logAction(ctx, logger, slog.LevelDebug, "repository_start", "completed", attributes...)
 }
 
 func startRepositoryScaleSets(
@@ -264,19 +235,23 @@ func startRepositoryScaleSet(
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 ) (scaleSetLifecycle, error) {
-	startedAt := time.Now()
-	attributes := make([]slog.Attr, 0, 3)
-	attributes = append(attributes, slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
-	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", "started", attributes...)
-	lifecycle, err := daemon.startScaleSet(
-		ctx, activeConfig.Logger, client, repositoryURL, scaleSetConfig, activeConfig.Coordinators[scaleSetConfig.Name],
-	)
-	attributes = append(attributes, slog.Duration("duration", time.Since(startedAt)))
+	initialAttributes := []slog.Attr{
+		slog.String("repository", repositoryURL),
+		slog.String("scaleSet", scaleSetConfig.Name),
+	}
+	var lifecycle scaleSetLifecycle
+	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", initialAttributes, func() tracedOperationResult {
+		startedLifecycle, startErr := daemon.startScaleSet(
+			ctx, activeConfig.Logger, client, repositoryURL, scaleSetConfig, activeConfig.Coordinators[scaleSetConfig.Name],
+		)
+		if startErr == nil {
+			lifecycle = startedLifecycle
+		}
+		return tracedOperationResult{terminalAttributes: nil, err: startErr}
+	})
 	if err != nil {
-		logActionFailure(ctx, activeConfig.Logger, "scale_set_start", err, attributes...)
 		return scaleSetLifecycle{}, err
 	}
-	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", "completed", attributes...)
 	return lifecycle, nil
 }
 
