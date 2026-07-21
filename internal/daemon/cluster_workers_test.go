@@ -16,11 +16,12 @@ import (
 
 func TestReconciliationRequestsCoalesce(t *testing.T) {
 	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}}}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
 		config: clusteredConfig(t), credentials: testAppCredentials(t), discoverer: staticDiscoverer{},
-		logger: slog.Default(), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier, nodes: state, assignments: state,
+		logger: slog.Default(), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, nodes: state, assignments: state,
 	}
 	daemon.leader = newClusterLeader(&daemon, &fakeClusterLease{alive: true})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,11 +101,12 @@ func TestAssignmentRecoveryStopsAfterLoadOrRepairFailure(t *testing.T) {
 	state = &fakeClusterState{startingAssignments: []cluster.Assignment{{
 		ID: 1, NodeID: "spock", ScaleSet: "linux", Repository: "repo",
 	}}}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon = clusteredDaemon{
 		nodeID: "spock", config: clusteredConfig(t), credentials: testAppCredentials(t),
-		logger: slog.Default(), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier, assignments: state,
+		logger: slog.Default(), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, assignments: state,
 	}
 	daemon.newGitHubClient = func(string, int64, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("client unavailable")

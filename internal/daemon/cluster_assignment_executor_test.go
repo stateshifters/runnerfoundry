@@ -22,13 +22,14 @@ func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
 		Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 	})
 	state := &fakeClusterState{}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
 		nodeID: "spock",
 		config: configured, logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-		loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
 	}
 	daemon.providerHealthy = func(_ context.Context, scaleSet config.ScaleSetConfig) error {
 		if scaleSet.Name == "unhealthy" {
@@ -129,12 +130,13 @@ func TestClusterLeaderRejectsConflictsAndDeletesFinalWithdrawal(t *testing.T) {
 	configured := clusteredConfig(t)
 	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}}}
 	logs := &bytes.Buffer{}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
 		config: configured, credentials: testAppCredentials(t),
 		discoverer: staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}}}},
-		logger:     slog.New(slog.NewTextHandler(logs, nil)), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		logger:     slog.New(slog.NewTextHandler(logs, nil)), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
 		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})

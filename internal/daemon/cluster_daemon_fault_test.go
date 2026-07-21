@@ -122,11 +122,12 @@ func TestClusterEventLoopDispatchesIndependentWorkers(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			state := &fakeClusterState{}
+			daemonFixture := clusteredDaemonForTest(state)
 			daemon := clusteredDaemon{
 				config: configured, discoverer: staticDiscoverer{}, logger: slog.Default(),
-				loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-				newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-				buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+				loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+				newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+				buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			test.configure(state, cancel)
@@ -196,10 +197,11 @@ func TestSlowProviderHealthDoesNotBlockAssignmentExecution(t *testing.T) {
 func TestBlockedReconciliationStopsWithDaemonContext(t *testing.T) {
 	reconciliationStarted := make(chan struct{})
 	state := &fakeClusterState{}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
-		config: clusteredConfig(t), logger: slog.Default(), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		config: clusteredConfig(t), logger: slog.Default(), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
 		discoverer: blockingDiscoverer{started: reconciliationStarted},
 		nodes:      state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
@@ -235,11 +237,12 @@ func (discoverer blockingDiscoverer) Discover(ctx context.Context) (githubapp.Di
 func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{publishErr: errors.New("heartbeat failed")}
+	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
 		nodeID: "spock", config: clusteredConfig(t), discoverer: staticDiscoverer{},
-		logger: newClusterLogSnapshotLogger(logs), loadConfig: clusteredDaemonForTest(state).loadConfig, newDiscoverer: clusteredDaemonForTest(state).newDiscoverer,
-		newGitHubClient: clusteredDaemonForTest(state).newGitHubClient, providerHealthy: clusteredDaemonForTest(state).providerHealthy,
-		buildReconciler: clusteredDaemonForTest(state).buildReconciler, notifier: clusteredDaemonForTest(state).notifier,
+		logger: newClusterLogSnapshotLogger(logs), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
+		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
+		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
 		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 	daemon.heartbeat(context.Background())
