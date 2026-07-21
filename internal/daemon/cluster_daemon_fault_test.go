@@ -393,9 +393,12 @@ func TestLeaderLeavesFailedRepositorySessionAbsent(t *testing.T) {
 	}
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
-	leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+	err := leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		key: {Name: "linux", RunnerGroup: "Default", Compatible: true, EffectiveCapacity: 1},
 	}, map[string]githubapp.Repository{"repo": {URL: "repo"}})
+	if err == nil {
+		t.Fatal("expected repository session start failure")
+	}
 	if _, exists := leader.sessions[key]; exists {
 		t.Fatal("failed repository session was retained")
 	}

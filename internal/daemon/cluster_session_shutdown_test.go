@@ -69,9 +69,12 @@ func TestLeaderDoesNotRestartExistingRepositorySession(t *testing.T) {
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := &repositoryScaleSetSession{key: key}
 	leader.sessions[key] = session
-	leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+	err := leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		key: {Name: "linux", EffectiveCapacity: 1},
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if leader.sessions[key] != session {
 		t.Fatal("existing session was replaced")
 	}

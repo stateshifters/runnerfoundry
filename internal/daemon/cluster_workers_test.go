@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
 	"github.com/meza/github-scaler/internal/githubapp"
@@ -67,6 +68,51 @@ func TestStoppedLeaderRejectsNewReconciliation(t *testing.T) {
 	if discoveryCalls != 0 {
 		t.Fatalf("stopped leader performed %d repository discoveries", discoveryCalls)
 	}
+}
+
+func TestRepositorySessionStartFailureRecoversLeaderOperationalStatus(t *testing.T) {
+	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{
+		Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
+	}}}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
+		InstallationID: 1, URL: "https://github.com/acme/retry",
+	}}}}
+	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
+	successfulClient := &fakeScaleSetClient{
+		runnerGroup:    &upstream.RunnerGroup{ID: 1},
+		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
+		messageClient:  scaleSetMessageClient{Client: messageClient},
+	}
+	startAttempts := 0
+	daemon.newGitHubClient = func(
+		string,
+		githubapp.InstallationID,
+		config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		startAttempts++
+		if startAttempts == 1 {
+			return nil, errors.New("session unavailable")
+		}
+		return successfulClient, nil
+	}
+	notifier := &clusterStatusSnapshotNotifier{}
+	daemon.notifier = notifier
+	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	daemon.leader = leader
+
+	daemon.reconcileLeader(context.Background())
+	daemon.reconcileLeader(context.Background())
+
+	expected := "STATUS=leader reconciling\nSTATUS=leader degraded\n" +
+		"STATUS=leader reconciling\nSTATUS=leader operational"
+	if actual := strings.Join(notifier.statuses, "\n"); actual != expected {
+		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
+	}
+	if startAttempts != 2 || len(leader.sessions) != 1 {
+		t.Fatalf("session start attempts=%d active sessions=%d, want 2 attempts and 1 session", startAttempts, len(leader.sessions))
+	}
+	leader.stop(context.Background())
 }
 
 func TestExistingAssignedRunnerIsNotStartedAgain(t *testing.T) {

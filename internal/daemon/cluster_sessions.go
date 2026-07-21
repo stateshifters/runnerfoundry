@@ -73,8 +73,8 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	}
 	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
 	stopErr := leader.stopOutdatedSessions(reconcileCtx, desired, statuses)
-	leader.startMissingSessions(reconcileCtx, desired, repositories)
-	return leader.reportReconciliationResult(stopErr)
+	startErr := leader.startMissingSessions(reconcileCtx, desired, repositories)
+	return leader.reportReconciliationResult(stopErr) && startErr == nil
 }
 
 func (leader *clusterLeader) reportReconciliationResult(err error) bool {
@@ -132,7 +132,8 @@ func (leader *clusterLeader) startMissingSessions(
 	ctx context.Context,
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 	repositories map[string]githubapp.Repository,
-) {
+) error {
+	var resultErr error
 	for key, status := range desired {
 		if _, exists := leader.sessions[key]; exists {
 			continue
@@ -141,11 +142,13 @@ func (leader *clusterLeader) startMissingSessions(
 		if startErr != nil {
 			leader.daemon.logger.Error("leader repository scale-set session failed",
 				slog.String("repository", key.repository), slog.String("scaleSet", key.scaleSet), slog.String("error", startErr.Error()))
+			resultErr = errors.Join(resultErr, startErr)
 			continue
 		}
 		leader.sessions[key] = session
 		leader.scheduler.add(session)
 	}
+	return resultErr
 }
 
 func hasClusterStatus(statuses []cluster.ScaleSetStatus, name string) bool {

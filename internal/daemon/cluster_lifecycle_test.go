@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/cluster"
 	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/github-scaler/internal/githubapp"
 )
 
 func TestRunClusteredDaemonPublishesStartupAndShutdown(t *testing.T) {
@@ -77,6 +81,67 @@ func TestClusteredLifecycleSmoke(t *testing.T) {
 	}
 	if state.publications[2].healthy {
 		t.Fatalf("shutdown did not withdraw the node: %#v", state.publications[2])
+	}
+}
+
+func TestClusteredLeaderStatusReflectsRepositorySessionStartFailure(t *testing.T) {
+	configured := clusteredConfig(t)
+	state := &fakeClusterState{
+		leases: []cluster.Lease{&fakeClusterLease{alive: true}},
+		statuses: []cluster.ScaleSetStatus{{
+			Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	daemonUnderTest := clusteredDaemonForTest(state)
+	var activeSessions []repositoryScaleSetSessionKey
+	notifier := &clusterStatusSnapshotNotifier{
+		cancel: cancel,
+		onStatus: func(status clusterServiceStatus) {
+			if status != clusterServiceStatusLeaderDegraded {
+				return
+			}
+			for key := range daemonUnderTest.currentLeader().sessions {
+				activeSessions = append(activeSessions, key)
+			}
+		},
+	}
+	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
+	successfulClient := &fakeScaleSetClient{
+		runnerGroup:    &upstream.RunnerGroup{ID: 1},
+		runnerScaleSet: &upstream.RunnerScaleSet{ID: 2},
+		messageClient:  scaleSetMessageClient{Client: messageClient},
+	}
+	discovery := githubapp.DiscoveryResult{Repositories: []githubapp.Repository{
+		{InstallationID: 1, URL: "https://github.com/acme/working"},
+		{InstallationID: 2, URL: "https://github.com/acme/failing"},
+	}}
+	daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return staticDiscoverer{result: discovery}, nil
+	}
+	daemonUnderTest.newGitHubClient = func(
+		repositoryURL string,
+		_ githubapp.InstallationID,
+		_ config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		if repositoryURL == "https://github.com/acme/failing" {
+			return nil, errors.New("session unavailable")
+		}
+		return successfulClient, nil
+	}
+	daemonUnderTest.notifier = notifier
+
+	if err := runClusteredDaemon(ctx, Options{}, daemonUnderTest, configured); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "STATUS=leader reconciling\nSTATUS=leader degraded"
+	if actual := strings.Join(notifier.statuses, "\n"); actual != expected {
+		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
+	}
+	expectedActive := []repositoryScaleSetSessionKey{{repository: "https://github.com/acme/working", scaleSet: "linux"}}
+	if !slices.Equal(activeSessions, expectedActive) {
+		t.Fatalf("active repository sessions = %#v, want %#v", activeSessions, expectedActive)
 	}
 }
 
@@ -218,6 +283,26 @@ func TestLeadershipContenderFailureLogsNodeIdentity(t *testing.T) {
 type cancelingWriter struct {
 	cancel context.CancelFunc
 	writer io.Writer
+}
+
+type clusterStatusSnapshotNotifier struct {
+	statuses []string
+	cancel   context.CancelFunc
+	onStatus func(clusterServiceStatus)
+}
+
+func (*clusterStatusSnapshotNotifier) Ready(context.Context) error     { return nil }
+func (*clusterStatusSnapshotNotifier) Reloading(context.Context) error { return nil }
+
+func (notifier *clusterStatusSnapshotNotifier) Status(_ context.Context, status clusterServiceStatus) error {
+	notifier.statuses = append(notifier.statuses, "STATUS="+string(status))
+	if notifier.onStatus != nil {
+		notifier.onStatus(status)
+	}
+	if status != clusterServiceStatusLeaderReconciling && notifier.cancel != nil {
+		notifier.cancel()
+	}
+	return nil
 }
 
 func (writer cancelingWriter) Write(contents []byte) (int, error) {
