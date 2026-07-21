@@ -1,4 +1,4 @@
-package postgresconfig
+package cluster
 
 import (
 	"errors"

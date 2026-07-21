@@ -298,7 +298,7 @@ func newPostgreSQLDatabaseConnection(connection *pgx.Conn) *databaseConnection {
 }
 
 func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection, error) {
-	config, err := store.settings.PrimaryConfig()
+	config, err := primaryConnectionConfig(store.settings)
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
 	}
@@ -310,7 +310,7 @@ func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection,
 }
 
 func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, error) {
-	config, err := store.settings.DirectConfig()
+	config, err := directConnectionConfig(store.settings)
 	if err != nil {
 		return nil, fmt.Errorf("resolve direct PostgreSQL connection: %w", err)
 	}

@@ -87,7 +87,7 @@ func postgreSQLTableExists(t *testing.T, dsn string, table string) bool {
 
 func assertPrimaryPostgreSQLSessionRole(t *testing.T, settings postgresconfig.Settings, expectedSessionUser string) {
 	t.Helper()
-	connectionConfig, err := settings.PrimaryConfig()
+	connectionConfig, err := primaryConnectionConfig(settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func assertPrimaryPostgreSQLSessionRole(t *testing.T, settings postgresconfig.Se
 
 func assertDirectPostgreSQLSessionRole(t *testing.T, settings postgresconfig.Settings, expectedSessionUser string) {
 	t.Helper()
-	connectionConfig, err := settings.DirectConfig()
+	connectionConfig, err := directConnectionConfig(settings)
 	if err != nil {
 		t.Fatal(err)
 	}
