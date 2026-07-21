@@ -4,10 +4,11 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
-	"net"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ import (
 
 var postgreSQLIntegrationDSN string
 var postgreSQLDatabaseSequence atomic.Uint64
+
+const (
+	minimumPostgreSQLTestPort     = 1024
+	postgreSQLStartAttemptLimit   = 5
+	postgreSQLTestPortOptionCount = math.MaxUint16 - minimumPostgreSQLTestPort + 1
+)
 
 func TestMain(testSuite *testing.M) {
 	dsn, database, runtimePath, err := startPostgreSQLIntegrationServer()
@@ -193,26 +200,37 @@ func postgreSQLTestDSN(t *testing.T) string {
 }
 
 func startPostgreSQLIntegrationServer() (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", nil, "", err
-	}
-	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || tcpAddress.Port < 1 || tcpAddress.Port > math.MaxUint16 {
-		_ = listener.Close()
-		return "", nil, "", fmt.Errorf("unexpected PostgreSQL test address: %v", listener.Addr())
-	}
-	port := uint32(tcpAddress.Port)
-	if err := listener.Close(); err != nil {
-		return "", nil, "", err
-	}
-	runtimePath, err := os.MkdirTemp("", "github-scaler-postgres-")
-	if err != nil {
-		return "", nil, "", err
-	}
+	return startPostgreSQLIntegrationServerWithPortCandidate(randomPostgreSQLPort)
+}
+
+func startPostgreSQLIntegrationServerWithPortCandidate(
+	nextPort func() uint32,
+) (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
 	cachePath, err := postgreSQLTestCache()
 	if err != nil {
-		_ = os.RemoveAll(runtimePath)
+		return "", nil, "", err
+	}
+	var lastStartError error
+	for range postgreSQLStartAttemptLimit {
+		dsn, database, runtimePath, startErr := startPostgreSQLIntegrationServerOnPort(nextPort(), cachePath)
+		if startErr == nil {
+			return dsn, database, runtimePath, nil
+		}
+		lastStartError = startErr
+	}
+	return "", nil, "", fmt.Errorf(
+		"start embedded PostgreSQL after %d attempts: %w",
+		postgreSQLStartAttemptLimit,
+		lastStartError,
+	)
+}
+
+func startPostgreSQLIntegrationServerOnPort(
+	port uint32,
+	cachePath string,
+) (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
+	runtimePath, err := os.MkdirTemp("", "github-scaler-postgres-")
+	if err != nil {
 		return "", nil, "", err
 	}
 	database := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
@@ -222,11 +240,17 @@ func startPostgreSQLIntegrationServer() (string, *embeddedpostgres.EmbeddedPostg
 		RuntimePath(runtimePath).
 		Logger(io.Discard))
 	if err := database.Start(); err != nil {
-		_ = os.RemoveAll(runtimePath)
+		if removeErr := os.RemoveAll(runtimePath); removeErr != nil {
+			return "", nil, "", errors.Join(err, fmt.Errorf("remove PostgreSQL runtime: %w", removeErr))
+		}
 		return "", nil, "", err
 	}
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
 	return dsn, database, runtimePath, nil
+}
+
+func randomPostgreSQLPort() uint32 {
+	return minimumPostgreSQLTestPort + rand.Uint32N(postgreSQLTestPortOptionCount)
 }
 
 func postgreSQLTestCache() (string, error) {
