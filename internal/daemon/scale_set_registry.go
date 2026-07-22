@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -35,6 +36,11 @@ type githubRegistrationToken struct {
 }
 
 type actionsServiceAdminConnection struct {
+	URL   actionsServiceURL
+	Token string
+}
+
+type actionsServiceAdminConnectionResponse struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
 }
@@ -43,11 +49,6 @@ type runnerScaleSetsResponse struct {
 	Count           int                       `json:"count"`
 	RunnerScaleSets []upstream.RunnerScaleSet `json:"value"`
 }
-
-var (
-	newHTTPRequest = http.NewRequestWithContext
-	parseURL       = url.Parse
-)
 
 func newGitHubScaleSetRegistry(
 	repositoryURL string,
@@ -84,16 +85,13 @@ func (registry githubScaleSetRegistry) runnerRegistrationToken(ctx context.Conte
 	if err != nil {
 		return "", err
 	}
-	requestURL := apiURLFromParsed(target.URL, fmt.Sprintf("/repos/%s/%s/actions/runners/registration-token", target.Owner, target.Repository))
-	request, err := newHTTPRequest(ctx, http.MethodPost, requestURL, http.NoBody)
+	responseBody, err := registry.requestRunnerRegistrationToken(ctx, target)
 	if err != nil {
-		return "", fmt.Errorf("create runner registration token request: %w", err)
+		return "", err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-
 	var registrationToken githubRegistrationToken
-	if err := registry.doJSON(request, http.StatusCreated, &registrationToken); err != nil {
-		return "", fmt.Errorf("get runner registration token: %w", err)
+	if decodeErr := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&registrationToken); decodeErr != nil {
+		return "", fmt.Errorf("get runner registration token: decode response: %w", decodeErr)
 	}
 	if registrationToken.Token == "" {
 		return "", errors.New("runner registration token response missing token")
@@ -101,30 +99,133 @@ func (registry githubScaleSetRegistry) runnerRegistrationToken(ctx context.Conte
 	return registrationToken.Token, nil
 }
 
+func (registry githubScaleSetRegistry) requestRunnerRegistrationToken(
+	ctx context.Context,
+	target repositoryTarget,
+) ([]byte, error) {
+	requestURL := apiURLValueFromParsed(target.URL,
+		fmt.Sprintf("/repos/%s/%s/actions/runners/registration-token", target.Owner, target.Repository))
+	request := (&http.Request{
+		Method: http.MethodPost,
+		URL:    requestURL,
+		Header: make(http.Header),
+		Body:   http.NoBody,
+	}).WithContext(ctx)
+	request.Header.Set("Accept", "application/vnd.github+json")
+
+	client := registry.httpClientForOrigin(requestURL)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("get runner registration token: issue request: %w", err)
+	}
+	responseBody, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("get runner registration token: unexpected status %s", response.Status)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("get runner registration token: read response: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("get runner registration token: close response body: %w", closeErr)
+	}
+	return responseBody, nil
+}
+
 func (registry githubScaleSetRegistry) actionsServiceAdminConnection(
 	ctx context.Context,
 	registrationToken string,
 ) (actionsServiceAdminConnection, error) {
-	requestURL, err := runnerRegistrationURL(registry.repositoryURL)
+	repository, err := parseRepositoryTarget(registry.repositoryURL)
 	if err != nil {
 		return actionsServiceAdminConnection{}, err
 	}
-	bodyText := fmt.Sprintf(`{"url":%s,"runner_event":"register"}`, strconv.Quote(registry.repositoryURL))
-	request, err := newHTTPRequest(ctx, http.MethodPost, requestURL, bytes.NewReader([]byte(bodyText)))
+	response, err := registry.requestActionsServiceAdminConnection(ctx, registrationToken, repository)
 	if err != nil {
-		return actionsServiceAdminConnection{}, fmt.Errorf("create actions service admin connection request: %w", err)
+		return actionsServiceAdminConnection{}, err
 	}
+	return validatedActionsServiceAdminConnection(response, repository)
+}
+
+func (registry githubScaleSetRegistry) requestActionsServiceAdminConnection(
+	ctx context.Context,
+	registrationToken string,
+	repository repositoryTarget,
+) (actionsServiceAdminConnectionResponse, error) {
+	responseBody, err := registry.executeActionsServiceAdminRequest(ctx, registrationToken, repository)
+	if err != nil {
+		return actionsServiceAdminConnectionResponse{}, err
+	}
+	var response actionsServiceAdminConnectionResponse
+	if decodeErr := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&response); decodeErr != nil {
+		return actionsServiceAdminConnectionResponse{}, fmt.Errorf("get actions service admin connection: decode response: %w", decodeErr)
+	}
+	return response, nil
+}
+
+func (registry githubScaleSetRegistry) executeActionsServiceAdminRequest(
+	ctx context.Context,
+	registrationToken string,
+	repository repositoryTarget,
+) ([]byte, error) {
+	requestURL := apiURLValueFromParsed(repository.URL, "/actions/runner-registration")
+	request := actionsServiceAdminRequest(ctx, requestURL, registry.repositoryURL, registrationToken)
+	client := registry.httpClientForOrigin(requestURL)
+	httpResponse, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("get actions service admin connection: issue request: %w", err)
+	}
+	responseBody, readErr := io.ReadAll(httpResponse.Body)
+	closeErr := httpResponse.Body.Close()
+	return validateActionsServiceAdminResponse(httpResponse, responseBody, readErr, closeErr)
+}
+
+func actionsServiceAdminRequest(
+	ctx context.Context,
+	requestURL *url.URL,
+	repositoryURL string,
+	registrationToken string,
+) *http.Request {
+	body := []byte(fmt.Sprintf(`{"url":%s,"runner_event":"register"}`, strconv.Quote(repositoryURL)))
+	request := (&http.Request{
+		Method: http.MethodPost, URL: requestURL, Header: make(http.Header),
+		Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)),
+	}).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "RemoteAuth "+registrationToken)
+	return request
+}
 
-	var adminConnection actionsServiceAdminConnection
-	if err := registry.doJSON(request, http.StatusOK, &adminConnection); err != nil {
-		return actionsServiceAdminConnection{}, fmt.Errorf("get actions service admin connection: %w", err)
+func validateActionsServiceAdminResponse(
+	httpResponse *http.Response,
+	responseBody []byte,
+	readErr error,
+	closeErr error,
+) ([]byte, error) {
+	if httpResponse.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get actions service admin connection: unexpected status %s", httpResponse.Status)
 	}
-	if adminConnection.URL == "" || adminConnection.Token == "" {
+	if readErr != nil {
+		return nil, fmt.Errorf("get actions service admin connection: read response: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("get actions service admin connection: close response body: %w", closeErr)
+	}
+	return responseBody, nil
+}
+
+func validatedActionsServiceAdminConnection(
+	response actionsServiceAdminConnectionResponse,
+	repository repositoryTarget,
+) (actionsServiceAdminConnection, error) {
+	if response.URL == "" || response.Token == "" {
 		return actionsServiceAdminConnection{}, errors.New("actions service admin connection response missing url or token")
 	}
-	return adminConnection, nil
+	serviceURL, err := parseActionsServiceURL(response.URL, repository)
+	if err != nil {
+		return actionsServiceAdminConnection{}, err
+	}
+	return actionsServiceAdminConnection{URL: serviceURL, Token: response.Token}, nil
 }
 
 func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
@@ -132,14 +233,27 @@ func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
 	adminConnection actionsServiceAdminConnection,
 	runnerGroupID int,
 ) ([]upstream.RunnerScaleSet, error) {
-	request, err := runnerScaleSetListRequest(ctx, adminConnection, runnerGroupID)
-	if err != nil {
-		return nil, err
-	}
+	request := runnerScaleSetListRequest(ctx, adminConnection, runnerGroupID)
 
+	client := registry.httpClientForOrigin(adminConnection.URL.parsed)
+	httpResponse, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("list runner scale sets: issue request: %w", err)
+	}
+	responseBody, readErr := io.ReadAll(httpResponse.Body)
+	closeErr := httpResponse.Body.Close()
+	if httpResponse.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list runner scale sets: unexpected status %s", httpResponse.Status)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("list runner scale sets: read response: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("list runner scale sets: close response body: %w", closeErr)
+	}
 	var response runnerScaleSetsResponse
-	if err := registry.doJSON(request, http.StatusOK, &response); err != nil {
-		return nil, fmt.Errorf("list runner scale sets: %w", err)
+	if decodeErr := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&response); decodeErr != nil {
+		return nil, fmt.Errorf("list runner scale sets: decode response: %w", decodeErr)
 	}
 	return response.RunnerScaleSets, nil
 }
@@ -148,49 +262,28 @@ func runnerScaleSetListRequest(
 	ctx context.Context,
 	adminConnection actionsServiceAdminConnection,
 	runnerGroupID int,
-) (*http.Request, error) {
-	requestURL, err := url.JoinPath(adminConnection.URL, scaleSetEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("build runner scale set list url: %w", err)
-	}
-	parsedURL, err := parseURL(requestURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse runner scale set list url: %w", err)
-	}
-	if httpsErr := requireHTTPSURL(parsedURL, "runner scale set list url"); httpsErr != nil {
-		return nil, httpsErr
-	}
+) *http.Request {
+	parsedURL := adminConnection.URL.parsed.JoinPath(scaleSetEndpoint)
 	query := parsedURL.Query()
 	query.Set("runnerGroupId", fmt.Sprintf("%d", runnerGroupID))
 	query.Set("api-version", "6.0-preview")
 	parsedURL.RawQuery = query.Encode()
 
-	request, err := newHTTPRequest(ctx, http.MethodGet, parsedURL.String(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("create runner scale set list request: %w", err)
-	}
+	request := (&http.Request{
+		Method: http.MethodGet,
+		URL:    parsedURL,
+		Header: make(http.Header),
+		Body:   http.NoBody,
+	}).WithContext(ctx)
 	request.Header.Set("Authorization", "Bearer "+adminConnection.Token)
 	request.Header.Set("Content-Type", "application/json")
-	return request, nil
+	return request
 }
 
-func (registry githubScaleSetRegistry) doJSON(request *http.Request, expectedStatus int, target any) (err error) {
-	response, err := registry.httpClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("issue request: %w", err)
-	}
-	defer func() {
-		if closeErr := response.Body.Close(); err == nil && closeErr != nil {
-			err = fmt.Errorf("close response body: %w", closeErr)
-		}
-	}()
-	if response.StatusCode != expectedStatus {
-		return fmt.Errorf("unexpected status %s", response.Status)
-	}
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return nil
+func (registry githubScaleSetRegistry) httpClientForOrigin(origin *url.URL) *http.Client {
+	client := *registry.httpClient
+	client.CheckRedirect = sameOriginRedirectPolicy(origin)
+	return &client
 }
 
 type repositoryTarget struct {
@@ -240,10 +333,17 @@ func requireHTTPSURL(parsedURL *url.URL, description string) error {
 	if parsedURL.Host == "" {
 		return fmt.Errorf("%s must include a host", description)
 	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("%s must not include user information", description)
+	}
 	return nil
 }
 
 func apiURLFromParsed(parsedURL *url.URL, path string) string {
+	return apiURLValueFromParsed(parsedURL, path).String()
+}
+
+func apiURLValueFromParsed(parsedURL *url.URL, path string) *url.URL {
 	apiHost := parsedURL.Host
 	apiPath := path
 	if strings.EqualFold(parsedURL.Host, "github.com") || strings.EqualFold(parsedURL.Host, "www.github.com") {
@@ -251,7 +351,7 @@ func apiURLFromParsed(parsedURL *url.URL, path string) string {
 	} else {
 		apiPath = "/api/v3" + path
 	}
-	return (&url.URL{Scheme: parsedURL.Scheme, Host: apiHost, Path: apiPath}).String()
+	return &url.URL{Scheme: parsedURL.Scheme, Host: apiHost, Path: apiPath}
 }
 
 func runnerRegistrationURL(repositoryURL string) (string, error) {

@@ -47,7 +47,7 @@ func TestDrainConfigurationReturnsCancellation(t *testing.T) {
 		Drain: func(context.Context) (int, error) { return 1, nil },
 	}}}
 	if err := drainConfiguration(ctx, activeConfig, time.Hour); err == nil {
-		t.Fatal("expected cancelled drain")
+		t.Fatal("expected canceled drain")
 	}
 }
 
@@ -149,38 +149,50 @@ func TestPruneRepositoryRejectsUnsupportedClient(t *testing.T) {
 	}
 }
 
-func TestPruneRepositorySurfacesGitHubFailures(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	successfulRunnerGroupClient := fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+func TestPruneRepositorySurfacesRunnerGroupFailure(t *testing.T) {
+	client := fakeScaleSetPruneClient{fakeRunnerGroupClient: fakeRunnerGroupClient{
+		getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
+			return nil, errors.New("group failed")
+		},
+	}}
+	assertPruneRepositoryFailure(t, client)
+}
+
+func TestPruneRepositorySurfacesScaleSetListFailure(t *testing.T) {
+	client := fakeScaleSetPruneClient{
+		fakeRunnerGroupClient: successfulPruneRunnerGroupClient(),
+		fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+			return nil, errors.New("list failed")
+		}},
+	}
+	assertPruneRepositoryFailure(t, client)
+}
+
+func TestPruneRepositorySurfacesScaleSetDeleteFailure(t *testing.T) {
+	client := fakeScaleSetPruneClient{
+		fakeRunnerGroupClient: successfulPruneRunnerGroupClient(),
+		fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+			return []upstream.RunnerScaleSet{{ID: 2, Name: "stale"}}, nil
+		}},
+		fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+			return errors.New("delete failed")
+		}},
+	}
+	assertPruneRepositoryFailure(t, client)
+}
+
+func successfulPruneRunnerGroupClient() fakeRunnerGroupClient {
+	return fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
 		return &upstream.RunnerGroup{ID: 1}, nil
 	}}
-	tests := map[string]fakeScaleSetPruneClient{
-		"runner group": {
-			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
-				return nil, errors.New("group failed")
-			}},
-		},
-		"list": {
-			fakeRunnerGroupClient: successfulRunnerGroupClient,
-			fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
-				return nil, errors.New("list failed")
-			}},
-		},
-		"delete": {
-			fakeRunnerGroupClient: successfulRunnerGroupClient,
-			fakeScaleSetListClient: fakeScaleSetListClient{listRunnerScaleSets: func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
-				return []upstream.RunnerScaleSet{{ID: 2, Name: "stale"}}, nil
-			}},
-			fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
-				return errors.New("delete failed")
-			}},
-		},
-	}
-	for testName, client := range tests {
-		t.Run(testName, func(t *testing.T) {
-			if err := pruneRepository(context.Background(), logger, client, "repo", []config.ScaleSetConfig{{Name: "linux", RunnerGroup: "default"}}); err == nil {
-				t.Fatal("expected prune failure")
-			}
-		})
+}
+
+func assertPruneRepositoryFailure(t *testing.T, client fakeScaleSetPruneClient) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := pruneRepository(context.Background(), logger, client, "repo", []config.ScaleSetConfig{{
+		Name: "linux", RunnerGroup: "default",
+	}}); err == nil {
+		t.Fatal("expected prune failure")
 	}
 }

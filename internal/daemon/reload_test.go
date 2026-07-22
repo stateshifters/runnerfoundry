@@ -36,24 +36,8 @@ func TestReloadConfigurationReportsReloadNotificationFailure(t *testing.T) {
 }
 
 func TestReloadLogsEveryLifecycleStage(t *testing.T) {
-	logs := &bytes.Buffer{}
-	logger := newLoggerForWriter(logs, "json", "debug")
-	loadedConfig := runnableConfig(t)
-	activeConfig := activeWithLifecycle(inertLifecycle())
-	activeConfig.Config.State.Path = loadedConfig.State.Path
-	activeConfig.Logger = logger
-	activeConfig.DemandStore = scaler.NewMemoryDemandStore()
-	daemonUnderTest := standaloneDaemon{
-		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
-		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
-		},
-		newLogger:     func(string, string) *slog.Logger { return logger },
-		notifier:      noopNotifier{},
-		drainInterval: time.Millisecond,
-	}
-
-	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonUnderTest, activeConfig); err != nil {
+	fixture := newReloadLoggingFixture(t)
+	if _, _, err := reloadAndReadInterval(context.Background(), "config", fixture.daemon, fixture.active); err != nil {
 		t.Fatalf("expected reload success, got %v", err)
 	}
 	for _, phase := range []string{
@@ -67,12 +51,32 @@ func TestReloadLogsEveryLifecycleStage(t *testing.T) {
 		"replacement_reconciliation_started",
 		"completed",
 	} {
-		assertStructuredAction(t, logs.Bytes(), "reload", phase)
+		assertStructuredAction(t, fixture.logs.Bytes(), "reload", phase)
 	}
 	for _, action := range []string{"polling_stop", "runner_drain", "scale_set_shutdown", "state_cleanup"} {
-		assertStructuredAction(t, logs.Bytes(), action, "started")
-		assertStructuredAction(t, logs.Bytes(), action, "completed")
+		assertStructuredAction(t, fixture.logs.Bytes(), action, "started")
+		assertStructuredAction(t, fixture.logs.Bytes(), action, "completed")
 	}
+}
+
+type reloadLoggingFixture struct {
+	logs   *bytes.Buffer
+	daemon standaloneDaemon
+	active activeConfiguration
+}
+
+func newReloadLoggingFixture(t *testing.T) reloadLoggingFixture {
+	t.Helper()
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
+	loadedConfig := runnableConfig(t)
+	active := activeWithLifecycle(inertLifecycle())
+	active.Config.State.Path = loadedConfig.State.Path
+	active.Logger = logger
+	active.DemandStore = scaler.NewMemoryDemandStore()
+	daemon := successfulReloadDaemon(loadedConfig)
+	daemon.newLogger = func(string, string) *slog.Logger { return logger }
+	return reloadLoggingFixture{logs: logs, daemon: daemon, active: active}
 }
 
 func TestReloadRejectsAChangedSQLiteStatePath(t *testing.T) {

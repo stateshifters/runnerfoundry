@@ -38,7 +38,7 @@ func TestRunScaleSetPassesRepositoryToReconciler(t *testing.T) {
 		&upstream.RunnerScaleSet{ID: 2},
 		scaleSetMessageClient{Client: messageClient},
 	)
-	_, err := runTestScaleSet(context.Background(), slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	_, err := runTestScaleSet(context.Background(), slog.Default(), client, config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 	}, scaleSets)
@@ -70,7 +70,7 @@ func TestRunScaleSetSurfacesCloseFailureAfterReconcilerFailure(t *testing.T) {
 		&upstream.RunnerScaleSet{ID: 2},
 		scaleSetMessageClient{Client: &fakeMessageClient{closeErr: errors.New("close failed")}},
 	)
-	_, err := runTestScaleSet(context.Background(), slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	_, err := runTestScaleSet(context.Background(), slog.Default(), client, config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 	}, scaleSets)
@@ -96,120 +96,105 @@ func TestStartCoordinatedScaleSetSurfacesRunnerGroupFailure(t *testing.T) {
 }
 
 func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	messageClient := newFakeMessageClient(cancel)
-	var capturedScaleSetID int
-	scaleSets := scaleSetSessionOperations{
-		RunnerHostname: func() string {
-			return "host"
-		},
-		BuildReconciler: func(
-			ctx context.Context,
-			repositoryURL string,
-			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetJITClient,
-			scaleSetID int,
-		) (scaler.Reconciler, error) {
-			capturedScaleSetID = scaleSetID
-			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-				Name:       scaleSetConfig.Name,
-				MaxRunners: scaleSetConfig.MaxRunners,
-				Provider:   &fakeScalerProvider{},
-				JITConfig:  fakeJITConfigGenerator{},
-			}}, nil
-		},
-		PollRetryDelay: time.Nanosecond,
-	}
-	deletedScaleSetIDs := []int{}
-	messageRunnerName := ""
-	client := &fakeScaleSetClient{
-		fakeScaleSetSessionClient: fakeScaleSetSessionClient{
-			fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
-				return &upstream.RunnerGroup{ID: 10}, nil
-			}},
-			fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
-				return &upstream.RunnerScaleSet{ID: 20}, nil
-			}},
-			fakeScaleSetMessageSessionClient: fakeScaleSetMessageSessionClient{messageSessionClient: func(_ context.Context, _ int, runnerName string) (scaleSetMessageClient, error) {
-				messageRunnerName = runnerName
-				return scaleSetMessageClient{Client: messageClient}, nil
-			}},
-		},
-		fakeScaleSetDeletionClient: fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
-			deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
-			return nil
-		}},
-	}
-
-	scaleSet, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
-		Name:        "linux",
-		RunnerGroup: "default",
-		MaxRunners:  2,
-	}, scaleSets)
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	scaleSet, err := runTestScaleSet(ctx, slog.Default(), fixture.client, fixture.config, fixture.operations)
 	if err != nil {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
 	if scaleSet.StopPolling == nil || scaleSet.Drain == nil || scaleSet.Shutdown == nil {
 		t.Fatalf("expected complete scale set lifecycle, got %#v", scaleSet)
 	}
-	waitForPoll(t, messageClient)
+	waitForPoll(t, fixture.messageClient)
 	scaleSet.StopPolling()
 	if err := scaleSet.Shutdown(context.Background()); err != nil {
 		t.Fatalf("expected shutdown success, got %v", err)
 	}
-	if !messageClient.closed {
+	if !fixture.messageClient.closed {
 		t.Fatal("expected message session to close")
 	}
-	if len(deletedScaleSetIDs) != 1 || deletedScaleSetIDs[0] != 20 {
-		t.Fatalf("expected scale set deletion, got %#v", deletedScaleSetIDs)
+	if len(fixture.deletedScaleSetIDs) != 1 || fixture.deletedScaleSetIDs[0] != 20 {
+		t.Fatalf("expected scale set deletion, got %#v", fixture.deletedScaleSetIDs)
 	}
-	if capturedScaleSetID != 20 {
-		t.Fatalf("expected scale set ID 20, got %d", capturedScaleSetID)
+	if fixture.capturedScaleSetID != 20 {
+		t.Fatalf("expected scale set ID 20, got %d", fixture.capturedScaleSetID)
 	}
-	if messageRunnerName != "host" {
-		t.Fatalf("expected runner hostname, got %q", messageRunnerName)
+	if fixture.messageRunnerName != "host" {
+		t.Fatalf("expected runner hostname, got %q", fixture.messageRunnerName)
 	}
 }
 
-func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
+type existingScaleSetSessionFixture struct {
+	messageClient      *fakeMessageClient
+	client             *fakeScaleSetClient
+	config             config.ScaleSetConfig
+	operations         scaleSetSessionOperations
+	capturedScaleSetID int
+	deletedScaleSetIDs []int
+	messageRunnerName  string
+}
+
+func newExistingScaleSetSessionFixture(t *testing.T) (*existingScaleSetSessionFixture, context.Context) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
+	fixture := &existingScaleSetSessionFixture{config: config.ScaleSetConfig{
+		Name: "linux", RunnerGroup: "default", MaxRunners: 2,
+	}}
+	fixture.messageClient = newFakeMessageClient(cancel)
+	fixture.operations = scaleSetSessionOperations{
+		RunnerHostname:  func() string { return "host" },
+		BuildReconciler: fixture.buildReconciler,
+		PollRetryDelay:  time.Nanosecond,
+	}
+	fixture.client = fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 10}, &upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: fixture.messageClient},
+	)
+	fixture.client.fakeScaleSetMessageSessionClient = fakeScaleSetMessageSessionClient{messageSessionClient: fixture.messageSession}
+	fixture.client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: fixture.deleteScaleSet}
+	return fixture, ctx
+}
+
+func (fixture *existingScaleSetSessionFixture) buildReconciler(
+	_ context.Context,
+	_ string,
+	scaleSetConfig config.ScaleSetConfig,
+	_ scaleSetJITClient,
+	scaleSetID int,
+) (scaler.Reconciler, error) {
+	fixture.capturedScaleSetID = scaleSetID
+	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: scaleSetConfig.Name, MaxRunners: scaleSetConfig.MaxRunners,
+		Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{},
+	}}, nil
+}
+
+func (fixture *existingScaleSetSessionFixture) messageSession(
+	_ context.Context,
+	_ int,
+	runnerName string,
+) (scaleSetMessageClient, error) {
+	fixture.messageRunnerName = runnerName
+	return scaleSetMessageClient{Client: fixture.messageClient}, nil
+}
+
+func (fixture *existingScaleSetSessionFixture) deleteScaleSet(_ context.Context, scaleSetID int) error {
+	fixture.deletedScaleSetIDs = append(fixture.deletedScaleSetIDs, scaleSetID)
+	return nil
+}
+
+func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "debug")
-	messageClient := newFakeMessageClient(cancel)
-	scaleSets := scaleSetSessionOperations{
-		RunnerHostname: func() string { return "host" },
-		BuildReconciler: func(
-			context.Context,
-			string,
-			config.ScaleSetConfig,
-			scaleSetJITClient,
-			int,
-		) (scaler.Reconciler, error) {
-			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-				Name: "local", MaxRunners: 2, Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{},
-			}}, nil
-		},
-		PollRetryDelay: time.Nanosecond,
-	}
-	client := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 10},
-		&upstream.RunnerScaleSet{ID: 20},
-		scaleSetMessageClient{Client: messageClient},
-	)
-	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
-		return nil
-	}}
 	lifecycle, err := runCoordinatedScaleSet(
-		ctx, logger, client, "https://github.com/acme/repo", config.ScaleSetConfig{
-			Name: "linux", RunnerGroup: "default", MaxRunners: 2,
-		}, scaler.NewCoordinator(2), scaleSets,
+		ctx, logger, fixture.client, "https://github.com/acme/repo", fixture.config,
+		scaler.NewCoordinator(2), fixture.operations,
 	)
 	if err != nil {
 		t.Fatalf("expected coordinated lifecycle, got %v", err)
 	}
-	waitForPoll(t, messageClient)
+	waitForPoll(t, fixture.messageClient)
 	lifecycle.StopPolling()
 	if lifecycle.DestroyActive == nil {
 		t.Fatal("expected immediate cleanup capability")
@@ -232,29 +217,14 @@ func TestRunCoordinatedScaleSetStartsSharedSchedulerPoller(t *testing.T) {
 }
 
 func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	messageClient := newFakeMessageClient(cancel)
-	messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	fixture.messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
 	provider := &fakeScalerProvider{trackStarted: true}
+	fixture.operations.BuildReconciler = reconcilerBuilderForProvider(provider)
 	coordinator := scaler.NewCoordinator(1)
-	client := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 10},
-		&upstream.RunnerScaleSet{ID: 20},
-		scaleSetMessageClient{Client: messageClient},
-	)
 	lifecycle, err := runCoordinatedScaleSet(
-		ctx, slog.Default(), client, "https://github.com/acme/repo", config.ScaleSetConfig{
-			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
-		}, coordinator, scaleSetSessionOperations{
-			RunnerHostname: func() string { return "host" },
-			BuildReconciler: func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
-				return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-					Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
-				}}, nil
-			},
-			PollRetryDelay: time.Nanosecond,
-		},
+		ctx, slog.Default(), fixture.client, "https://github.com/acme/repo",
+		fixture.config, coordinator, fixture.operations,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +235,20 @@ func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testi
 	}
 	if len(provider.started) != 1 {
 		t.Fatalf("expected initial session statistics to restore assigned demand, got %#v", provider.started)
+	}
+}
+
+func reconcilerBuilderForProvider(provider *fakeScalerProvider) func(
+	context.Context,
+	string,
+	config.ScaleSetConfig,
+	scaleSetJITClient,
+	int,
+) (scaler.Reconciler, error) {
+	return func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "local", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}}, nil
 	}
 }
 
@@ -291,58 +275,23 @@ func TestReconcilerPreparationFailureClosesMessageSession(t *testing.T) {
 }
 
 func TestRunScaleSetCreatesMissingScaleSet(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	messageClient := newFakeMessageClient(cancel)
-	scaleSets := scaleSetSessionOperations{
-		RunnerHostname: func() string {
-			return "host"
-		},
-		BuildReconciler: func(
-			ctx context.Context,
-			repositoryURL string,
-			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetJITClient,
-			scaleSetID int,
-		) (scaler.Reconciler, error) {
-			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-				Name:       scaleSetConfig.Name,
-				MaxRunners: scaleSetConfig.MaxRunners,
-				Provider:   &fakeScalerProvider{},
-				JITConfig:  fakeJITConfigGenerator{},
-			}}, nil
-		},
-		PollRetryDelay: time.Nanosecond,
-	}
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
 	var missingScaleSet *upstream.RunnerScaleSet
 	var createdScaleSetRequest *upstream.RunnerScaleSet
-	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
-		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
-			return &upstream.RunnerGroup{ID: 10}, nil
-		}},
-		fakeScaleSetRegistrationClient: fakeScaleSetRegistrationClient{
-			getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
-				return missingScaleSet, nil
-			},
-			createRunnerScaleSet: func(_ context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
-				createdScaleSetRequest = runnerScaleSet
-				return &upstream.RunnerScaleSet{ID: 30}, nil
-			},
+	fixture.client.fakeScaleSetRegistrationClient = fakeScaleSetRegistrationClient{
+		getRunnerScaleSet: func(context.Context, int, string) (*upstream.RunnerScaleSet, error) {
+			return missingScaleSet, nil
 		},
-		fakeScaleSetMessageSessionClient: fakeScaleSetMessageSessionClient{messageSessionClient: func(context.Context, int, string) (scaleSetMessageClient, error) {
-			return scaleSetMessageClient{Client: messageClient}, nil
-		}},
-	}}
-
-	_, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
-		Name:        "linux",
-		RunnerGroup: "default",
-		MaxRunners:  2,
-	}, scaleSets)
+		createRunnerScaleSet: func(_ context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error) {
+			createdScaleSetRequest = runnerScaleSet
+			return &upstream.RunnerScaleSet{ID: 30}, nil
+		},
+	}
+	_, err := runTestScaleSet(ctx, slog.Default(), fixture.client, fixture.config, fixture.operations)
 	if err != nil {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
-	waitForPoll(t, messageClient)
+	waitForPoll(t, fixture.messageClient)
 	if createdScaleSetRequest.Name != "linux" {
 		t.Fatalf("expected created scale set request, got %#v", createdScaleSetRequest)
 	}
@@ -442,7 +391,7 @@ func assertScaleSetSessionFailure(
 	t.Helper()
 	operations.RunnerHostname = func() string { return "host" }
 	_, err := runTestScaleSet(
-		context.Background(), slog.Default(), client, "https://github.com/meza/repo-a",
+		context.Background(), slog.Default(), client,
 		config.ScaleSetConfig{Name: "linux", RunnerGroup: "default"}, operations,
 	)
 	if err == nil || !strings.Contains(err.Error(), expected) {

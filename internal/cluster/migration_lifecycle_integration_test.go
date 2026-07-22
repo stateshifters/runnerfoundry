@@ -10,36 +10,39 @@ import (
 
 func TestPostgreSQLMigrationLifecycleIsReversible(t *testing.T) {
 	store, dsn := postgreSQLTestStore(t)
-	ctx := context.Background()
 	now := time.Now()
 	assertMigrationStatus(t, store, MigrationStatus{Current: 1, Target: 1, CompatibilityFloor: 1})
-	var err error
-	if err = store.Publish(ctx, "live-node", NodeHealthy, nil, now); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.MigrateDown(ctx, 0, now, time.Minute); err == nil {
-		t.Fatal("expected rollback to reject a live node")
-	}
-	if err = store.Publish(ctx, "live-node", NodeUnhealthy, nil, now.Add(-2*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	lease, err := store.TryLeader(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.MigrateDown(ctx, 0, now, time.Minute); err == nil {
-		t.Fatal("expected rollback to reject an active leader")
-	}
-	if err = lease.Close(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.MigrateDown(ctx, 0, now, time.Minute); err != nil {
+	if err := store.MigrateDown(context.Background(), 0, now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	assertMigrationStatus(t, store, MigrationStatus{Target: 1})
 	assertPostgreSQLDomainSchemaMissing(t, dsn)
-	if err = store.Migrate(ctx); err != nil {
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	assertPostgreSQLDomainSchemaExists(t, dsn)
+}
+
+func TestPostgreSQLRollbackRejectsLiveNode(t *testing.T) {
+	store, _ := postgreSQLTestStore(t)
+	now := time.Now()
+	if err := store.Publish(context.Background(), "live-node", NodeHealthy, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MigrateDown(context.Background(), 0, now, time.Minute); err == nil {
+		t.Fatal("expected rollback to reject a live node")
+	}
+}
+
+func TestPostgreSQLRollbackRejectsActiveLeader(t *testing.T) {
+	store, _ := postgreSQLTestStore(t)
+	lease := acquireLeader(t, store)
+	t.Cleanup(func() {
+		if err := lease.Close(context.Background()); err != nil {
+			t.Errorf("close leader lease: %v", err)
+		}
+	})
+	if err := store.MigrateDown(context.Background(), 0, time.Now(), time.Minute); err == nil {
+		t.Fatal("expected rollback to reject an active leader")
+	}
 }

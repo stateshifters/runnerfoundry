@@ -69,8 +69,9 @@ func setValidGitHubCredentials(t *testing.T, configured *config.Config) {
 
 func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *testing.T) {
 	daemon := newClusteredDaemon()
+	credentialFixture := newPostgresCredentialFixture()
 	connection, err := daemon.openStore(postgresconfig.Settings{
-		Role: "github_scaler", Password: "env://GITHUB_SCALER_MISSING_POSTGRES_PASSWORD",
+		Role: "github_scaler", Password: credentialFixture.missingReference,
 	})
 	if err != nil {
 		t.Fatal(err)

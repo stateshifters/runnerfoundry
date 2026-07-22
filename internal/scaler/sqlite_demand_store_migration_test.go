@@ -1,3 +1,5 @@
+//go:build integration
+
 package scaler
 
 import (
@@ -11,6 +13,23 @@ import (
 
 func TestSQLiteDemandStoreMigratesLegacyZeroIdentityDemand(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
+	seedLegacyZeroIdentityDemand(t, databasePath)
+	reopened, err := OpenSQLiteDemandStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeSQLiteDemandStore(t, reopened)
+	ordered, err := reopened.Ordered(context.Background(), "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != 1 || ordered[0].RequestID != 49 {
+		t.Fatalf("expected migration to preserve only valid demand, got %#v", ordered)
+	}
+}
+
+func seedLegacyZeroIdentityDemand(t *testing.T, databasePath string) {
+	t.Helper()
 	store, openErr := OpenSQLiteDemandStore(databasePath)
 	if openErr != nil {
 		t.Fatal(openErr)
@@ -27,19 +46,6 @@ func TestSQLiteDemandStoreMigratesLegacyZeroIdentityDemand(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
-	}
-
-	reopened, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	ordered, err := reopened.Ordered(context.Background(), "linux")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ordered) != 1 || ordered[0].RequestID != 49 {
-		t.Fatalf("expected migration to preserve only valid demand, got %#v", ordered)
 	}
 }
 

@@ -71,48 +71,65 @@ func TestStoppedLeaderRejectsNewReconciliation(t *testing.T) {
 }
 
 func TestRepositorySessionStartFailureRecoversLeaderOperationalStatus(t *testing.T) {
+	fixture := repositorySessionRetryFixture(t)
+	fixture.daemon.reconcileLeader(context.Background())
+	fixture.daemon.reconcileLeader(context.Background())
+
+	expected := "STATUS=leader reconciling\nSTATUS=leader degraded\n" +
+		"STATUS=leader reconciling\nSTATUS=leader operational"
+	if actual := strings.Join(fixture.notifier.statuses, "\n"); actual != expected {
+		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
+	}
+	if fixture.startAttempts != 2 || len(fixture.leader.sessions) != 1 {
+		t.Fatalf("session start attempts=%d active sessions=%d, want 2 attempts and 1 session", fixture.startAttempts, len(fixture.leader.sessions))
+	}
+	fixture.leader.stop(context.Background())
+}
+
+type repositorySessionRetryTestFixture struct {
+	daemon        *clusteredDaemon
+	leader        *clusterLeader
+	notifier      *clusterStatusSnapshotNotifier
+	successClient *fakeScaleSetClient
+	startAttempts int
+}
+
+func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixture {
+	t.Helper()
 	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{
 		Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
 	}}}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
+	fixture := &repositorySessionRetryTestFixture{daemon: &daemon}
+	fixture.daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
 		InstallationID: 1, URL: "https://github.com/acme/retry",
 	}}}}
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	successfulClient := fakeExistingScaleSetClient(
+	fixture.successClient = fakeExistingScaleSetClient(
 		&upstream.RunnerGroup{ID: 1},
 		&upstream.RunnerScaleSet{ID: 2},
 		scaleSetMessageClient{Client: messageClient},
 	)
-	startAttempts := 0
-	daemon.newGitHubClient = func(
-		string,
-		githubapp.InstallationID,
-		config.GitHubAppCredentials,
+	fixture.daemon.newGitHubClient = func(
+		repositoryURL string,
+		_ githubapp.InstallationID,
+		_ config.GitHubAppCredentials,
 	) (scaleSetClient, error) {
-		startAttempts++
-		if startAttempts == 1 {
-			return nil, errors.New("session unavailable")
-		}
-		return successfulClient, nil
+		return fixture.clientForRepository(repositoryURL)
 	}
-	notifier := &clusterStatusSnapshotNotifier{}
-	daemon.notifier = notifier
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
-	daemon.leader = leader
+	fixture.notifier = &clusterStatusSnapshotNotifier{}
+	fixture.daemon.notifier = fixture.notifier
+	fixture.leader = newClusterLeader(fixture.daemon, &fakeClusterLease{alive: true})
+	fixture.daemon.leader = fixture.leader
+	return fixture
+}
 
-	daemon.reconcileLeader(context.Background())
-	daemon.reconcileLeader(context.Background())
-
-	expected := "STATUS=leader reconciling\nSTATUS=leader degraded\n" +
-		"STATUS=leader reconciling\nSTATUS=leader operational"
-	if actual := strings.Join(notifier.statuses, "\n"); actual != expected {
-		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
+func (fixture *repositorySessionRetryTestFixture) clientForRepository(string) (*fakeScaleSetClient, error) {
+	fixture.startAttempts++
+	if fixture.startAttempts == 1 {
+		return nil, errors.New("session unavailable")
 	}
-	if startAttempts != 2 || len(leader.sessions) != 1 {
-		t.Fatalf("session start attempts=%d active sessions=%d, want 2 attempts and 1 session", startAttempts, len(leader.sessions))
-	}
-	leader.stop(context.Background())
+	return fixture.successClient, nil
 }
 
 func TestExistingAssignedRunnerIsNotStartedAgain(t *testing.T) {
@@ -234,7 +251,6 @@ type fakeClusterState struct {
 	claimedNodeIDs           []cluster.NodeID
 	begun                    []cluster.AssignmentID
 	ready                    []cluster.AssignmentID
-	retried                  []cluster.AssignmentID
 	started                  []cluster.AssignmentID
 	released                 []cluster.AssignmentID
 	leases                   []cluster.Lease
@@ -248,7 +264,6 @@ type fakeClusterState struct {
 	readyErr                 error
 	confirmFailuresRemaining int
 	confirmFailure           error
-	retryErr                 error
 	startedErr               error
 	claimErr                 error
 	removeErr                error

@@ -7,46 +7,49 @@ import (
 	"time"
 )
 
-func TestCoordinatorPreservesDemandAcrossCancellationBoundaries(t *testing.T) {
+func TestCoordinatorPreservesDemandWhenRunningInspectionIsCanceled(t *testing.T) {
+	assertCoordinatorPreservesCanceledDemand(t, acquiredDemandStore(), failingWorker{runningErr: context.Canceled})
+}
+
+func TestCoordinatorPreservesDemandWhenNamedRunnerInspectionIsCanceled(t *testing.T) {
+	assertCoordinatorPreservesCanceledDemand(t, acquiredDemandStore(), failingWorker{existsErr: context.Canceled})
+}
+
+func TestCoordinatorPreservesDemandWhenAcquisitionIsCanceled(t *testing.T) {
+	assertCoordinatorPreservesCanceledDemand(t, queuedDemandStore(), failingWorker{acquireErr: context.Canceled})
+}
+
+func TestCoordinatorPreservesDemandWhenAcquisitionPersistenceIsCanceled(t *testing.T) {
 	startOrder := []string{}
-	tests := map[string]struct {
-		store  *failingDemandStore
-		worker RepositoryWorker
-	}{
-		"running inspection": {
-			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
-			worker: failingWorker{runningErr: context.Canceled},
-		},
-		"named runner inspection": {
-			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
-			worker: failingWorker{existsErr: context.Canceled},
-		},
-		"acquisition": {
-			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11}}}},
-			worker: failingWorker{acquireErr: context.Canceled},
-		},
-		"acquisition persistence": {
-			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11}}}, applyErr: context.Canceled},
-			worker: &recordingWorker{repository: "repo", startOrder: &startOrder},
-		},
-		"runner start": {
-			store:  &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11, Acquired: true}}}},
-			worker: failingWorker{startErr: context.Canceled},
-		},
+	store := queuedDemandStore()
+	store.applyErr = context.Canceled
+	assertCoordinatorPreservesCanceledDemand(t, store, &recordingWorker{repository: "repo", startOrder: &startOrder})
+}
+
+func TestCoordinatorPreservesDemandWhenRunnerStartIsCanceled(t *testing.T) {
+	assertCoordinatorPreservesCanceledDemand(t, acquiredDemandStore(), failingWorker{startErr: context.Canceled})
+}
+
+func assertCoordinatorPreservesCanceledDemand(t *testing.T, store *failingDemandStore, worker RepositoryWorker) {
+	t.Helper()
+	coordinator := NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Schedule(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
 	}
-	for testName, testCase := range tests {
-		t.Run(testName, func(t *testing.T) {
-			coordinator := NewDurableCoordinator("linux", 1, testCase.store)
-			coordinator.AddRepository("repo", testCase.worker)
-			err := coordinator.Schedule(context.Background())
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("expected cancellation, got %v", err)
-			}
-			if len(testCase.store.demand) != 1 || testCase.store.demand[0].RequestID != 11 {
-				t.Fatalf("expected demand preservation, got %#v", testCase.store.demand)
-			}
-		})
+	if len(store.demand) != 1 || store.demand[0].RequestID != 11 {
+		t.Fatalf("expected demand preservation, got %#v", store.demand)
 	}
+}
+
+func queuedDemandStore() *failingDemandStore {
+	return &failingDemandStore{demand: []QueuedDemand{{JobDemand: JobDemand{Repository: "repo", RequestID: 11}}}}
+}
+
+func acquiredDemandStore() *failingDemandStore {
+	store := queuedDemandStore()
+	store.demand[0].Acquired = true
+	return store
 }
 
 func TestCoordinatorReportsDemandMutationFailures(t *testing.T) {

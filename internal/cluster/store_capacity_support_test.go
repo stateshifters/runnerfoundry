@@ -11,7 +11,6 @@ import (
 type capacityTestCluster struct {
 	store   *Store
 	dsn     string
-	ctx     context.Context
 	now     time.Time
 	liveFor time.Duration
 }
@@ -20,7 +19,7 @@ func newCapacityTestCluster(t *testing.T) capacityTestCluster {
 	t.Helper()
 	store, dsn := postgreSQLTestStore(t)
 	fixture := capacityTestCluster{
-		store: store, dsn: dsn, ctx: context.Background(),
+		store: store, dsn: dsn,
 		now: time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC), liveFor: time.Minute,
 	}
 	fixture.publish(t, "spock", NodeHealthy,
@@ -36,7 +35,7 @@ func newCapacityTestCluster(t *testing.T) capacityTestCluster {
 
 func (fixture capacityTestCluster) publish(t *testing.T, nodeID NodeID, health NodeHealth, contributions ...Contribution) {
 	t.Helper()
-	if err := fixture.store.Publish(fixture.ctx, nodeID, health, contributions, fixture.now); err != nil {
+	if err := fixture.store.Publish(context.Background(), nodeID, health, contributions, fixture.now); err != nil {
 		t.Fatal(err)
 	}
 }

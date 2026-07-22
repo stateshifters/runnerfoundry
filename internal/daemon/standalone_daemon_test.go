@@ -30,65 +30,67 @@ func TestLoadConfigurationReturnsConfigLoadFailure(t *testing.T) {
 }
 
 func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
+	ctx, fixture := standaloneLifecycleFixture(t)
+	if err := runDaemon(ctx, Options{}, fixture.daemon); err != nil {
+		t.Fatalf("expected clean shutdown, got %v", err)
+	}
+	if !fixture.pollingStopped || !fixture.shutdown {
+		t.Fatalf("expected lifecycle shutdown, stopped=%t shutdown=%t", fixture.pollingStopped, fixture.shutdown)
+	}
+}
+
+type standaloneLifecycleObservation struct {
+	daemon         standaloneDaemon
+	pollingStopped bool
+	shutdown       bool
+}
+
+func standaloneLifecycleFixture(t *testing.T) (context.Context, *standaloneLifecycleObservation) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	stopped := false
-	shutdown := false
+	fixture := &standaloneLifecycleObservation{}
 	loadedConfig := runnableConfig(t)
-	daemonUnderTest := standaloneDaemon{
+	fixture.daemon = standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{result: githubapp.DiscoveryResult{
-				Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
-				InstallationFailures: map[githubapp.InstallationID]error{},
-			}}, nil
+			return fixture.discovery(), nil
 		},
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 			return &fakeScaleSetClient{}, nil
 		},
-		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  cancellingNotifier{cancel: cancel},
-		startScaleSet: func(
-			context.Context,
-			*slog.Logger,
-			scaleSetClient,
-			string,
-			config.ScaleSetConfig,
-			*scaler.Coordinator,
-		) (scaleSetLifecycle, error) {
-			return scaleSetLifecycle{
-				StopPolling:   func() { stopped = true },
-				Drain:         func(context.Context) (int, error) { return 0, nil },
-				DestroyActive: func(context.Context) error { return nil },
-				Shutdown:      func(context.Context) error { shutdown = true; return nil },
-			}, nil
-		},
+		newLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+		notifier:      cancellingNotifier{cancel: cancel},
+		startScaleSet: fixture.startScaleSet,
 	}
-	if err := runDaemon(ctx, Options{}, daemonUnderTest); err != nil {
-		t.Fatalf("expected clean shutdown, got %v", err)
-	}
-	if !stopped || !shutdown {
-		t.Fatalf("expected lifecycle shutdown, stopped=%t shutdown=%t", stopped, shutdown)
-	}
+	return ctx, fixture
+}
+
+func (*standaloneLifecycleObservation) discovery() staticDiscoverer {
+	return staticDiscoverer{result: githubapp.DiscoveryResult{
+		Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
+		InstallationFailures: map[githubapp.InstallationID]error{},
+	}}
+}
+
+func (fixture *standaloneLifecycleObservation) startScaleSet(
+	context.Context,
+	*slog.Logger,
+	scaleSetClient,
+	string,
+	config.ScaleSetConfig,
+	*scaler.Coordinator,
+) (scaleSetLifecycle, error) {
+	return scaleSetLifecycle{
+		StopPolling:   func() { fixture.pollingStopped = true },
+		Drain:         func(context.Context) (int, error) { return 0, nil },
+		DestroyActive: func(context.Context) error { return nil },
+		Shutdown:      func(context.Context) error { fixture.shutdown = true; return nil },
+	}, nil
 }
 
 func TestDaemonLogsLifecycleActions(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	logs := &bytes.Buffer{}
-	logger := newLoggerForWriter(logs, "json", "debug")
-	discoverer := &recordingDiscoverer{
-		result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}},
-		afterDiscover: func(int) {
-			cancel()
-		},
-	}
-	loadedConfig := runnableConfig(t)
-	daemonUnderTest := standaloneDaemon{
-		loadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
-		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
-		newLogger:     func(string, string) *slog.Logger { return logger },
-		notifier:      noopNotifier{},
-	}
-	if err := runDaemon(ctx, Options{ConfigPath: "config.yaml"}, daemonUnderTest); err != nil {
+	ctx, fixture := standaloneLoggingFixture(t)
+	if err := runDaemon(ctx, Options{ConfigPath: "config.yaml"}, fixture.daemon); err != nil {
 		t.Fatalf("expected clean daemon shutdown, got %v", err)
 	}
 	for _, expected := range []struct {
@@ -102,8 +104,31 @@ func TestDaemonLogsLifecycleActions(t *testing.T) {
 		{action: "shutdown", phase: "started"},
 		{action: "shutdown", phase: "completed"},
 	} {
-		assertStructuredAction(t, logs.Bytes(), expected.action, expected.phase)
+		assertStructuredAction(t, fixture.logs.Bytes(), expected.action, expected.phase)
 	}
+}
+
+type standaloneLogFixture struct {
+	logs   *bytes.Buffer
+	daemon standaloneDaemon
+}
+
+func standaloneLoggingFixture(t *testing.T) (context.Context, standaloneLogFixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
+	discoverer := &recordingDiscoverer{
+		result:        githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}},
+		afterDiscover: func(int) { cancel() },
+	}
+	loadedConfig := runnableConfig(t)
+	return ctx, standaloneLogFixture{logs: logs, daemon: standaloneDaemon{
+		loadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
+		newLogger:     func(string, string) *slog.Logger { return logger },
+		notifier:      noopNotifier{},
+	}}
 }
 
 func TestLoadConfigurationSurfacesLocalPreflightFailures(t *testing.T) {

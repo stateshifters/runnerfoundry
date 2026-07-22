@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -12,68 +13,136 @@ import (
 	"github.com/meza/github-scaler/internal/postgresconfig"
 )
 
-func TestStoreSurfacesConnectionFailuresWithoutCredentials(t *testing.T) {
+func TestPublishSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		return store.Publish(context.Background(), "node", NodeHealthy, nil, time.Now())
+	})
+}
+
+func TestScaleSetsSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.ScaleSets(context.Background(), time.Now(), time.Minute)
+		return err
+	})
+}
+
+func TestEnqueueSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		return store.Enqueue(context.Background(), Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+	})
+}
+
+func TestAssignOldestSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.AssignOldest(context.Background(), "set", time.Now(), time.Minute)
+		return err
+	})
+}
+
+func TestClaimForStartSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.ClaimForStart(context.Background(), "node")
+		return err
+	})
+}
+
+func TestPendingAcquisitionsSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.PendingAcquisitions(context.Background())
+		return err
+	})
+}
+
+func TestStartingSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.Starting(context.Background(), "node")
+		return err
+	})
+}
+
+func TestCompleteDemandSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		return store.CompleteDemand(context.Background(), "set", "repo", 1)
+	})
+}
+
+func TestBeginAcquisitionSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error { return store.BeginAcquisition(context.Background(), 1, 2, 3) })
+}
+
+func TestConfirmAcquisitionSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error { return store.ConfirmAcquisition(context.Background(), 1) })
+}
+
+func TestConfirmRunningSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error { return store.ConfirmRunning(context.Background(), 1, "node") })
+}
+
+func TestCompleteAssignmentSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		return store.CompleteAssignment(context.Background(), 1, "node", AssignmentReserved)
+	})
+}
+
+func TestTryLeaderSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.TryLeader(context.Background())
+		return err
+	})
+}
+
+func TestWaitForLeaderSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		_, err := store.WaitForLeader(context.Background())
+		return err
+	})
+}
+
+func assertStoreConnectionFailure(t *testing.T, operation func(*Store) error) {
+	t.Helper()
 	connectionErr := errors.New("connection failed")
 	store := NewStore(postgresconfig.Settings{})
 	store.connector = func(context.Context) (*databaseConnection, error) { return nil, connectionErr }
 	store.directConnector = func(context.Context) (leaderConnection, error) { return nil, connectionErr }
-	ctx := context.Background()
-	operations := []func() error{
-		func() error { return store.Publish(ctx, "node", NodeHealthy, nil, time.Now()) },
-		func() error { _, err := store.ScaleSets(ctx, time.Now(), time.Minute); return err },
-		func() error {
-			return store.Enqueue(ctx, Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
-		},
-		func() error { _, err := store.AssignOldest(ctx, "set", time.Now(), time.Minute); return err },
-		func() error { _, err := store.ClaimForStart(ctx, "node"); return err },
-		func() error { _, err := store.PendingAcquisitions(ctx); return err },
-		func() error { _, err := store.Starting(ctx, "node"); return err },
-		func() error { return store.CompleteDemand(ctx, "set", "repo", 1) },
-		func() error { return store.BeginAcquisition(ctx, 1, 2, 3) },
-		func() error { return store.ConfirmAcquisition(ctx, 1) },
-		func() error { return store.ConfirmRunning(ctx, 1, "node") },
-		func() error { return store.CompleteAssignment(ctx, 1, "node", AssignmentReserved) },
-		func() error { _, err := store.TryLeader(ctx); return err },
-		func() error { _, err := store.WaitForLeader(ctx); return err },
-	}
-	for operationIndex, operation := range operations {
-		if !errors.Is(operation(), connectionErr) {
-			t.Fatalf("operation %d did not return connector failure", operationIndex)
-		}
+	if err := operation(store); !errors.Is(err, connectionErr) {
+		t.Fatalf("operation error = %v, want connector failure", err)
 	}
 }
 
-func TestPostgreSQLConnectorRedactsResolutionAndConnectionFailures(t *testing.T) {
-	for _, test := range []struct {
-		settings  postgresconfig.Settings
-		forbidden []string
-	}{
-		{
-			settings:  postgresconfig.Settings{Password: "file:///missing-postgresql-secret", Role: "github_scaler"},
-			forbidden: []string{"missing-postgresql-secret", "github_scaler"},
-		},
-		{
-			settings: postgresconfig.Settings{
-				DSN: "postgres://secret-user:secret-password@127.0.0.1:1/database?connect_timeout=1", Role: "github_scaler",
-			},
-			forbidden: []string{"secret-user", "secret-password", "github_scaler", "postgres://"},
-		},
-	} {
-		store := NewStore(test.settings)
-		operations := []func() error{
-			func() error { return store.Migrate(context.Background()) },
-			func() error { _, err := store.MigrationStatus(context.Background()); return err },
-			func() error { return store.MigrateDown(context.Background(), 0, time.Now(), time.Minute) },
+func TestPostgreSQLConnectorRedactsCredentialResolutionFailure(t *testing.T) {
+	settings := settingsWithProofReference("file:///missing-postgresql-secret")
+	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{"missing-postgresql-secret", "github_scaler"})
+}
+
+func TestPostgreSQLConnectorRedactsConnectionFailure(t *testing.T) {
+	values := newConnectionFixtureValues()
+	connectionURL, err := url.Parse(values.dsn("127.0.0.1", "1", "database"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := connectionURL.Query()
+	query.Set("connect_timeout", "1")
+	connectionURL.RawQuery = query.Encode()
+	settings := postgresconfig.Settings{DSN: connectionURL.String(), Role: "github_scaler"}
+	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{values.identity, values.proof, "github_scaler", "postgres://"})
+}
+
+func assertPostgreSQLConnectorFailureRedacts(t *testing.T, settings postgresconfig.Settings, forbiddenValues []string) {
+	t.Helper()
+	store := NewStore(settings)
+	operations := []func() error{
+		func() error { return store.Migrate(context.Background()) },
+		func() error { _, err := store.MigrationStatus(context.Background()); return err },
+		func() error { return store.MigrateDown(context.Background(), 0, time.Now(), time.Minute) },
+	}
+	for _, operation := range operations {
+		err := operation()
+		if err == nil {
+			t.Fatal("expected PostgreSQL connection setup failure")
 		}
-		for _, operation := range operations {
-			err := operation()
-			if err == nil {
-				t.Fatal("expected PostgreSQL connection setup failure")
-			}
-			for _, forbidden := range test.forbidden {
-				if strings.Contains(err.Error(), forbidden) {
-					t.Fatalf("connection error exposed forbidden value %q: %v", forbidden, err)
-				}
+		for _, forbidden := range forbiddenValues {
+			if strings.Contains(err.Error(), forbidden) {
+				t.Fatalf("connection error exposed forbidden value %q: %v", forbidden, err)
 			}
 		}
 	}
@@ -86,6 +155,13 @@ func TestStoreDefaultConnectorsRejectInvalidSettings(t *testing.T) {
 	}
 	if _, err := store.directConnector(context.Background()); err == nil {
 		t.Fatal("expected direct connector resolution failure")
+	}
+}
+
+func TestMigrationStatusReportsMetadataInspectionFailure(t *testing.T) {
+	store := storeWithConnection(&fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseFailure()}}})
+	if _, err := store.MigrationStatus(context.Background()); err == nil {
+		t.Fatal("expected migration metadata inspection failure")
 	}
 }
 
@@ -111,25 +187,35 @@ func TestEnqueueRejectsInvalidDemandBeforeConnecting(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := NewStore(postgresconfig.Settings{})
-			store.connector = func(context.Context) (*databaseConnection, error) {
-				t.Fatal("invalid demand reached the database connector")
-				return nil, errors.New("unreachable connector")
-			}
+			store.connector = connectorThatMustNotRun(t)
 			if err := store.Enqueue(context.Background(), test.demand); !errors.Is(err, ErrInvalidDemand) {
 				t.Fatalf("Enqueue() error = %v, want %v", err, ErrInvalidDemand)
 			}
 		})
 	}
+}
+
+func TestAssignOldestRejectsInvalidScaleSetBeforeConnecting(t *testing.T) {
 	store := NewStore(postgresconfig.Settings{})
-	store.connector = func(context.Context) (*databaseConnection, error) {
-		t.Fatal("invalid demand operation reached the database connector")
-		return nil, errors.New("unreachable connector")
-	}
+	store.connector = connectorThatMustNotRun(t)
 	if _, err := store.AssignOldest(context.Background(), " \t", time.Now(), time.Minute); !errors.Is(err, ErrInvalidDemand) {
 		t.Fatalf("AssignOldest() error = %v, want %v", err, ErrInvalidDemand)
 	}
+}
+
+func TestCompleteDemandRejectsInvalidRepositoryBeforeConnecting(t *testing.T) {
+	store := NewStore(postgresconfig.Settings{})
+	store.connector = connectorThatMustNotRun(t)
 	if err := store.CompleteDemand(context.Background(), "set", " \t", 1); !errors.Is(err, ErrInvalidDemand) {
 		t.Fatalf("CompleteDemand() error = %v, want %v", err, ErrInvalidDemand)
+	}
+}
+
+func connectorThatMustNotRun(t *testing.T) func(context.Context) (*databaseConnection, error) {
+	t.Helper()
+	return func(context.Context) (*databaseConnection, error) {
+		t.Fatal("invalid demand reached the database connector")
+		return nil, errors.New("unreachable connector")
 	}
 }
 
@@ -159,38 +245,81 @@ func TestPublishRejectsInvalidContributionsBeforeConnecting(t *testing.T) {
 	}
 }
 
-func TestStoreSurfacesDatabaseOperationFailures(t *testing.T) {
-	ctx := context.Background()
-	databaseErr := errors.New("database failed")
-	tests := []struct {
-		name       string
-		connection *fakeDatabaseConnection
-		operation  func(store *Store) error
-	}{
-		{name: "publish begin", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error { return store.Publish(ctx, "node", NodeHealthy, nil, time.Now()) }},
-		{name: "scale sets query", connection: &fakeDatabaseConnection{queryErr: databaseErr}, operation: func(store *Store) error { _, err := store.ScaleSets(ctx, time.Now(), time.Minute); return err }},
-		{name: "enqueue", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error {
-			return store.Enqueue(ctx, Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
-		}},
-		{name: "assignment begin", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error {
-			_, err := store.AssignOldest(ctx, "set", time.Now(), time.Minute)
-			return err
-		}},
-		{name: "claim ready", connection: &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseErr}}}, operation: func(store *Store) error { _, err := store.ClaimForStart(ctx, "node"); return err }},
-		{name: "load recovery", connection: &fakeDatabaseConnection{queryErr: databaseErr}, operation: func(store *Store) error { _, err := store.PendingAcquisitions(ctx); return err }},
-		{name: "complete demand", connection: &fakeDatabaseConnection{beginErr: databaseErr}, operation: func(store *Store) error { return store.CompleteDemand(ctx, "set", "repo", 1) }},
-		{name: "assignment update", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error { return store.ConfirmAcquisition(ctx, 1) }},
-		{name: "leader query", connection: &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseErr}}}, operation: func(store *Store) error { _, err := store.TryLeader(ctx); return err }},
-		{name: "leader wait", connection: &fakeDatabaseConnection{execErrors: []error{databaseErr}}, operation: func(store *Store) error { _, err := store.WaitForLeader(ctx); return err }},
+func TestPublishSurfacesDatabaseBeginFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{beginErr: databaseFailure()}, func(store *Store) error {
+		return store.Publish(context.Background(), "node", NodeHealthy, nil, time.Now())
+	})
+}
+
+func TestScaleSetsSurfacesDatabaseQueryFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{queryErr: databaseFailure()}, func(store *Store) error {
+		_, err := store.ScaleSets(context.Background(), time.Now(), time.Minute)
+		return err
+	})
+}
+
+func TestEnqueueSurfacesDatabaseExecutionFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{execErrors: []error{databaseFailure()}}, func(store *Store) error {
+		return store.Enqueue(context.Background(), Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+	})
+}
+
+func TestAssignOldestSurfacesDatabaseBeginFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{beginErr: databaseFailure()}, func(store *Store) error {
+		_, err := store.AssignOldest(context.Background(), "set", time.Now(), time.Minute)
+		return err
+	})
+}
+
+func TestClaimForStartSurfacesDatabaseQueryFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseFailure()}}}, func(store *Store) error {
+		_, err := store.ClaimForStart(context.Background(), "node")
+		return err
+	})
+}
+
+func TestPendingAcquisitionsSurfacesDatabaseQueryFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{queryErr: databaseFailure()}, func(store *Store) error {
+		_, err := store.PendingAcquisitions(context.Background())
+		return err
+	})
+}
+
+func TestCompleteDemandSurfacesDatabaseBeginFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{beginErr: databaseFailure()}, func(store *Store) error {
+		return store.CompleteDemand(context.Background(), "set", "repo", 1)
+	})
+}
+
+func TestConfirmAcquisitionSurfacesDatabaseExecutionFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{execErrors: []error{databaseFailure()}}, func(store *Store) error {
+		return store.ConfirmAcquisition(context.Background(), 1)
+	})
+}
+
+func TestTryLeaderSurfacesDatabaseQueryFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{rowResults: []fakeRow{{err: databaseFailure()}}}, func(store *Store) error {
+		_, err := store.TryLeader(context.Background())
+		return err
+	})
+}
+
+func TestWaitForLeaderSurfacesDatabaseExecutionFailure(t *testing.T) {
+	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{execErrors: []error{databaseFailure()}}, func(store *Store) error {
+		_, err := store.WaitForLeader(context.Background())
+		return err
+	})
+}
+
+func assertDatabaseOperationFailure(t *testing.T, connection *fakeDatabaseConnection, operation func(*Store) error) {
+	t.Helper()
+	if err := operation(storeWithConnection(connection)); err == nil {
+		t.Fatal("expected database operation failure")
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store := storeWithConnection(test.connection)
-			if err := test.operation(store); err == nil {
-				t.Fatal("expected database operation failure")
-			}
-		})
-	}
+}
+
+func databaseFailure() error {
+	return errors.New("database failed")
 }
 
 func TestFakeDatabaseOperationsFollowScriptedCallOrder(t *testing.T) {
@@ -271,45 +400,65 @@ func TestCompleteDemandReportsEveryTransactionalFailure(t *testing.T) {
 	}
 }
 
-func TestAssignmentTransactionReportsEveryFailure(t *testing.T) {
-	databaseErr := errors.New("database failed")
-	now := time.Now()
-	oldest := fakeRow{scan: func(destinations ...any) {
+func TestAssignmentReportsUnavailableReleaseFailure(t *testing.T) {
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}, nil)
+}
+
+func TestAssignmentReportsAbsentOldestDemand(t *testing.T) {
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{rowResults: []fakeRow{{err: pgx.ErrNoRows}}}, ErrNoAssignment)
+}
+
+func TestAssignmentReportsOldestDemandQueryFailure(t *testing.T) {
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{rowResults: []fakeRow{{err: databaseFailure()}}}, nil)
+}
+
+func TestAssignmentReportsAbsentContributor(t *testing.T) {
+	oldest, _, _ := assignmentRows(t)
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{rowResults: []fakeRow{oldest, {err: pgx.ErrNoRows}}}, ErrNoAssignment)
+}
+
+func TestAssignmentReportsContributorQueryFailure(t *testing.T) {
+	oldest, _, _ := assignmentRows(t)
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{rowResults: []fakeRow{oldest, {err: databaseFailure()}}}, nil)
+}
+
+func TestAssignmentReportsInsertFailure(t *testing.T) {
+	oldest, contributor, _ := assignmentRows(t)
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{
+		rowResults: []fakeRow{oldest, contributor, {err: databaseFailure()}},
+	}, nil)
+}
+
+func TestAssignmentReportsCommitFailure(t *testing.T) {
+	oldest, contributor, identifier := assignmentRows(t)
+	assertAssignmentFailure(t, &fakeDatabaseTransaction{
+		rowResults: []fakeRow{oldest, contributor, identifier}, commitErr: databaseFailure(),
+	}, nil)
+}
+
+func assertAssignmentFailure(t *testing.T, transaction *fakeDatabaseTransaction, expected error) {
+	t.Helper()
+	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
+	_, err := store.AssignOldest(context.Background(), "set", time.Now(), time.Minute)
+	if expected != nil && !errors.Is(err, expected) {
+		t.Fatalf("error = %v, want %v", err, expected)
+	}
+	if expected == nil && err == nil {
+		t.Fatal("expected assignment failure")
+	}
+}
+
+func assignmentRows(t *testing.T) (oldest fakeRow, contributor fakeRow, identifier fakeRow) {
+	t.Helper()
+	oldest = fakeRow{scan: func(destinations ...any) {
 		*destination[int64](t, destinations[0]) = 1
 		*destination[string](t, destinations[1]) = "repo"
 		*destination[int64](t, destinations[2]) = 2
-		*destination[time.Time](t, destinations[3]) = now
+		*destination[time.Time](t, destinations[3]) = time.Now()
 	}}
-	contributor := fakeRow{scan: func(destinations ...any) { *destination[NodeID](t, destinations[0]) = "node" }}
-	identifier := fakeRow{scan: func(destinations ...any) { *destination[AssignmentID](t, destinations[0]) = 3 }}
-	tests := []struct {
-		name        string
-		execErrors  []error
-		rowResults  []fakeRow
-		commitErr   error
-		expectedErr error
-	}{
-		{name: "release unavailable", execErrors: []error{databaseErr}},
-		{name: "oldest absent", rowResults: []fakeRow{{err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
-		{name: "oldest query", rowResults: []fakeRow{{err: databaseErr}}},
-		{name: "contributor absent", rowResults: []fakeRow{oldest, {err: pgx.ErrNoRows}}, expectedErr: ErrNoAssignment},
-		{name: "contributor query", rowResults: []fakeRow{oldest, {err: databaseErr}}},
-		{name: "assignment insert", rowResults: []fakeRow{oldest, contributor, {err: databaseErr}}},
-		{name: "commit", rowResults: []fakeRow{oldest, contributor, identifier}, commitErr: databaseErr},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			transaction := &fakeDatabaseTransaction{execErrors: test.execErrors, rowResults: test.rowResults, commitErr: test.commitErr}
-			store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
-			_, err := store.AssignOldest(context.Background(), "set", now, time.Minute)
-			if test.expectedErr != nil && !errors.Is(err, test.expectedErr) {
-				t.Fatalf("error = %v, want %v", err, test.expectedErr)
-			}
-			if test.expectedErr == nil && err == nil {
-				t.Fatal("expected assignment failure")
-			}
-		})
-	}
+	contributor = fakeRow{scan: func(destinations ...any) { *destination[NodeID](t, destinations[0]) = "node" }}
+	identifier = fakeRow{scan: func(destinations ...any) { *destination[AssignmentID](t, destinations[0]) = 3 }}
+	return oldest, contributor, identifier
 }
 
 func TestScaleSetStatusReportsRowFailures(t *testing.T) {

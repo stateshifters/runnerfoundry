@@ -9,7 +9,53 @@ import (
 	"testing"
 )
 
-func TestRunTracedOperationLogsSuccessfulLifecycle(t *testing.T) {
+func TestRunTracedOperationExecutesSuccessfulOperationOnce(t *testing.T) {
+	result := runSuccessfulTracedOperation(t)
+	if result.operationCalls != 1 {
+		t.Fatalf("operation calls = %d, want 1", result.operationCalls)
+	}
+	if result.attributeBacking[1].Key != "guard" || result.attributeBacking[1].Value.String() != "unchanged" {
+		t.Fatalf("initial attribute backing was mutated: %#v", result.attributeBacking)
+	}
+}
+
+func TestRunTracedOperationLogsSuccessfulStart(t *testing.T) {
+	events := runSuccessfulTracedOperation(t).events
+	if len(events) != 2 {
+		t.Fatalf("discovery events = %d, want 2", len(events))
+	}
+	if events[0]["phase"] != "started" || events[0]["repository"] != "https://github.com/acme/repo" {
+		t.Fatalf("started event = %#v", events[0])
+	}
+	if _, exists := events[0]["duration"]; exists {
+		t.Fatalf("started event contains duration: %#v", events[0])
+	}
+	if _, exists := events[0]["repositoryCount"]; exists {
+		t.Fatalf("started event contains terminal attributes: %#v", events[0])
+	}
+}
+
+func TestRunTracedOperationLogsSuccessfulCompletion(t *testing.T) {
+	events := runSuccessfulTracedOperation(t).events
+	if events[1]["phase"] != "completed" || events[1]["repository"] != "https://github.com/acme/repo" {
+		t.Fatalf("completed event = %#v", events[1])
+	}
+	if events[1]["repositoryCount"] != float64(1) {
+		t.Fatalf("repository count = %#v, want 1", events[1]["repositoryCount"])
+	}
+	if _, exists := events[1]["duration"]; !exists {
+		t.Fatalf("completed event is missing duration: %#v", events[1])
+	}
+}
+
+type successfulTraceResult struct {
+	operationCalls   int
+	attributeBacking []slog.Attr
+	events           []map[string]any
+}
+
+func runSuccessfulTracedOperation(t *testing.T) successfulTraceResult {
+	t.Helper()
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "debug")
 	attributeBacking := []slog.Attr{
@@ -36,38 +82,46 @@ func TestRunTracedOperationLogsSuccessfulLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run traced operation: %v", err)
 	}
-	if operationCalls != 1 {
-		t.Fatalf("operation calls = %d, want 1", operationCalls)
-	}
-	if attributeBacking[1].Key != "guard" || attributeBacking[1].Value.String() != "unchanged" {
-		t.Fatalf("initial attribute backing was mutated: %#v", attributeBacking)
-	}
-
 	events := structuredActionEvents(t, logs.Bytes(), "discovery")
-	if len(events) != 2 {
-		t.Fatalf("discovery events = %d, want 2: %s", len(events), logs.String())
+	return successfulTraceResult{operationCalls: operationCalls, attributeBacking: attributeBacking, events: events}
+}
+
+func TestRunTracedOperationReturnsOperationError(t *testing.T) {
+	result := runFailedTracedOperation(t)
+	if !errors.Is(result.err, result.operationErr) {
+		t.Fatalf("operation error = %v, want %v", result.err, result.operationErr)
 	}
-	if events[0]["phase"] != "started" || events[0]["repository"] != "https://github.com/acme/repo" {
-		t.Fatalf("unexpected started event: %#v", events[0])
-	}
-	if _, exists := events[0]["duration"]; exists {
-		t.Fatalf("started event contains duration: %#v", events[0])
-	}
-	if _, exists := events[0]["repositoryCount"]; exists {
-		t.Fatalf("started event contains terminal attributes: %#v", events[0])
-	}
-	if events[1]["phase"] != "completed" || events[1]["repository"] != "https://github.com/acme/repo" {
-		t.Fatalf("unexpected completed event: %#v", events[1])
-	}
-	if events[1]["repositoryCount"] != float64(1) {
-		t.Fatalf("completed event repository count = %#v, want 1", events[1]["repositoryCount"])
-	}
-	if _, exists := events[1]["duration"]; !exists {
-		t.Fatalf("completed event is missing duration: %#v", events[1])
+	if result.operationCalls != 1 {
+		t.Fatalf("operation calls = %d, want 1", result.operationCalls)
 	}
 }
 
-func TestRunTracedOperationLogsFailedLifecycleAndReturnsOperationError(t *testing.T) {
+func TestRunTracedOperationLogsFailedLifecycle(t *testing.T) {
+	result := runFailedTracedOperation(t)
+	if len(result.events) != 2 || result.events[0]["phase"] != "started" {
+		t.Fatalf("lifecycle events = %#v", result.events)
+	}
+	failedEvent := result.events[1]
+	if failedEvent["phase"] != "failed" || failedEvent["level"] != "ERROR" {
+		t.Fatalf("failed event = %#v", failedEvent)
+	}
+	if failedEvent["error"] != result.operationErr.Error() || failedEvent["repositoryCount"] != float64(1) {
+		t.Fatalf("failed event context = %#v", failedEvent)
+	}
+	if _, exists := failedEvent["duration"]; !exists {
+		t.Fatalf("failed event is missing duration: %#v", failedEvent)
+	}
+}
+
+type failedTraceResult struct {
+	err            error
+	operationErr   error
+	operationCalls int
+	events         []map[string]any
+}
+
+func runFailedTracedOperation(t *testing.T) failedTraceResult {
+	t.Helper()
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "debug")
 	operationErr := errors.New("discovery failed")
@@ -87,29 +141,8 @@ func TestRunTracedOperationLogsFailedLifecycleAndReturnsOperationError(t *testin
 			}
 		},
 	)
-	if !errors.Is(err, operationErr) {
-		t.Fatalf("run traced operation error = %v, want %v", err, operationErr)
-	}
-	if operationCalls != 1 {
-		t.Fatalf("operation calls = %d, want 1", operationCalls)
-	}
-
 	events := structuredActionEvents(t, logs.Bytes(), "discovery")
-	if len(events) != 2 {
-		t.Fatalf("discovery events = %d, want 2: %s", len(events), logs.String())
-	}
-	if events[0]["phase"] != "started" {
-		t.Fatalf("unexpected started event: %#v", events[0])
-	}
-	if events[1]["phase"] != "failed" || events[1]["level"] != "ERROR" {
-		t.Fatalf("unexpected failed event: %#v", events[1])
-	}
-	if events[1]["error"] != operationErr.Error() || events[1]["repositoryCount"] != float64(1) {
-		t.Fatalf("failed event is missing operation context: %#v", events[1])
-	}
-	if _, exists := events[1]["duration"]; !exists {
-		t.Fatalf("failed event is missing duration: %#v", events[1])
-	}
+	return failedTraceResult{err: err, operationErr: operationErr, operationCalls: operationCalls, events: events}
 }
 
 func TestRunTracedOperationExecutesOperationWithoutLogger(t *testing.T) {

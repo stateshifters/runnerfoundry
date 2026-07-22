@@ -36,43 +36,58 @@ type ComposeConfig struct {
 	Service     string
 }
 
-type Command struct {
-	Name string
-	Args []string
-}
-
 type CommandRunner interface {
-	Run(ctx context.Context, command Command) (string, error)
+	StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error
+	ListComposeRunners(ctx context.Context, scaleSetName string) (string, error)
+	RemoveComposeRunner(ctx context.Context, containerID string) error
+	ListComposeServices(ctx context.Context, config ComposeConfig) (string, error)
 }
 
 type ExecCommandRunner struct{}
 
-func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (string, error) {
-	// Production callers restrict Name to the hard-coded docker executable.
-	execCommand := exec.CommandContext(ctx, command.Name, command.Args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	outputBytes, err := execCommand.CombinedOutput()
-	if err != nil {
-		diagnostic := redactJITConfig(string(outputBytes), command.Args)
-		if diagnostic != "" {
-			return "", fmt.Errorf("%s command failed: %w: %s", command.Name, err, diagnostic)
-		}
-		return "", fmt.Errorf("%s command failed: %w", command.Name, err)
-	}
-	return string(outputBytes), nil
+func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error {
+	args := append(composeArgs(config),
+		"run", "--detach", "--rm",
+		"--name", request.RunnerName,
+		"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+		"--label", contract.OwnershipRunner+"="+request.RunnerName,
+		"--env", JITConfigEnvironment+"="+request.JITConfig,
+		config.Service,
+	)
+	_, err := runner.runDocker(ctx, args, request.JITConfig)
+	return err
 }
 
-func redactJITConfig(output string, commandArguments []string) string {
-	redactedOutput := strings.TrimSpace(output)
-	jitConfigPrefix := JITConfigEnvironment + "="
-	for _, argument := range commandArguments {
-		if strings.HasPrefix(argument, jitConfigPrefix) {
-			jitConfig := strings.TrimPrefix(argument, jitConfigPrefix)
-			if jitConfig != "" {
-				redactedOutput = strings.ReplaceAll(redactedOutput, jitConfig, "[REDACTED]")
-			}
+func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, scaleSetName string) (string, error) {
+	return runner.runDocker(ctx, []string{
+		"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName,
+	}, "")
+}
+
+func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
+	_, err := runner.runDocker(ctx, []string{"rm", "--force", containerID}, "")
+	return err
+}
+
+func (runner ExecCommandRunner) ListComposeServices(ctx context.Context, config ComposeConfig) (string, error) {
+	return runner.runDocker(ctx, append(composeArgs(config), "config", "--services"), "")
+}
+
+func (runner ExecCommandRunner) runDocker(ctx context.Context, args []string, jitConfig string) (string, error) {
+	execCommand := exec.CommandContext(ctx, "docker")
+	execCommand.Args = append(execCommand.Args, args...)
+	outputBytes, err := execCommand.CombinedOutput()
+	if err != nil {
+		diagnostic := strings.TrimSpace(string(outputBytes))
+		if jitConfig != "" {
+			diagnostic = strings.ReplaceAll(diagnostic, jitConfig, "[REDACTED]")
 		}
+		if diagnostic != "" {
+			return "", fmt.Errorf("docker command failed: %w: %s", err, diagnostic)
+		}
+		return "", fmt.Errorf("docker command failed: %w", err)
 	}
-	return redactedOutput
+	return string(outputBytes), nil
 }
 
 type ComposeProvider struct {
@@ -81,17 +96,7 @@ type ComposeProvider struct {
 }
 
 func (provider ComposeProvider) Start(ctx context.Context, request StartRequest) error {
-	_, err := provider.CommandRunner.Run(ctx, Command{
-		Name: "docker",
-		Args: append(provider.baseArgs(),
-			"run", "--detach", "--rm",
-			"--name", request.RunnerName,
-			"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
-			"--label", contract.OwnershipRunner+"="+request.RunnerName,
-			"--env", JITConfigEnvironment+"="+request.JITConfig,
-			provider.Config.Service,
-		),
-	})
+	err := provider.CommandRunner.StartComposeRunner(ctx, provider.Config, request)
 	if err != nil {
 		return fmt.Errorf("start compose runner: %w", err)
 	}
@@ -99,10 +104,7 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 }
 
 func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
-	output, err := provider.CommandRunner.Run(ctx, Command{
-		Name: "docker",
-		Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName},
-	})
+	output, err := provider.CommandRunner.ListComposeRunners(ctx, scaleSetName)
 	if err != nil {
 		return nil, fmt.Errorf("list compose runners: %w", err)
 	}
@@ -131,10 +133,7 @@ func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInst
 	default:
 		return nil
 	}
-	_, err := provider.CommandRunner.Run(ctx, Command{
-		Name: "docker",
-		Args: []string{"rm", "--force", instance.ID},
-	})
+	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
 	if err != nil {
 		return fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err)
 	}
@@ -142,10 +141,7 @@ func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInst
 }
 
 func (provider ComposeProvider) Validate(ctx context.Context) error {
-	output, err := provider.CommandRunner.Run(ctx, Command{
-		Name: "docker",
-		Args: append(provider.baseArgs(), "config", "--services"),
-	})
+	output, err := provider.CommandRunner.ListComposeServices(ctx, provider.Config)
 	if err != nil {
 		return fmt.Errorf("validate compose config: %w", err)
 	}
@@ -157,8 +153,8 @@ func (provider ComposeProvider) Validate(ctx context.Context) error {
 	return fmt.Errorf("compose service %q was not found", provider.Config.Service)
 }
 
-func (provider ComposeProvider) baseArgs() []string {
-	return []string{"compose", "-f", provider.Config.ComposeFile}
+func composeArgs(config ComposeConfig) []string {
+	return []string{"compose", "-f", config.ComposeFile}
 }
 
 func decodeDockerContainers(output string) ([]dockerContainer, error) {

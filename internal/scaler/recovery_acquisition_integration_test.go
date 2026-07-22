@@ -12,33 +12,34 @@ import (
 
 func TestReopenedCoordinatorRetainsAcquiredDemandWhenRunnerStartFails(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
-	store, openErr := OpenSQLiteDemandStore(databasePath)
-	if openErr != nil {
-		t.Fatal(openErr)
-	}
-	if err := store.Apply(context.Background(), "linux", []JobDemand{{
+	seedRecoveryDemandStore(t, databasePath, map[string][]JobDemand{"linux": {{
 		Repository: "repo", RequestID: 9, QueueTime: time.Now(), Acquired: true,
-	}}, nil); err != nil {
-		t.Fatal(err)
-	}
+	}}})
+	assertFailedStartRetainsAcquiredDemand(t, databasePath)
+	assertReopenedDemandStartsWithoutReacquisition(t, databasePath)
+}
+
+func assertFailedStartRetainsAcquiredDemand(t *testing.T, databasePath string) {
+	t.Helper()
+	store := openRecoveryStore(t, databasePath)
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close failed-start recovery store: %v", err)
+		}
+	}()
 	coordinator := NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", failingWorker{startErr: errors.New("start failed")})
 	if err := coordinator.Schedule(context.Background()); err == nil {
 		t.Fatal("expected runner start failure")
 	}
-	remaining, orderedErr := store.Ordered(context.Background(), "linux")
-	if orderedErr != nil || len(remaining) != 1 || !remaining[0].Acquired {
-		t.Fatalf("expected acquired demand to remain durable, got %#v, %v", remaining, orderedErr)
+	if remaining := assertSingleRecoveryDemand(t, store, "linux", 9); !remaining.Acquired {
+		t.Fatalf("expected acquired demand to remain acquired, got %#v", remaining)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	reopened, reopenErr := OpenSQLiteDemandStore(databasePath)
-	if reopenErr != nil {
-		t.Fatal(reopenErr)
-	}
-	defer reopened.Close()
+func assertReopenedDemandStartsWithoutReacquisition(t *testing.T, databasePath string) {
+	t.Helper()
+	reopened := reopenedRecoveryStore(t, databasePath)
 	startOrder := []string{}
 	retryCoordinator := NewDurableCoordinator("linux", 1, reopened)
 	retryWorker := &recordingWorker{repository: "repo", startOrder: &startOrder}

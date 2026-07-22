@@ -56,27 +56,7 @@ func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
 }
 
 func TestClusteredExecutorUsesOnlyLocalScaleSets(t *testing.T) {
-	configured := clusteredConfig(t)
-	state := &fakeClusterState{readyAssignments: []*cluster.Assignment{
-		{ID: 1, NodeID: "spock", ScaleSet: "remote-only", Repository: "repo", RequestID: 1},
-		{ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, InstallationID: 3, GitHubScaleSetID: 4},
-	}}
-	provider := &fakeScalerProvider{trackStarted: true}
-	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.buildReconciler = func(
-		context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int,
-	) (scaler.Reconciler, error) {
-		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-			Name: "linux", MaxRunners: 10, Provider: provider, JITConfig: fakeJITConfigGenerator{},
-		}}, nil
-	}
-	daemon := clusteredDaemon{
-		nodeID: "spock",
-		config: configured, credentials: testAppCredentials(t), logger: slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
-		newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
-		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier,
-		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-	}
+	daemon, state, provider := clusteredAssignmentExecutorFixture(t)
 	daemon.executeAssignments(context.Background())
 	if len(state.released) != 1 || state.released[0] != 1 {
 		t.Fatalf("remote-only assignment was not released: %#v", state.released)
@@ -91,77 +71,145 @@ func TestClusteredExecutorUsesOnlyLocalScaleSets(t *testing.T) {
 	}
 }
 
-func TestClusterLeaderManagesRemoteScaleSetAndRetainsItDuringFailover(t *testing.T) {
+func clusteredAssignmentExecutorFixture(t *testing.T) (*clusteredDaemon, *fakeClusterState, *fakeScalerProvider) {
+	t.Helper()
 	configured := clusteredConfig(t)
-	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{
-		Name: "remote-only", RunnerGroup: "Default", EffectiveCapacity: 12, Compatible: true,
-	}}}
-	lease := &fakeClusterLease{alive: true}
-	state.leases = []cluster.Lease{lease}
-	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	githubClient := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 1},
-		&upstream.RunnerScaleSet{ID: 20},
-		scaleSetMessageClient{Client: messageClient},
-	)
-	deletedScaleSetIDs := []int{}
-	githubClient.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
-		deletedScaleSetIDs = append(deletedScaleSetIDs, runnerScaleSetID)
-		return nil
+	state := &fakeClusterState{readyAssignments: []*cluster.Assignment{
+		{ID: 1, NodeID: "spock", ScaleSet: "remote-only", Repository: "repo", RequestID: 1},
+		{ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, InstallationID: 3, GitHubScaleSetID: 4},
 	}}
+	provider := &fakeScalerProvider{trackStarted: true}
 	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-		return githubClient, nil
+	daemonUnderTest.buildReconciler = func(
+		context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int,
+	) (scaler.Reconciler, error) {
+		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+			Name: "linux", MaxRunners: 10, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+		}}, nil
 	}
-	daemon := clusteredDaemon{
-		config: configured, credentials: testAppCredentials(t),
-		discoverer: staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}}}},
-		logger:     slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
-		newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
-		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier, nodes: state, assignments: state,
-		tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-	}
-	daemon.tryLeadership(context.Background())
-	daemon.leader.reconcile(context.Background())
-	if daemon.leader == nil || len(daemon.leader.sessions) != 1 {
-		t.Fatalf("leader did not manage remote-only scale set: %#v", daemon.leader)
-	}
-	session := daemon.leader.sessions[repositoryScaleSetSessionKey{repository: "repo", scaleSet: "remote-only"}]
+	daemonUnderTest.nodeID = "spock"
+	daemonUnderTest.config = configured
+	daemonUnderTest.credentials = testAppCredentials(t)
+	daemonUnderTest.logger = slog.Default()
+	daemonUnderTest.nodes = state
+	daemonUnderTest.assignments = state
+	daemonUnderTest.tryLeader = fakeTryLeader(state)
+	daemonUnderTest.waitForLeader = fakeWaitForLeader(state)
+	return daemonUnderTest, state, provider
+}
+
+func TestClusterLeaderManagesRemoteScaleSetAtAggregateCapacity(t *testing.T) {
+	fixture := newRemoteScaleSetLeaderFixture(t)
+	fixture.daemon.tryLeadership(context.Background())
+	fixture.daemon.leader.reconcile(context.Background())
+	session := fixture.daemon.leader.sessions[repositoryScaleSetSessionKey{repository: "repo", scaleSet: "remote-only"}]
 	if session == nil || session.capacity != 12 {
 		t.Fatalf("aggregate capacity was not used by leader: %#v", session)
 	}
-	lease.alive = false
+}
+
+func TestClusterLeaderFailoverRetainsDeclaredScaleSetAndClosesLease(t *testing.T) {
+	fixture := newRemoteScaleSetLeaderFixture(t)
+	fixture.daemon.tryLeadership(context.Background())
+	fixture.daemon.leader.reconcile(context.Background())
+	fixture.lease.alive = false
 	ctx, cancel := context.WithCancel(context.Background())
-	daemon.heartbeat(ctx)
+	fixture.daemon.heartbeat(ctx)
 	cancel()
-	daemon.stopLeadershipContender(ctx)
-	if len(deletedScaleSetIDs) != 0 {
-		t.Fatalf("leader failover deleted a declared scale set: %#v", deletedScaleSetIDs)
+	fixture.daemon.stopLeadershipContender(ctx)
+	if len(fixture.deletedScaleSetIDs) != 0 {
+		t.Fatalf("leader failover deleted a declared scale set: %#v", fixture.deletedScaleSetIDs)
 	}
-	if !lease.closed {
+	if !fixture.lease.closed {
 		t.Fatal("leader failover did not close its lease")
 	}
 }
 
-func TestClusterLeaderRejectsConflictsAndDeletesFinalWithdrawal(t *testing.T) {
+type remoteScaleSetLeaderFixture struct {
+	daemon             *clusteredDaemon
+	lease              *fakeClusterLease
+	deletedScaleSetIDs []int
+}
+
+func newRemoteScaleSetLeaderFixture(t *testing.T) *remoteScaleSetLeaderFixture {
+	t.Helper()
 	configured := clusteredConfig(t)
-	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}}}
-	logs := &bytes.Buffer{}
-	daemonFixture := clusteredDaemonForTest(state)
-	daemon := clusteredDaemon{
-		config: configured, credentials: testAppCredentials(t),
-		discoverer: staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}}}},
-		logger:     slog.New(slog.NewTextHandler(logs, nil)), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
-		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
-		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
-		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+	state := &fakeClusterState{statuses: []cluster.ScaleSetStatus{{
+		Name: "remote-only", RunnerGroup: "Default", EffectiveCapacity: 12, Compatible: true,
+	}}}
+	fixture := &remoteScaleSetLeaderFixture{lease: &fakeClusterLease{alive: true}}
+	state.leases = []cluster.Lease{fixture.lease}
+	githubClient := remoteScaleSetGitHubClient(fixture)
+	daemonUnderTest := clusteredDaemonForTest(state)
+	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+		return githubClient, nil
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	fixture.daemon = daemonUnderTest
+	fixture.daemon.config = configured
+	fixture.daemon.credentials = testAppCredentials(t)
+	fixture.daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{
+		Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}},
+	}}
+	fixture.daemon.logger = slog.Default()
+	fixture.daemon.nodes = state
+	fixture.daemon.assignments = state
+	fixture.daemon.tryLeader = fakeTryLeader(state)
+	fixture.daemon.waitForLeader = fakeWaitForLeader(state)
+	return fixture
+}
+
+func remoteScaleSetGitHubClient(fixture *remoteScaleSetLeaderFixture) *fakeScaleSetClient {
+	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, scaleSetID int) error {
+		fixture.deletedScaleSetIDs = append(fixture.deletedScaleSetIDs, scaleSetID)
+		return nil
+	}}
+	return client
+}
+
+func TestClusterLeaderRejectsConflictingDeclarations(t *testing.T) {
+	leader, logs, _ := conflictingScaleSetLeaderFixture(t)
 	leader.reconcile(context.Background())
 	if len(leader.sessions) != 0 || !strings.Contains(logs.String(), "conflicting clustered scale-set declarations") {
 		t.Fatalf("conflict was not rejected clearly: sessions=%#v logs=%q", leader.sessions, logs.String())
 	}
+}
 
+func conflictingScaleSetLeaderFixture(t *testing.T) (leader *clusterLeader, logs *bytes.Buffer, state *fakeClusterState) {
+	t.Helper()
+	configured := clusteredConfig(t)
+	state = &fakeClusterState{statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}}}
+	logs = &bytes.Buffer{}
+	daemon := clusteredDaemonForTest(state)
+	daemon.config = configured
+	daemon.credentials = testAppCredentials(t)
+	daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{
+		Repositories: []githubapp.Repository{{URL: "repo", InstallationID: 7}},
+	}}
+	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemon.nodes = state
+	daemon.assignments = state
+	daemon.tryLeader = fakeTryLeader(state)
+	daemon.waitForLeader = fakeWaitForLeader(state)
+	return newClusterLeader(daemon, &fakeClusterLease{alive: true}), logs, state
+}
+
+func TestClusterLeaderDeletesScaleSetAfterFinalExplicitWithdrawal(t *testing.T) {
+	leader, state, deletedScaleSetIDs := withdrawnScaleSetLeaderFixture(t)
+	state.statuses = nil
+	leader.reconcile(context.Background())
+	if len(*deletedScaleSetIDs) != 1 || (*deletedScaleSetIDs)[0] != 20 {
+		t.Fatalf("final explicit withdrawal did not delete scale set: %#v", *deletedScaleSetIDs)
+	}
+}
+
+func withdrawnScaleSetLeaderFixture(t *testing.T) (*clusterLeader, *fakeClusterState, *[]int) {
+	t.Helper()
+	leader, _, state := conflictingScaleSetLeaderFixture(t)
 	messageClient := &fakeMessageClient{}
 	deletedScaleSetIDs := []int{}
 	githubClient := fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
@@ -174,9 +222,5 @@ func TestClusterLeaderRejectsConflictsAndDeletesFinalWithdrawal(t *testing.T) {
 		stopPolling: func() {}, pollerDone: closedChannel(),
 	}
 	leader.sessions[session.key] = session
-	state.statuses = nil
-	leader.reconcile(context.Background())
-	if len(deletedScaleSetIDs) != 1 || deletedScaleSetIDs[0] != 20 {
-		t.Fatalf("final explicit withdrawal did not delete scale set: %#v", deletedScaleSetIDs)
-	}
+	return leader, state, &deletedScaleSetIDs
 }

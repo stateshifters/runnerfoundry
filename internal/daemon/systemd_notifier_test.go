@@ -19,11 +19,11 @@ func TestSystemdNotifierIgnoresMissingNotifySocket(t *testing.T) {
 	}
 }
 
-func TestSystemdNotifierSurfacesCancelledContext(t *testing.T) {
+func TestSystemdNotifierSurfacesCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := notifySystemd(ctx, "READY=1"); err == nil {
-		t.Fatal("expected cancelled context error")
+		t.Fatal("expected canceled context error")
 	}
 }
 

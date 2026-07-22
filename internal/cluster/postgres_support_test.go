@@ -4,14 +4,17 @@ package cluster
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"math/rand/v2"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,18 +34,18 @@ const (
 )
 
 func TestMain(testSuite *testing.M) {
-	dsn, database, runtimePath, err := startPostgreSQLIntegrationServer()
+	server, err := startPostgreSQLIntegrationServer()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "start embedded PostgreSQL: %v\n", err)
 		os.Exit(1)
 	}
-	postgreSQLIntegrationDSN = dsn
+	postgreSQLIntegrationDSN = server.dsn
 	exitCode := testSuite.Run()
-	if err = database.Stop(); err != nil {
+	if err = server.database.Stop(); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "stop embedded PostgreSQL: %v\n", err)
 		exitCode = 1
 	}
-	if err = os.RemoveAll(runtimePath); err != nil {
+	if err = os.RemoveAll(server.runtimePath); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove embedded PostgreSQL runtime: %v\n", err)
 		exitCode = 1
 	}
@@ -162,35 +165,8 @@ func postgreSQLTestStore(t *testing.T) (*Store, string) {
 func postgreSQLTestDSN(t *testing.T) string {
 	t.Helper()
 	databaseName := fmt.Sprintf("github_scaler_test_%d", postgreSQLDatabaseSequence.Add(1))
-	admin, err := pgx.Connect(context.Background(), postgreSQLIntegrationDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = admin.Exec(context.Background(), "CREATE DATABASE "+pgx.Identifier{databaseName}.Sanitize()); err != nil {
-		_ = admin.Close(context.Background())
-		t.Fatal(err)
-	}
-	if err = admin.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		connection, connectErr := pgx.Connect(context.Background(), postgreSQLIntegrationDSN)
-		if connectErr != nil {
-			t.Errorf("connect to remove PostgreSQL test database: %v", connectErr)
-			return
-		}
-		defer func() {
-			if closeErr := connection.Close(context.Background()); closeErr != nil {
-				t.Errorf("close PostgreSQL cleanup connection: %v", closeErr)
-			}
-		}()
-		if _, dropErr := connection.Exec(
-			context.Background(),
-			"DROP DATABASE "+pgx.Identifier{databaseName}.Sanitize()+" WITH (FORCE)",
-		); dropErr != nil {
-			t.Errorf("remove PostgreSQL test database: %v", dropErr)
-		}
-	})
+	createPostgreSQLTestDatabase(t, databaseName)
+	t.Cleanup(func() { removePostgreSQLTestDatabase(t, databaseName) })
 	parsedDSN, err := url.Parse(postgreSQLIntegrationDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -199,39 +175,99 @@ func postgreSQLTestDSN(t *testing.T) string {
 	return parsedDSN.String()
 }
 
-func startPostgreSQLIntegrationServer() (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
+func createPostgreSQLTestDatabase(t *testing.T, databaseName string) {
+	t.Helper()
+	admin, err := pgx.Connect(context.Background(), postgreSQLIntegrationDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = admin.Exec(context.Background(), "CREATE DATABASE "+pgx.Identifier{databaseName}.Sanitize()); err != nil {
+		closeErr := admin.Close(context.Background())
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	if err = admin.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removePostgreSQLTestDatabase(t *testing.T, databaseName string) {
+	t.Helper()
+	connection, err := pgx.Connect(context.Background(), postgreSQLIntegrationDSN)
+	if err != nil {
+		t.Errorf("connect to remove PostgreSQL test database: %v", err)
+		return
+	}
+	defer func() {
+		if closeErr := connection.Close(context.Background()); closeErr != nil {
+			t.Errorf("close PostgreSQL cleanup connection: %v", closeErr)
+		}
+	}()
+	if _, err := connection.Exec(context.Background(),
+		"DROP DATABASE "+pgx.Identifier{databaseName}.Sanitize()+" WITH (FORCE)",
+	); err != nil {
+		t.Errorf("remove PostgreSQL test database: %v", err)
+	}
+}
+
+type postgreSQLIntegrationServer struct {
+	dsn         string
+	database    *embeddedpostgres.EmbeddedPostgres
+	runtimePath string
+}
+
+func startPostgreSQLIntegrationServer() (postgreSQLIntegrationServer, error) {
 	return startPostgreSQLIntegrationServerWithPortCandidate(randomPostgreSQLPort)
 }
 
 func startPostgreSQLIntegrationServerWithPortCandidate(
-	nextPort func() uint32,
-) (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
+	nextPort func() (uint32, error),
+) (postgreSQLIntegrationServer, error) {
 	cachePath, err := postgreSQLTestCache()
 	if err != nil {
-		return "", nil, "", err
+		return postgreSQLIntegrationServer{}, err
 	}
 	var lastStartError error
 	for range postgreSQLStartAttemptLimit {
-		dsn, database, runtimePath, startErr := startPostgreSQLIntegrationServerOnPort(nextPort(), cachePath)
+		port, candidateErr := nextPort()
+		if candidateErr != nil {
+			return postgreSQLIntegrationServer{}, fmt.Errorf("select PostgreSQL test port: %w", candidateErr)
+		}
+		if portErr := requireAvailablePostgreSQLPort(port); portErr != nil {
+			lastStartError = portErr
+			continue
+		}
+		server, startErr := startPostgreSQLIntegrationServerOnPort(port, cachePath)
 		if startErr == nil {
-			return dsn, database, runtimePath, nil
+			return server, nil
 		}
 		lastStartError = startErr
 	}
-	return "", nil, "", fmt.Errorf(
+	return postgreSQLIntegrationServer{}, fmt.Errorf(
 		"start embedded PostgreSQL after %d attempts: %w",
 		postgreSQLStartAttemptLimit,
 		lastStartError,
 	)
 }
 
+func requireAvailablePostgreSQLPort(port uint32) error {
+	address := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("PostgreSQL test port %d is unavailable: %w", port, err)
+	}
+	if err := listener.Close(); err != nil {
+		return fmt.Errorf("release PostgreSQL test port %d: %w", port, err)
+	}
+	return nil
+}
+
 func startPostgreSQLIntegrationServerOnPort(
 	port uint32,
 	cachePath string,
-) (string, *embeddedpostgres.EmbeddedPostgres, string, error) {
+) (postgreSQLIntegrationServer, error) {
 	runtimePath, err := os.MkdirTemp("", "github-scaler-postgres-")
 	if err != nil {
-		return "", nil, "", err
+		return postgreSQLIntegrationServer{}, fmt.Errorf("create PostgreSQL runtime directory: %w", err)
 	}
 	database := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 		Version(embeddedpostgres.V16).
@@ -241,16 +277,25 @@ func startPostgreSQLIntegrationServerOnPort(
 		Logger(io.Discard))
 	if err := database.Start(); err != nil {
 		if removeErr := os.RemoveAll(runtimePath); removeErr != nil {
-			return "", nil, "", errors.Join(err, fmt.Errorf("remove PostgreSQL runtime: %w", removeErr))
+			return postgreSQLIntegrationServer{}, errors.Join(err, fmt.Errorf("remove PostgreSQL runtime: %w", removeErr))
 		}
-		return "", nil, "", err
+		return postgreSQLIntegrationServer{}, fmt.Errorf("start embedded PostgreSQL: %w", err)
 	}
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
-	return dsn, database, runtimePath, nil
+	return postgreSQLIntegrationServer{dsn: dsn, database: database, runtimePath: runtimePath}, nil
 }
 
-func randomPostgreSQLPort() uint32 {
-	return minimumPostgreSQLTestPort + rand.Uint32N(postgreSQLTestPortOptionCount)
+func randomPostgreSQLPort() (uint32, error) {
+	for {
+		var randomBytes [2]byte
+		if _, err := io.ReadFull(cryptorand.Reader, randomBytes[:]); err != nil {
+			return 0, fmt.Errorf("read secure random PostgreSQL port: %w", err)
+		}
+		offset := binary.BigEndian.Uint16(randomBytes[:])
+		if uint32(offset) < postgreSQLTestPortOptionCount {
+			return minimumPostgreSQLTestPort + uint32(offset), nil
+		}
+	}
 }
 
 func postgreSQLTestCache() (string, error) {

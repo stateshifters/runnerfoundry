@@ -57,34 +57,46 @@ func TestCoordinatedScaleSetHandlerQueuesAvailableAndAssignedJobsAndRemovesCompl
 }
 
 func TestCoordinatedScaleSetHandlerUsesStatisticsForZeroIdentityAssignedJobs(t *testing.T) {
-	logs := &bytes.Buffer{}
-	logger := slog.New(slog.NewTextHandler(logs, nil))
-	provider := &fakeScalerProvider{trackStarted: true}
-	coordinator := scaler.NewCoordinator(2)
-	coordinator.AddRepository("repo", coordinatedRepositoryWorker{
-		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-			Name: "local", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
-		}},
-	})
-	handler := coordinatedScaleSetHandler{Logger: logger, ScaleSet: "self-hosted", Coordinator: coordinator, Repository: "repo"}
-	message := &upstream.RunnerScaleSetMessage{
-		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
-		JobAssignedMessages: []*upstream.JobAssigned{{}, {}},
-	}
-
-	if err := handler.HandleMessage(context.Background(), message); err != nil {
+	fixture := newAssignedStatisticsFixture()
+	if err := fixture.handler.HandleMessage(context.Background(), fixture.message); err != nil {
 		t.Fatalf("expected assigned capacity reconciliation, got %v", err)
 	}
-	if len(provider.started) != 2 {
-		t.Fatalf("expected two assigned runners, got %#v", provider.started)
+	if len(fixture.provider.started) != 2 {
+		t.Fatalf("expected two assigned runners, got %#v", fixture.provider.started)
 	}
-	for _, startedRunner := range provider.started {
+	for _, startedRunner := range fixture.provider.started {
 		if strings.HasSuffix(startedRunner.RunnerName, "-0") {
 			t.Fatalf("expected assigned runner without zero request identity, got %q", startedRunner.RunnerName)
 		}
 	}
-	if !strings.Contains(logs.String(), "assigned capacity reconciled") || !strings.Contains(logs.String(), "startedRunners=2") || strings.Contains(logs.String(), "requestID=0") {
-		t.Fatalf("expected aggregate assigned-capacity log without fabricated identity, got %q", logs.String())
+	if !strings.Contains(fixture.logs.String(), "assigned capacity reconciled") ||
+		!strings.Contains(fixture.logs.String(), "startedRunners=2") ||
+		strings.Contains(fixture.logs.String(), "requestID=0") {
+		t.Fatalf("expected aggregate assigned-capacity log without fabricated identity, got %q", fixture.logs.String())
+	}
+}
+
+type assignedStatisticsFixture struct {
+	logs     *bytes.Buffer
+	provider *fakeScalerProvider
+	handler  coordinatedScaleSetHandler
+	message  *upstream.RunnerScaleSetMessage
+}
+
+func newAssignedStatisticsFixture() assignedStatisticsFixture {
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	provider := &fakeScalerProvider{trackStarted: true}
+	coordinator := scaler.NewCoordinator(2)
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "local", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
+	}}})
+	return assignedStatisticsFixture{
+		logs: logs, provider: provider,
+		handler: coordinatedScaleSetHandler{Logger: logger, ScaleSet: "self-hosted", Coordinator: coordinator, Repository: "repo"},
+		message: &upstream.RunnerScaleSetMessage{
+			Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2}, JobAssignedMessages: []*upstream.JobAssigned{{}, {}},
+		},
 	}
 }
 

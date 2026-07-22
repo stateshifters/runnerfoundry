@@ -15,7 +15,7 @@ func TestReopenedCoordinatorRetainsProviderVisibleDemandWithoutDuplication(t *te
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	if err := store.Apply(context.Background(), "linux", []JobDemand{{
 		Repository: "repo", RequestID: 10, QueueTime: time.Now(), Acquired: true,
 	}}, nil); err != nil {

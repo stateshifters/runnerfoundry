@@ -97,46 +97,55 @@ func assertClusteredStartupFailure(
 	}
 }
 
-func TestClusterEventLoopDispatchesIndependentWorkers(t *testing.T) {
-	configured := clusteredConfig(t)
-	tests := []struct {
-		name      string
-		events    func() clusterEvents
-		configure func(*fakeClusterState, context.CancelFunc)
-	}{
-		{name: "heartbeat", events: func() clusterEvents {
-			channel := make(chan time.Time, 1)
-			channel <- time.Now()
-			return clusterEvents{heartbeat: channel}
-		}, configure: func(state *fakeClusterState, cancel context.CancelFunc) { state.onPublish = cancel }},
-		{name: "leadership", events: func() clusterEvents {
-			channel := make(chan leadershipResult, 1)
-			channel <- leadershipResult{lease: &fakeClusterLease{alive: true}}
-			return clusterEvents{leadership: channel}
-		}, configure: func(state *fakeClusterState, cancel context.CancelFunc) { state.onScaleSets = cancel }},
-		{name: "executor", events: func() clusterEvents {
-			channel := make(chan time.Time, 1)
-			channel <- time.Now()
-			return clusterEvents{executor: channel}
-		}, configure: func(state *fakeClusterState, cancel context.CancelFunc) { state.onClaimReady = cancel }},
+func TestClusterEventLoopDispatchesHeartbeatWorker(t *testing.T) {
+	ctx, fixture := clusterEventFixtureForTest(t)
+	fixture.state.onPublish = fixture.cancel
+	heartbeats := make(chan time.Time, 1)
+	heartbeats <- time.Now()
+	if err := fixture.daemon.runEvents(ctx, Options{}, clusterEvents{heartbeat: heartbeats}); err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			state := &fakeClusterState{}
-			daemonFixture := clusteredDaemonForTest(state)
-			daemon := clusteredDaemon{
-				config: configured, discoverer: staticDiscoverer{}, logger: slog.Default(),
-				loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
-				newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
-				buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			test.configure(state, cancel)
-			if err := daemon.runEvents(ctx, Options{}, test.events()); err != nil {
-				t.Fatal(err)
-			}
-		})
+}
+
+func TestClusterEventLoopDispatchesLeadershipWorker(t *testing.T) {
+	ctx, fixture := clusterEventFixtureForTest(t)
+	fixture.state.onScaleSets = fixture.cancel
+	leadership := make(chan leadershipResult, 1)
+	leadership <- leadershipResult{lease: &fakeClusterLease{alive: true}}
+	if err := fixture.daemon.runEvents(ctx, Options{}, clusterEvents{leadership: leadership}); err != nil {
+		t.Fatal(err)
 	}
+}
+
+func TestClusterEventLoopDispatchesAssignmentWorker(t *testing.T) {
+	ctx, fixture := clusterEventFixtureForTest(t)
+	fixture.state.onClaimReady = fixture.cancel
+	executor := make(chan time.Time, 1)
+	executor <- time.Now()
+	if err := fixture.daemon.runEvents(ctx, Options{}, clusterEvents{executor: executor}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type clusterEventFixture struct {
+	state  *fakeClusterState
+	daemon *clusteredDaemon
+	cancel context.CancelFunc
+}
+
+func clusterEventFixtureForTest(t *testing.T) (context.Context, clusterEventFixture) {
+	t.Helper()
+	state := &fakeClusterState{}
+	daemon := clusteredDaemonForTest(state)
+	daemon.config = clusteredConfig(t)
+	daemon.discoverer = staticDiscoverer{}
+	daemon.logger = slog.Default()
+	daemon.nodes = state
+	daemon.assignments = state
+	daemon.tryLeader = fakeTryLeader(state)
+	daemon.waitForLeader = fakeWaitForLeader(state)
+	ctx, cancel := context.WithCancel(context.Background())
+	return ctx, clusterEventFixture{state: state, daemon: daemon, cancel: cancel}
 }
 
 func TestClusterEventLoopReturnsReloadFailure(t *testing.T) {
@@ -153,45 +162,61 @@ func TestClusterEventLoopReturnsReloadFailure(t *testing.T) {
 }
 
 func TestSlowProviderHealthDoesNotBlockAssignmentExecution(t *testing.T) {
-	healthCheckStarted := make(chan struct{})
-	releaseHealthCheck := make(chan struct{})
-	assignmentClaimed := make(chan struct{})
-	state := &fakeClusterState{onClaimReady: func() { close(assignmentClaimed) }}
-	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.providerHealthy = func(ctx context.Context, _ config.ScaleSetConfig) error {
-		close(healthCheckStarted)
-		select {
-		case <-releaseHealthCheck:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	daemon := clusteredDaemon{
-		config: clusteredConfig(t), discoverer: staticDiscoverer{}, logger: slog.Default(),
-		loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
-		newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
-		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier, nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-	}
+	fixture := newSlowProviderHealthFixture(t)
 	heartbeatEvents := make(chan time.Time, 1)
 	executorEvents := make(chan time.Time, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- daemon.runEvents(ctx, Options{}, clusterEvents{heartbeat: heartbeatEvents, executor: executorEvents})
+		done <- fixture.daemon.runEvents(ctx, Options{}, clusterEvents{heartbeat: heartbeatEvents, executor: executorEvents})
 	}()
 	heartbeatEvents <- time.Now()
-	<-healthCheckStarted
+	<-fixture.healthCheckStarted
 	executorEvents <- time.Now()
 	select {
-	case <-assignmentClaimed:
+	case <-fixture.assignmentClaimed:
 	case <-time.After(time.Second):
 		t.Fatal("assignment execution was blocked by provider health")
 	}
-	close(releaseHealthCheck)
+	close(fixture.releaseHealthCheck)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+type slowProviderHealthFixture struct {
+	daemon             *clusteredDaemon
+	healthCheckStarted chan struct{}
+	releaseHealthCheck chan struct{}
+	assignmentClaimed  chan struct{}
+}
+
+func newSlowProviderHealthFixture(t *testing.T) *slowProviderHealthFixture {
+	t.Helper()
+	fixture := &slowProviderHealthFixture{
+		healthCheckStarted: make(chan struct{}), releaseHealthCheck: make(chan struct{}), assignmentClaimed: make(chan struct{}),
+	}
+	state := &fakeClusterState{onClaimReady: func() { close(fixture.assignmentClaimed) }}
+	fixture.daemon = clusteredDaemonForTest(state)
+	fixture.daemon.config = clusteredConfig(t)
+	fixture.daemon.discoverer = staticDiscoverer{}
+	fixture.daemon.logger = slog.Default()
+	fixture.daemon.providerHealthy = fixture.providerHealth
+	fixture.daemon.nodes = state
+	fixture.daemon.assignments = state
+	fixture.daemon.tryLeader = fakeTryLeader(state)
+	fixture.daemon.waitForLeader = fakeWaitForLeader(state)
+	return fixture
+}
+
+func (fixture *slowProviderHealthFixture) providerHealth(ctx context.Context, _ config.ScaleSetConfig) error {
+	close(fixture.healthCheckStarted)
+	select {
+	case <-fixture.releaseHealthCheck:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("provider health check canceled: %w", ctx.Err())
 	}
 }
 
@@ -318,43 +343,91 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 
 func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {
 	configured := clusteredConfig(t)
-	failure := errors.New("failed")
-	tests := []struct {
-		name          string
-		loaded        config.Config
-		loadErr       error
-		discovererErr error
-		publishErr    error
-		wantErr       bool
-	}{
-		{name: "load", loadErr: failure, wantErr: true},
-		{name: "backend", loaded: runnableConfig(t), wantErr: true},
-		{name: "connection", loaded: withPostgreSQLDSN(configured, "postgres://replacement"), wantErr: true},
-		{name: "credentials", loaded: withPrivateKey(configured, "missing-key"), wantErr: true},
-		{name: "discoverer", loaded: configured, discovererErr: failure, wantErr: true},
-		{name: "publish", loaded: configured, publishErr: failure, wantErr: true},
-		{name: "success", loaded: configured},
+	daemon, state := newClusterReloadFixture(t, clusterReloadFixtureConfig{initial: configured, loaded: configured})
+	if err := daemon.reload(context.Background(), "config.yaml"); err != nil {
+		t.Fatalf("expected reload success, got %v", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			state := &fakeClusterState{publishErr: test.publishErr}
-			daemonUnderTest := clusteredDaemonForTest(state)
-			daemonUnderTest.loadConfig = func(string) (config.Config, error) { return test.loaded, test.loadErr }
-			daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-				return staticDiscoverer{}, test.discovererErr
-			}
-			daemon := clusteredDaemon{
-				config: configured, credentials: testAppCredentials(t), logger: slog.Default(), loadConfig: daemonUnderTest.loadConfig, newDiscoverer: daemonUnderTest.newDiscoverer,
-				newGitHubClient: daemonUnderTest.newGitHubClient, providerHealthy: daemonUnderTest.providerHealthy,
-				buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier,
-				nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
-			}
-			err := daemon.reload(context.Background(), "config.yaml")
-			if test.wantErr != (err != nil) {
-				t.Fatalf("reload error = %v, wantErr=%t", err, test.wantErr)
-			}
-		})
+	if len(state.publications) != 1 {
+		t.Fatalf("replacement publications = %d, want 1", len(state.publications))
 	}
+}
+
+func TestClusterReloadReportsConfigurationLoadFailure(t *testing.T) {
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{initial: clusteredConfig(t), loadErr: errors.New("failed")})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected configuration load failure")
+	}
+}
+
+func TestClusterReloadRejectsNonPostgreSQLBackend(t *testing.T) {
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{initial: clusteredConfig(t), loaded: runnableConfig(t)})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected backend authority failure")
+	}
+}
+
+func TestClusterReloadRejectsChangedPostgreSQLConnection(t *testing.T) {
+	configured := clusteredConfig(t)
+	loaded := withPostgreSQLDSN(configured, "postgres://replacement")
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{initial: configured, loaded: loaded})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected connection authority failure")
+	}
+}
+
+func TestClusterReloadRejectsInvalidCredentials(t *testing.T) {
+	configured := clusteredConfig(t)
+	loaded := withPrivateKey(configured, "missing-key")
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{initial: configured, loaded: loaded})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected credential validation failure")
+	}
+}
+
+func TestClusterReloadReportsDiscovererConstructionFailure(t *testing.T) {
+	configured := clusteredConfig(t)
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{
+		initial: configured, loaded: configured, discovererErr: errors.New("failed"),
+	})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected discoverer construction failure")
+	}
+}
+
+func TestClusterReloadReportsReplacementPublicationFailure(t *testing.T) {
+	configured := clusteredConfig(t)
+	daemon, _ := newClusterReloadFixture(t, clusterReloadFixtureConfig{
+		initial: configured, loaded: configured, publishErr: errors.New("failed"),
+	})
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected replacement publication failure")
+	}
+}
+
+type clusterReloadFixtureConfig struct {
+	initial       config.Config
+	loaded        config.Config
+	loadErr       error
+	discovererErr error
+	publishErr    error
+}
+
+func newClusterReloadFixture(t *testing.T, fixture clusterReloadFixtureConfig) (*clusteredDaemon, *fakeClusterState) {
+	t.Helper()
+	state := &fakeClusterState{publishErr: fixture.publishErr}
+	daemon := clusteredDaemonForTest(state)
+	daemon.config = fixture.initial
+	daemon.credentials = testAppCredentials(t)
+	daemon.logger = slog.Default()
+	daemon.loadConfig = func(string) (config.Config, error) { return fixture.loaded, fixture.loadErr }
+	daemon.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return staticDiscoverer{}, fixture.discovererErr
+	}
+	daemon.nodes = state
+	daemon.assignments = state
+	daemon.tryLeader = fakeTryLeader(state)
+	daemon.waitForLeader = fakeWaitForLeader(state)
+	return daemon, state
 }
 
 func TestLeaderReconciliationReportsDiscoveryFailure(t *testing.T) {

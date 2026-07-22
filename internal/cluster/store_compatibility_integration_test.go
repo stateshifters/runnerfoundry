@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestPostgreSQLCompatibilityUsesOnlyLiveHealthyContributors(t *testing.T) {
 	if status.Compatible || status.EffectiveCapacity != 0 {
 		t.Fatalf("live conflict contributed capacity: %#v", status)
 	}
-	if err := fixture.store.Publish(fixture.ctx, "spock", NodeHealthy, []Contribution{
+	if err := fixture.store.Publish(context.Background(), "spock", NodeHealthy, []Contribution{
 		{ScaleSet: "meza-ubuntu-slim", RunnerGroup: "Default", MaxRunners: 6, Healthy: true},
 	}, fixture.now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
@@ -37,7 +38,7 @@ func TestPostgreSQLCompatibilityUsesOnlyLiveHealthyContributors(t *testing.T) {
 
 func TestPostgreSQLExplicitWithdrawalRemovesOnlyTheFinalDeclarationAndItsDemand(t *testing.T) {
 	fixture := newCapacityTestCluster(t)
-	if err := fixture.store.Enqueue(fixture.ctx, Demand{
+	if err := fixture.store.Enqueue(context.Background(), Demand{
 		ScaleSet: "serenity-only", Repository: "repo", RequestID: 100, QueueTime: fixture.now,
 	}); err != nil {
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestPostgreSQLExplicitWithdrawalRemovesOnlyTheFinalDeclarationAndItsDemand(
 	fixture.publish(t, "serenity", NodeHealthy,
 		Contribution{ScaleSet: "serenity-only", RunnerGroup: "Default", MaxRunners: 1, Healthy: true},
 	)
-	assignment, err := fixture.store.AssignOldest(fixture.ctx, "serenity-only", fixture.now, fixture.liveFor)
+	assignment, err := fixture.store.AssignOldest(context.Background(), "serenity-only", fixture.now, fixture.liveFor)
 	if !errors.Is(err, ErrNoAssignment) || assignment != nil {
 		t.Fatalf("withdrawn scale set retained demand: %#v, %v", assignment, err)
 	}

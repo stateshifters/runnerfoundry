@@ -14,6 +14,50 @@ import (
 )
 
 func TestCoordinatedScaleSetHandlerRetainsDemandUntilJobStarted(t *testing.T) {
+	fixture := newRetainedDemandFixture(t)
+	if err := fixture.handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAssignedMessages: []*upstream.JobAssigned{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.worker.running = 0
+	if err := fixture.coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.worker.started) != 1 || fixture.worker.started[0] != 50 {
+		t.Fatalf("expected JobAssigned demand to remain provisionable, got %#v", fixture.worker.started)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerRemovesDemandWhenJobStarts(t *testing.T) {
+	fixture := newRetainedDemandFixture(t)
+	started := &upstream.RunnerScaleSetMessage{
+		Statistics:         &upstream.RunnerScaleSetStatistic{},
+		JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
+	}
+	for range 2 {
+		if err := fixture.handler.HandleMessage(context.Background(), started); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.worker.running = 0
+	if err := fixture.coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.worker.started) != 0 {
+		t.Fatalf("expected JobStarted to complete durable demand, got %#v", fixture.worker.started)
+	}
+}
+
+type retainedDemandFixture struct {
+	worker      *recordingRecoveryWorker
+	coordinator *scaler.Coordinator
+	handler     coordinatedScaleSetHandler
+}
+
+func newRetainedDemandFixture(t *testing.T) retainedDemandFixture {
+	t.Helper()
 	worker := &recordingRecoveryWorker{running: 1}
 	coordinator := scaler.NewCoordinator(1)
 	coordinator.AddRepository("repo", worker)
@@ -22,37 +66,9 @@ func TestCoordinatedScaleSetHandlerRetainsDemandUntilJobStarted(t *testing.T) {
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
-	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
-		Statistics:          &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
-		JobAssignedMessages: []*upstream.JobAssigned{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	worker.running = 0
-	if err := coordinator.Schedule(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(worker.started) != 1 || worker.started[0] != 50 {
-		t.Fatalf("expected JobAssigned demand to remain provisionable, got %#v", worker.started)
-	}
-
-	worker.running = 1
-	started := &upstream.RunnerScaleSetMessage{
-		Statistics:         &upstream.RunnerScaleSetStatistic{},
-		JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 50}}},
-	}
-	for range 2 {
-		if err := handler.HandleMessage(context.Background(), started); err != nil {
-			t.Fatal(err)
-		}
-	}
-	worker.running = 0
-	if err := coordinator.Schedule(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(worker.started) != 1 {
-		t.Fatalf("expected JobStarted to complete durable demand, got %#v", worker.started)
+	return retainedDemandFixture{
+		worker: worker, coordinator: coordinator,
+		handler: coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"},
 	}
 }
 

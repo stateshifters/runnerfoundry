@@ -136,6 +136,9 @@ func (client scaleSetMessageClient) GetMessage(ctx context.Context, lastMessageI
 	if err != nil {
 		return nil, fmt.Errorf("get message: %w", err)
 	}
+	if message == nil {
+		return nil, scalesetpoller.ErrNoMessage
+	}
 	return message, nil
 }
 

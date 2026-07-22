@@ -311,10 +311,6 @@ linters:
     gosec:
       severity: low
       confidence: low
-      excludes:
-        # SHA1 is acceptable when used for non-security fingerprinting.
-        - G401
-        - G505
       config:
         global:
           nosec: false
@@ -330,116 +326,6 @@ linters:
         G301: "0755"
         G302: "0644"
         G306: "0644"
-
-  exclusions:
-    # Keep the v1 default behavior for generated files.
-    generated: lax
-
-    # Do not silently hide issues via default exclude presets.
-    presets: []
-
-    # v1 exclude-dirs-use-default: vendor$, third_party$, testdata$, examples$, Godeps$, builtin$
-    paths:
-      - vendor$
-      - third_party$
-      - testdata$
-      - examples$
-      - Godeps$
-      - builtin$
-
-    rules:
-      - path: _test\.go
-        linters:
-          - dupl
-      - path: _test\.go
-        linters:
-          - errcheck
-      - path: _test\.go
-        linters:
-          - funlen
-      - path: _test\.go
-        linters:
-          - gocognit
-      - path: _test\.go
-        linters:
-          - maintidx
-      - path: _test\.go
-        linters:
-          - unparam
-      - path: _test\.go
-        linters:
-          - prealloc
-      - path: _test\.go
-        linters:
-          - misspell
-      - path: _test\.go
-        linters:
-          - whitespace
-      - path: _test\.go
-        linters:
-          - unused
-      - path: _test\.go
-        linters:
-          - revive
-        text: "unused-parameter"
-      - path: _test\.go
-        linters:
-          - revive
-        text: "package-comments"
-      # Tests can be verbose; relax complexity/length thresholds for _test.go only.
-      - path: _test\.go
-        linters:
-          - revive
-        text: "function-length"
-      - path: _test\.go
-        linters:
-          - revive
-        text: "cognitive-complexity"
-      - path: _test\.go
-        linters:
-          - revive
-        text: "cyclomatic"
-      - path: _test\.go
-        linters:
-          - gocritic
-        text: "httpNoBody"
-      - path: _test\.go
-        linters:
-          - gosec
-        text: "G304"
-      - path: _test\.go
-        linters:
-          - gosec
-        text: "G101"
-      - path: internal[\\/]scaleset[\\/]poller_test\.go
-        linters:
-          - nilnil
-      - path: internal[\\/]daemon[\\/]scale_set_registry\.go
-        linters:
-          - gosec
-        text: "G704"
-      - path: internal[\\/]provider[\\/]docker[\\/]compose\.go
-        linters:
-          - gosec
-        text: "G204"
-      - path: internal[\\/]provider[\\/]libvirt[\\/]provider\.go
-        linters:
-          - gosec
-        text: "G204"
-      - path: cmd[\\/]github-scaler[\\/]main\.go
-        linters:
-          - gosec
-        text: "G304"
-
-formatters:
-  exclusions:
-    paths:
-      - vendor$
-      - third_party$
-      - testdata$
-      - examples$
-      - Godeps$
-      - builtin$
 
 issues:
   # Do not truncate.

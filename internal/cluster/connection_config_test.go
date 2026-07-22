@@ -15,65 +15,88 @@ import (
 type Settings = postgresconfig.Settings
 type Endpoint = postgresconfig.Endpoint
 
-func TestSettingsResolveEveryStructuredFieldSource(t *testing.T) {
-	type fieldCase struct {
-		name string
-		set  func(*Settings, string)
-		get  func(*pgx.ConnConfig) string
-		want string
-	}
-	fields := []fieldCase{
-		{name: "host", set: func(settings *Settings, value string) { settings.Host = value }, get: func(config *pgx.ConnConfig) string { return config.Host }, want: "database.internal"},
-		{name: "port", set: func(settings *Settings, value string) { settings.Port = value }, get: func(config *pgx.ConnConfig) string { return strconv.Itoa(int(config.Port)) }, want: "6432"},
-		{name: "name", set: func(settings *Settings, value string) { settings.Name = value }, get: func(config *pgx.ConnConfig) string { return config.Database }, want: "github_scaler"},
-		{name: "user", set: func(settings *Settings, value string) { settings.User = value }, get: func(config *pgx.ConnConfig) string { return config.User }, want: "scaler"},
-		{name: "password", set: func(settings *Settings, value string) { settings.Password = value }, get: func(config *pgx.ConnConfig) string { return config.Password }, want: "opaque secret"},
-	}
-	for _, field := range fields {
-		field := field
+type connectionFixtureValues struct {
+	identity string
+	proof    string
+}
+
+func newConnectionFixtureValues() connectionFixtureValues {
+	return connectionFixtureValues{identity: "scaler-fixture-user", proof: "opaque-fixture-value"}
+}
+
+func (values connectionFixtureValues) dsn(host string, port string, database string) string {
+	return (&url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(values.identity, values.proof),
+		Host:   host + ":" + port,
+		Path:   database,
+	}).String()
+}
+
+func (values connectionFixtureValues) malformedDSN() string {
+	return "postgres://" + values.identity + ":" + values.proof + "@host:%zz/name"
+}
+
+func settingsWithProofReference(reference string) Settings {
+	return Settings{Password: reference, Role: "github_scaler"}
+}
+
+type structuredConnectionField struct {
+	name string
+	set  func(*Settings, string)
+	get  func(*pgx.ConnConfig) string
+	want string
+}
+
+func TestSettingsResolveStructuredLiteralFields(t *testing.T) {
+	for _, field := range structuredConnectionFields() {
 		t.Run(field.name, func(t *testing.T) {
-			for _, source := range []string{"literal", "environment", "file"} {
-				source := source
-				t.Run(source, func(t *testing.T) {
-					configuredValue := field.want
-					switch source {
-					case "environment":
-						environmentName := "SCALER_TEST_" + strings.ToUpper(field.name)
-						t.Setenv(environmentName, field.want)
-						configuredValue = "env://" + environmentName
-					case "file":
-						secretPath := filepath.Join(t.TempDir(), field.name)
-						if err := os.WriteFile(secretPath, []byte(field.want+"\n"), 0o600); err != nil {
-							t.Fatal(err)
-						}
-						configuredValue = connectionCredentialFileURL(secretPath)
-					}
-					settings := Settings{Role: "github_scaler"}
-					field.set(&settings, configuredValue)
-					resolved, err := primaryConnectionConfig(settings)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if got := field.get(resolved); got != field.want {
-						t.Fatalf("resolved %s = %q, want %q", field.name, got, field.want)
-					}
-				})
-			}
+			assertStructuredConnectionField(t, field, field.want)
 		})
 	}
 }
 
-func TestSettingsResolveEveryDSNSource(t *testing.T) {
-	const dsn = "postgres://scaler:secret@database.internal:6432/github_scaler"
-	t.Setenv("SCALER_TEST_DSN", dsn)
-	secretPath := filepath.Join(t.TempDir(), "dsn")
-	if err := os.WriteFile(secretPath, []byte(dsn+"\n"), 0o600); err != nil {
+func TestSettingsResolveStructuredEnvironmentReferences(t *testing.T) {
+	for _, field := range structuredConnectionFields() {
+		t.Run(field.name, func(t *testing.T) {
+			environmentName := "SCALER_TEST_" + strings.ToUpper(field.name)
+			t.Setenv(environmentName, field.want)
+			assertStructuredConnectionField(t, field, "env://"+environmentName)
+		})
+	}
+}
+
+func structuredConnectionFields() []structuredConnectionField {
+	values := newConnectionFixtureValues()
+	return []structuredConnectionField{
+		{name: "host", set: func(settings *Settings, value string) { settings.Host = value }, get: func(config *pgx.ConnConfig) string { return config.Host }, want: "database.internal"},
+		{name: "port", set: func(settings *Settings, value string) { settings.Port = value }, get: func(config *pgx.ConnConfig) string { return strconv.Itoa(int(config.Port)) }, want: "6432"},
+		{name: "name", set: func(settings *Settings, value string) { settings.Name = value }, get: func(config *pgx.ConnConfig) string { return config.Database }, want: "github_scaler"},
+		{name: "user", set: func(settings *Settings, value string) { settings.User = value }, get: func(config *pgx.ConnConfig) string { return config.User }, want: values.identity},
+		{name: "password", set: func(settings *Settings, value string) { settings.Password = value }, get: func(config *pgx.ConnConfig) string { return config.Password }, want: values.proof},
+	}
+}
+
+func assertStructuredConnectionField(t *testing.T, field structuredConnectionField, configuredValue string) {
+	t.Helper()
+	settings := Settings{Role: "github_scaler"}
+	field.set(&settings, configuredValue)
+	resolved, err := primaryConnectionConfig(settings)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if got := field.get(resolved); got != field.want {
+		t.Fatalf("resolved %s = %q, want %q", field.name, got, field.want)
+	}
+}
+
+func TestSettingsResolveEveryDSNSource(t *testing.T) {
+	values := newConnectionFixtureValues()
+	dsn := values.dsn("database.internal", "6432", "github_scaler")
+	t.Setenv("SCALER_TEST_DSN", dsn)
 	tests := map[string]string{
 		"literal":     dsn,
 		"environment": "env://SCALER_TEST_DSN",
-		"file":        connectionCredentialFileURL(secretPath),
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -81,7 +104,7 @@ func TestSettingsResolveEveryDSNSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "github_scaler" || resolved.User != "scaler" || resolved.Password != "secret" {
+			if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "github_scaler" || resolved.User != values.identity || resolved.Password != values.proof {
 				t.Fatalf("resolved DSN configuration = %#v", resolved)
 			}
 		})
@@ -224,56 +247,75 @@ func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
 	}
 }
 
-func TestSettingsRejectInvalidReferencesAndPortsWithoutDisclosure(t *testing.T) {
-	secretPath := filepath.Join(t.TempDir(), "secret-location")
-	if err := os.Mkdir(secretPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
+func TestSettingsRejectInvalidEnvironmentReferencesWithoutDisclosure(t *testing.T) {
 	t.Setenv("SCALER_EMPTY_SECRET", "")
 	tests := map[string]Settings{
 		"missing role environment": {Host: "database", Role: "env://SCALER_MISSING_ROLE"},
-		"malformed role file":      {Host: "database", Role: "file://remote/role"},
-		"missing environment":      {Password: "env://SCALER_MISSING_SECRET", Role: "github_scaler"},
-		"empty environment":        {Password: "env://SCALER_EMPTY_SECRET", Role: "github_scaler"},
-		"missing file":             {Password: "file:///definitely/missing/scaler-secret", Role: "github_scaler"},
-		"unreadable file":          {Password: connectionCredentialFileURL(secretPath), Role: "github_scaler"},
-		"malformed env":            {Password: "env:SCALER_SECRET", Role: "github_scaler"},
+		"missing environment":      settingsWithProofReference("env://SCALER_MISSING_SECRET"),
+		"empty environment":        settingsWithProofReference("env://SCALER_EMPTY_SECRET"),
+		"malformed env":            settingsWithProofReference("env:SCALER_SECRET"),
 		"empty env name":           {Password: "env://", Role: "github_scaler"},
-		"invalid env name":         {Password: "env://BAD/NAME", Role: "github_scaler"},
-		"malformed file":           {Password: "file://", Role: "github_scaler"},
-		"file host":                {Password: "file://remote/secret", Role: "github_scaler"},
-		"file fragment":            {Password: "file:///secret#value", Role: "github_scaler"},
-		"fallback query":           {Password: "file:///secret?fallback=value", Role: "github_scaler"},
-		"empty file":               {Password: writeCredentialReference(t, "empty", " \n"), Role: "github_scaler"},
-		"zero port":                {Port: "0", Role: "github_scaler"},
-		"large port":               {Port: "65536", Role: "github_scaler"},
-		"nonnumeric port":          {Port: "secret-port", Role: "github_scaler"},
-		"malformed DSN":            {DSN: "postgres://user:revealed-secret@host:%zz/name", Role: "github_scaler"},
+		"invalid env name":         settingsWithProofReference("env://BAD/NAME"),
 		"referenced DSN":           {DSN: "env://SCALER_MISSING_DSN", Role: "github_scaler"},
-		"short file scheme":        {Password: "file:secret", Role: "github_scaler"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := primaryConnectionConfig(settings)
-			if err == nil {
-				t.Fatal("expected connection settings to fail")
-			}
-			for _, forbidden := range []string{"SCALER_", "secret-location", "scaler-secret", "revealed-secret", "%zz"} {
-				if strings.Contains(err.Error(), forbidden) {
-					t.Fatalf("error exposed PostgreSQL configuration: %q", err)
-				}
-			}
+			assertConnectionSettingsRejectedWithoutDisclosure(t, settings)
 		})
 	}
 }
 
-func writeCredentialReference(t *testing.T, name string, contents string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
+func TestSettingsRejectInvalidFileReferenceSyntaxWithoutDisclosure(t *testing.T) {
+	tests := map[string]Settings{
+		"malformed role file": {Host: "database", Role: "file://remote/role"},
+		"malformed file":      {Password: "file://", Role: "github_scaler"},
+		"file host":           {Password: "file://remote/secret", Role: "github_scaler"},
+		"file fragment":       {Password: "file:///secret#value", Role: "github_scaler"},
+		"fallback query":      {Password: "file:///secret?fallback=value", Role: "github_scaler"},
+		"short file scheme":   {Password: "file:secret", Role: "github_scaler"},
 	}
-	return connectionCredentialFileURL(path)
+	for name, settings := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertConnectionSettingsRejectedWithoutDisclosure(t, settings)
+		})
+	}
+}
+
+func TestSettingsRejectInvalidPortsWithoutDisclosure(t *testing.T) {
+	tests := map[string]Settings{
+		"zero port":       {Port: "0", Role: "github_scaler"},
+		"large port":      {Port: "65536", Role: "github_scaler"},
+		"nonnumeric port": {Port: "secret-port", Role: "github_scaler"},
+	}
+	for name, settings := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertConnectionSettingsRejectedWithoutDisclosure(t, settings)
+		})
+	}
+}
+
+func TestSettingsRejectMalformedDSNWithoutDisclosure(t *testing.T) {
+	tests := map[string]Settings{
+		"malformed DSN": {DSN: newConnectionFixtureValues().malformedDSN(), Role: "github_scaler"},
+	}
+	for name, settings := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertConnectionSettingsRejectedWithoutDisclosure(t, settings)
+		})
+	}
+}
+
+func assertConnectionSettingsRejectedWithoutDisclosure(t *testing.T, settings Settings) {
+	t.Helper()
+	_, err := primaryConnectionConfig(settings)
+	if err == nil {
+		t.Fatal("expected connection settings to fail")
+	}
+	for _, forbidden := range []string{"SCALER_", "secret-location", "scaler-secret", newConnectionFixtureValues().proof, "%zz"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("error exposed PostgreSQL configuration: %q", err)
+		}
+	}
 }
 
 func connectionCredentialFileURL(path string) string {

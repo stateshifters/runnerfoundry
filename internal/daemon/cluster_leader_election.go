@@ -129,6 +129,9 @@ func (daemon *clusteredDaemon) deliverLeadership(
 }
 
 func waitForLeadershipRetry(ctx context.Context, delay time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	if delay <= 0 {
 		delay = clusterLeadershipRetryDelay
 	}

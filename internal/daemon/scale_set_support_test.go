@@ -16,12 +16,11 @@ func runTestScaleSet(
 	ctx context.Context,
 	logger *slog.Logger,
 	client scaleSetClient,
-	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	operations scaleSetSessionOperations,
 ) (scaleSetLifecycle, error) {
 	return runCoordinatedScaleSet(
-		ctx, logger, client, repositoryURL, scaleSetConfig,
+		ctx, logger, client, "https://github.com/meza/repo-a", scaleSetConfig,
 		scaler.NewCoordinator(scaleSetConfig.MaxRunners), operations,
 	)
 }

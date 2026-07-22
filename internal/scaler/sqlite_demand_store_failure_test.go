@@ -2,187 +2,135 @@ package scaler
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestSQLiteDemandStoreReportsMutationFailures(t *testing.T) {
-	store, err := OpenSQLiteDemandStore(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	if _, err := store.database.Exec(`CREATE TRIGGER reject_insert BEFORE INSERT ON demand BEGIN SELECT RAISE(FAIL, 'rejected'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Apply(ctx, "linux", []JobDemand{{Repository: "repo", RequestID: 1}}, nil); err == nil {
-		t.Fatal("expected insert failure")
-	}
-	if _, err := store.database.Exec("DROP TRIGGER reject_insert"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Apply(ctx, "linux", []JobDemand{{Repository: "repo", RequestID: 1}}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.database.Exec(`CREATE TRIGGER reject_delete BEFORE DELETE ON demand BEGIN SELECT RAISE(FAIL, 'rejected'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Apply(ctx, "linux", nil, []DemandRemoval{{Repository: "repo", RequestID: 1}}); err == nil {
-		t.Fatal("expected removal failure")
-	}
-	if _, err := store.database.Exec("DROP TRIGGER reject_delete"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.database.Exec("PRAGMA user_version = 0"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.migrate(ctx); err == nil {
-		t.Fatal("expected duplicate table migration failure")
+func TestSQLiteDemandStoreReportsDatabaseConfigurationFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	fixture.mock.ExpectExec("PRAGMA journal_mode").WillReturnError(errors.New("configure failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected database configuration error")
 	}
 }
 
-func TestSQLiteDemandStoreRejectsUnavailableDirectory(t *testing.T) {
-	if _, err := OpenSQLiteDemandStore(filepath.Join(t.TempDir(), "missing", "state.db")); err == nil {
-		t.Fatal("expected lock path failure")
+func TestSQLiteDemandStoreReportsSchemaVersionReadFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	fixture.mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectQuery("PRAGMA user_version").WillReturnError(errors.New("read failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected schema read error")
 	}
 }
 
-func TestSQLiteDemandStoreReleasesLockWhenDatabaseOpenFails(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "state.db")
-	if _, err := createSQLiteDemandStore(databasePath, func(string) (*sql.DB, error) { return nil, errors.New("open failed") }); err == nil {
-		t.Fatal("expected database open failure")
-	}
-	store, err := OpenSQLiteDemandStore(databasePath)
-	if err != nil {
-		t.Fatalf("expected released lock, got %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
+func TestSQLiteDemandStoreReportsMigrationBeginFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 0)
+	fixture.mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected migration begin error")
 	}
 }
 
-func TestSQLiteDemandStoreReportsDatabaseProtocolFailures(t *testing.T) {
-	t.Run("database configuration", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		mock.ExpectExec("PRAGMA journal_mode").WillReturnError(errors.New("configure failed"))
-		if err := store.migrate(context.Background()); err == nil {
-			t.Fatal("expected database configuration error")
-		}
-	})
-	t.Run("schema version read", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectQuery("PRAGMA user_version").WillReturnError(errors.New("read failed"))
-		if err := store.migrate(context.Background()); err == nil {
-			t.Fatal("expected schema read error")
-		}
-	})
-	t.Run("migration begin", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		expectSchemaVersion(mock, 0)
-		mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
-		if err := store.migrate(context.Background()); err == nil {
-			t.Fatal("expected migration begin error")
-		}
-	})
-	t.Run("schema version write", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		writeErr := errors.New("write failed")
-		rollbackErr := errors.New("rollback failed")
-		expectSchemaVersion(mock, 0)
-		mock.ExpectBegin()
-		mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("PRAGMA user_version").WillReturnError(writeErr)
-		mock.ExpectRollback().WillReturnError(rollbackErr)
-		err := store.migrate(context.Background())
-		if !errors.Is(err, writeErr) || !errors.Is(err, rollbackErr) {
-			t.Fatalf("migration error = %v, want write and rollback failures", err)
-		}
-	})
-	t.Run("migration commit", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		expectSchemaVersion(mock, 0)
-		mock.ExpectBegin()
-		mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("PRAGMA user_version").WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
-		if err := store.migrate(context.Background()); err == nil {
-			t.Fatal("expected migration commit error")
-		}
-	})
-	legacyMigrationFailures := map[string]func(sqlmock.Sqlmock){
-		"legacy migration begin": func(mock sqlmock.Sqlmock) {
-			mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
-		},
-		"legacy demand removal": func(mock sqlmock.Sqlmock) {
-			mock.ExpectBegin()
-			mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("delete failed"))
-			mock.ExpectRollback()
-		},
-		"legacy version write": func(mock sqlmock.Sqlmock) {
-			mock.ExpectBegin()
-			mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectExec("PRAGMA user_version").WillReturnError(errors.New("write failed"))
-			mock.ExpectRollback()
-		},
-		"legacy migration commit": func(mock sqlmock.Sqlmock) {
-			mock.ExpectBegin()
-			mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectExec("PRAGMA user_version").WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
-		},
+func TestSQLiteDemandStoreReportsSchemaWriteAndRollbackFailures(t *testing.T) {
+	fixture := mockDemandStore(t)
+	writeErr := errors.New("write failed")
+	rollbackErr := errors.New("rollback failed")
+	expectSchemaVersion(fixture.mock, 0)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectExec("PRAGMA user_version").WillReturnError(writeErr)
+	fixture.mock.ExpectRollback().WillReturnError(rollbackErr)
+	err := fixture.store.migrate(context.Background())
+	if !errors.Is(err, writeErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("migration error = %v, want write and rollback failures", err)
 	}
-	for testName, configureFailure := range legacyMigrationFailures {
-		t.Run(testName, func(t *testing.T) {
-			fixture := mockDemandStore(t)
-			store, mock := fixture.store, fixture.mock
-			expectSchemaVersion(mock, 1)
-			configureFailure(mock)
-			if err := store.migrate(context.Background()); err == nil {
-				t.Fatal("expected legacy migration failure")
-			}
-		})
+}
+
+func TestSQLiteDemandStoreReportsMigrationCommitFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 0)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("CREATE TABLE demand").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectExec("PRAGMA user_version").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+	assertMigrationCommitFailure(t, fixture.store)
+}
+
+func TestSQLiteDemandStoreReportsLegacyMigrationBeginFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 1)
+	fixture.mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected legacy migration begin error")
 	}
-	t.Run("demand commit", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		mock.ExpectBegin()
-		mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
-		if err := store.Apply(context.Background(), "linux", nil, nil); err == nil {
-			t.Fatal("expected demand commit error")
-		}
-	})
-	t.Run("demand scan", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		closeErr := errors.New("close failed")
-		rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
-			AddRow("repo", "invalid", 0, false, 1).
-			CloseError(closeErr)
-		mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
-		if _, err := store.Ordered(context.Background(), "linux"); !errors.Is(err, closeErr) {
-			t.Fatalf("scan error = %v, want row close failure", err)
-		}
-	})
-	t.Run("demand iteration", func(t *testing.T) {
-		fixture := mockDemandStore(t)
-		store, mock := fixture.store, fixture.mock
-		rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).AddRow("repo", 1, 0, false, 1).RowError(0, errors.New("iteration failed"))
-		mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
-		if _, err := store.Ordered(context.Background(), "linux"); err == nil {
-			t.Fatal("expected iteration error")
-		}
-	})
+}
+
+func TestSQLiteDemandStoreReportsLegacyDemandRemovalFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 1)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("delete failed"))
+	fixture.mock.ExpectRollback()
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected legacy demand removal error")
+	}
+}
+
+func TestSQLiteDemandStoreReportsLegacyVersionWriteFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 1)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectExec("PRAGMA user_version").WillReturnError(errors.New("write failed"))
+	fixture.mock.ExpectRollback()
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected legacy version write error")
+	}
+}
+
+func TestSQLiteDemandStoreReportsLegacyMigrationCommitFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 1)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectExec("PRAGMA user_version").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+	assertMigrationCommitFailure(t, fixture.store)
+}
+
+func TestSQLiteDemandStoreReportsDemandCommitFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+	if err := fixture.store.Apply(context.Background(), "linux", nil, nil); err == nil {
+		t.Fatal("expected demand commit error")
+	}
+}
+
+func TestSQLiteDemandStoreReportsRowCloseFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	closeErr := errors.New("close failed")
+	rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
+		AddRow("repo", "invalid", 0, false, 1).
+		CloseError(closeErr)
+	fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
+	if _, err := fixture.store.Ordered(context.Background(), "linux"); !errors.Is(err, closeErr) {
+		t.Fatalf("scan error = %v, want row close failure", err)
+	}
+}
+
+func TestSQLiteDemandStoreReportsRowIterationFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
+		AddRow("repo", 1, 0, false, 1).
+		RowError(0, errors.New("iteration failed"))
+	fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
+	if _, err := fixture.store.Ordered(context.Background(), "linux"); err == nil {
+		t.Fatal("expected iteration error")
+	}
 }
 
 type demandStoreMock struct {
@@ -211,4 +159,11 @@ func mockDemandStore(t *testing.T) demandStoreMock {
 func expectSchemaVersion(mock sqlmock.Sqlmock, version int) {
 	mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("PRAGMA user_version").WillReturnRows(sqlmock.NewRows([]string{"user_version"}).AddRow(version))
+}
+
+func assertMigrationCommitFailure(t *testing.T, store *SQLiteDemandStore) {
+	t.Helper()
+	if err := store.migrate(context.Background()); err == nil {
+		t.Fatal("expected migration commit error")
+	}
 }

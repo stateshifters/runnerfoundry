@@ -13,45 +13,12 @@ import (
 )
 
 func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	messageClient := &blockingMessageClient{
-		entered: make(chan struct{}),
-		exited:  make(chan struct{}),
-	}
-	scaleSets := scaleSetSessionOperations{
-		RunnerHostname: func() string {
-			return "host"
-		},
-		BuildReconciler: func(
-			ctx context.Context,
-			repositoryURL string,
-			scaleSetConfig config.ScaleSetConfig,
-			client scaleSetJITClient,
-			scaleSetID int,
-		) (scaler.Reconciler, error) {
-			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-				Name:       scaleSetConfig.Name,
-				MaxRunners: scaleSetConfig.MaxRunners,
-				Provider:   &fakeScalerProvider{},
-				JITConfig:  fakeJITConfigGenerator{},
-			}}, nil
-		},
-		PollRetryDelay: time.Nanosecond,
-	}
-	client := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 10},
-		&upstream.RunnerScaleSet{ID: 20},
-		scaleSetMessageClient{Client: messageClient},
-	)
-	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
-		return nil
-	}}
-	scaleSet, err := runTestScaleSet(ctx, slog.Default(), client, "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	ctx, messageClient, client := blockingScaleSetFixture(t)
+	scaleSet, err := runTestScaleSet(ctx, slog.Default(), client, config.ScaleSetConfig{
 		Name:        "linux",
 		RunnerGroup: "default",
 		MaxRunners:  2,
-	}, scaleSets)
+	}, successfulScaleSetOperations())
 	if err != nil {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
@@ -69,6 +36,40 @@ func TestScaleSetStopPollingWaitsForPollerBeforeShutdown(t *testing.T) {
 	}
 	if err := scaleSet.Shutdown(context.Background()); err != nil {
 		t.Fatalf("expected shutdown success, got %v", err)
+	}
+}
+
+func blockingScaleSetFixture(t *testing.T) (ctx context.Context, messageClient *blockingMessageClient, client *fakeScaleSetClient) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	messageClient = &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
+	client = fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 10}, &upstream.RunnerScaleSet{ID: 20},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error {
+		return nil
+	}}
+	return ctx, messageClient, client
+}
+
+func successfulScaleSetOperations() scaleSetSessionOperations {
+	return scaleSetSessionOperations{
+		RunnerHostname: func() string { return "host" },
+		BuildReconciler: func(
+			_ context.Context,
+			_ string,
+			scaleSetConfig config.ScaleSetConfig,
+			_ scaleSetJITClient,
+			_ int,
+		) (scaler.Reconciler, error) {
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+				Name: scaleSetConfig.Name, MaxRunners: scaleSetConfig.MaxRunners,
+				Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{},
+			}}, nil
+		},
+		PollRetryDelay: time.Nanosecond,
 	}
 }
 

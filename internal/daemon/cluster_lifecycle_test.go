@@ -44,104 +44,136 @@ func TestRunClusteredDaemonPublishesStartupAndShutdown(t *testing.T) {
 }
 
 func TestClusteredLifecycleSmoke(t *testing.T) {
-	configured := clusteredConfig(t)
-	state := &fakeClusterState{
-		leases:   []cluster.Lease{&fakeClusterLease{alive: true}},
-		statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}},
-	}
-	reloadRequests := make(chan struct{}, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	providerHealthy := true
-	notifier := &clusterLifecycleNotifier{onReady: func() {
-		providerHealthy = false
-		reloadRequests <- struct{}{}
-	}}
-	state.onPublish = func() {
-		if len(state.publications) == 2 {
-			cancel()
-		}
-	}
-	daemonUnderTest := clusteredDaemonForTest(state)
-	daemonUnderTest.loadConfig = func(string) (config.Config, error) { return configured, nil }
-	daemonUnderTest.notifier = notifier
-	daemonUnderTest.providerHealthy = func(context.Context, config.ScaleSetConfig) error {
-		if providerHealthy {
-			return nil
-		}
-		return errors.New("provider unavailable")
-	}
-	if err := runClusteredDaemon(ctx, Options{ReloadRequests: reloadRequests}, daemonUnderTest, configured); err != nil {
+	ctx, fixture := clusteredLifecycleFixture(t)
+	if err := runClusteredDaemon(ctx, Options{ReloadRequests: fixture.reloadRequests}, fixture.daemon, fixture.config); err != nil {
 		t.Fatal(err)
 	}
-	if !notifier.ready || state.migrations != 1 || len(state.publications) != 3 {
-		t.Fatalf("ready=%t migrations=%d publications=%d", notifier.ready, state.migrations, len(state.publications))
+	if !fixture.notifier.ready || fixture.state.migrations != 1 || len(fixture.state.publications) != 3 {
+		t.Fatalf("ready=%t migrations=%d publications=%d", fixture.notifier.ready, fixture.state.migrations, len(fixture.state.publications))
 	}
-	if !state.publications[0].contributions[0].Healthy || state.publications[1].contributions[0].Healthy {
-		t.Fatalf("provider health transition was not published: %#v", state.publications)
+	if !fixture.state.publications[0].contributions[0].Healthy || fixture.state.publications[1].contributions[0].Healthy {
+		t.Fatalf("provider health transition was not published: %#v", fixture.state.publications)
 	}
-	if state.publications[2].healthy {
-		t.Fatalf("shutdown did not withdraw the node: %#v", state.publications[2])
+	if fixture.state.publications[2].healthy {
+		t.Fatalf("shutdown did not withdraw the node: %#v", fixture.state.publications[2])
 	}
 }
 
-func TestClusteredLeaderStatusReflectsRepositorySessionStartFailure(t *testing.T) {
-	configured := clusteredConfig(t)
-	state := &fakeClusterState{
-		leases: []cluster.Lease{&fakeClusterLease{alive: true}},
-		statuses: []cluster.ScaleSetStatus{{
-			Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
-		}},
-	}
+type clusteredLifecycleTestFixture struct {
+	config          config.Config
+	state           *fakeClusterState
+	daemon          *clusteredDaemon
+	notifier        *clusterLifecycleNotifier
+	reloadRequests  chan struct{}
+	providerHealthy bool
+}
+
+func clusteredLifecycleFixture(t *testing.T) (context.Context, *clusteredLifecycleTestFixture) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	daemonUnderTest := clusteredDaemonForTest(state)
-	var activeSessions []repositoryScaleSetSessionKey
-	notifier := &clusterStatusSnapshotNotifier{
-		cancel: cancel,
-		onStatus: func(status clusterServiceStatus) {
-			if status != clusterServiceStatusLeaderDegraded {
-				return
-			}
-			for key := range daemonUnderTest.currentLeader().sessions {
-				activeSessions = append(activeSessions, key)
-			}
+	fixture := &clusteredLifecycleTestFixture{
+		config: clusteredConfig(t), providerHealthy: true, reloadRequests: make(chan struct{}, 1),
+		state: &fakeClusterState{
+			leases:   []cluster.Lease{&fakeClusterLease{alive: true}},
+			statuses: []cluster.ScaleSetStatus{{Name: "linux", Compatible: false}},
 		},
 	}
-	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
-	successfulClient := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 1},
-		&upstream.RunnerScaleSet{ID: 2},
-		scaleSetMessageClient{Client: messageClient},
-	)
-	discovery := githubapp.DiscoveryResult{Repositories: []githubapp.Repository{
-		{InstallationID: 1, URL: "https://github.com/acme/working"},
-		{InstallationID: 2, URL: "https://github.com/acme/failing"},
-	}}
-	daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-		return staticDiscoverer{result: discovery}, nil
-	}
-	daemonUnderTest.newGitHubClient = func(
-		repositoryURL string,
-		_ githubapp.InstallationID,
-		_ config.GitHubAppCredentials,
-	) (scaleSetClient, error) {
-		if repositoryURL == "https://github.com/acme/failing" {
-			return nil, errors.New("session unavailable")
+	fixture.notifier = &clusterLifecycleNotifier{onReady: fixture.onReady}
+	fixture.state.onPublish = func() {
+		if len(fixture.state.publications) == 2 {
+			cancel()
 		}
-		return successfulClient, nil
 	}
-	daemonUnderTest.notifier = notifier
+	fixture.daemon = clusteredDaemonForTest(fixture.state)
+	fixture.daemon.loadConfig = func(string) (config.Config, error) { return fixture.config, nil }
+	fixture.daemon.notifier = fixture.notifier
+	fixture.daemon.providerHealthy = fixture.providerHealth
+	return ctx, fixture
+}
 
-	if err := runClusteredDaemon(ctx, Options{}, daemonUnderTest, configured); err != nil {
+func (fixture *clusteredLifecycleTestFixture) onReady() {
+	fixture.providerHealthy = false
+	fixture.reloadRequests <- struct{}{}
+}
+
+func (fixture *clusteredLifecycleTestFixture) providerHealth(context.Context, config.ScaleSetConfig) error {
+	if fixture.providerHealthy {
+		return nil
+	}
+	return errors.New("provider unavailable")
+}
+
+func TestClusteredLeaderStatusReflectsRepositorySessionStartFailure(t *testing.T) {
+	ctx, fixture := clusteredLeaderStatusFixture(t)
+	if err := runClusteredDaemon(ctx, Options{}, fixture.daemon, fixture.config); err != nil {
 		t.Fatal(err)
 	}
 
 	expected := "STATUS=leader reconciling\nSTATUS=leader degraded"
-	if actual := strings.Join(notifier.statuses, "\n"); actual != expected {
+	if actual := strings.Join(fixture.notifier.statuses, "\n"); actual != expected {
 		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
 	}
 	expectedActive := []repositoryScaleSetSessionKey{{repository: "https://github.com/acme/working", scaleSet: "linux"}}
-	if !slices.Equal(activeSessions, expectedActive) {
-		t.Fatalf("active repository sessions = %#v, want %#v", activeSessions, expectedActive)
+	if !slices.Equal(fixture.activeSessions, expectedActive) {
+		t.Fatalf("active repository sessions = %#v, want %#v", fixture.activeSessions, expectedActive)
+	}
+}
+
+type clusteredLeaderStatusTestFixture struct {
+	config           config.Config
+	daemon           *clusteredDaemon
+	notifier         *clusterStatusSnapshotNotifier
+	successfulClient *fakeScaleSetClient
+	activeSessions   []repositoryScaleSetSessionKey
+}
+
+func clusteredLeaderStatusFixture(t *testing.T) (context.Context, *clusteredLeaderStatusTestFixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	state := &fakeClusterState{
+		leases:   []cluster.Lease{&fakeClusterLease{alive: true}},
+		statuses: []cluster.ScaleSetStatus{{Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true}},
+	}
+	fixture := &clusteredLeaderStatusTestFixture{config: clusteredConfig(t), daemon: clusteredDaemonForTest(state)}
+	fixture.successfulClient = fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 2},
+		scaleSetMessageClient{Client: &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}},
+	)
+	fixture.notifier = &clusterStatusSnapshotNotifier{cancel: cancel, onStatus: fixture.captureActiveSessions}
+	fixture.daemon.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return fixture.discovery(), nil
+	}
+	fixture.daemon.newGitHubClient = func(
+		repositoryURL string,
+		_ githubapp.InstallationID,
+		_ config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		return fixture.clientForRepository(repositoryURL)
+	}
+	fixture.daemon.notifier = fixture.notifier
+	return ctx, fixture
+}
+
+func (*clusteredLeaderStatusTestFixture) discovery() staticDiscoverer {
+	return staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{
+		{InstallationID: 1, URL: "https://github.com/acme/working"},
+		{InstallationID: 2, URL: "https://github.com/acme/failing"},
+	}}}
+}
+
+func (fixture *clusteredLeaderStatusTestFixture) clientForRepository(repositoryURL string) (*fakeScaleSetClient, error) {
+	if repositoryURL == "https://github.com/acme/failing" {
+		return nil, errors.New("session unavailable")
+	}
+	return fixture.successfulClient, nil
+}
+
+func (fixture *clusteredLeaderStatusTestFixture) captureActiveSessions(status clusterServiceStatus) {
+	if status != clusterServiceStatusLeaderDegraded {
+		return
+	}
+	for key := range fixture.daemon.currentLeader().sessions {
+		fixture.activeSessions = append(fixture.activeSessions, key)
 	}
 }
 

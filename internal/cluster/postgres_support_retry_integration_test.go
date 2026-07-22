@@ -16,10 +16,10 @@ func TestPostgreSQLIntegrationServerRetriesPortCollisions(t *testing.T) {
 	occupiedPort := postgreSQLIntegrationPort(t)
 	attempts := 0
 
-	dsn, database, runtimePath, err := startPostgreSQLIntegrationServerWithPortCandidate(func() uint32 {
+	server, err := startPostgreSQLIntegrationServerWithPortCandidate(func() (uint32, error) {
 		attempts++
 		if attempts == 1 {
-			return occupiedPort
+			return occupiedPort, nil
 		}
 		return randomPostgreSQLPort()
 	})
@@ -27,10 +27,10 @@ func TestPostgreSQLIntegrationServerRetriesPortCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if stopErr := database.Stop(); stopErr != nil {
+		if stopErr := server.database.Stop(); stopErr != nil {
 			t.Errorf("stop retry-test PostgreSQL: %v", stopErr)
 		}
-		if removeErr := os.RemoveAll(runtimePath); removeErr != nil {
+		if removeErr := os.RemoveAll(server.runtimePath); removeErr != nil {
 			t.Errorf("remove retry-test PostgreSQL runtime: %v", removeErr)
 		}
 	})
@@ -38,7 +38,7 @@ func TestPostgreSQLIntegrationServerRetriesPortCollisions(t *testing.T) {
 	if attempts < 2 {
 		t.Fatalf("PostgreSQL startup attempts = %d, want at least 2", attempts)
 	}
-	connection, err := pgx.Connect(context.Background(), dsn)
+	connection, err := pgx.Connect(context.Background(), server.dsn)
 	if err != nil {
 		t.Fatalf("connect to retry-test PostgreSQL: %v", err)
 	}

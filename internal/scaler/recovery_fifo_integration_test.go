@@ -18,7 +18,7 @@ func TestReopenedCoordinatorPreservesFIFOWhileCapacityIsFullAndResumesAfterRelea
 	}
 
 	reopened := openRecoveryStore(t, databasePath)
-	defer reopened.Close()
+	closeSQLiteDemandStore(t, reopened)
 	startOrder := []string{}
 	coordinator, workers := recoveredFIFOCoordinator(reopened, &startOrder)
 

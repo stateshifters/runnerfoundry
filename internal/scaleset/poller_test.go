@@ -76,6 +76,13 @@ func TestPollerTreatsNoMessageAsSuccess(t *testing.T) {
 	}
 }
 
+func TestPollerRejectsAmbiguousNilMessage(t *testing.T) {
+	poller := Poller{Client: ambiguousMessageClient{}, Handler: &recordingMessageHandler{}}
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected ambiguous nil message error")
+	}
+}
+
 func TestPollerReportsMessageReceiveFailure(t *testing.T) {
 	if err := (&Poller{Client: failingMessageClient{}, Handler: &recordingMessageHandler{}}).PollOnce(context.Background()); err == nil {
 		t.Fatal("expected get message error")
@@ -124,8 +131,7 @@ type recordingMessageClient struct {
 
 func (client *recordingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
 	if len(client.messages) == 0 {
-		// The upstream client represents an empty poll with a nil message and nil error.
-		return nil, nil
+		return nil, ErrNoMessage
 	}
 	message := client.messages[0]
 	client.messages = client.messages[1:]
@@ -165,5 +171,16 @@ func (client failingMessageClient) GetMessage(ctx context.Context, lastMessageID
 }
 
 func (client failingMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
+	return nil
+}
+
+type ambiguousMessageClient struct{}
+
+func (client ambiguousMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+	var missingMessage *upstream.RunnerScaleSetMessage
+	return missingMessage, nil
+}
+
+func (client ambiguousMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
 	return nil
 }

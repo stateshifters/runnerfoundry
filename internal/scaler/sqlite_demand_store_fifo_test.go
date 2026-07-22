@@ -1,3 +1,5 @@
+//go:build integration
+
 package scaler
 
 import (
@@ -28,7 +30,7 @@ func TestSQLiteDemandStorePreservesFIFOAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	closeSQLiteDemandStore(t, reopened)
 	ordered, err := reopened.Ordered(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
@@ -45,10 +47,7 @@ func TestSQLiteDemandStoreReopensTwoHundredQueuedJobs(t *testing.T) {
 		t.Fatal(openErr)
 	}
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
-	observed := make([]JobDemand, 200)
-	for index := range observed {
-		observed[index] = JobDemand{Repository: "repo", RequestID: int64(200 - index), QueueTime: queueTime.Add(time.Duration(200-index) * time.Second)}
-	}
+	observed := descendingDemand(200, queueTime)
 	if err := store.Apply(context.Background(), "linux", observed, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +58,7 @@ func TestSQLiteDemandStoreReopensTwoHundredQueuedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	closeSQLiteDemandStore(t, reopened)
 	ordered, err := reopened.Ordered(context.Background(), "linux")
 	if err != nil {
 		t.Fatal(err)
@@ -69,13 +68,25 @@ func TestSQLiteDemandStoreReopensTwoHundredQueuedJobs(t *testing.T) {
 	}
 }
 
+func descendingDemand(count int, queueTime time.Time) []JobDemand {
+	observed := make([]JobDemand, count)
+	for index := range observed {
+		requestID := count - index
+		observed[index] = JobDemand{
+			Repository: "repo", RequestID: int64(requestID),
+			QueueTime: queueTime.Add(time.Duration(requestID) * time.Second),
+		}
+	}
+	return observed
+}
+
 func TestSQLiteDemandStoreRejectsSecondOwner(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "state.db")
 	first, openErr := OpenSQLiteDemandStore(databasePath)
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer first.Close()
+	closeSQLiteDemandStore(t, first)
 	if _, err := OpenSQLiteDemandStore(databasePath); err == nil {
 		t.Fatal("expected second state owner to be rejected")
 	}
@@ -87,7 +98,7 @@ func TestSQLiteDemandStoreApplyDeduplicatesObservedDemand(t *testing.T) {
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	ctx := context.Background()
 	demand := JobDemand{Repository: "repo", RequestID: 7, QueueTime: time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)}
 	if err := store.Apply(ctx, "linux", []JobDemand{demand, demand}, nil); err != nil {
@@ -105,7 +116,7 @@ func TestSQLiteDemandStoreApplyMarksExistingDemandAcquired(t *testing.T) {
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	ctx := context.Background()
 	demand := JobDemand{Repository: "repo", RequestID: 7, QueueTime: time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)}
 	if err := store.Apply(ctx, "linux", []JobDemand{demand}, nil); err != nil {
@@ -127,7 +138,7 @@ func TestSQLiteDemandStoreDeleteRemovesSelectedDemand(t *testing.T) {
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	ctx := context.Background()
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	if err := store.Apply(ctx, "linux", []JobDemand{
@@ -151,7 +162,7 @@ func TestSQLiteDemandStoreRemoveRepositoryRemovesOnlyMatchingRepository(t *testi
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	ctx := context.Background()
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	if err := store.Apply(ctx, "linux", []JobDemand{
@@ -175,7 +186,7 @@ func TestSQLiteDemandStoreRemoveScaleSetRemovesOnlyMatchingScaleSet(t *testing.T
 	if openErr != nil {
 		t.Fatal(openErr)
 	}
-	defer store.Close()
+	closeSQLiteDemandStore(t, store)
 	ctx := context.Background()
 	queueTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	if err := store.Apply(ctx, "linux", []JobDemand{{Repository: "repo", RequestID: 7, QueueTime: queueTime}}, nil); err != nil {

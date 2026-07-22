@@ -8,6 +8,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/github-scaler/internal/config"
+	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
 )
 
 func TestScaleSetMessageClientForwardsMessages(t *testing.T) {
@@ -25,6 +26,17 @@ func TestScaleSetMessageClientForwardsMessages(t *testing.T) {
 	}
 	if err := client.Close(context.Background()); err != nil {
 		t.Fatalf("expected close success, got %v", err)
+	}
+}
+
+func TestScaleSetMessageClientTranslatesEmptyUpstreamPoll(t *testing.T) {
+	client := scaleSetMessageClient{Client: &fakeMessageClient{}}
+	message, err := client.GetMessage(context.Background(), 1, 2)
+	if message != nil {
+		t.Fatalf("empty poll message = %#v", message)
+	}
+	if !errors.Is(err, scalesetpoller.ErrNoMessage) {
+		t.Fatalf("empty poll error = %v, want ErrNoMessage", err)
 	}
 }
 

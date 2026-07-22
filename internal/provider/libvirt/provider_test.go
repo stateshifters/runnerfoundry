@@ -29,7 +29,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 		t.Fatalf("expected start success, got %v", err)
 	}
 	expectedCommands := []Command{
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "create", "/dev/stdin"}, Stdin: commandRunner.commands[0].Stdin},
+		{Args: []string{"-c", "qemu:///system", "create", "/dev/stdin"}, Stdin: commandRunner.commands[0].Stdin},
 	}
 	if !reflect.DeepEqual(commandRunner.commands, expectedCommands) {
 		t.Fatalf("unexpected commands\nwant %#v\ngot  %#v", expectedCommands, commandRunner.commands)
@@ -46,7 +46,34 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 }
 
 func TestListRebuildsOwnedDomainState(t *testing.T) {
-	commandRunner := &recordingCommandRunner{
+	instances, _ := listOwnedDomainFixture(t)
+	expected := []RunnerInstance{
+		{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning},
+		{ID: "vm-set-2", RunnerName: "vm-set-2", State: RunnerStateCompleted},
+	}
+	if !reflect.DeepEqual(instances, expected) {
+		t.Fatalf("unexpected instances\nwant %#v\ngot  %#v", expected, instances)
+	}
+}
+
+func TestListInspectsOnlyOwnedDomainStates(t *testing.T) {
+	_, commands := listOwnedDomainFixture(t)
+	expected := []Command{
+		{Args: []string{"-c", "qemu:///system", "list", "--all", "--name"}},
+		{Args: []string{"-c", "qemu:///system", "dumpxml", "vm-set-1"}},
+		{Args: []string{"-c", "qemu:///system", "domstate", "vm-set-1"}},
+		{Args: []string{"-c", "qemu:///system", "dumpxml", "vm-set-2"}},
+		{Args: []string{"-c", "qemu:///system", "domstate", "vm-set-2"}},
+		{Args: []string{"-c", "qemu:///system", "dumpxml", "other"}},
+	}
+	if !reflect.DeepEqual(commands, expected) {
+		t.Fatalf("unexpected commands\nwant %#v\ngot  %#v", expected, commands)
+	}
+}
+
+func listOwnedDomainFixture(t *testing.T) ([]RunnerInstance, []Command) {
+	t.Helper()
+	runner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\nvm-set-2\nother\n",
 			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-1</github-scaler:name></github-scaler:runner></metadata></domain>`,
@@ -57,32 +84,14 @@ func TestListRebuildsOwnedDomainState(t *testing.T) {
 		},
 	}
 	provider := Provider{
-		CommandRunner: commandRunner,
+		CommandRunner: runner,
 		Config:        Config{ConnectionURI: "qemu:///system"},
 	}
-
 	instances, err := provider.List(context.Background(), "vm-set")
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
 	}
-	expectedInstances := []RunnerInstance{
-		{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning},
-		{ID: "vm-set-2", RunnerName: "vm-set-2", State: RunnerStateCompleted},
-	}
-	if !reflect.DeepEqual(instances, expectedInstances) {
-		t.Fatalf("unexpected instances\nwant %#v\ngot  %#v", expectedInstances, instances)
-	}
-	expectedCommands := []Command{
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "list", "--all", "--name"}},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "dumpxml", "vm-set-1"}},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "domstate", "vm-set-1"}},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "dumpxml", "vm-set-2"}},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "domstate", "vm-set-2"}},
-		{Name: "virsh", Args: []string{"-c", "qemu:///system", "dumpxml", "other"}},
-	}
-	if !reflect.DeepEqual(commandRunner.commands, expectedCommands) {
-		t.Fatalf("unexpected commands\nwant %#v\ngot  %#v", expectedCommands, commandRunner.commands)
-	}
+	return instances, runner.commands
 }
 
 func TestListClassifiesUnknownDomainState(t *testing.T) {
@@ -167,134 +176,71 @@ func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	}
 }
 
-func TestProviderSurfacesFailures(t *testing.T) {
-	validTemplate := writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`)
-	invalidTemplate := writeTemplate(t, `<domain><name>broken</domain>`)
-	tests := map[string]func(t *testing.T){
-		"start missing template": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: filepath.Join(t.TempDir(), "missing")}}
-			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
-				t.Fatal("expected missing template error")
-			}
-		},
-		"start invalid template": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: invalidTemplate}}
-			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
-				t.Fatal("expected invalid template error")
-			}
-		},
-		"start create command": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: validTemplate}}
-			if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
-				t.Fatal("expected create error")
-			}
-		},
-		"list command": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: failingCommandRunner{}}
-			if _, err := provider.List(context.Background(), "set"); err == nil {
-				t.Fatal("expected list command error")
-			}
-		},
-		"dump command": func(t *testing.T) {
-			t.Helper()
-			commandRunner := &recordingCommandRunner{outputs: []string{"runner\n"}, failOnCall: 2}
-			provider := Provider{CommandRunner: commandRunner}
-			if _, err := provider.List(context.Background(), "set"); err == nil {
-				t.Fatal("expected dump command error")
-			}
-		},
-		"state command": func(t *testing.T) {
-			t.Helper()
-			commandRunner := &recordingCommandRunner{
-				outputs:    []string{"runner\n", `<domain><metadata><github-scaler.scale-set>set</github-scaler.scale-set></metadata></domain>`},
-				failOnCall: 3,
-			}
-			provider := Provider{CommandRunner: commandRunner}
-			if _, err := provider.List(context.Background(), "set"); err == nil {
-				t.Fatal("expected state command error")
-			}
-		},
-		"destroy command": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
-				t.Fatal("expected destroy command error")
-			}
-		},
-		"validate template": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: invalidTemplate}}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected validation template error")
-			}
-		},
-		"validate connection": func(t *testing.T) {
-			t.Helper()
-			provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: validTemplate}}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected validation connection error")
-			}
-		},
-	}
-	for testName, testCase := range tests {
-		t.Run(testName, testCase)
+func TestStartReportsMissingTemplate(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: filepath.Join(t.TempDir(), "missing")}}
+	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+		t.Fatal("expected missing template error")
 	}
 }
 
-func TestExecCommandRunner(t *testing.T) {
-	output, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "go", Args: []string{"version"}})
-	if err != nil {
-		t.Fatalf("expected exec success, got %v", err)
-	}
-	if output == "" {
-		t.Fatal("expected command output")
-	}
-	output, err = (ExecCommandRunner{}).Run(context.Background(), Command{Name: "go", Args: []string{"env", "GOVERSION"}, Stdin: "ignored"})
-	if err != nil {
-		t.Fatalf("expected exec with stdin success, got %v", err)
-	}
-	if output == "" {
-		t.Fatal("expected command output")
-	}
-	if _, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "definitely-missing-github-scaler-command"}); err == nil {
-		t.Fatal("expected exec failure")
+func TestStartRejectsInvalidTemplate(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain><name>broken</domain>`)}}
+	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+		t.Fatal("expected invalid template error")
 	}
 }
 
-func TestExecCommandRunnerRedactsCommandOutputAndStdinOnFailure(t *testing.T) {
-	programPath := filepath.Join(t.TempDir(), "main.go")
-	if err := os.WriteFile(programPath, []byte(`package main
-
-import (
-	"fmt"
-	"os"
-)
-
-func main() {
-	fmt.Fprint(os.Stderr, "secret-jit-config")
-	os.Exit(1)
+func TestStartReportsCreateCommandFailure(t *testing.T) {
+	provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`)}}
+	if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
+		t.Fatal("expected create error")
+	}
 }
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{
-		Name:  "go",
-		Args:  []string{"run", programPath},
-		Stdin: "secret-stdin-jit",
-	})
-	if err == nil {
-		t.Fatal("expected command failure")
+func TestListReportsCommandFailure(t *testing.T) {
+	provider := Provider{CommandRunner: failingCommandRunner{}}
+	if _, err := provider.List(context.Background(), "set"); err == nil {
+		t.Fatal("expected list command error")
 	}
-	if strings.Contains(err.Error(), "secret-jit-config") || strings.Contains(err.Error(), "secret-stdin-jit") {
-		t.Fatalf("expected command output and stdin to be redacted, got %q", err.Error())
+}
+
+func TestListReportsDomainInspectionFailure(t *testing.T) {
+	commandRunner := &recordingCommandRunner{outputs: []string{"runner\n"}, failOnCall: 2}
+	provider := Provider{CommandRunner: commandRunner}
+	if _, err := provider.List(context.Background(), "set"); err == nil {
+		t.Fatal("expected domain inspection error")
 	}
-	if !strings.Contains(err.Error(), "go run") {
-		t.Fatalf("expected command context, got %q", err.Error())
+}
+
+func TestListReportsDomainStateFailure(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs:    []string{"runner\n", `<domain><metadata><github-scaler.scale-set>set</github-scaler.scale-set></metadata></domain>`},
+		failOnCall: 3,
+	}
+	provider := Provider{CommandRunner: commandRunner}
+	if _, err := provider.List(context.Background(), "set"); err == nil {
+		t.Fatal("expected domain state error")
+	}
+}
+
+func TestDestroyReportsCommandFailure(t *testing.T) {
+	provider := Provider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
+		t.Fatal("expected destroy command error")
+	}
+}
+
+func TestValidateRejectsInvalidTemplate(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain><name>broken</domain>`)}}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected validation template error")
+	}
+}
+
+func TestValidateReportsConnectionFailure(t *testing.T) {
+	provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`)}}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected validation connection error")
 	}
 }
 
@@ -335,7 +281,12 @@ type recordingCommandRunner struct {
 	failOnCall int
 }
 
-func (runner *recordingCommandRunner) Run(ctx context.Context, command Command) (string, error) {
+type Command struct {
+	Args  []string
+	Stdin string
+}
+
+func (runner *recordingCommandRunner) record(command Command) (string, error) {
 	runner.commands = append(runner.commands, command)
 	if runner.failOnCall == len(runner.commands) {
 		return "", errors.New("command failed")
@@ -348,8 +299,49 @@ func (runner *recordingCommandRunner) Run(ctx context.Context, command Command) 
 	return output, nil
 }
 
+func (runner *recordingCommandRunner) CreateDomain(_ context.Context, connectionURI string, domainXML string) error {
+	_, err := runner.record(Command{Args: []string{"-c", connectionURI, "create", "/dev/stdin"}, Stdin: domainXML})
+	return err
+}
+
+func (runner *recordingCommandRunner) ListDomains(_ context.Context, connectionURI string) (string, error) {
+	return runner.record(Command{Args: []string{"-c", connectionURI, "list", "--all", "--name"}})
+}
+
+func (runner *recordingCommandRunner) ReadDomainXML(_ context.Context, connectionURI string, domainName string) (string, error) {
+	return runner.record(Command{Args: []string{"-c", connectionURI, "dumpxml", domainName}})
+}
+
+func (runner *recordingCommandRunner) ReadDomainState(_ context.Context, connectionURI string, domainName string) (string, error) {
+	return runner.record(Command{Args: []string{"-c", connectionURI, "domstate", domainName}})
+}
+
+func (runner *recordingCommandRunner) DestroyDomain(_ context.Context, connectionURI string, domainName string) error {
+	_, err := runner.record(Command{Args: []string{"-c", connectionURI, "destroy", domainName}})
+	return err
+}
+
+func (runner *recordingCommandRunner) ReadConnectionURI(_ context.Context, connectionURI string) (string, error) {
+	return runner.record(Command{Args: []string{"-c", connectionURI, "uri"}})
+}
+
 type failingCommandRunner struct{}
 
-func (runner failingCommandRunner) Run(ctx context.Context, command Command) (string, error) {
+func (runner failingCommandRunner) CreateDomain(context.Context, string, string) error {
+	return errors.New("command failed")
+}
+func (runner failingCommandRunner) ListDomains(context.Context, string) (string, error) {
+	return "", errors.New("command failed")
+}
+func (runner failingCommandRunner) ReadDomainXML(context.Context, string, string) (string, error) {
+	return "", errors.New("command failed")
+}
+func (runner failingCommandRunner) ReadDomainState(context.Context, string, string) (string, error) {
+	return "", errors.New("command failed")
+}
+func (runner failingCommandRunner) DestroyDomain(context.Context, string, string) error {
+	return errors.New("command failed")
+}
+func (runner failingCommandRunner) ReadConnectionURI(context.Context, string) (string, error) {
 	return "", errors.New("command failed")
 }

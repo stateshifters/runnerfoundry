@@ -15,64 +15,32 @@ import (
 )
 
 func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.T) {
-	started := []string{}
-	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
-		},
-		startScaleSet: func(
-			_ context.Context,
-			_ *slog.Logger,
-			_ scaleSetClient,
-			repositoryURL string,
-			scaleSetConfig config.ScaleSetConfig,
-			_ *scaler.Coordinator,
-		) (scaleSetLifecycle, error) {
-			started = append(started, repositoryURL+"/"+scaleSetConfig.Name)
-			return inertLifecycle(), nil
-		},
-	}
-	activeConfig := testActiveConfiguration()
+	fixture := newDiscoveryStartFixture()
 	discovery := githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/one"}},
 		InstallationFailures: map[githubapp.InstallationID]error{2: errors.New("unavailable")},
 	}
-	activeConfig.Repositories["https://github.com/kept/two"] = managedRepository{
+	fixture.active.Repositories["https://github.com/kept/two"] = managedRepository{
 		InstallationID: 2,
 		Lifecycles:     map[string]scaleSetLifecycle{"linux": inertLifecycle()},
 	}
-	if err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, discovery); err != nil {
+	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, discovery); err != nil {
 		t.Fatalf("expected discovery application, got %v", err)
 	}
-	if len(started) != 1 || len(activeConfig.Repositories) != 2 {
-		t.Fatalf("expected new and retained repositories, started=%#v repositories=%#v", started, activeConfig.Repositories)
+	if len(fixture.started) != 1 || len(fixture.active.Repositories) != 2 {
+		t.Fatalf("expected new and retained repositories, started=%#v repositories=%#v", fixture.started, fixture.active.Repositories)
 	}
 }
 
 func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
+	fixture := newDiscoveryStartFixture()
 	logs := &bytes.Buffer{}
-	activeConfig := testActiveConfiguration()
-	activeConfig.Logger = newLoggerForWriter(logs, "json", "debug")
-	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
-		},
-		startScaleSet: func(
-			context.Context,
-			*slog.Logger,
-			scaleSetClient,
-			string,
-			config.ScaleSetConfig,
-			*scaler.Coordinator,
-		) (scaleSetLifecycle, error) {
-			return inertLifecycle(), nil
-		},
-	}
+	fixture.active.Logger = newLoggerForWriter(logs, "json", "debug")
 	discovery := githubapp.DiscoveryResult{
 		Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
 		InstallationFailures: map[githubapp.InstallationID]error{},
 	}
-	if err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, discovery); err != nil {
+	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, discovery); err != nil {
 		t.Fatalf("expected repository reconciliation, got %v", err)
 	}
 	for _, expected := range []struct {
@@ -87,6 +55,35 @@ func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
 	} {
 		assertStructuredAction(t, logs.Bytes(), expected.action, expected.phase)
 	}
+}
+
+type discoveryStartFixture struct {
+	daemon  standaloneDaemon
+	active  activeConfiguration
+	started []string
+}
+
+func newDiscoveryStartFixture() *discoveryStartFixture {
+	fixture := &discoveryStartFixture{active: testActiveConfiguration()}
+	fixture.daemon = standaloneDaemon{
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		startScaleSet: fixture.startScaleSet,
+	}
+	return fixture
+}
+
+func (fixture *discoveryStartFixture) startScaleSet(
+	_ context.Context,
+	_ *slog.Logger,
+	_ scaleSetClient,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	_ *scaler.Coordinator,
+) (scaleSetLifecycle, error) {
+	fixture.started = append(fixture.started, repositoryURL+"/"+scaleSetConfig.Name)
+	return inertLifecycle(), nil
 }
 
 func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *testing.T) {
@@ -190,13 +187,48 @@ func TestApplyDiscoveryReprovisionsProviderVisiblePromiseThatDisappearsBeforeJob
 }
 
 func TestApplyDiscoveryResumesAvailableRepositoriesAndRetainsUnavailableDemand(t *testing.T) {
-	const healthyRepository = "https://github.com/acme/healthy"
-	const unavailableRepository = "https://github.com/acme/unavailable"
+	fixture := newPartialRecoveryFixture(t)
+	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, fixture.discovery); err == nil {
+		t.Fatal("expected unavailable repository startup failure")
+	}
+	if len(fixture.healthyWorker.started) != 1 || fixture.healthyWorker.started[0] != 46 {
+		t.Fatalf("expected healthy promised runner to resume, got %#v", fixture.healthyWorker.started)
+	}
+}
+
+func TestApplyDiscoveryRetainsUnavailableRepositoryDemandForRetry(t *testing.T) {
+	fixture := newPartialRecoveryFixture(t)
+	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, fixture.discovery); err == nil {
+		t.Fatal("expected unavailable repository startup failure")
+	}
+	unavailableWorker := &recordingRecoveryWorker{}
+	fixture.coordinator.AddRepository(unavailableRepositoryURL, unavailableWorker)
+	if err := fixture.coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(unavailableWorker.started) != 1 || unavailableWorker.started[0] != 45 {
+		t.Fatalf("expected unavailable demand to remain queued for retry, got %#v", unavailableWorker.started)
+	}
+}
+
+const healthyRepositoryURL = "https://github.com/acme/healthy"
+const unavailableRepositoryURL = "https://github.com/acme/unavailable"
+
+type partialRecoveryFixture struct {
+	coordinator   *scaler.Coordinator
+	healthyWorker *recordingRecoveryWorker
+	active        activeConfiguration
+	daemon        standaloneDaemon
+	discovery     githubapp.DiscoveryResult
+}
+
+func newPartialRecoveryFixture(t *testing.T) partialRecoveryFixture {
+	t.Helper()
 	store := scaler.NewMemoryDemandStore()
 	coordinator := scaler.NewDurableCoordinator("linux", 2, store)
 	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{
-		{RequestID: 45, Repository: unavailableRepository, QueueTime: time.Now(), Acquired: true},
-		{RequestID: 46, Repository: healthyRepository, QueueTime: time.Now().Add(time.Second), Acquired: true},
+		{RequestID: 45, Repository: unavailableRepositoryURL, QueueTime: time.Now(), Acquired: true},
+		{RequestID: 46, Repository: healthyRepositoryURL, QueueTime: time.Now().Add(time.Second), Acquired: true},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -206,32 +238,21 @@ func TestApplyDiscoveryResumesAvailableRepositoriesAndRetainsUnavailableDemand(t
 	activeConfig.Coordinators["linux"] = coordinator
 	daemonUnderTest := recoveryDaemonForTest(healthyWorker)
 	daemonUnderTest.newGitHubClient = func(repositoryURL string, _ githubapp.InstallationID, _ config.GitHubAppCredentials) (scaleSetClient, error) {
-		if repositoryURL == unavailableRepository {
+		if repositoryURL == unavailableRepositoryURL {
 			return nil, errors.New("unavailable")
 		}
 		return &fakeScaleSetClient{}, nil
 	}
 
-	err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, githubapp.DiscoveryResult{
-		Repositories: []githubapp.Repository{
-			{InstallationID: 1, URL: unavailableRepository},
-			{InstallationID: 2, URL: healthyRepository},
+	return partialRecoveryFixture{
+		coordinator: coordinator, healthyWorker: healthyWorker, active: activeConfig, daemon: daemonUnderTest,
+		discovery: githubapp.DiscoveryResult{
+			Repositories: []githubapp.Repository{
+				{InstallationID: 1, URL: unavailableRepositoryURL},
+				{InstallationID: 2, URL: healthyRepositoryURL},
+			},
+			InstallationFailures: map[githubapp.InstallationID]error{},
 		},
-		InstallationFailures: map[githubapp.InstallationID]error{},
-	})
-	if err == nil {
-		t.Fatal("expected unavailable repository startup failure")
-	}
-	if len(healthyWorker.started) != 1 || healthyWorker.started[0] != 46 {
-		t.Fatalf("expected healthy promised runner to resume, got %#v", healthyWorker.started)
-	}
-	unavailableWorker := &recordingRecoveryWorker{}
-	coordinator.AddRepository(unavailableRepository, unavailableWorker)
-	if err := coordinator.Schedule(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(unavailableWorker.started) != 1 || unavailableWorker.started[0] != 45 {
-		t.Fatalf("expected unavailable demand to remain queued for retry, got %#v", unavailableWorker.started)
 	}
 }
 
@@ -295,79 +316,111 @@ func TestApplyDiscoveryImmediatelyRemovesRevokedRepository(t *testing.T) {
 }
 
 func TestApplyDiscoveryIsolatesRepositoryStartupFailureAndLogsItsIdentity(t *testing.T) {
+	fixture := repositoryStartupFailureFixture()
+	err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, fixture.discovery)
+	if err == nil {
+		t.Fatal("expected repository startup failure")
+	}
+	if _, exists := fixture.active.Repositories["https://github.com/acme/healthy"]; !exists {
+		t.Fatal("expected healthy repository to start despite another repository failure")
+	}
+	for _, expected := range []string{"repository startup failed", "repository=https://github.com/acme/failing", "installationID=1", "client failed"} {
+		if !strings.Contains(fixture.logs.String(), expected) {
+			t.Fatalf("expected %q in repository failure log %q", expected, fixture.logs.String())
+		}
+	}
+}
+
+type repositoryStartupFailureTestFixture struct {
+	logs      *bytes.Buffer
+	active    activeConfiguration
+	daemon    standaloneDaemon
+	discovery githubapp.DiscoveryResult
+}
+
+func repositoryStartupFailureFixture() repositoryStartupFailureTestFixture {
 	logs := &bytes.Buffer{}
-	activeConfig := testActiveConfiguration()
-	activeConfig.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	daemonUnderTest := standaloneDaemon{
+	active := testActiveConfiguration()
+	active.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemon := standaloneDaemon{
 		newGitHubClient: func(repositoryURL string, _ githubapp.InstallationID, _ config.GitHubAppCredentials) (scaleSetClient, error) {
 			if repositoryURL == "https://github.com/acme/failing" {
 				return nil, errors.New("client failed")
 			}
 			return &fakeScaleSetClient{}, nil
 		},
-		startScaleSet: func(context.Context, *slog.Logger, scaleSetClient, string, config.ScaleSetConfig, *scaler.Coordinator) (scaleSetLifecycle, error) {
-			return inertLifecycle(), nil
-		},
+		startScaleSet: successfulDiscoveryScaleSetStart,
 	}
-	err := applyDiscovery(context.Background(), daemonUnderTest, &activeConfig, githubapp.DiscoveryResult{
+	return repositoryStartupFailureTestFixture{logs: logs, active: active, daemon: daemon, discovery: githubapp.DiscoveryResult{
 		Repositories: []githubapp.Repository{
 			{InstallationID: 1, URL: "https://github.com/acme/failing"},
 			{InstallationID: 2, URL: "https://github.com/acme/healthy"},
 		},
 		InstallationFailures: map[githubapp.InstallationID]error{},
-	})
-	if err == nil {
-		t.Fatal("expected repository startup failure")
-	}
-	if _, exists := activeConfig.Repositories["https://github.com/acme/healthy"]; !exists {
-		t.Fatal("expected healthy repository to start despite another repository failure")
-	}
-	for _, expected := range []string{"repository startup failed", "repository=https://github.com/acme/failing", "installationID=1", "client failed"} {
-		if !strings.Contains(logs.String(), expected) {
-			t.Fatalf("expected %q in repository failure log %q", expected, logs.String())
-		}
-	}
+	}}
+}
+
+func successfulDiscoveryScaleSetStart(
+	context.Context,
+	*slog.Logger,
+	scaleSetClient,
+	string,
+	config.ScaleSetConfig,
+	*scaler.Coordinator,
+) (scaleSetLifecycle, error) {
+	return inertLifecycle(), nil
 }
 
 func TestStartRepositoryRollsBackEarlierScaleSetsWhenLaterStartupFails(t *testing.T) {
-	stopped := false
-	shutdown := false
-	activeConfig := testActiveConfiguration()
-	activeConfig.Config.ScaleSets = append(activeConfig.Config.ScaleSets, config.ScaleSetConfig{Name: "windows", MaxRunners: 1})
-	activeConfig.Coordinators["windows"] = scaler.NewCoordinator(1)
-	startCalls := 0
-	daemonUnderTest := standaloneDaemon{
-		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
-		},
-		startScaleSet: func(
-			context.Context,
-			*slog.Logger,
-			scaleSetClient,
-			string,
-			config.ScaleSetConfig,
-			*scaler.Coordinator,
-		) (scaleSetLifecycle, error) {
-			startCalls++
-			if startCalls == 2 {
-				return scaleSetLifecycle{}, errors.New("second failed")
-			}
-			return scaleSetLifecycle{
-				StopPolling:   func() { stopped = true },
-				DestroyActive: func(context.Context) error { return nil },
-				Shutdown:      func(context.Context) error { shutdown = true; return nil },
-			}, nil
-		},
-	}
-	_, err := startRepository(context.Background(), daemonUnderTest, &activeConfig, githubapp.Repository{
+	fixture := repositoryRollbackFixture()
+	_, err := startRepository(context.Background(), fixture.daemon, &fixture.active, githubapp.Repository{
 		InstallationID: 1, URL: "https://github.com/acme/repo",
 	})
 	if err == nil {
 		t.Fatal("expected later startup failure")
 	}
-	if !stopped || !shutdown {
-		t.Fatalf("expected earlier scale set rollback, stopped=%t shutdown=%t", stopped, shutdown)
+	if !fixture.stopped || !fixture.shutdown {
+		t.Fatalf("expected earlier scale set rollback, stopped=%t shutdown=%t", fixture.stopped, fixture.shutdown)
 	}
+}
+
+type repositoryRollbackTestFixture struct {
+	active     activeConfiguration
+	daemon     standaloneDaemon
+	startCalls int
+	stopped    bool
+	shutdown   bool
+}
+
+func repositoryRollbackFixture() *repositoryRollbackTestFixture {
+	fixture := &repositoryRollbackTestFixture{active: testActiveConfiguration()}
+	fixture.active.Config.ScaleSets = append(fixture.active.Config.ScaleSets, config.ScaleSetConfig{Name: "windows", MaxRunners: 1})
+	fixture.active.Coordinators["windows"] = scaler.NewCoordinator(1)
+	fixture.daemon = standaloneDaemon{
+		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+			return &fakeScaleSetClient{}, nil
+		},
+		startScaleSet: fixture.startScaleSet,
+	}
+	return fixture
+}
+
+func (fixture *repositoryRollbackTestFixture) startScaleSet(
+	context.Context,
+	*slog.Logger,
+	scaleSetClient,
+	string,
+	config.ScaleSetConfig,
+	*scaler.Coordinator,
+) (scaleSetLifecycle, error) {
+	fixture.startCalls++
+	if fixture.startCalls == 2 {
+		return scaleSetLifecycle{}, errors.New("second failed")
+	}
+	return scaleSetLifecycle{
+		StopPolling: func() { fixture.stopped = true }, DestroyActive: func(context.Context) error { return nil },
+		Shutdown: func(context.Context) error { fixture.shutdown = true; return nil },
+	}, nil
 }
 
 func TestApplyDiscoveryRejectsLocalScaleSetNameCollision(t *testing.T) {
