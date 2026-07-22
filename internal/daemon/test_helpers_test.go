@@ -12,6 +12,14 @@ import (
 	"github.com/meza/github-scaler/internal/config"
 )
 
+type postgresCredentialFixture struct {
+	missingReference string
+}
+
+func newPostgresCredentialFixture() postgresCredentialFixture {
+	return postgresCredentialFixture{missingReference: "env://GITHUB_SCALER_MISSING_POSTGRES_PASSWORD"}
+}
+
 func testAppCredentials(t *testing.T) config.GitHubAppCredentials {
 	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

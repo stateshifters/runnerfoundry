@@ -13,6 +13,10 @@ type MessageClient interface {
 	DeleteMessage(ctx context.Context, messageID int) error
 }
 
+// ErrNoMessage identifies a successful poll that returned no work.
+// MessageClient adapters return it instead of an ambiguous nil message.
+var ErrNoMessage = errors.New("no scale set message")
+
 type MessageHandler interface {
 	HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error
 }
@@ -37,11 +41,14 @@ func (poller *Poller) PollOnce(ctx context.Context) error {
 		return errors.New("message handler is required")
 	}
 	message, err := poller.Client.GetMessage(ctx, poller.LastMessageID, poller.MaxCapacity)
+	if errors.Is(err, ErrNoMessage) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("get scale set message: %w", err)
 	}
 	if message == nil {
-		return nil
+		return errors.New("message client returned nil without ErrNoMessage")
 	}
 	if message.Statistics == nil {
 		return errors.New("scale set message statistics are required")

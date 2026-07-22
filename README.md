@@ -4,7 +4,7 @@
 
 It is using GitHub's new [Scaleset library](https://github.com/actions/scaleset)
 
-The current version supports Docker Compose and libvirt providers. The daemon polls Github for scale-set messages, stores waiting demand in SQLite, generates JIT configs, and starts ephemeral runners in the configured provider. It does not store Github credentials or JIT secrets in the database.
+The current version supports Docker Compose and libvirt providers. A standalone daemon stores waiting demand in SQLite. Multiple daemons can instead coordinate through PostgreSQL, with one elected leader managing Github scale sets and every host contributing its own provider capacity. The daemon does not store Github credentials, PostgreSQL credentials, or JIT secrets in either database.
 
 :::notice
 Libvirt support is for unix only. Windows hosts can only use Docker Compose.
@@ -46,13 +46,66 @@ scale_sets:
       domain_xml_template: ./domain-template.xml
 ```
 
+For clustered operation, replace `state.path` with `state.postgres` on every host:
+
+```yaml
+state:
+  postgres:
+    role: github_scaler
+    host: postgresql.internal
+    port: "5432"
+    name: github_scaler
+    user: file:///run/secrets/github-scaler-postgres-user
+    password: file:///run/secrets/github-scaler-postgres-password
+    direct:
+      host: postgresql-direct.internal
+      port: "5432"
+```
+
+The daemon uses the operating-system hostname as the host's cluster identity. It is not configurable. `state.postgres.role` is required. Static or rotating login users must be members of this stable role; every database session assumes it before running migrations, state calls, or leadership coordination. Database objects and migration metadata remain owned by the role instead of a transient login identity.
+
+PostgreSQL can be configured with `host`, `port`, `name`, `user`, and `password`. Each value, including `role`, may be a literal, an `env://VARIABLE` reference, or a `file:///path` reference. `file://` must be followed by an absolute path valid for the host operating system. For example, Vault Agent can manage the username and password as separate files, as shown above.
+
+Alternatively, set `dsn` to a conventional PostgreSQL connection string or an `env://` or `file://` reference containing one. A DSN cannot be combined with structured fields. Omitted structured fields inherit pgx/PostgreSQL defaults, including `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and related environment variables. `state.postgres` may contain only the required role when all connection values come from standard PostgreSQL environment settings. The removed `dsn_env` and `dsn_file` keys are rejected.
+
+`direct` is optional and uses the same DSN or structured fields and reference syntax. Structured direct fields inherit omitted primary fields, then standard PostgreSQL defaults. A direct DSN cannot be mixed with direct structured fields, and a primary DSN requires a complete `direct.dsn` when the direct endpoint differs. Migrations and advisory-lock sessions use this session-affine endpoint; ordinary state calls use the primary endpoint. Without `direct`, the primary endpoint must be PostgreSQL or a session-mode pooler. Transaction-mode pooling is suitable only for ordinary primary traffic when a direct endpoint is configured.
+
+References are resolved whenever a new database connection is opened, and file contents are trimmed but never cached. Missing, unreadable, malformed, and empty references fail; fallback query values are not supported. Existing connections are not recycled when a file changes, so an active leader lease remains open until PostgreSQL or the scaler closes it. Credential values are opaque: the scaler does not inspect or assume an expiry, lease duration, or usage count. Connection errors and logs do not contain resolved values, generated connection strings, reference paths, or pgx connection details.
+
+### PostgreSQL lifecycle
+
+The stable role and its login memberships must exist before the scaler starts. Provision the role with `NOLOGIN`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, and `NOREPLICATION`, and limit its ownership and privileges to the scaler database or schema and its objects. Grant rotating login identities membership in that role; do not grant scaler objects directly to those identities. The application does not create databases, roles, memberships, grants, or role attributes.
+
+Daemon startup automatically migrates an empty or outdated database upward before publishing capacity or reporting ready. Concurrent nodes serialize this work with a PostgreSQL advisory lock. Schema setup and teardown come exclusively from the embedded reversible migrations.
+
+Inspect or apply migrations explicitly with:
+
+```sh
+github-scaler migrate status --config /etc/github-scaler/config.yaml
+github-scaler migrate up --config /etc/github-scaler/config.yaml
+```
+
+`migrate status` is read-only. On an empty database it reports version zero without creating migration metadata. Migration commands load only `state.postgres`, so unrelated daemon configuration does not prevent database inspection or recovery.
+
+Downgrade with the currently deployed binary, because an older binary does not contain migrations introduced by a newer release. Stop every scaler node, wait at least 30 seconds for its heartbeat to expire, then run:
+
+```sh
+github-scaler migrate down --to <version> --config /etc/github-scaler/config.yaml
+```
+
+Rollback refuses to run while a leader lease or live node heartbeat remains. Deploy the older binary only after the command succeeds.
+
 Create a Github App with repository administration access for self-hosted runners, install it on the accounts the daemon should serve, and grant it either selected-repository or all-repository access. `github-scaler` discovers every installation owned by the App and every repository exposed by each installation. Github installation settings are the repository opt-in boundary.
 
 Set `github.app.app_id` to the numeric App ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
 
-Each scale-set definition is created in every discovered repository. `max_runners` is one shared limit across all installations and repositories for that definition, not a per-repository limit. Jobs are admitted by Github queue time. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. FIFO ordering survives daemon restarts and reloads through the configured SQLite database.
+Each scale-set definition is created in every discovered repository. In standalone mode, `max_runners` is one shared limit across all installations and repositories for that definition. In clustered mode, it is a per-host, per-scale-set contribution. The leader sums compatible contributions from live, healthy hosts. For example, `max_runners: 10` on Spock and `max_runners: 2` on Serenity produce an effective capacity of 12 for the shared scale-set name, while neither host can receive more than its own limit. Limits for different scale sets remain independent.
 
-`state.path` is required and should be an absolute path in production. Only one daemon may open a state database. Changing the path requires a restart; reload rejects the replacement configuration. Put the database on durable storage if a replacement host must resume queued work. Back up or migrate the database only while the service is stopped.
+Cluster hosts may declare shared or disjoint scale sets. The leader manages their union, including scale sets absent from its own local configuration. Live, healthy hosts sharing a name must agree on Github-facing settings such as `runner_group`; conflicting live declarations contribute zero capacity and are logged as errors. Provider settings and `max_runners` remain host-local. A missed heartbeat or unhealthy provider removes that host from both effective capacity and compatibility checks, so its stale settings cannot disable compatible live contributors. Its declaration remains in the managed union until the host explicitly withdraws it. The scale set is removed only after the final declaration is explicitly withdrawn.
+
+Jobs are admitted by Github queue time through one FIFO per scale set across repositories and hosts. The oldest observed job's repository receives the next available runner, while Github chooses the exact job assigned within that repository. PostgreSQL keeps clustered demand and assignments available through leader failover; SQLite keeps standalone FIFO ordering across restart and reload.
+
+Exactly one of `state.path` and `state.postgres` is required. `state.path` should be absolute in production, and only one daemon may open that SQLite database. Changing the state backend or any `state.postgres` configuration requires a restart; replacing the contents of an existing referenced file does not change configuration and affects subsequent connections. Put SQLite on durable storage if a replacement standalone host must resume queued work. Back up or migrate SQLite only while the service is stopped.
 
 `max_runners` must be greater than zero; omit a scale set instead of setting zero capacity.
 
@@ -60,7 +113,7 @@ Github runner scale sets are routed by their scale-set name. Use the configured 
 
 Set `prune: true` only when `github-scaler` owns every runner scale set in the discovered repositories and runner groups. When enabled, discovery deletes Github runner scale sets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 
-`log.format` accepts `text` or `json`. `log.level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`. Lifecycle milestones are logged at `info`. Set the level to `debug` to include individual repository, scale-set, polling, reconciliation, cleanup, and reload actions. Failures remain visible at `warn` or `error` as appropriate.
+`log.format` accepts `text` or `json`. `log.level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`. Lifecycle milestones are logged at `info`. Set the level to `debug` to include individual repository, scale-set, polling, reconciliation, cleanup, reload, assignment, acquisition, repair, start, completion, migration, rollback, and leadership actions. Failures remain visible at `warn` or `error` as appropriate. Logs may include non-secret node, scale-set, repository, request, assignment, operation, and PostgreSQL SQLSTATE values. PostgreSQL migration command errors may also include the server's non-secret message, detail, hint, table name, and constraint name. They never include PostgreSQL connection settings, role names, secret-reference paths, credentials, JIT secrets, generated connection strings, SQL bodies, or raw pgx connection errors.
 
 ## Install as a Daemon
 
@@ -95,7 +148,7 @@ sudo systemctl status github-scaler
 
 The daemon reads `/etc/github-scaler/config.yaml` at startup. It does not watch or continuously reread the file.
 
-Systemd readiness covers local preflight only. The daemon sends `READY=1` after the configuration, App credentials, and local settings validate. Github discovery, scale-set registration, and message-session creation run immediately afterward through the reconciliation loop. A Github outage or repository-specific registration failure does not block service startup; the daemon logs the failure and retries on the configured discovery interval.
+Systemd readiness covers local preflight only. The daemon sends `READY=1` after configuration, App credentials, and local settings validate and, in clustered mode, after database migration and contribution publication succeed. It does not claim that Github reconciliation has succeeded. The daemon reports its operational phase separately through systemd `STATUS=` values: `standby`, `leader reconciling`, `leader operational`, or `leader degraded`. Github discovery, scale-set registration, and message-session creation run immediately after readiness. A Github outage or repository-specific registration failure leaves the process ready, reports the leader as degraded, logs the failure, and retries on the configured discovery interval.
 
 After editing the config or replacing the private-key file, reload the service:
 
@@ -103,7 +156,7 @@ After editing the config or replacing the private-key file, reload the service:
 sudo systemctl reload github-scaler
 ```
 
-Reload validates the replacement configuration and credentials before stopping the active scale sets. Systemd considers the reload accepted after this local preflight succeeds. The daemon then drains active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and reconciles the replacement configuration. Existing runner containers or VMs keep running until their active jobs exit. Watch progress with:
+Reload validates the replacement configuration and credentials first. In standalone mode, the daemon then drains active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and reconciles the replacement configuration. In clustered mode, the host atomically replaces its published contributions; running work continues, and an active leader immediately reconciles the changed union without waiting for the next discovery interval or deleting scale sets that another host still declares. Existing runner containers or VMs keep running until their active jobs exit. Watch progress with:
 
 ```sh
 journalctl -u github-scaler -f
@@ -223,19 +276,29 @@ For each scale-set definition, the daemon:
 - generates JIT configs while shared capacity is available
 - acknowledges Github messages only after local handling succeeds
 
-The daemon commits identifiable Github demand to SQLite before acknowledging its message. Job-assigned and job-completed messages without positive request identities are not stored as queue entries; their assigned capacity comes from Github message statistics. Runner recovery combines the durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate job-available delivery updates the existing request rather than adding another queue entry.
+In clustered mode, PostgreSQL elects one leader and stores the global FIFO, host contributions, and runner assignments. Only the leader creates and polls the union of Github scale sets. Each assignment follows `reserved -> acquiring -> ready -> starting -> running -> complete`. The leader records Github acquisition intent before contacting Github and confirms the acquisition before the selected host may claim it. Each live host claims assignments addressed to its operating-system hostname and starts them with that host's local provider configuration. Every non-complete assignment consumes the selected host's local capacity. Expired-host assignments complete without deleting their demand, making that demand eligible for reassignment. A replacement leader resumes scheduling from the same durable demand.
+
+The daemon commits identifiable Github demand to the configured state database before acknowledging its message. In standalone mode, job-assigned and job-completed messages without positive request identities are not stored as queue entries; their assigned capacity comes from Github message statistics. Runner recovery combines the durable queue with provider-visible Docker labels/names and libvirt metadata. A duplicate job-available delivery updates the existing request rather than adding another queue entry.
 
 ### Recovery Guarantees
 
-Positive-identity job demand is durable across restart and reload. For each available job, the daemon first stores the request in SQLite. When shared capacity is available, it asks Github to acquire the request, records the acquired state, and provisions the named runner. The queue entry remains until Github reports `JobStarted` for that request or reports terminal `JobCompleted` state. Starting or observing a runner is not proof that Github assigned the job successfully.
+Positive-identity job demand is durable across restart and reload. For each available job, the daemon first stores the request in the configured state database. The queue entry remains until Github reports `JobStarted` for that request or terminal `JobCompleted` state. Starting or observing a runner is not proof that Github assigned the job successfully.
 
-At startup, the daemon reopens `state.path`, rebuilds repository workers from Github discovery, and schedules the persisted queue. A provider-visible named runner suppresses duplicate provisioning without completing its matching queue entry. If that runner disappears before `JobStarted`, the daemon provisions it again without reacquiring the request. Missing repositories retain their demand until discovery can register their workers. FIFO order and the shared `max_runners` limit continue to apply to recovered demand.
+#### Standalone recovery
 
-Reload validates the replacement configuration before stopping old polling. It drains active runners, closes the old scale-set sessions, reuses the same SQLite store for configured scale sets, registers replacement workers, and schedules retained demand. A failed replacement reconciliation keeps the demand durable and selects the shorter reconciliation retry delay. Demand for repositories or scale sets removed by the replacement configuration is intentionally deleted.
+At standalone startup, the daemon reopens `state.path`, rebuilds repository workers from Github discovery, and schedules the persisted queue. A provider-visible named runner suppresses duplicate provisioning without completing its matching queue entry. If that runner disappears before `JobStarted`, the daemon provisions it again without reacquiring the request. Missing repositories retain their demand until discovery can register their workers. FIFO order and the standalone `max_runners` limit continue to apply.
 
-Positive request identities and their acquired state come from SQLite. Provider labels, names, and metadata identify runners that already exist. Identity-free assigned work is not stored as queue demand. Each Github message-session snapshot restores its authoritative assigned-job count after restart or reload, and later statistics refresh that retained count. Every recovery pass reconciles those counts again, so capacity released without a new Github event still provisions the waiting work.
+Standalone reload drains active runners, closes old scale-set sessions, reuses the SQLite store for configured scale sets, registers replacement workers, and schedules retained demand. Demand for repositories or scale sets removed by the replacement configuration is intentionally deleted. Identity-free assigned work is not stored as queue demand; Github message-session statistics restore that assigned capacity after restart or reload.
 
-Github's scale-set client does not formally specify whether acquiring the same request again after a successful acquisition is idempotent. A crash after Github accepts acquisition but before SQLite records it can therefore produce an unconfirmed reacquisition response. The daemon requires the response to contain the requested ID; otherwise it starts no identity-bound runner, retains the durable request, and leaves the message unacknowledged. Public release remains blocked until the upstream reacquisition contract is confirmed or recovery no longer depends on it.
+#### Clustered recovery
+
+The leader and host executors resume from PostgreSQL demand and assignment state. A database failure after Github confirms acquisition retries only the `acquiring -> ready` database transition in the same process; it does not reacquire the request. After a process failure leaves an assignment in `acquiring`, a replacement leader may retry acquisition, but it requires Github's response to contain the requested ID before making the assignment ready. An unconfirmed response starts no identity-bound runner and leaves the demand retained.
+
+Before starting an assignment in `starting`, the host checks for its stable request-derived runner name. An existing runner is observed rather than started again. After an ambiguous provider error, the host checks again before retrying. A process restart repairs `starting` assignments before claiming new work, and failures remain in `starting` rather than returning to `ready`. Github `JobStarted` and terminal `JobCompleted` messages complete demand and its active assignment together.
+
+Clustered reload replaces the host's contributions and immediately reconciles them when that host is leader. Missing repositories retain demand until discovery can recreate their sessions. Expired hosts lose effective capacity, and their active assignments complete while their demand remains available to another compatible contributor.
+
+Github's scale-set client does not formally specify whether acquiring the same request again after a successful acquisition is idempotent. The requested-ID check is therefore the recovery boundary after an `acquiring` process failure. Public release remains blocked until the upstream reacquisition contract is confirmed or recovery no longer depends on it.
 
 When installation access is removed, the daemon immediately drops queued demand, destroys active local runners, closes the message sessions, and attempts to unregister the affected scale sets. This can interrupt active jobs. On normal shutdown, active jobs are left running while message sessions close and scale sets unregister.
 

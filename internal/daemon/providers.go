@@ -14,31 +14,35 @@ func buildReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) (scaler.Reconciler, error) {
-	return buildReconcilerWithRuntime(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderRuntime())
+	return buildReconcilerWithCommands(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, productionProviderCommands())
 }
 
-type providerRuntime struct {
+type providerCommands struct {
 	DockerCommandRunner  dockerprovider.CommandRunner
 	LibvirtCommandRunner libvirtprovider.CommandRunner
 }
 
-func productionProviderRuntime() providerRuntime {
-	return providerRuntime{
+func productionProviderCommands() providerCommands {
+	return providerCommands{
 		DockerCommandRunner:  dockerprovider.ExecCommandRunner{},
 		LibvirtCommandRunner: libvirtprovider.ExecCommandRunner{},
 	}
 }
 
-func buildReconcilerWithRuntime(
+func validateProductionScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig) error {
+	return validateScaleSetProvider(ctx, scaleSetConfig, productionProviderCommands())
+}
+
+func buildReconcilerWithCommands(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
-	providers providerRuntime,
+	providers providerCommands,
 ) (scaler.Reconciler, error) {
 	if scaleSetConfig.Docker != nil {
 		return buildDockerReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.DockerCommandRunner)
@@ -49,11 +53,41 @@ func buildReconcilerWithRuntime(
 	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
 
+func validateScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSetConfig, providers providerCommands) error {
+	if scaleSetConfig.Docker != nil {
+		provider := dockerprovider.ComposeProvider{
+			CommandRunner: providers.DockerCommandRunner,
+			Config: dockerprovider.ComposeConfig{
+				ComposeFile: scaleSetConfig.Docker.ComposeFile,
+				Service:     scaleSetConfig.Docker.Service,
+			},
+		}
+		if err := provider.Validate(ctx); err != nil {
+			return fmt.Errorf("validate docker provider: %w", err)
+		}
+		return nil
+	}
+	if scaleSetConfig.Libvirt != nil {
+		provider := libvirtprovider.Provider{
+			CommandRunner: providers.LibvirtCommandRunner,
+			Config: libvirtprovider.Config{
+				ConnectionURI:     scaleSetConfig.Libvirt.ConnectionURI,
+				DomainXMLTemplate: scaleSetConfig.Libvirt.DomainXMLTemplate,
+			},
+		}
+		if err := provider.Validate(ctx); err != nil {
+			return fmt.Errorf("validate libvirt provider: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
+}
+
 func buildDockerReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 	commandRunner dockerprovider.CommandRunner,
 ) (scaler.Reconciler, error) {
@@ -73,7 +107,7 @@ func buildLibvirtReconciler(
 	ctx context.Context,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 	commandRunner libvirtprovider.CommandRunner,
 ) (scaler.Reconciler, error) {
@@ -93,7 +127,7 @@ func newReconciler(
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
 	provider scaler.Provider,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) scaler.Reconciler {
 	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
@@ -111,7 +145,7 @@ func validatedReconciler(
 	provider scaler.Provider,
 	validate func(ctx context.Context) error,
 	providerName string,
-	client scaleSetClient,
+	client scaleSetJITClient,
 	scaleSetID int,
 ) (scaler.Reconciler, error) {
 	if err := validate(ctx); err != nil {

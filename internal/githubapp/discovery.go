@@ -7,19 +7,22 @@ import (
 	"github.com/meza/github-scaler/internal/config"
 )
 
+// InstallationID identifies a GitHub App installation.
+type InstallationID int64
+
 type Repository struct {
-	InstallationID int64
+	InstallationID InstallationID
 	URL            string
 }
 
 type DiscoveryResult struct {
 	Repositories         []Repository
-	InstallationFailures map[int64]error
+	InstallationFailures map[InstallationID]error
 }
 
 type DiscoveryAPI interface {
-	ListInstallations(ctx context.Context, page int) ([]int64, int, error)
-	ListRepositories(ctx context.Context, installationID int64, page int) ([]string, int, error)
+	ListInstallations(ctx context.Context, page int) ([]InstallationID, int, error)
+	ListRepositories(ctx context.Context, installationID InstallationID, page int) ([]string, int, error)
 }
 
 type Discoverer struct {
@@ -31,7 +34,7 @@ func (discoverer Discoverer) Discover(ctx context.Context) (DiscoveryResult, err
 	if err != nil {
 		return DiscoveryResult{}, err
 	}
-	result := DiscoveryResult{InstallationFailures: map[int64]error{}}
+	result := DiscoveryResult{InstallationFailures: map[InstallationID]error{}}
 	for _, installationID := range installationIDs {
 		repositories, repositoryErr := discoverer.repositories(ctx, installationID)
 		if repositoryErr != nil {
@@ -43,8 +46,8 @@ func (discoverer Discoverer) Discover(ctx context.Context) (DiscoveryResult, err
 	return result, nil
 }
 
-func (discoverer Discoverer) installations(ctx context.Context) ([]int64, error) {
-	var installationIDs []int64
+func (discoverer Discoverer) installations(ctx context.Context) ([]InstallationID, error) {
+	var installationIDs []InstallationID
 	for page := 1; page != 0; {
 		pageInstallations, nextPage, err := discoverer.API.ListInstallations(ctx, page)
 		if err != nil {
@@ -56,7 +59,7 @@ func (discoverer Discoverer) installations(ctx context.Context) ([]int64, error)
 	return installationIDs, nil
 }
 
-func (discoverer Discoverer) repositories(ctx context.Context, installationID int64) ([]Repository, error) {
+func (discoverer Discoverer) repositories(ctx context.Context, installationID InstallationID) ([]Repository, error) {
 	var repositories []Repository
 	for page := 1; page != 0; {
 		pageRepositories, nextPage, err := discoverer.API.ListRepositories(ctx, installationID, page)

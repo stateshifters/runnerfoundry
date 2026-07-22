@@ -45,14 +45,10 @@ func TestPollerDoesNotAcknowledgeFailedHandling(t *testing.T) {
 	}
 }
 
-func TestPollerHandlesNilMessageAndValidationFailures(t *testing.T) {
+func TestPollerRequiresClientAndHandler(t *testing.T) {
 	tests := map[string]Poller{
 		"missing client":  {Handler: &recordingMessageHandler{}},
 		"missing handler": {Client: &recordingMessageClient{}},
-		"nil statistics": {
-			Client:  &recordingMessageClient{messages: []*upstream.RunnerScaleSetMessage{{MessageID: 1}}},
-			Handler: &recordingMessageHandler{},
-		},
 	}
 	for testName, poller := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -61,17 +57,39 @@ func TestPollerHandlesNilMessageAndValidationFailures(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestPollerRejectsMessageWithoutStatistics(t *testing.T) {
+	poller := Poller{
+		Client:  &recordingMessageClient{messages: []*upstream.RunnerScaleSetMessage{{MessageID: 1}}},
+		Handler: &recordingMessageHandler{},
+	}
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected missing statistics error")
+	}
+}
+
+func TestPollerTreatsNoMessageAsSuccess(t *testing.T) {
 	poller := Poller{Client: &recordingMessageClient{}, Handler: &recordingMessageHandler{}}
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatalf("expected nil message success, got %v", err)
 	}
 }
 
-func TestPollerSurfacesClientAndAcknowledgementFailures(t *testing.T) {
+func TestPollerRejectsAmbiguousNilMessage(t *testing.T) {
+	poller := Poller{Client: ambiguousMessageClient{}, Handler: &recordingMessageHandler{}}
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected ambiguous nil message error")
+	}
+}
+
+func TestPollerReportsMessageReceiveFailure(t *testing.T) {
 	if err := (&Poller{Client: failingMessageClient{}, Handler: &recordingMessageHandler{}}).PollOnce(context.Background()); err == nil {
 		t.Fatal("expected get message error")
 	}
+}
+
+func TestPollerReportsAcknowledgementFailure(t *testing.T) {
 	client := &recordingMessageClient{
 		messages:    []*upstream.RunnerScaleSetMessage{{MessageID: 7, Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}},
 		deleteFails: true,
@@ -113,8 +131,7 @@ type recordingMessageClient struct {
 
 func (client *recordingMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
 	if len(client.messages) == 0 {
-		//nolint:nilnil // nil message with nil error is the upstream no-message contract.
-		return nil, nil
+		return nil, ErrNoMessage
 	}
 	message := client.messages[0]
 	client.messages = client.messages[1:]
@@ -154,5 +171,16 @@ func (client failingMessageClient) GetMessage(ctx context.Context, lastMessageID
 }
 
 func (client failingMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
+	return nil
+}
+
+type ambiguousMessageClient struct{}
+
+func (client ambiguousMessageClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+	var missingMessage *upstream.RunnerScaleSetMessage
+	return missingMessage, nil
+}
+
+func (client ambiguousMessageClient) DeleteMessage(ctx context.Context, messageID int) error {
 	return nil
 }

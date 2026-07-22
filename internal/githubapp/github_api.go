@@ -18,7 +18,7 @@ type githubAPI struct {
 	privateKey          []byte
 	baseTransport       http.RoundTripper
 	appClient           *github.Client
-	installationClients map[int64]*github.Client
+	installationClients map[InstallationID]*github.Client
 	clientMutex         sync.Mutex
 }
 
@@ -33,23 +33,23 @@ func newGitHubAPI(credentials config.GitHubAppCredentials) (*githubAPI, error) {
 		privateKey:          []byte(credentials.PrivateKey),
 		baseTransport:       baseTransport,
 		appClient:           github.NewClient(&http.Client{Transport: appTransport}),
-		installationClients: map[int64]*github.Client{},
+		installationClients: map[InstallationID]*github.Client{},
 	}, nil
 }
 
-func (api *githubAPI) ListInstallations(ctx context.Context, page int) ([]int64, int, error) {
+func (api *githubAPI) ListInstallations(ctx context.Context, page int) ([]InstallationID, int, error) {
 	installations, response, err := api.appClient.Apps.ListInstallations(ctx, &github.ListOptions{Page: page, PerPage: discoveryPageSize})
 	if err != nil {
 		return nil, 0, fmt.Errorf("request installations: %w", err)
 	}
-	installationIDs := make([]int64, 0, len(installations))
+	installationIDs := make([]InstallationID, 0, len(installations))
 	for _, installation := range installations {
-		installationIDs = append(installationIDs, installation.GetID())
+		installationIDs = append(installationIDs, InstallationID(installation.GetID()))
 	}
 	return installationIDs, response.NextPage, nil
 }
 
-func (api *githubAPI) ListRepositories(ctx context.Context, installationID int64, page int) ([]string, int, error) {
+func (api *githubAPI) ListRepositories(ctx context.Context, installationID InstallationID, page int) ([]string, int, error) {
 	client, err := api.installationClient(installationID)
 	if err != nil {
 		return nil, 0, err
@@ -65,13 +65,13 @@ func (api *githubAPI) ListRepositories(ctx context.Context, installationID int64
 	return repositoryURLs, response.NextPage, nil
 }
 
-func (api *githubAPI) installationClient(installationID int64) (*github.Client, error) {
+func (api *githubAPI) installationClient(installationID InstallationID) (*github.Client, error) {
 	api.clientMutex.Lock()
 	defer api.clientMutex.Unlock()
 	if client := api.installationClients[installationID]; client != nil {
 		return client, nil
 	}
-	transport, err := ghinstallation.New(api.baseTransport, api.appID, installationID, api.privateKey)
+	transport, err := ghinstallation.New(api.baseTransport, api.appID, int64(installationID), api.privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("create installation transport: %w", err)
 	}

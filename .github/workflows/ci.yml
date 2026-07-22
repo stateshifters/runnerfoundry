@@ -24,6 +24,7 @@ jobs:
     env:
       GOCACHE: /cache/go-build
       GOMODCACHE: /cache/go-mod
+      GITHUB_SCALER_POSTGRES_CACHE: /cache/embedded-postgres
       npm_config_cache: /cache/npm
     steps:
       - name: Checkout code
@@ -44,6 +45,9 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: PostgreSQL integration tests
+        run: make test-integration
 
       - name: Check coverage
         run: make coverage

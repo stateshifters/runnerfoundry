@@ -37,27 +37,75 @@ type Config struct {
 	DomainXMLTemplate string
 }
 
-type Command struct {
-	Name  string
-	Args  []string
-	Stdin string
+type CommandRunner interface {
+	DomainCreator
+	DomainReader
+	DomainDestroyer
+	ConnectionReader
 }
 
-type CommandRunner interface {
-	Run(ctx context.Context, command Command) (string, error)
+type DomainCreator interface {
+	CreateDomain(ctx context.Context, connectionURI string, domainXML string) error
+}
+
+type DomainReader interface {
+	ListDomains(ctx context.Context, connectionURI string) (string, error)
+	ReadDomainXML(ctx context.Context, connectionURI string, domainName string) (string, error)
+	ReadDomainState(ctx context.Context, connectionURI string, domainName string) (string, error)
+}
+
+type DomainDestroyer interface {
+	DestroyDomain(ctx context.Context, connectionURI string, domainName string) error
+}
+
+type ConnectionReader interface {
+	ReadConnectionURI(ctx context.Context, connectionURI string) (string, error)
 }
 
 type ExecCommandRunner struct{}
 
-func (runner ExecCommandRunner) Run(ctx context.Context, command Command) (string, error) {
-	// Production callers restrict Name to the hard-coded virsh executable.
-	execCommand := exec.CommandContext(ctx, command.Name, command.Args...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	if command.Stdin != "" {
-		execCommand.Stdin = strings.NewReader(command.Stdin)
+func (runner ExecCommandRunner) CreateDomain(ctx context.Context, connectionURI string, domainXML string) error {
+	_, err := runner.runVirsh(ctx, connectionURI, domainXML, "create", "/dev/stdin")
+	return err
+}
+
+func (runner ExecCommandRunner) ListDomains(ctx context.Context, connectionURI string) (string, error) {
+	return runner.runVirsh(ctx, connectionURI, "", "list", "--all", "--name")
+}
+
+func (runner ExecCommandRunner) ReadDomainXML(ctx context.Context, connectionURI string, domainName string) (string, error) {
+	return runner.runVirsh(ctx, connectionURI, "", "dumpxml", domainName)
+}
+
+func (runner ExecCommandRunner) ReadDomainState(ctx context.Context, connectionURI string, domainName string) (string, error) {
+	return runner.runVirsh(ctx, connectionURI, "", "domstate", domainName)
+}
+
+func (runner ExecCommandRunner) DestroyDomain(ctx context.Context, connectionURI string, domainName string) error {
+	_, err := runner.runVirsh(ctx, connectionURI, "", "destroy", domainName)
+	return err
+}
+
+func (runner ExecCommandRunner) ReadConnectionURI(ctx context.Context, connectionURI string) (string, error) {
+	return runner.runVirsh(ctx, connectionURI, "", "uri")
+}
+
+func (runner ExecCommandRunner) runVirsh(
+	ctx context.Context,
+	connectionURI string,
+	stdin string,
+	operation string,
+	operands ...string,
+) (string, error) {
+	execCommand := exec.CommandContext(ctx, "virsh")
+	execCommand.Args = append(execCommand.Args, "-c", connectionURI, operation)
+	execCommand.Args = append(execCommand.Args, operands...)
+	if stdin != "" {
+		execCommand.Stdin = strings.NewReader(stdin)
 	}
 	outputBytes, err := execCommand.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s %s failed: %w", command.Name, strings.Join(command.Args, " "), err)
+		return "", fmt.Errorf("virsh %s failed: %w", operation, err)
 	}
 	return string(outputBytes), nil
 }
@@ -72,14 +120,14 @@ func (provider Provider) Start(ctx context.Context, request StartRequest) error 
 	if err != nil {
 		return err
 	}
-	if _, err := provider.runVirshWithStdin(ctx, renderedXML, "create", "/dev/stdin"); err != nil {
+	if err := provider.CommandRunner.CreateDomain(ctx, provider.Config.ConnectionURI, renderedXML); err != nil {
 		return fmt.Errorf("create libvirt runner %q: %w", request.RunnerName, err)
 	}
 	return nil
 }
 
 func (provider Provider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
-	output, err := provider.runVirsh(ctx, "list", "--all", "--name")
+	output, err := provider.CommandRunner.ListDomains(ctx, provider.Config.ConnectionURI)
 	if err != nil {
 		return nil, fmt.Errorf("list libvirt domains: %w", err)
 	}
@@ -101,14 +149,14 @@ func (provider Provider) List(ctx context.Context, scaleSetName string) ([]Runne
 }
 
 func (provider Provider) instanceForDomain(ctx context.Context, domainName string, scaleSetName string) (RunnerInstance, bool, error) {
-	domainXML, err := provider.runVirsh(ctx, "dumpxml", domainName)
+	domainXML, err := provider.CommandRunner.ReadDomainXML(ctx, provider.Config.ConnectionURI, domainName)
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
 	}
 	if metadataValue(domainXML, contract.OwnershipScaleSet) != scaleSetName {
 		return RunnerInstance{}, false, nil
 	}
-	domainState, err := provider.runVirsh(ctx, "domstate", domainName)
+	domainState, err := provider.CommandRunner.ReadDomainState(ctx, provider.Config.ConnectionURI, domainName)
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
 	}
@@ -127,7 +175,7 @@ func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) e
 	if instance.State != RunnerStateRunning {
 		return nil
 	}
-	if _, err := provider.runVirsh(ctx, "destroy", instance.ID); err != nil {
+	if err := provider.CommandRunner.DestroyDomain(ctx, provider.Config.ConnectionURI, instance.ID); err != nil {
 		return fmt.Errorf("destroy libvirt runner %q: %w", instance.RunnerName, err)
 	}
 	return nil
@@ -137,7 +185,7 @@ func (provider Provider) Validate(ctx context.Context) error {
 	if _, err := provider.renderDomainXML(StartRequest{ScaleSetName: "validation", RunnerName: "validation"}); err != nil {
 		return err
 	}
-	if _, err := provider.runVirsh(ctx, "uri"); err != nil {
+	if _, err := provider.CommandRunner.ReadConnectionURI(ctx, provider.Config.ConnectionURI); err != nil {
 		return fmt.Errorf("validate libvirt connection: %w", err)
 	}
 	return nil
@@ -157,29 +205,6 @@ func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
 		return "", fmt.Errorf("render libvirt XML template: %w", err)
 	}
 	return renderedXML, nil
-}
-
-func (provider Provider) runVirsh(ctx context.Context, args ...string) (string, error) {
-	output, err := provider.CommandRunner.Run(ctx, Command{
-		Name: "virsh",
-		Args: append([]string{"-c", provider.Config.ConnectionURI}, args...),
-	})
-	if err != nil {
-		return "", fmt.Errorf("run virsh %q: %w", strings.Join(args, " "), err)
-	}
-	return output, nil
-}
-
-func (provider Provider) runVirshWithStdin(ctx context.Context, stdin string, args ...string) (string, error) {
-	output, err := provider.CommandRunner.Run(ctx, Command{
-		Name:  "virsh",
-		Args:  append([]string{"-c", provider.Config.ConnectionURI}, args...),
-		Stdin: stdin,
-	})
-	if err != nil {
-		return "", fmt.Errorf("run virsh %q: %w", strings.Join(args, " "), err)
-	}
-	return output, nil
 }
 
 func metadataValue(domainXML string, key string) string {

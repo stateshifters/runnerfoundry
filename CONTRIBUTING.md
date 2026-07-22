@@ -5,6 +5,9 @@ discussions, or any other method with the owners of this repository before makin
 
 Please note we have a code of conduct, please follow it in all your interactions with the project.
 
+The [architecture overview](docs/architecture.md) describes the application's current system boundaries, runtime modes, and
+interactions. Read it before changing behavior that crosses those boundaries.
+
 ## Quality bar (what good looks like)
 
 This project optimizes for long-term maintainability and predictable behavior. Prefer small, boring, readable changes over clever
@@ -58,6 +61,45 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 
 ## Verification
 
+PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
+
+### Test suite boundaries
+
+Unit tests MUST NOT perform filesystem, database, network, process, or other external I/O. Prefer injected dependencies,
+fakes, and in-memory stores so the default test suite remains fast, deterministic, and isolated.
+
+The `integration` build tag is the only build tag permitted for tests. It MAY be used only when real boundary behavior is
+the subject of the test and replacing that boundary with an in-memory substitute would invalidate the behavior being
+verified. Qualifying behavior includes database-engine semantics, durable close-and-reopen recovery, and the production
+composition entry point. Slowness, complexity, cross-package composition, or inconvenient setup alone do not justify the
+tag. Production Go files MUST NOT use build tags.
+
+### PostgreSQL integration tests
+
+Fast unit tests use in-memory fakes and do not provision PostgreSQL. Tests that require real migrations, roles, transactions, or advisory-lock behavior use the `integration` build tag and the pinned embedded PostgreSQL binary. Containers and a Dev Container are not required.
+
+`make lint` also runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at or below 100; the command reports each violating path and value. This is a backstop, not a substitute for cohesive functions, explicit boundaries, and behavior-focused tests.
+
+The embedded binary is cached under the operating system's user cache directory at `github-scaler/embedded-postgres`, using Go's `os.UserCacheDir`. Set `GITHUB_SCALER_POSTGRES_CACHE` to use another absolute directory; CI uses `/cache/embedded-postgres`. A cold integration run populates this cache, while later runs reuse the pinned binary.
+
+The cluster integration package starts one PostgreSQL server for the package and creates a separate database for each test. This keeps real PostgreSQL process, role, transaction, migration, and advisory-lock behavior while isolating test data without repeatedly restarting the server.
+
+Run the fast suite during normal development:
+
+```sh
+make test
+```
+
+Run integration behavior explicitly before review:
+
+```sh
+make test-integration
+```
+
+`make coverage` and `make test-race` include the integration tag. `make smoke` builds the executable, exercises the clustered daemon lifecycle and migration command surfaces, then uses real PostgreSQL to verify multi-host capacity, leader failover, demand continuity, and reversible migration behavior.
+
+### Complete verification suite
+
 V1 code must maintain 100% Go test coverage.
 
 ```sh
@@ -65,10 +107,11 @@ make lint
 make fmt-check
 make vet
 make test
+make test-integration
 make coverage
 make test-race
 make smoke
 ```
 
 - The coverage total must report `100.0%`.
-- The code must not use build tags with the only exception being the `ruleguard/rules-team.go` file.
+- Outside tests, build tags are limited to `ruleguard/rules-team.go`.

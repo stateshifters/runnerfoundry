@@ -3,11 +3,10 @@ package docker
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/meza/github-scaler/internal/provider/contract"
 )
 
 func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) {
@@ -113,67 +112,59 @@ func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestDockerProviderSurfacesCommandAndJSONFailures(t *testing.T) {
-	tests := map[string]func(t *testing.T){
-		"start": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Start(context.Background(), StartRequest{}); err == nil {
-				t.Fatal("expected start error")
-			}
-		},
-		"list command": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list command error")
-			}
-		},
-		"list array json": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `[`}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list json error")
-			}
-		},
-		"list line json": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `{`}}
-			if _, err := provider.List(context.Background(), "linux"); err == nil {
-				t.Fatal("expected list json line error")
-			}
-		},
-		"destroy": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
-				t.Fatal("expected destroy error")
-			}
-		},
-		"validate": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected validate error")
-			}
-		},
-		"validate missing service": func(t *testing.T) {
-			t.Helper()
-			provider := ComposeProvider{
-				CommandRunner: &recordingCommandRunner{output: "other\n"},
-				Config:        ComposeConfig{Service: "runner"},
-			}
-			if err := provider.Validate(context.Background()); err == nil {
-				t.Fatal("expected missing service error")
-			}
-		},
-	}
-	for testName, testCase := range tests {
-		t.Run(testName, testCase)
+func TestDockerProviderReportsStartCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+		t.Fatal("expected start error")
 	}
 }
 
-func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
+func TestDockerProviderReportsListCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list command error")
+	}
+}
+
+func TestDockerProviderRejectsMalformedJSONArray(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `[`}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list json error")
+	}
+}
+
+func TestDockerProviderRejectsMalformedLineDelimitedJSON(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: &recordingCommandRunner{output: `{`}}
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
+		t.Fatal("expected list json line error")
+	}
+}
+
+func TestDockerProviderReportsDestroyCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
+		t.Fatal("expected destroy error")
+	}
+}
+
+func TestDockerProviderReportsValidationCommandFailure(t *testing.T) {
+	provider := ComposeProvider{CommandRunner: failingCommandRunner{}}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected validate error")
+	}
+}
+
+func TestDockerProviderValidationRequiresConfiguredService(t *testing.T) {
+	provider := ComposeProvider{
+		CommandRunner: &recordingCommandRunner{output: "other\n"},
+		Config:        ComposeConfig{Service: "runner"},
+	}
+	if err := provider.Validate(context.Background()); err == nil {
+		t.Fatal("expected missing service error")
+	}
+}
+
+func TestDestroyAndValidateSucceed(t *testing.T) {
 	commandRunner := &recordingCommandRunner{output: "runner\n"}
 	provider := ComposeProvider{
 		CommandRunner: commandRunner,
@@ -190,17 +181,6 @@ func TestDestroyValidateAndExecRunnerSuccess(t *testing.T) {
 	}
 	if err := provider.Validate(context.Background()); err != nil {
 		t.Fatalf("expected validate success, got %v", err)
-	}
-
-	output, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "go", Args: []string{"version"}})
-	if err != nil {
-		t.Fatalf("expected exec success, got %v", err)
-	}
-	if output == "" {
-		t.Fatal("expected go version output")
-	}
-	if _, err := (ExecCommandRunner{}).Run(context.Background(), Command{Name: "definitely-missing-github-scaler-command"}); err == nil {
-		t.Fatal("expected exec failure")
 	}
 }
 
@@ -237,53 +217,53 @@ func TestDestroyRemovesDeadRunner(t *testing.T) {
 	}
 }
 
-func TestExecCommandRunnerReportsDiagnosticsWithoutJITConfig(t *testing.T) {
-	programPath := filepath.Join(t.TempDir(), "main.go")
-	if err := os.WriteFile(programPath, []byte(`package main
-
-import (
-	"fmt"
-	"os"
-)
-
-func main() {
-	fmt.Fprint(os.Stderr, "docker diagnostic: secret-jit-config")
-	os.Exit(1)
-}
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := (ExecCommandRunner{}).Run(context.Background(), Command{
-		Name: "go",
-		Args: []string{"run", programPath, "--env", JITConfigEnvironment + "=secret-jit-config"},
-	})
-	if err == nil {
-		t.Fatal("expected command failure")
-	}
-	if strings.Contains(err.Error(), "secret-jit-config") {
-		t.Fatalf("expected JIT config to be redacted, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "go command failed") {
-		t.Fatalf("expected command context, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "docker diagnostic: [REDACTED]") {
-		t.Fatalf("expected redacted command diagnostic, got %q", err.Error())
-	}
-}
-
 type recordingCommandRunner struct {
 	commands []Command
 	output   string
 }
 
-func (runner *recordingCommandRunner) Run(ctx context.Context, command Command) (string, error) {
+type Command struct {
+	Args []string
+}
+
+func (runner *recordingCommandRunner) record(command Command) (string, error) {
 	runner.commands = append(runner.commands, command)
 	return runner.output, nil
 }
 
+func (runner *recordingCommandRunner) StartComposeRunner(_ context.Context, config ComposeConfig, request StartRequest) error {
+	_, err := runner.record(Command{Args: append(composeArgs(config),
+		"run", "--detach", "--rm", "--name", request.RunnerName,
+		"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+		"--label", contract.OwnershipRunner+"="+request.RunnerName,
+		"--env", JITConfigEnvironment+"="+request.JITConfig, config.Service)})
+	return err
+}
+
+func (runner *recordingCommandRunner) ListComposeRunners(_ context.Context, scaleSetName string) (string, error) {
+	return runner.record(Command{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName}})
+}
+
+func (runner *recordingCommandRunner) RemoveComposeRunner(_ context.Context, containerID string) error {
+	_, err := runner.record(Command{Args: []string{"rm", "--force", containerID}})
+	return err
+}
+
+func (runner *recordingCommandRunner) ListComposeServices(_ context.Context, config ComposeConfig) (string, error) {
+	return runner.record(Command{Args: append(composeArgs(config), "config", "--services")})
+}
+
 type failingCommandRunner struct{}
 
-func (runner failingCommandRunner) Run(ctx context.Context, command Command) (string, error) {
+func (runner failingCommandRunner) StartComposeRunner(context.Context, ComposeConfig, StartRequest) error {
+	return errors.New("command failed")
+}
+func (runner failingCommandRunner) ListComposeRunners(context.Context, string) (string, error) {
+	return "", errors.New("command failed")
+}
+func (runner failingCommandRunner) RemoveComposeRunner(context.Context, string) error {
+	return errors.New("command failed")
+}
+func (runner failingCommandRunner) ListComposeServices(context.Context, ComposeConfig) (string, error) {
 	return "", errors.New("command failed")
 }

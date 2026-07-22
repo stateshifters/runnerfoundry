@@ -110,29 +110,43 @@ func (store *SQLiteDemandStore) removeLegacyZeroIdentityDemand(ctx context.Conte
 	})
 }
 
-func (store *SQLiteDemandStore) runMigration(ctx context.Context, description string, migrate func(*sql.Tx) error) error {
+func (store *SQLiteDemandStore) runMigration(ctx context.Context, description string, migrate func(*sql.Tx) error) (resultErr error) {
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin %s: %w", description, err)
 	}
-	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
+	transactionOpen := true
+	defer finishSQLiteTransaction(transaction, &transactionOpen, description, &resultErr)
 	if err := migrate(transaction); err != nil {
 		return err
 	}
+	transactionOpen = false
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit %s: %w", description, err)
 	}
 	return nil
 }
 
-func (store *SQLiteDemandStore) Apply(ctx context.Context, scaleSet string, observed []JobDemand, removed []DemandRemoval) error {
+func (store *SQLiteDemandStore) Apply(ctx context.Context, scaleSet string, observed []JobDemand, removed []DemandRemoval) (resultErr error) {
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin demand update: %w", err)
 	}
-	defer transaction.Rollback() //nolint:errcheck // Rollback is cleanup; commit and operation errors are returned explicitly.
+	transactionOpen := true
+	defer finishSQLiteTransaction(transaction, &transactionOpen, "demand update", &resultErr)
+	if err = applyDemandChanges(ctx, transaction, scaleSet, observed, removed); err != nil {
+		return err
+	}
+	transactionOpen = false
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit demand update: %w", err)
+	}
+	return nil
+}
+
+func applyDemandChanges(ctx context.Context, transaction *sql.Tx, scaleSet string, observed []JobDemand, removed []DemandRemoval) error {
 	for _, demand := range observed {
-		_, err = transaction.ExecContext(ctx, `INSERT INTO demand(scale_set, repository, request_id, queue_time, acquired)
+		_, err := transaction.ExecContext(ctx, `INSERT INTO demand(scale_set, repository, request_id, queue_time, acquired)
 			VALUES(?, ?, ?, ?, ?)
 			ON CONFLICT(scale_set, repository, request_id) DO UPDATE SET acquired = MAX(acquired, excluded.acquired)`,
 			scaleSet, demand.Repository, demand.RequestID, demand.QueueTime.UnixNano(), demand.Acquired)
@@ -145,10 +159,17 @@ func (store *SQLiteDemandStore) Apply(ctx context.Context, scaleSet string, obse
 			return fmt.Errorf("remove queued demand: %w", err)
 		}
 	}
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("commit demand update: %w", err)
-	}
 	return nil
+}
+
+func finishSQLiteTransaction(transaction *sql.Tx, transactionOpen *bool, description string, resultErr *error) {
+	if !*transactionOpen {
+		return
+	}
+	*transactionOpen = false
+	if rollbackErr := transaction.Rollback(); rollbackErr != nil {
+		*resultErr = errors.Join(*resultErr, fmt.Errorf("rollback %s: %w", description, rollbackErr))
+	}
 }
 
 func (store *SQLiteDemandStore) RemoveRepository(ctx context.Context, scaleSet string, repository string) error {
@@ -167,14 +188,17 @@ func (store *SQLiteDemandStore) RemoveScaleSet(ctx context.Context, scaleSet str
 	return nil
 }
 
-func (store *SQLiteDemandStore) Ordered(ctx context.Context, scaleSet string) ([]QueuedDemand, error) {
+func (store *SQLiteDemandStore) Ordered(ctx context.Context, scaleSet string) (result []QueuedDemand, resultErr error) {
 	rows, err := store.database.QueryContext(ctx, `SELECT repository, request_id, queue_time, acquired, observation_order
 		FROM demand WHERE scale_set = ? ORDER BY queue_time, observation_order`, scaleSet)
 	if err != nil {
 		return nil, fmt.Errorf("query queued demand: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // Query iteration and rows.Err report relevant read failures.
-	var result []QueuedDemand
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close queued demand rows: %w", closeErr))
+		}
+	}()
 	for rows.Next() {
 		var demand QueuedDemand
 		var queueNanoseconds int64

@@ -15,17 +15,45 @@ import (
 )
 
 func TestBuildReconcilerRejectsMissingProvider(t *testing.T) {
-	if _, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1, providerRuntime{}); err == nil {
+	if _, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, fakeScaleSetJITClient{}, 1, providerCommands{}); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }
 
+func TestValidateScaleSetProviderReportsHealth(t *testing.T) {
+	ctx := context.Background()
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+	}, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
+	}, providerCommands{DockerCommandRunner: dockerRunnerStub{err: errors.New("failed")}}); err == nil {
+		t.Fatal("expected docker health failure")
+	}
+	template := writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`)
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: template},
+	}, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
+		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "missing"},
+	}, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{}}); err == nil {
+		t.Fatal("expected libvirt health failure")
+	}
+	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{Name: "missing"}, providerCommands{}); err == nil {
+		t.Fatal("expected missing provider health failure")
+	}
+}
+
 func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
-	reconciler, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	reconciler, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:       "linux",
 		MaxRunners: 2,
 		Docker:     &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
-	}, &fakeScaleSetClient{}, 5, providerRuntime{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "runner\n"}})
 	if err != nil {
 		t.Fatalf("expected docker reconciler, got %v", err)
 	}
@@ -35,24 +63,24 @@ func TestBuildDockerReconcilerValidatesProvider(t *testing.T) {
 }
 
 func TestBuildDockerReconcilerSurfacesValidationFailure(t *testing.T) {
-	_, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	_, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:   "linux",
 		Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
-	}, &fakeScaleSetClient{}, 5, providerRuntime{DockerCommandRunner: dockerRunnerStub{output: "other\n"}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{DockerCommandRunner: dockerRunnerStub{output: "other\n"}})
 	if err == nil || !strings.Contains(err.Error(), "validate docker provider") {
 		t.Fatalf("expected docker validation error, got %v", err)
 	}
 }
 
 func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
-	reconciler, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	reconciler, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name:       "linux-vm",
 		MaxRunners: 1,
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI:     "qemu:///system",
 			DomainXMLTemplate: writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`),
 		},
-	}, &fakeScaleSetClient{}, 5, providerRuntime{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}})
 	if err != nil {
 		t.Fatalf("expected libvirt reconciler, got %v", err)
 	}
@@ -62,20 +90,26 @@ func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
 }
 
 func TestBuildLibvirtReconcilerSurfacesValidationFailure(t *testing.T) {
-	_, err := buildReconcilerWithRuntime(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
+	_, err := buildReconcilerWithCommands(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{
 		Name: "linux-vm",
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI:     "qemu:///system",
 			DomainXMLTemplate: filepath.Join(t.TempDir(), "missing.xml"),
 		},
-	}, &fakeScaleSetClient{}, 5, providerRuntime{LibvirtCommandRunner: &libvirtRunnerStub{}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{}})
 	if err == nil || !strings.Contains(err.Error(), "validate libvirt provider") {
 		t.Fatalf("expected libvirt validation error, got %v", err)
 	}
 }
 
-func TestBuildReconcilerUsesProductionRuntime(t *testing.T) {
-	if _, err := buildReconciler(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, &fakeScaleSetClient{}, 1); err == nil {
+func TestBuildReconcilerRejectsScaleSetWithoutProvider(t *testing.T) {
+	if _, err := buildReconciler(context.Background(), "https://github.com/meza/repo-a", config.ScaleSetConfig{Name: "linux"}, fakeScaleSetJITClient{}, 1); err == nil {
+		t.Fatal("expected missing provider error")
+	}
+}
+
+func TestProductionProviderValidationRejectsScaleSetWithoutProvider(t *testing.T) {
+	if err := validateProductionScaleSetProvider(context.Background(), config.ScaleSetConfig{Name: "linux"}); err == nil {
 		t.Fatal("expected missing provider error")
 	}
 }
@@ -141,19 +175,6 @@ func TestDockerProviderAdapterPreservesRunnerStateOnDestroy(t *testing.T) {
 	}
 }
 
-func TestDockerProviderAdapterSurfacesProviderErrors(t *testing.T) {
-	adapter := dockerProviderAdapter{Provider: dockerprovider.ComposeProvider{CommandRunner: dockerFailingRunner{}}}
-	if _, err := adapter.List(context.Background(), "linux"); err == nil {
-		t.Fatal("expected list error")
-	}
-	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{}); err == nil {
-		t.Fatal("expected start error")
-	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
-		t.Fatal("expected destroy error")
-	}
-}
-
 func TestDockerRunnerStateMapsCompletedStates(t *testing.T) {
 	if dockerRunnerState(dockerprovider.RunnerInstance{State: dockerprovider.RunnerStateCompleted}) != scaler.RunnerStateCompleted {
 		t.Fatal("expected completed docker state")
@@ -206,15 +227,26 @@ func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	}
 }
 
-func TestLibvirtProviderAdapterSurfacesProviderErrors(t *testing.T) {
-	adapter := libvirtProviderAdapter{Provider: libvirtprovider.Provider{CommandRunner: libvirtFailingRunner{}}}
-	if _, err := adapter.List(context.Background(), "linux"); err == nil {
+func TestProviderAdaptersSurfaceProviderErrors(t *testing.T) {
+	t.Run("docker", func(t *testing.T) {
+		adapter := dockerProviderAdapter{Provider: dockerprovider.ComposeProvider{CommandRunner: dockerFailingRunner{}}}
+		assertProviderAdapterSurfacesErrors(t, adapter)
+	})
+	t.Run("libvirt", func(t *testing.T) {
+		adapter := libvirtProviderAdapter{Provider: libvirtprovider.Provider{CommandRunner: libvirtFailingRunner{}}}
+		assertProviderAdapterSurfacesErrors(t, adapter)
+	})
+}
+
+func assertProviderAdapterSurfacesErrors(t *testing.T, provider scaler.Provider) {
+	t.Helper()
+	if _, err := provider.List(context.Background(), "linux"); err == nil {
 		t.Fatal("expected list error")
 	}
-	if err := adapter.Start(context.Background(), scaler.RunnerStartRequest{}); err == nil {
+	if err := provider.Start(context.Background(), scaler.RunnerStartRequest{}); err == nil {
 		t.Fatal("expected start error")
 	}
-	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
+	if err := provider.Destroy(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy error")
 	}
 }
@@ -248,41 +280,80 @@ type dockerRunnerStub struct {
 	err    error
 }
 
-func (runner dockerRunnerStub) Run(ctx context.Context, command dockerprovider.Command) (string, error) {
+func (runner dockerRunnerStub) result() (string, error) {
 	if runner.err != nil {
 		return "", runner.err
 	}
 	return runner.output, nil
 }
 
+func (runner dockerRunnerStub) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.StartRequest) error {
+	_, err := runner.result()
+	return err
+}
+func (runner dockerRunnerStub) ListComposeRunners(context.Context, string) (string, error) {
+	return runner.result()
+}
+func (runner dockerRunnerStub) RemoveComposeRunner(context.Context, string) error {
+	_, err := runner.result()
+	return err
+}
+func (runner dockerRunnerStub) ListComposeServices(context.Context, dockerprovider.ComposeConfig) (string, error) {
+	return runner.result()
+}
+
 type dockerRecordingRunner struct {
-	commands []dockerprovider.Command
+	commands []string
 	outputs  []string
 }
 
-func (runner *dockerRecordingRunner) Run(ctx context.Context, command dockerprovider.Command) (string, error) {
-	runner.commands = append(runner.commands, command)
+func (runner *dockerRecordingRunner) record(operation string) (string, error) {
+	runner.commands = append(runner.commands, operation)
 	if len(runner.outputs) == 0 {
 		return "", nil
 	}
 	output := runner.outputs[0]
 	runner.outputs = runner.outputs[1:]
 	return output, nil
+}
+
+func (runner *dockerRecordingRunner) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.StartRequest) error {
+	_, err := runner.record("start")
+	return err
+}
+func (runner *dockerRecordingRunner) ListComposeRunners(context.Context, string) (string, error) {
+	return runner.record("list")
+}
+func (runner *dockerRecordingRunner) RemoveComposeRunner(context.Context, string) error {
+	_, err := runner.record("remove")
+	return err
+}
+func (runner *dockerRecordingRunner) ListComposeServices(context.Context, dockerprovider.ComposeConfig) (string, error) {
+	return runner.record("services")
 }
 
 type dockerFailingRunner struct{}
 
-func (runner dockerFailingRunner) Run(ctx context.Context, command dockerprovider.Command) (string, error) {
+func (runner dockerFailingRunner) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.StartRequest) error {
+	return errors.New("docker failed")
+}
+func (runner dockerFailingRunner) ListComposeRunners(context.Context, string) (string, error) {
+	return "", errors.New("docker failed")
+}
+func (runner dockerFailingRunner) RemoveComposeRunner(context.Context, string) error {
+	return errors.New("docker failed")
+}
+func (runner dockerFailingRunner) ListComposeServices(context.Context, dockerprovider.ComposeConfig) (string, error) {
 	return "", errors.New("docker failed")
 }
 
 type libvirtRunnerStub struct {
-	commands []libvirtprovider.Command
+	commands []string
 	outputs  []string
 }
 
-func (runner *libvirtRunnerStub) Run(ctx context.Context, command libvirtprovider.Command) (string, error) {
-	runner.commands = append(runner.commands, command)
+func (runner *libvirtRunnerStub) record(operation string) (string, error) {
+	runner.commands = append(runner.commands, operation)
 	if len(runner.outputs) == 0 {
 		return "", nil
 	}
@@ -291,8 +362,44 @@ func (runner *libvirtRunnerStub) Run(ctx context.Context, command libvirtprovide
 	return output, nil
 }
 
+func (runner *libvirtRunnerStub) CreateDomain(context.Context, string, string) error {
+	_, err := runner.record("create")
+	return err
+}
+func (runner *libvirtRunnerStub) ListDomains(context.Context, string) (string, error) {
+	return runner.record("list")
+}
+func (runner *libvirtRunnerStub) ReadDomainXML(context.Context, string, string) (string, error) {
+	return runner.record("dumpxml")
+}
+func (runner *libvirtRunnerStub) ReadDomainState(context.Context, string, string) (string, error) {
+	return runner.record("domstate")
+}
+func (runner *libvirtRunnerStub) DestroyDomain(context.Context, string, string) error {
+	_, err := runner.record("destroy")
+	return err
+}
+func (runner *libvirtRunnerStub) ReadConnectionURI(context.Context, string) (string, error) {
+	return runner.record("uri")
+}
+
 type libvirtFailingRunner struct{}
 
-func (runner libvirtFailingRunner) Run(ctx context.Context, command libvirtprovider.Command) (string, error) {
+func (runner libvirtFailingRunner) CreateDomain(context.Context, string, string) error {
+	return errors.New("libvirt failed")
+}
+func (runner libvirtFailingRunner) ListDomains(context.Context, string) (string, error) {
+	return "", errors.New("libvirt failed")
+}
+func (runner libvirtFailingRunner) ReadDomainXML(context.Context, string, string) (string, error) {
+	return "", errors.New("libvirt failed")
+}
+func (runner libvirtFailingRunner) ReadDomainState(context.Context, string, string) (string, error) {
+	return "", errors.New("libvirt failed")
+}
+func (runner libvirtFailingRunner) DestroyDomain(context.Context, string, string) error {
+	return errors.New("libvirt failed")
+}
+func (runner libvirtFailingRunner) ReadConnectionURI(context.Context, string) (string, error) {
 	return "", errors.New("libvirt failed")
 }

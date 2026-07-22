@@ -91,10 +91,6 @@ func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository
 	return nil
 }
 
-func (coordinator *Coordinator) Observe(demand JobDemand) {
-	_ = coordinator.Apply(context.Background(), []JobDemand{demand}, nil) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
-}
-
 func (coordinator *Coordinator) Apply(ctx context.Context, observed []JobDemand, removed []DemandRemoval) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
@@ -102,10 +98,6 @@ func (coordinator *Coordinator) Apply(ctx context.Context, observed []JobDemand,
 		return fmt.Errorf("apply demand changes: %w", err)
 	}
 	return nil
-}
-
-func (coordinator *Coordinator) Remove(repository string, requestID int64) {
-	_ = coordinator.Apply(context.Background(), nil, []DemandRemoval{{Repository: repository, RequestID: requestID}}) //nolint:errcheck,gosec // Compatibility helper has no error return; durable callers use Apply.
 }
 
 // ObserveAssigned replaces a repository's authoritative GitHub assigned-job count.
@@ -284,21 +276,21 @@ func (coordinator *Coordinator) runningCounts(ctx context.Context) (int, map[str
 	return runningCount, repositoryRunningCounts, nil
 }
 
-type memoryDemandStore struct {
+type MemoryDemandStore struct {
 	demand          map[demandKey]QueuedDemand
 	nextObservation uint64
 }
 
-func createMemoryDemandStore() *memoryDemandStore {
-	return &memoryDemandStore{demand: map[demandKey]QueuedDemand{}}
+func createMemoryDemandStore() *MemoryDemandStore {
+	return &MemoryDemandStore{demand: map[demandKey]QueuedDemand{}}
 }
 
 // NewMemoryDemandStore provides transient demand storage for tests and embedded callers.
-func NewMemoryDemandStore() DemandStore { //nolint:ireturn // The exported test seam intentionally exposes only the production store contract.
+func NewMemoryDemandStore() *MemoryDemandStore {
 	return createMemoryDemandStore()
 }
 
-func (store *memoryDemandStore) Apply(_ context.Context, _ string, observed []JobDemand, removed []DemandRemoval) error {
+func (store *MemoryDemandStore) Apply(_ context.Context, _ string, observed []JobDemand, removed []DemandRemoval) error {
 	for _, demand := range observed {
 		key := demandKey{Repository: demand.Repository, RequestID: demand.RequestID}
 		if existing, exists := store.demand[key]; exists {
@@ -317,7 +309,7 @@ func (store *memoryDemandStore) Apply(_ context.Context, _ string, observed []Jo
 	return nil
 }
 
-func (store *memoryDemandStore) RemoveRepository(_ context.Context, _ string, repository string) error {
+func (store *MemoryDemandStore) RemoveRepository(_ context.Context, _ string, repository string) error {
 	for key := range store.demand {
 		if key.Repository == repository {
 			delete(store.demand, key)
@@ -326,9 +318,9 @@ func (store *memoryDemandStore) RemoveRepository(_ context.Context, _ string, re
 	return nil
 }
 
-func (store *memoryDemandStore) RemoveScaleSet(context.Context, string) error { return nil }
+func (store *MemoryDemandStore) RemoveScaleSet(context.Context, string) error { return nil }
 
-func (store *memoryDemandStore) Ordered(context.Context, string) ([]QueuedDemand, error) {
+func (store *MemoryDemandStore) Ordered(context.Context, string) ([]QueuedDemand, error) {
 	ordered := make([]QueuedDemand, 0, len(store.demand))
 	for _, demand := range store.demand {
 		ordered = append(ordered, demand)

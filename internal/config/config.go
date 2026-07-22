@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/meza/github-scaler/internal/postgresconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,7 +24,8 @@ type Config struct {
 }
 
 type StateConfig struct {
-	Path string `yaml:"path"`
+	Path     string                   `yaml:"path"`
+	Postgres *postgresconfig.Settings `yaml:"postgres"`
 }
 
 type GitHubConfig struct {
@@ -85,6 +88,51 @@ func Load(reader io.Reader) (Config, error) {
 	return loadedConfig, nil
 }
 
+// LoadPostgreSQLState decodes only the clustered state settings needed by the
+// migration commands. Other daemon settings are deliberately ignored, while
+// the PostgreSQL subtree retains the same strict keys and validation as Load.
+func LoadPostgreSQLState(reader io.Reader) (postgresconfig.Settings, error) {
+	var document yaml.Node
+	if err := yaml.NewDecoder(reader).Decode(&document); err != nil {
+		return postgresconfig.Settings{}, fmt.Errorf("decode migration config: %w", err)
+	}
+	stateNode := yamlMappingValue(document.Content[0], "state")
+	postgresNode := yamlMappingValue(stateNode, "postgres")
+	if postgresNode == nil {
+		return postgresconfig.Settings{}, errors.New("PostgreSQL clustered state is required")
+	}
+	return decodePostgreSQLStateNode(postgresNode)
+}
+
+func decodePostgreSQLStateNode(postgresNode *yaml.Node) (postgresconfig.Settings, error) {
+	postgresContents, err := yaml.Marshal(postgresNode)
+	if err != nil {
+		return postgresconfig.Settings{}, fmt.Errorf("read PostgreSQL migration config: %w", err)
+	}
+	var postgresConfig postgresconfig.Settings
+	decoder := yaml.NewDecoder(bytes.NewReader(postgresContents))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&postgresConfig); err != nil {
+		return postgresconfig.Settings{}, fmt.Errorf("decode PostgreSQL migration config: %w", err)
+	}
+	if err := postgresconfig.Validate(postgresConfig); err != nil {
+		return postgresconfig.Settings{}, fmt.Errorf("validate PostgreSQL migration config: %w", err)
+	}
+	return postgresConfig, nil
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
 // Validate applies defaults and rejects unsafe startup state.
 func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.GitHub.validate(); err != nil {
@@ -104,10 +152,28 @@ func (loadedConfig *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported log.level %q", loadedConfig.Log.Level)
 	}
-	if strings.TrimSpace(loadedConfig.State.Path) == "" {
-		return errors.New("state.path is required")
+	if err := loadedConfig.State.validate(); err != nil {
+		return err
 	}
 	return loadedConfig.validateScaleSets()
+}
+
+func (stateConfig StateConfig) validate() error {
+	hasSQLite := strings.TrimSpace(stateConfig.Path) != ""
+	hasPostgreSQL := stateConfig.Postgres != nil
+	if hasSQLite && hasPostgreSQL {
+		return errors.New("state.path and state.postgres are mutually exclusive")
+	}
+	if !hasSQLite && !hasPostgreSQL {
+		return errors.New("state.path is required when state.postgres is not configured")
+	}
+	if !hasPostgreSQL {
+		return nil
+	}
+	if err := postgresconfig.Validate(*stateConfig.Postgres); err != nil {
+		return fmt.Errorf("validate PostgreSQL state: %w", err)
+	}
+	return nil
 }
 
 func (githubConfig *GitHubConfig) validate() error {
