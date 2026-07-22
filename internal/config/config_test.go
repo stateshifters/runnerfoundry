@@ -62,14 +62,14 @@ func TestLoadPostgreSQLStateIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
 	postgresConfig, err := LoadPostgreSQLState(strings.NewReader(`github: invalid
 state:
   postgres:
-    role: github_scaler
+    role: runnerfoundry
     host: database.internal
 scale_sets: invalid
 `))
 	if err != nil {
 		t.Fatalf("load PostgreSQL state: %v", err)
 	}
-	if postgresConfig.Role != "github_scaler" || postgresConfig.Host != "database.internal" {
+	if postgresConfig.Role != "runnerfoundry" || postgresConfig.Host != "database.internal" {
 		t.Fatalf("PostgreSQL state = %#v", postgresConfig)
 	}
 }
@@ -80,10 +80,10 @@ func TestLoadPostgreSQLStateRejectsInvalidPostgreSQLConfiguration(t *testing.T) 
 		"malformed document":  "state: [",
 		"missing state":       "github: invalid\n",
 		"missing postgres":    "state: {}\n",
-		"unknown primary key": "state:\n  postgres:\n    role: github_scaler\n    unknown: value\n",
-		"unknown direct key":  "state:\n  postgres:\n    role: github_scaler\n    direct:\n      unknown: value\n",
+		"unknown primary key": "state:\n  postgres:\n    role: runnerfoundry\n    unknown: value\n",
+		"unknown direct key":  "state:\n  postgres:\n    role: runnerfoundry\n    direct:\n      unknown: value\n",
 		"missing role":        "state:\n  postgres: {}\n",
-		"conflicting settings": "state:\n  postgres:\n    role: github_scaler\n    dsn: postgres://database\n" +
+		"conflicting settings": "state:\n  postgres:\n    role: runnerfoundry\n    dsn: postgres://database\n" +
 			"    host: database.internal\n",
 	}
 	for name, configText := range tests {
@@ -110,10 +110,10 @@ func TestLoadDefaultsLogLevelToInfo(t *testing.T) {
 func TestLoadAcceptsPostgreSQLClusterStateSources(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{
-		"standard environment": "\n    role: github_scaler\n",
-		"direct DSN":           "\n    role: github_scaler\n    dsn: postgres://scaler@database/scaler\n",
+		"standard environment": "\n    role: runnerfoundry\n",
+		"direct DSN":           "\n    role: runnerfoundry\n    dsn: postgres://scaler@database/scaler\n",
 		"referenced DSN":       "\n    role: env://POSTGRES_ROLE\n    dsn: env://DATABASE_URL\n",
-		"structured settings":  "\n    role: file:///run/secrets/postgres-role\n    host: postgresql.internal\n    port: file:///run/secrets/postgres-port\n    name: github_scaler\n    user: env://POSTGRES_USER\n    password: file:///run/secrets/postgres-password\n    direct:\n      host: postgresql-direct.internal\n      port: 5432\n",
+		"structured settings":  "\n    role: file:///run/secrets/postgres-role\n    host: postgresql.internal\n    port: file:///run/secrets/postgres-port\n    name: runnerfoundry\n    user: env://POSTGRES_USER\n    password: file:///run/secrets/postgres-password\n    direct:\n      host: postgresql-direct.internal\n      port: 5432\n",
 	}
 	for testName, connectionSource := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -152,7 +152,7 @@ func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
 			expectedError: "state.path and state.postgres are mutually exclusive",
 		},
 		"DSN and structured settings": {
-			state:         "  postgres:\n    role: github_scaler\n    dsn: postgres://database/scaler\n    host: database\n",
+			state:         "  postgres:\n    role: runnerfoundry\n    dsn: postgres://database/scaler\n    host: database\n",
 			expectedError: "state.postgres.dsn cannot be combined with structured PostgreSQL settings",
 		},
 		"missing role": {
@@ -160,11 +160,11 @@ func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
 			expectedError: "state.postgres.role is required",
 		},
 		"direct DSN and structured settings": {
-			state:         "  postgres:\n    role: github_scaler\n    direct:\n      dsn: postgres://database/scaler\n      host: database\n",
+			state:         "  postgres:\n    role: runnerfoundry\n    direct:\n      dsn: postgres://database/scaler\n      host: database\n",
 			expectedError: "state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
 		},
 		"opaque primary DSN with partial direct override": {
-			state:         "  postgres:\n    role: github_scaler\n    dsn: postgres://pool/scaler\n    direct:\n      host: database\n",
+			state:         "  postgres:\n    role: runnerfoundry\n    dsn: postgres://pool/scaler\n    direct:\n      host: database\n",
 			expectedError: "state.postgres.direct.dsn is required when overriding a primary DSN",
 		},
 	}

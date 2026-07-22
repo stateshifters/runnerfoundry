@@ -7,9 +7,9 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/scaler"
-	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/scaler"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 type scaleSetSessionOperations struct {

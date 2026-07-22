@@ -10,11 +10,11 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
-	"github.com/meza/github-scaler/internal/postgresconfig"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestReconciliationRequestsCoalesce(t *testing.T) {
@@ -200,7 +200,7 @@ func TestStaleLeadershipAndStatusFailureDoNotChangeDaemonState(t *testing.T) {
 func clusteredConfig(t *testing.T) config.Config {
 	t.Helper()
 	configured := runnableConfig(t)
-	configured.State.Postgres = &postgresconfig.Settings{DSN: "postgres://unused", Role: "github_scaler"}
+	configured.State.Postgres = &postgresconfig.Settings{DSN: "postgres://unused", Role: "runnerfoundry"}
 	configured.ScaleSets[0].RunnerGroup = "Default"
 	configured.ScaleSets[0].MaxRunners = 10
 	return configured

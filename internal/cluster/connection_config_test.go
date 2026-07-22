@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 type Settings = postgresconfig.Settings
@@ -36,7 +36,7 @@ func (values connectionFixtureValues) malformedDSN() string {
 }
 
 func settingsWithProofReference(reference string) Settings {
-	return Settings{Password: reference, Role: "github_scaler"}
+	return Settings{Password: reference, Role: "runnerfoundry"}
 }
 
 type structuredConnectionField struct {
@@ -69,7 +69,7 @@ func structuredConnectionFields() []structuredConnectionField {
 	return []structuredConnectionField{
 		{name: "host", set: func(settings *Settings, value string) { settings.Host = value }, get: func(config *pgx.ConnConfig) string { return config.Host }, want: "database.internal"},
 		{name: "port", set: func(settings *Settings, value string) { settings.Port = value }, get: func(config *pgx.ConnConfig) string { return strconv.Itoa(int(config.Port)) }, want: "6432"},
-		{name: "name", set: func(settings *Settings, value string) { settings.Name = value }, get: func(config *pgx.ConnConfig) string { return config.Database }, want: "github_scaler"},
+		{name: "name", set: func(settings *Settings, value string) { settings.Name = value }, get: func(config *pgx.ConnConfig) string { return config.Database }, want: "runnerfoundry"},
 		{name: "user", set: func(settings *Settings, value string) { settings.User = value }, get: func(config *pgx.ConnConfig) string { return config.User }, want: values.identity},
 		{name: "password", set: func(settings *Settings, value string) { settings.Password = value }, get: func(config *pgx.ConnConfig) string { return config.Password }, want: values.proof},
 	}
@@ -77,7 +77,7 @@ func structuredConnectionFields() []structuredConnectionField {
 
 func assertStructuredConnectionField(t *testing.T, field structuredConnectionField, configuredValue string) {
 	t.Helper()
-	settings := Settings{Role: "github_scaler"}
+	settings := Settings{Role: "runnerfoundry"}
 	field.set(&settings, configuredValue)
 	resolved, err := primaryConnectionConfig(settings)
 	if err != nil {
@@ -90,7 +90,7 @@ func assertStructuredConnectionField(t *testing.T, field structuredConnectionFie
 
 func TestSettingsResolveEveryDSNSource(t *testing.T) {
 	values := newConnectionFixtureValues()
-	dsn := values.dsn("database.internal", "6432", "github_scaler")
+	dsn := values.dsn("database.internal", "6432", "runnerfoundry")
 	t.Setenv("SCALER_TEST_DSN", dsn)
 	tests := map[string]string{
 		"literal":     dsn,
@@ -98,11 +98,11 @@ func TestSettingsResolveEveryDSNSource(t *testing.T) {
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
-			resolved, err := primaryConnectionConfig(Settings{DSN: source, Role: "github_scaler"})
+			resolved, err := primaryConnectionConfig(Settings{DSN: source, Role: "runnerfoundry"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "github_scaler" || resolved.User != values.identity || resolved.Password != values.proof {
+			if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "runnerfoundry" || resolved.User != values.identity || resolved.Password != values.proof {
 				t.Fatalf("resolved DSN configuration = %#v", resolved)
 			}
 		})
@@ -110,9 +110,9 @@ func TestSettingsResolveEveryDSNSource(t *testing.T) {
 }
 
 func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
-	t.Setenv("SCALER_TEST_ROLE", "github_scaler")
+	t.Setenv("SCALER_TEST_ROLE", "runnerfoundry")
 	for sourceName, roleSource := range map[string]string{
-		"literal": "github_scaler", "environment": "env://SCALER_TEST_ROLE",
+		"literal": "runnerfoundry", "environment": "env://SCALER_TEST_ROLE",
 	} {
 		t.Run(sourceName, func(t *testing.T) {
 			resolved, err := primaryConnectionConfig(Settings{
@@ -121,7 +121,7 @@ func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resolved.RuntimeParams["role"] != "github_scaler" {
+			if resolved.RuntimeParams["role"] != "runnerfoundry" {
 				t.Fatalf("resolved role = %q", resolved.RuntimeParams["role"])
 			}
 		})
@@ -130,7 +130,7 @@ func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
 
 func TestSettingsBuildDirectConnection(t *testing.T) {
 	settings := Settings{
-		Host: "pool", Port: "6432", Name: "scaler", User: "login", Password: "secret", Role: "github_scaler",
+		Host: "pool", Port: "6432", Name: "scaler", User: "login", Password: "secret", Role: "runnerfoundry",
 		Direct: &Endpoint{Host: "database", Port: "5432"},
 	}
 	resolved, err := directConnectionConfig(settings)
@@ -140,7 +140,7 @@ func TestSettingsBuildDirectConnection(t *testing.T) {
 	if resolved.Host != "database" || resolved.Port != 5432 || resolved.Database != "scaler" || resolved.User != "login" || resolved.Password != "secret" {
 		t.Fatalf("direct structured settings = %#v", resolved)
 	}
-	if resolved.RuntimeParams["role"] != "github_scaler" {
+	if resolved.RuntimeParams["role"] != "runnerfoundry" {
 		t.Fatalf("direct role = %q", resolved.RuntimeParams["role"])
 	}
 }
@@ -154,16 +154,16 @@ func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 		user     string
 	}{
 		"no direct endpoint": {
-			settings: Settings{DSN: primaryDSN, Role: "github_scaler"}, host: "primary", user: "primary-user",
+			settings: Settings{DSN: primaryDSN, Role: "runnerfoundry"}, host: "primary", user: "primary-user",
 		},
 		"empty direct endpoint": {
-			settings: Settings{DSN: primaryDSN, Role: "github_scaler", Direct: &Endpoint{}}, host: "primary", user: "primary-user",
+			settings: Settings{DSN: primaryDSN, Role: "runnerfoundry", Direct: &Endpoint{}}, host: "primary", user: "primary-user",
 		},
 		"complete direct DSN": {
-			settings: Settings{DSN: primaryDSN, Role: "github_scaler", Direct: &Endpoint{DSN: directDSN}}, host: "direct", user: "direct-user",
+			settings: Settings{DSN: primaryDSN, Role: "runnerfoundry", Direct: &Endpoint{DSN: directDSN}}, host: "direct", user: "direct-user",
 		},
 		"direct DSN over structured primary": {
-			settings: Settings{Host: "primary", Role: "github_scaler", Direct: &Endpoint{DSN: directDSN}}, host: "direct", user: "direct-user",
+			settings: Settings{Host: "primary", Role: "runnerfoundry", Direct: &Endpoint{DSN: directDSN}}, host: "direct", user: "direct-user",
 		},
 	}
 	for name, test := range tests {
@@ -182,7 +182,7 @@ func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 func TestSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) {
 	const directDSN = "postgres://direct-user@direct:6432/direct"
 	if _, err := directConnectionConfig(Settings{
-		Host: "primary", Role: "github_scaler",
+		Host: "primary", Role: "runnerfoundry",
 		Direct: &Endpoint{DSN: directDSN, Host: "direct"},
 	}); err == nil {
 		t.Fatal("expected direct DSN and structured settings conflict")
@@ -193,7 +193,7 @@ func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T
 	for name, settings := range map[string]Settings{
 		"missing role": {Host: "database"},
 		"opaque DSN partial direct override": {
-			DSN: "postgres://pool/scaler", Role: "github_scaler", Direct: &Endpoint{Host: "database"},
+			DSN: "postgres://pool/scaler", Role: "runnerfoundry", Direct: &Endpoint{Host: "database"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -210,7 +210,7 @@ func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
 	t.Setenv("PGDATABASE", "environment-name")
 	t.Setenv("PGUSER", "environment-user")
 	t.Setenv("PGPASSWORD", "environment-password")
-	resolved, err := primaryConnectionConfig(Settings{Role: "github_scaler"})
+	resolved, err := primaryConnectionConfig(Settings{Role: "runnerfoundry"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,9 +226,9 @@ func TestSettingsRejectInvalidEnvironmentReferencesWithoutDisclosure(t *testing.
 		"missing environment":      settingsWithProofReference("env://SCALER_MISSING_SECRET"),
 		"empty environment":        settingsWithProofReference("env://SCALER_EMPTY_SECRET"),
 		"malformed env":            settingsWithProofReference("env:SCALER_SECRET"),
-		"empty env name":           {Password: "env://", Role: "github_scaler"},
+		"empty env name":           {Password: "env://", Role: "runnerfoundry"},
 		"invalid env name":         settingsWithProofReference("env://BAD/NAME"),
-		"referenced DSN":           {DSN: "env://SCALER_MISSING_DSN", Role: "github_scaler"},
+		"referenced DSN":           {DSN: "env://SCALER_MISSING_DSN", Role: "runnerfoundry"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -239,9 +239,9 @@ func TestSettingsRejectInvalidEnvironmentReferencesWithoutDisclosure(t *testing.
 
 func TestSettingsRejectInvalidPortsWithoutDisclosure(t *testing.T) {
 	tests := map[string]Settings{
-		"zero port":       {Port: "0", Role: "github_scaler"},
-		"large port":      {Port: "65536", Role: "github_scaler"},
-		"nonnumeric port": {Port: "secret-port", Role: "github_scaler"},
+		"zero port":       {Port: "0", Role: "runnerfoundry"},
+		"large port":      {Port: "65536", Role: "runnerfoundry"},
+		"nonnumeric port": {Port: "secret-port", Role: "runnerfoundry"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -252,7 +252,7 @@ func TestSettingsRejectInvalidPortsWithoutDisclosure(t *testing.T) {
 
 func TestSettingsRejectMalformedDSNWithoutDisclosure(t *testing.T) {
 	tests := map[string]Settings{
-		"malformed DSN": {DSN: newConnectionFixtureValues().malformedDSN(), Role: "github_scaler"},
+		"malformed DSN": {DSN: newConnectionFixtureValues().malformedDSN(), Role: "runnerfoundry"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
-	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
+	"github.com/meza/RunnerFoundry/internal/config"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 func TestScaleSetMessageClientForwardsMessages(t *testing.T) {
@@ -124,7 +124,7 @@ func TestRunnerHostnameFallsBackWhenHostNameFails(t *testing.T) {
 	operatingSystemHostname = func() (string, error) {
 		return "", errors.New("hostname failed")
 	}
-	if runnerHostname() != "github-scaler" {
+	if runnerHostname() != "runnerfoundry" {
 		t.Fatal("expected fallback hostname")
 	}
 }

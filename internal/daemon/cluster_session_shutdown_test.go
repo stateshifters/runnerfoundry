@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {

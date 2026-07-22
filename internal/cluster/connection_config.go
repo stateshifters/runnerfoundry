@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func primaryConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {

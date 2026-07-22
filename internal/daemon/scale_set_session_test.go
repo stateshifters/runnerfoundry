@@ -10,8 +10,8 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestRunScaleSetPassesRepositoryToReconciler(t *testing.T) {

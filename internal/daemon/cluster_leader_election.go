@@ -5,7 +5,7 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/meza/github-scaler/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/cluster"
 )
 
 func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {

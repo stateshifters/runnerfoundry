@@ -11,11 +11,11 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
-	"github.com/meza/github-scaler/internal/postgresconfig"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestClusteredStartupRequiresOperatingSystemHostname(t *testing.T) {

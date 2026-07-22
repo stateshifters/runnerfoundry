@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/tern/v2/migrate"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
@@ -38,7 +38,7 @@ func TestMigrationConnectionCloseReportsFailure(t *testing.T) {
 }
 
 func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
-	store := NewStore(postgresconfig.Settings{Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Role: "runnerfoundry"})
 	catalog, err := store.migrationCatalog()
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestPostgreSQLMigrationErrorsWithoutSQLStateDiscardServerDetails(t *testing
 func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
 	operation := "apply PostgreSQL migrations"
 	sensitiveError := errors.New(
-		"postgres://secret-user:secret-password@postgres.internal/github_scaler: SELECT * FROM secret_table",
+		"postgres://secret-user:secret-password@postgres.internal/runnerfoundry: SELECT * FROM secret_table",
 	)
 	err := safePostgreSQLError(operation, sensitiveError)
 	if err.Error() != operation {
@@ -114,7 +114,7 @@ func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
 		"secret-user",
 		"secret-password",
 		"postgres.internal",
-		"github_scaler",
+		"runnerfoundry",
 		"SELECT * FROM secret_table",
 	} {
 		if strings.Contains(err.Error(), forbidden) {
@@ -127,7 +127,7 @@ func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
 }
 
 func TestNewMigratorRejectsInvalidMigrationFiles(t *testing.T) {
-	store := NewStore(postgresconfig.Settings{Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Role: "runnerfoundry"})
 	store.migrationFiles = failingSubFS{}
 	if _, err := store.migrationCatalog(); err == nil {
 		t.Fatal("expected migration filesystem error")

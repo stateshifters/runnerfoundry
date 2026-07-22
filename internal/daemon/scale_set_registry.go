@@ -15,8 +15,8 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 const scaleSetEndpoint = "_apis/runtime/runnerscalesets"

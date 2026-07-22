@@ -1,7 +1,7 @@
 github:
   app:
     app_id: 0
-    private_key_file: /etc/github-scaler/github-app.pem
+    private_key_file: /etc/runnerfoundry/github-app.pem
   discovery_interval: 5m
 
 log:
@@ -9,7 +9,7 @@ log:
   level: info
 
 state:
-  path: /var/lib/github-scaler/state.db
+  path: /var/lib/runnerfoundry/state.db
 
 prune: false
 

@@ -24,7 +24,7 @@ func TestRunReportsStandaloneGitHubPreflightFailure(t *testing.T) {
 }
 
 func TestRunReportsInvalidClusteredDatabaseConfiguration(t *testing.T) {
-	configPath := writeRunConfig(t, "state:\n  postgres:\n    role: github_scaler\n    port: invalid\n")
+	configPath := writeRunConfig(t, "state:\n  postgres:\n    role: runnerfoundry\n    port: invalid\n")
 	if err := Run(context.Background(), Options{ConfigPath: configPath}); err == nil {
 		t.Fatal("expected invalid PostgreSQL configuration to fail clustered startup")
 	}

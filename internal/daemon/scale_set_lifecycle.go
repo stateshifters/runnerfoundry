@@ -8,7 +8,7 @@ import (
 	"os"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 var operatingSystemHostname = os.Hostname
@@ -117,7 +117,7 @@ func ensureRunnerScaleSet(
 func runnerHostname() string {
 	hostname, err := operatingSystemHostname()
 	if err != nil {
-		return "github-scaler"
+		return "runnerfoundry"
 	}
 	return hostname
 }

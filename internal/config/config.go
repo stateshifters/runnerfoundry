@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 	"gopkg.in/yaml.v3"
 )
 

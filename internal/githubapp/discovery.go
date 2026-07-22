@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 // InstallationID identifies a GitHub App installation.

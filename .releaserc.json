@@ -47,8 +47,8 @@
       {
         "assets": [
           {
-            "path": "dist/github-scaler_*_amd64.deb",
-            "label": "GitHub Scaler v${nextRelease.version} Debian package"
+            "path": "dist/runnerfoundry_*_amd64.deb",
+            "label": "RunnerFoundry v${nextRelease.version} Debian package"
           }
         ]
       }

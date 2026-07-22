@@ -35,7 +35,7 @@ func TestNoopNotifierSupportsReloading(t *testing.T) {
 }
 
 func TestSystemdNotifierSurfacesNotifySocketFailure(t *testing.T) {
-	t.Setenv("NOTIFY_SOCKET", "/path/that/does/not/exist/github-scaler.sock")
+	t.Setenv("NOTIFY_SOCKET", "/path/that/does/not/exist/runnerfoundry.sock")
 	if err := notifySystemd(context.Background(), "READY=1"); err == nil {
 		t.Fatal("expected notify socket error")
 	}
