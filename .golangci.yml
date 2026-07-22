@@ -72,6 +72,13 @@ linters:
   settings:
     depguard:
       rules:
+        unsafe-openpgp:
+          list-mode: lax
+          files:
+            - $all
+          deny:
+            - pkg: golang.org/x/crypto/openpgp
+              desc: golang.org/x/crypto/openpgp is unmaintained and unsafe by design
         cmd-boundary:
           list-mode: lax
           files:

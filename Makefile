@@ -7,7 +7,7 @@ NOTICES_FILE := $(METADATA_DIR)/THIRD_PARTY_NOTICES.txt
 SBOM_FILE := $(METADATA_DIR)/github-scaler-sbom.json
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-GOLANGCI_LINT_TOOLCHAIN := go1.26.4
+GOLANGCI_LINT_TOOLCHAIN = go$(shell go list -m -f '{{.GoVersion}}')
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
