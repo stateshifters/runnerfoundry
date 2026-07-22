@@ -2,6 +2,10 @@ name: Security Scan
 on:
   pull_request: {}
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   osv:
     name: OSV Scan
@@ -16,14 +20,21 @@ jobs:
 
       - name: Run OSV Scan
         run: |
-          osv-scanner --recursive --call-analysis=go -f gh-annotations .
+          osv-scanner --recursive --call-analysis=go --format sarif --output-file osv-results.sarif .
+
+      - name: Upload results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@adfda868f108ac4222129de456ea554034a27db7 # v4
+        if: always()
+        with:
+          sarif_file: 'osv-results.sarif'
+          category: osv
 
       - name: Upload results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: osv-results
-          path: 'osv-results.json'
+          path: 'osv-results.sarif'
 
   semgrep:
     name: Semgrep Scan
@@ -42,12 +53,19 @@ jobs:
             --scan-unknown-extensions \
             --verbose \
             --matching-explanations \
-            --json-output semgrep-results.json \
+            --sarif-output semgrep-results.sarif \
             .
+
+      - name: Upload results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@adfda868f108ac4222129de456ea554034a27db7 # v4
+        if: always()
+        with:
+          sarif_file: 'semgrep-results.sarif'
+          category: semgrep
 
       - name: Upload results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: semgrep-results
-          path: 'semgrep-results.json'
+          path: 'semgrep-results.sarif'
