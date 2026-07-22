@@ -201,7 +201,10 @@ func (leader *clusterLeader) startSessionPoller(ctx context.Context, session *re
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollUntilShutdown(ctx, leader.daemon.logger, session.key.repository, session.key.scaleSet, &poller, pollRetryDelay)
+		pollUntilShutdown(
+			ctx, leader.daemon.logger, session.key.repository, session.key.scaleSet, &poller,
+			pollRetryAfter(pollRetryDelay),
+		)
 	}()
 	return done
 }

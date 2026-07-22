@@ -33,32 +33,33 @@ const (
 )
 
 type clusteredDaemon struct {
-	nodeID               cluster.NodeID
-	config               config.Config
-	credentials          config.GitHubAppCredentials
-	discoverer           repositoryDiscoverer
-	logger               *slog.Logger
-	hostname             func() (string, error)
-	newLogger            func(string, string) *slog.Logger
-	openStore            clusterStateOpener
-	loadConfig           func(string) (config.Config, error)
-	newDiscoverer        func(config.GitHubAppCredentials) (repositoryDiscoverer, error)
-	newGitHubClient      func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error)
-	providerHealthy      func(context.Context, config.ScaleSetConfig) error
-	buildReconciler      func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error)
-	notifier             serviceNotifier
-	nodes                clusterNodeState
-	assignments          clusterAssignmentState
-	tryLeader            func(context.Context) (leadershipResult, error)
-	waitForLeader        func(context.Context) (leadershipResult, error)
-	leader               *clusterLeader
-	leadershipResults    chan leadershipResult
-	stopContender        context.CancelFunc
-	contenderDone        <-chan struct{}
-	leadershipMutex      sync.Mutex
-	workers              sync.WaitGroup
-	leadershipRetryDelay time.Duration
-	configurationMutex   sync.RWMutex
+	nodeID                    cluster.NodeID
+	config                    config.Config
+	credentials               config.GitHubAppCredentials
+	discoverer                repositoryDiscoverer
+	logger                    *slog.Logger
+	hostname                  func() (string, error)
+	newLogger                 func(string, string) *slog.Logger
+	openStore                 clusterStateOpener
+	loadConfig                func(string) (config.Config, error)
+	newDiscoverer             func(config.GitHubAppCredentials) (repositoryDiscoverer, error)
+	newGitHubClient           func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error)
+	providerHealthy           func(context.Context, config.ScaleSetConfig) error
+	buildReconciler           func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error)
+	notifier                  serviceNotifier
+	nodes                     clusterNodeState
+	assignments               clusterAssignmentState
+	tryLeader                 func(context.Context) (leadershipResult, error)
+	waitForLeader             func(context.Context) (leadershipResult, error)
+	leader                    *clusterLeader
+	leadershipResults         chan leadershipResult
+	stopContender             context.CancelFunc
+	contenderDone             <-chan struct{}
+	leadershipMutex           sync.Mutex
+	workers                   sync.WaitGroup
+	leadershipRetryDelay      time.Duration
+	waitBeforeLeadershipRetry func(context.Context, time.Duration) bool
+	configurationMutex        sync.RWMutex
 }
 
 type leadershipResult struct {
@@ -120,10 +121,11 @@ func newClusteredDaemon() *clusteredDaemon {
 		newGitHubClient: func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
 			return newGitHubClient(repositoryURL, installationID, credentials)
 		},
-		providerHealthy:      validateProductionScaleSetProvider,
-		buildReconciler:      buildReconciler,
-		notifier:             systemdNotifier{},
-		leadershipRetryDelay: clusterLeadershipRetryDelay,
+		providerHealthy:           validateProductionScaleSetProvider,
+		buildReconciler:           buildReconciler,
+		notifier:                  systemdNotifier{},
+		leadershipRetryDelay:      clusterLeadershipRetryDelay,
+		waitBeforeLeadershipRetry: waitForRetryDelay,
 	}
 }
 

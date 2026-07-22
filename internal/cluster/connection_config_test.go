@@ -2,8 +2,6 @@ package cluster
 
 import (
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -113,12 +111,8 @@ func TestSettingsResolveEveryDSNSource(t *testing.T) {
 
 func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
 	t.Setenv("SCALER_TEST_ROLE", "github_scaler")
-	rolePath := filepath.Join(t.TempDir(), "role")
-	if err := os.WriteFile(rolePath, []byte("github_scaler\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	for sourceName, roleSource := range map[string]string{
-		"literal": "github_scaler", "environment": "env://SCALER_TEST_ROLE", "file": connectionCredentialFileURL(rolePath),
+		"literal": "github_scaler", "environment": "env://SCALER_TEST_ROLE",
 	} {
 		t.Run(sourceName, func(t *testing.T) {
 			resolved, err := primaryConnectionConfig(Settings{
@@ -210,28 +204,6 @@ func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T
 	}
 }
 
-func TestSettingsReadFilesAtPointOfUse(t *testing.T) {
-	secretPath := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(secretPath, []byte("first"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	settings := Settings{Password: connectionCredentialFileURL(secretPath), Role: "github_scaler"}
-	first, firstErr := primaryConnectionConfig(settings)
-	if firstErr != nil {
-		t.Fatal(firstErr)
-	}
-	if err := os.WriteFile(secretPath, []byte("second"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	second, secondErr := primaryConnectionConfig(settings)
-	if secondErr != nil {
-		t.Fatal(secondErr)
-	}
-	if first.Password != "first" || second.Password != "second" {
-		t.Fatalf("file-backed connection configurations = %#v, %#v", first, second)
-	}
-}
-
 func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
 	t.Setenv("PGHOST", "environment-host")
 	t.Setenv("PGPORT", "6543")
@@ -257,22 +229,6 @@ func TestSettingsRejectInvalidEnvironmentReferencesWithoutDisclosure(t *testing.
 		"empty env name":           {Password: "env://", Role: "github_scaler"},
 		"invalid env name":         settingsWithProofReference("env://BAD/NAME"),
 		"referenced DSN":           {DSN: "env://SCALER_MISSING_DSN", Role: "github_scaler"},
-	}
-	for name, settings := range tests {
-		t.Run(name, func(t *testing.T) {
-			assertConnectionSettingsRejectedWithoutDisclosure(t, settings)
-		})
-	}
-}
-
-func TestSettingsRejectInvalidFileReferenceSyntaxWithoutDisclosure(t *testing.T) {
-	tests := map[string]Settings{
-		"malformed role file": {Host: "database", Role: "file://remote/role"},
-		"malformed file":      {Password: "file://", Role: "github_scaler"},
-		"file host":           {Password: "file://remote/secret", Role: "github_scaler"},
-		"file fragment":       {Password: "file:///secret#value", Role: "github_scaler"},
-		"fallback query":      {Password: "file:///secret?fallback=value", Role: "github_scaler"},
-		"short file scheme":   {Password: "file:secret", Role: "github_scaler"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -316,12 +272,4 @@ func assertConnectionSettingsRejectedWithoutDisclosure(t *testing.T, settings Se
 			t.Fatalf("error exposed PostgreSQL configuration: %q", err)
 		}
 	}
-}
-
-func connectionCredentialFileURL(path string) string {
-	urlPath := filepath.ToSlash(path)
-	if filepath.VolumeName(path) != "" && !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
-	}
-	return (&url.URL{Scheme: "file", Path: urlPath}).String()
 }

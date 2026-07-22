@@ -2,19 +2,41 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func resolveSetting(configuredValue string) (string, error) {
+type connectionSettingResolver struct {
+	readCredentialFile func(string) ([]byte, error)
+}
+
+var errInvalidCredentialFilePath = errors.New("invalid credential file path")
+
+func operatingSystemConnectionSettingResolver() connectionSettingResolver {
+	return connectionSettingResolver{readCredentialFile: readOperatingSystemCredentialFile}
+}
+
+func readOperatingSystemCredentialFile(path string) ([]byte, error) {
+	localizedPath := filepath.FromSlash(path)
+	if !filepath.IsAbs(localizedPath) {
+		return nil, errInvalidCredentialFilePath
+	}
+	contents, err := fs.ReadFile(os.DirFS(filepath.Dir(localizedPath)), filepath.Base(localizedPath))
+	if err != nil {
+		return nil, fmt.Errorf("read credential file: %w", err)
+	}
+	return contents, nil
+}
+
+func (resolver connectionSettingResolver) resolve(configuredValue string) (string, error) {
 	switch {
 	case strings.HasPrefix(configuredValue, "env:"):
 		return resolveEnvironmentSetting(configuredValue)
 	case strings.HasPrefix(configuredValue, "file:"):
-		return resolveFileSetting(configuredValue)
+		return resolver.resolveFile(configuredValue)
 	default:
 		return configuredValue, nil
 	}
@@ -35,19 +57,18 @@ func resolveEnvironmentSetting(reference string) (string, error) {
 	return value, nil
 }
 
-func resolveFileSetting(reference string) (string, error) {
+func (resolver connectionSettingResolver) resolveFile(reference string) (string, error) {
 	if !strings.HasPrefix(reference, "file://") {
 		return "", errors.New("malformed PostgreSQL file reference")
 	}
-	parsed, err := url.Parse(reference)
-	if err != nil || malformedFileURL(parsed) {
+	path := strings.TrimPrefix(reference, "file://")
+	if path == "" || strings.ContainsAny(path, "?#") {
 		return "", errors.New("malformed PostgreSQL file reference")
 	}
-	path := nativeFilePath(parsed.Path)
-	if path == "" || (!filepath.IsAbs(path) && filepath.VolumeName(path) == "") {
+	contents, readErr := resolver.readCredentialFile(path)
+	if errors.Is(readErr, errInvalidCredentialFilePath) {
 		return "", errors.New("malformed PostgreSQL file reference")
 	}
-	contents, readErr := fs.ReadFile(os.DirFS(filepath.Dir(path)), filepath.Base(path))
 	if readErr != nil {
 		return "", errors.New("read PostgreSQL file reference")
 	}
@@ -56,17 +77,4 @@ func resolveFileSetting(reference string) (string, error) {
 		return "", errors.New("PostgreSQL file reference is empty")
 	}
 	return value, nil
-}
-
-func malformedFileURL(parsed *url.URL) bool {
-	return parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || parsed.RawQuery != "" ||
-		parsed.Fragment != "" || parsed.Opaque != ""
-}
-
-func nativeFilePath(urlPath string) string {
-	path := filepath.FromSlash(urlPath)
-	if len(path) >= 3 && os.IsPathSeparator(path[0]) && path[2] == ':' {
-		return path[1:]
-	}
-	return path
 }

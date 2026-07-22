@@ -64,7 +64,7 @@ state:
 
 The daemon uses the operating-system hostname as the host's cluster identity. It is not configurable. `state.postgres.role` is required. Static or rotating login users must be members of this stable role; every database session assumes it before running migrations, state calls, or leadership coordination. Database objects and migration metadata remain owned by the role instead of a transient login identity.
 
-PostgreSQL can be configured with `host`, `port`, `name`, `user`, and `password`. Each value, including `role`, may be a literal, an `env://VARIABLE` reference, or a `file:///path` reference. `file://` accepts native Unix and Windows absolute paths. For example, Vault Agent can manage the username and password as separate files, as shown above.
+PostgreSQL can be configured with `host`, `port`, `name`, `user`, and `password`. Each value, including `role`, may be a literal, an `env://VARIABLE` reference, or a `file:///path` reference. `file://` must be followed by an absolute path valid for the host operating system. For example, Vault Agent can manage the username and password as separate files, as shown above.
 
 Alternatively, set `dsn` to a conventional PostgreSQL connection string or an `env://` or `file://` reference containing one. A DSN cannot be combined with structured fields. Omitted structured fields inherit pgx/PostgreSQL defaults, including `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, and related environment variables. `state.postgres` may contain only the required role when all connection values come from standard PostgreSQL environment settings. The removed `dsn_env` and `dsn_file` keys are rejected.
 

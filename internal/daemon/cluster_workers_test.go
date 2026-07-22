@@ -222,7 +222,9 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		},
 		providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
 		buildReconciler: buildReconciler,
-		notifier:        noopNotifier{}, leadershipRetryDelay: time.Nanosecond,
+		notifier:        noopNotifier{}, waitBeforeLeadershipRetry: func(ctx context.Context, _ time.Duration) bool {
+			return ctx.Err() == nil
+		},
 	}
 }
 

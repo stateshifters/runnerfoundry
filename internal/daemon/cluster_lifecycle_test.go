@@ -199,6 +199,7 @@ func TestRunClusteredDaemonReconcilesImmediatelyWhenElected(t *testing.T) {
 
 func TestLeadershipContenderRetriesThenAcquires(t *testing.T) {
 	attempts := 0
+	waits := 0
 	state := &fakeClusterState{waitForLeader: func(context.Context) (cluster.Lease, error) {
 		attempts++
 		if attempts == 1 {
@@ -207,10 +208,16 @@ func TestLeadershipContenderRetriesThenAcquires(t *testing.T) {
 		return &cluster.LeaderLease{}, nil
 	}}
 	results := make(chan leadershipResult, 1)
-	daemon := clusteredDaemon{waitForLeader: fakeWaitForLeader(state), logger: slog.Default()}
+	daemon := clusteredDaemon{
+		waitForLeader: fakeWaitForLeader(state), logger: slog.Default(),
+		waitBeforeLeadershipRetry: func(context.Context, time.Duration) bool {
+			waits++
+			return true
+		},
+	}
 	daemon.contendForLeadership(context.Background(), results, make(chan struct{}))
-	if result := <-results; result.lease == nil || attempts != 2 {
-		t.Fatalf("result=%#v attempts=%d", result, attempts)
+	if result := <-results; result.lease == nil || attempts != 2 || waits != 1 {
+		t.Fatalf("result=%#v attempts=%d waits=%d", result, attempts, waits)
 	}
 }
 
@@ -280,19 +287,65 @@ func TestStartingLeadershipContenderTwiceOpensOneWaiter(t *testing.T) {
 func TestLeadershipRetryStopsWhenCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if waitForLeadershipRetry(ctx, time.Nanosecond) {
+	daemon := clusteredDaemon{waitBeforeLeadershipRetry: func(context.Context, time.Duration) bool {
+		t.Fatal("canceled retry invoked its wait boundary")
+		return true
+	}}
+	if daemon.waitForLeadershipRetry(ctx) {
 		t.Fatal("canceled retry waited")
+	}
+}
+
+func TestLeadershipRetryUsesDefaultDelay(t *testing.T) {
+	var observedDelay time.Duration
+	daemon := clusteredDaemon{waitBeforeLeadershipRetry: func(_ context.Context, delay time.Duration) bool {
+		observedDelay = delay
+		return true
+	}}
+	if !daemon.waitForLeadershipRetry(context.Background()) {
+		t.Fatal("elapsed retry did not continue leadership contention")
+	}
+	if observedDelay != clusterLeadershipRetryDelay {
+		t.Fatalf("leadership retry delay = %s", observedDelay)
+	}
+}
+
+func TestLeadershipRetryUsesConfiguredDelay(t *testing.T) {
+	configuredDelay := 17 * time.Second
+	var observedDelay time.Duration
+	daemon := clusteredDaemon{
+		leadershipRetryDelay: configuredDelay,
+		waitBeforeLeadershipRetry: func(_ context.Context, delay time.Duration) bool {
+			observedDelay = delay
+			return true
+		},
+	}
+	if !daemon.waitForLeadershipRetry(context.Background()) {
+		t.Fatal("elapsed retry did not continue leadership contention")
+	}
+	if observedDelay != configuredDelay {
+		t.Fatalf("leadership retry delay = %s", observedDelay)
 	}
 }
 
 func TestLeadershipContenderStopsWhenCanceledDuringRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
 	state := &fakeClusterState{waitForLeader: func(context.Context) (cluster.Lease, error) {
+		attempts++
 		return nil, errors.New("temporary failure")
 	}}
-	logger := slog.New(slog.NewTextHandler(cancelingWriter{cancel: cancel}, nil))
-	daemon := clusteredDaemon{waitForLeader: fakeWaitForLeader(state), logger: logger}
+	daemon := clusteredDaemon{
+		waitForLeader: fakeWaitForLeader(state), logger: slog.Default(),
+		waitBeforeLeadershipRetry: func(retryCtx context.Context, _ time.Duration) bool {
+			cancel()
+			return retryCtx.Err() == nil
+		},
+	}
 	daemon.contendForLeadership(ctx, make(chan leadershipResult, 1), make(chan struct{}))
+	if attempts != 1 {
+		t.Fatalf("leadership attempts = %d", attempts)
+	}
 }
 
 func TestLeadershipContenderFailureLogsNodeIdentity(t *testing.T) {

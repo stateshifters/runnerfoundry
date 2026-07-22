@@ -11,13 +11,26 @@ import (
 const pollRetryDelay = 5 * time.Second
 const sustainedPollFailureThreshold = 3
 
+type pollRetryPolicy struct {
+	delay time.Duration
+	wait  func(context.Context, time.Duration) bool
+}
+
+func pollRetryAfter(delay time.Duration) pollRetryPolicy {
+	return pollRetryPolicy{delay: delay, wait: waitForRetryDelay}
+}
+
+func (retry pollRetryPolicy) waitBeforeNext(ctx context.Context) bool {
+	return retry.wait(ctx, retry.delay)
+}
+
 func pollUntilShutdown(
 	ctx context.Context,
 	logger *slog.Logger,
 	repositoryURL string,
 	scaleSetName string,
 	poller *scalesetpoller.Poller,
-	retryDelay time.Duration,
+	retry pollRetryPolicy,
 ) {
 	consecutiveFailures := 0
 	for ctx.Err() == nil {
@@ -29,7 +42,7 @@ func pollUntilShutdown(
 				return
 			}
 			consecutiveFailures = logPollFailure(logger, repositoryURL, scaleSetName, err, consecutiveFailures)
-			if !waitForPollRetry(ctx, retryDelay) {
+			if !retry.waitBeforeNext(ctx) {
 				return
 			}
 			continue
@@ -81,15 +94,4 @@ func logPollFailure(logger *slog.Logger, repositoryURL string, scaleSetName stri
 		)
 	}
 	return consecutiveFailures
-}
-
-func waitForPollRetry(ctx context.Context, retryDelay time.Duration) bool {
-	timer := time.NewTimer(retryDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }

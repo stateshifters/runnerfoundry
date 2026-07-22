@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"time"
 
 	"github.com/meza/github-scaler/internal/cluster"
 )
@@ -107,7 +106,7 @@ func (daemon *clusteredDaemon) contendForLeadership(
 		}
 		daemon.logger.Error("leader contender failed",
 			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
-		if !waitForLeadershipRetry(ctx, daemon.leadershipRetryDelay) {
+		if !daemon.waitForLeadershipRetry(ctx) {
 			return
 		}
 	}
@@ -128,21 +127,15 @@ func (daemon *clusteredDaemon) deliverLeadership(
 	}
 }
 
-func waitForLeadershipRetry(ctx context.Context, delay time.Duration) bool {
+func (daemon *clusteredDaemon) waitForLeadershipRetry(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+	delay := daemon.leadershipRetryDelay
 	if delay <= 0 {
 		delay = clusterLeadershipRetryDelay
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	return daemon.waitBeforeLeadershipRetry(ctx, delay)
 }
 
 func (daemon *clusteredDaemon) stopLeadershipContender(ctx context.Context) {

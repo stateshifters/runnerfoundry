@@ -122,7 +122,10 @@ func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLife
 	)
 	go func() {
 		defer close(pollerDone)
-		pollUntilShutdown(ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, &poller, lifecycleConfig.RetryDelay)
+		pollUntilShutdown(
+			ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, &poller,
+			pollRetryAfter(lifecycleConfig.RetryDelay),
+		)
 	}()
 	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
 		slog.String("repository", lifecycleConfig.RepositoryURL),

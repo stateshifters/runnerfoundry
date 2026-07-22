@@ -10,14 +10,21 @@ import (
 )
 
 func primaryConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
+	return primaryConnectionConfigWithResolver(settings, operatingSystemConnectionSettingResolver())
+}
+
+func primaryConnectionConfigWithResolver(
+	settings postgresconfig.Settings,
+	resolver connectionSettingResolver,
+) (*pgx.ConnConfig, error) {
 	if settings.Role == "" {
 		return nil, errors.New("PostgreSQL role is required")
 	}
-	resolvedRole, err := resolveSetting(settings.Role)
+	resolvedRole, err := resolver.resolve(settings.Role)
 	if err != nil {
 		return nil, err
 	}
-	config, err := connectionConfigWithoutRole(settings)
+	config, err := connectionConfigWithoutRole(settings, resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -26,8 +33,15 @@ func primaryConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig,
 }
 
 func directConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
+	return directConnectionConfigWithResolver(settings, operatingSystemConnectionSettingResolver())
+}
+
+func directConnectionConfigWithResolver(
+	settings postgresconfig.Settings,
+	resolver connectionSettingResolver,
+) (*pgx.ConnConfig, error) {
 	if settings.Direct == nil {
-		return primaryConnectionConfig(settings)
+		return primaryConnectionConfigWithResolver(settings, resolver)
 	}
 	direct := postgresconfig.Settings{
 		DSN: settings.Direct.DSN, Host: settings.Direct.Host, Port: settings.Direct.Port,
@@ -39,46 +53,52 @@ func directConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, 
 			return nil, errors.New("direct PostgreSQL DSN is required when overriding a primary DSN")
 		}
 		if direct.DSN == "" {
-			return primaryConnectionConfig(settings)
+			return primaryConnectionConfigWithResolver(settings, resolver)
 		}
-		return primaryConnectionConfig(direct)
+		return primaryConnectionConfigWithResolver(direct, resolver)
 	}
 	if direct.DSN != "" {
-		return primaryConnectionConfig(direct)
+		return primaryConnectionConfigWithResolver(direct, resolver)
 	}
 	direct.Host = inheritConnectionSetting(direct.Host, settings.Host)
 	direct.Port = inheritConnectionSetting(direct.Port, settings.Port)
 	direct.Name = inheritConnectionSetting(direct.Name, settings.Name)
 	direct.User = inheritConnectionSetting(direct.User, settings.User)
 	direct.Password = inheritConnectionSetting(direct.Password, settings.Password)
-	return primaryConnectionConfig(direct)
+	return primaryConnectionConfigWithResolver(direct, resolver)
 }
 
-func connectionConfigWithoutRole(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
+func connectionConfigWithoutRole(
+	settings postgresconfig.Settings,
+	resolver connectionSettingResolver,
+) (*pgx.ConnConfig, error) {
 	if settings.DSN != "" && hasStructuredConnectionValues(settings) {
 		return nil, errors.New("PostgreSQL DSN cannot be combined with structured settings")
 	}
 	if settings.DSN != "" {
-		return dsnConnectionConfig(settings.DSN)
+		return dsnConnectionConfig(settings.DSN, resolver)
 	}
-	return structuredConnectionConfig(settings)
+	return structuredConnectionConfig(settings, resolver)
 }
 
-func dsnConnectionConfig(configuredDSN string) (*pgx.ConnConfig, error) {
-	resolvedDSN, err := resolveSetting(configuredDSN)
+func dsnConnectionConfig(configuredDSN string, resolver connectionSettingResolver) (*pgx.ConnConfig, error) {
+	resolvedDSN, err := resolver.resolve(configuredDSN)
 	if err != nil {
 		return nil, err
 	}
 	return parseConnectionConfig(resolvedDSN)
 }
 
-func structuredConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
+func structuredConnectionConfig(
+	settings postgresconfig.Settings,
+	resolver connectionSettingResolver,
+) (*pgx.ConnConfig, error) {
 	values := url.Values{}
 	for key, configuredValue := range map[string]string{
 		"host": settings.Host, "port": settings.Port, "dbname": settings.Name,
 		"user": settings.User, "password": settings.Password,
 	} {
-		resolvedValue, err := resolveStructuredConnectionSetting(key, configuredValue)
+		resolvedValue, err := resolveStructuredConnectionSetting(key, configuredValue, resolver)
 		if err != nil {
 			return nil, err
 		}
@@ -104,11 +124,15 @@ func inheritConnectionSetting(value string, inherited string) string {
 	return inherited
 }
 
-func resolveStructuredConnectionSetting(key string, configuredValue string) (string, error) {
+func resolveStructuredConnectionSetting(
+	key string,
+	configuredValue string,
+	resolver connectionSettingResolver,
+) (string, error) {
 	if configuredValue == "" {
 		return "", nil
 	}
-	resolvedValue, err := resolveSetting(configuredValue)
+	resolvedValue, err := resolver.resolve(configuredValue)
 	if err != nil {
 		return "", err
 	}

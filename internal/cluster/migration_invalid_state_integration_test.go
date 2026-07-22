@@ -14,11 +14,7 @@ import (
 )
 
 func credentialFileURL(path string) string {
-	urlPath := filepath.ToSlash(path)
-	if filepath.VolumeName(path) != "" && !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
-	}
-	return (&url.URL{Scheme: "file", Path: urlPath}).String()
+	return "file://" + filepath.ToSlash(path)
 }
 
 func TestPostgreSQLMigrationOperationsReportMigratorInitializationFailures(t *testing.T) {
