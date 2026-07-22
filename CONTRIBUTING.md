@@ -5,6 +5,9 @@ discussions, or any other method with the owners of this repository before makin
 
 Please note we have a code of conduct, please follow it in all your interactions with the project.
 
+The [architecture overview](docs/architecture.md) describes the application's current system boundaries, runtime modes, and
+interactions. Read it before changing behavior that crosses those boundaries.
+
 ## Quality bar (what good looks like)
 
 This project optimizes for long-term maintainability and predictable behavior. Prefer small, boring, readable changes over clever
