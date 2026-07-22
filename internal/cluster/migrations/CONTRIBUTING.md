@@ -1,6 +1,6 @@
 # PostgreSQL migrations
 
-This directory is the authoritative history of the clustered PostgreSQL schema. Read the repository [contribution contract](../../../CONTRIBUTING.md) and [ADR 4](../../../doc/arch/0004-coordinate-multi-host-scaling-in-postgresql.md) before changing it.
+This directory is the authoritative history of the clustered PostgreSQL schema. Read the repository [contribution contract](../../../CONTRIBUTING.md) and [ADR 4](../../../docs/arch/0004-coordinate-multi-host-scaling-in-postgresql.md) before changing it.
 
 ## Create a migration
 
