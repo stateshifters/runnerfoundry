@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {

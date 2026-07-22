@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/cluster"
 )
 
 type clusterMessageHandler struct {

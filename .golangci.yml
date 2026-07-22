@@ -82,11 +82,11 @@ linters:
         cmd-boundary:
           list-mode: lax
           files:
-            - "**/cmd/github-scaler/*.go"
+            - "**/cmd/runnerfoundry/*.go"
           deny:
             - pkg: github.com/actions/scaleset
               desc: cmd packages should adapt operator input and delegate GitHub integration to internal daemon code
-            - pkg: github.com/meza/github-scaler/internal/provider/
+            - pkg: github.com/meza/RunnerFoundry/internal/provider/
               desc: cmd packages should not construct providers directly
         config-driver-boundary:
           list-mode: lax

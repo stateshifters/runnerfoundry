@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 func controlledPollRetry(wait func(context.Context) bool) pollRetryPolicy {

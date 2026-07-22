@@ -23,7 +23,7 @@ type migrationRequest struct {
 }
 
 func parseConfigPath(args []string, output io.Writer) (string, error) {
-	flags := flag.NewFlagSet("github-scaler", flag.ContinueOnError)
+	flags := flag.NewFlagSet("runnerfoundry", flag.ContinueOnError)
 	flags.SetOutput(output)
 	configPath := flags.String("config", "", "path to scaler YAML config")
 	if err := flags.Parse(args); err != nil {
@@ -62,7 +62,7 @@ func parseMigrationFlags(
 	args []string,
 	output io.Writer,
 ) (configPathValue string, targetValue string, resultErr error) {
-	flags := flag.NewFlagSet("github-scaler migrate "+string(action), flag.ContinueOnError)
+	flags := flag.NewFlagSet("runnerfoundry migrate "+string(action), flag.ContinueOnError)
 	flags.SetOutput(output)
 	configPath := flags.String("config", "", "path to scaler YAML config")
 	targetText := flags.String("to", "", "migration version to roll back to")

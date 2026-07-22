@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/meza/github-scaler/internal/config"
-	dockerprovider "github.com/meza/github-scaler/internal/provider/docker"
-	libvirtprovider "github.com/meza/github-scaler/internal/provider/libvirt"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/config"
+	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	libvirtprovider "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func buildReconciler(

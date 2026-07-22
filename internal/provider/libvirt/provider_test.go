@@ -37,10 +37,10 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	if commandRunner.commands[0].Stdin == "" {
 		t.Fatal("expected rendered domain XML on stdin")
 	}
-	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "github-scaler:scale-set", "vm-set", "github-scaler.jit=secret"}) {
+	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:scale-set", "vm-set", "runnerfoundry.jit=secret"}) {
 		t.Fatalf("expected rendered scaler metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
 	}
-	if containsAll(commandRunner.commands[0].Stdin, []string{"github-scaler.jit-env"}) {
+	if containsAll(commandRunner.commands[0].Stdin, []string{"runnerfoundry.jit-env"}) {
 		t.Fatalf("jit config must not be stored in metadata: %s", commandRunner.commands[0].Stdin)
 	}
 }
@@ -76,11 +76,11 @@ func listOwnedDomainFixture(t *testing.T) ([]RunnerInstance, []Command) {
 	runner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\nvm-set-2\nother\n",
-			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-1</github-scaler:name></github-scaler:runner></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>vm-set-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 			"running\n",
-			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-2</github-scaler:name></github-scaler:runner></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>vm-set-2</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 			"shut off\n",
-			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>other</github-scaler:scale-set><github-scaler:name>other</github-scaler:name></github-scaler:runner></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>other</runnerfoundry:scale-set><runnerfoundry:name>other</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 		},
 	}
 	provider := Provider{
@@ -98,7 +98,7 @@ func TestListClassifiesUnknownDomainState(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\n",
-			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set><github-scaler:name>vm-set-1</github-scaler:name></github-scaler:runner></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>vm-set-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 			"paused\n",
 		},
 	}
@@ -117,7 +117,7 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		outputs: []string{
 			"vm-set-1\n",
-			`<domain><metadata><github-scaler:runner xmlns:github-scaler="urn:github-scaler"><github-scaler:scale-set>vm-set</github-scaler:scale-set></github-scaler:runner></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set></runnerfoundry:runner></metadata></domain>`,
 			"running\n",
 		},
 	}
@@ -214,7 +214,7 @@ func TestListReportsDomainInspectionFailure(t *testing.T) {
 
 func TestListReportsDomainStateFailure(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
-		outputs:    []string{"runner\n", `<domain><metadata><github-scaler.scale-set>set</github-scaler.scale-set></metadata></domain>`},
+		outputs:    []string{"runner\n", `<domain><metadata><runnerfoundry.scale-set>set</runnerfoundry.scale-set></metadata></domain>`},
 		failOnCall: 3,
 	}
 	provider := Provider{CommandRunner: commandRunner}

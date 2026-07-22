@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 func TestLocalScaleSetNameQualifiesScaleSetByRepository(t *testing.T) {

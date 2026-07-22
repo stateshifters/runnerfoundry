@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/daemon"
+	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
 func TestRunMainWritesExecutionErrorsToStderr(t *testing.T) {
@@ -70,7 +70,7 @@ func TestMainExitsWithCommandResult(t *testing.T) {
 		os.Args = originalArgs
 		exitProcess = originalExit
 	})
-	os.Args = []string{"github-scaler", "--unsupported"}
+	os.Args = []string{"runnerfoundry", "--unsupported"}
 	exitCode := -1
 	exitProcess = func(code int) { exitCode = code }
 	main()
@@ -86,7 +86,7 @@ func TestMainReportsMissingMigrationConfig(t *testing.T) {
 		os.Args = originalArgs
 		exitProcess = originalExit
 	})
-	os.Args = []string{"github-scaler", "migrate", "status", "--config", "missing-config.yaml"}
+	os.Args = []string{"runnerfoundry", "migrate", "status", "--config", "missing-config.yaml"}
 	exitCode := -1
 	exitProcess = func(code int) { exitCode = code }
 	main()
@@ -103,10 +103,10 @@ func TestMainReportsInvalidPostgreSQLSettings(t *testing.T) {
 		exitProcess = originalExit
 	})
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("state:\n  postgres:\n    role: github_scaler\n    port: invalid\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("state:\n  postgres:\n    role: runnerfoundry\n    port: invalid\n"), 0o600); err != nil {
 		t.Fatalf("write migration config: %v", err)
 	}
-	os.Args = []string{"github-scaler", "migrate", "status", "--config", configPath}
+	os.Args = []string{"runnerfoundry", "migrate", "status", "--config", configPath}
 	exitCode := -1
 	exitProcess = func(code int) { exitCode = code }
 	main()

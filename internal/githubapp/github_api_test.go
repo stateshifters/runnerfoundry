@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/google/go-github/v80/github"
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 func TestGitHubAPIDiscoversInstallationsAndRepositoriesThroughSDK(t *testing.T) {

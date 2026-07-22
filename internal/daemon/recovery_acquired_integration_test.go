@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestDaemonRestartProvisionsPersistedAcquiredDemandWithoutReacquiring(t *testing.T) {

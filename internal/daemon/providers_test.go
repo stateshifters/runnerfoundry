@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/config"
-	dockerprovider "github.com/meza/github-scaler/internal/provider/docker"
-	libvirtprovider "github.com/meza/github-scaler/internal/provider/libvirt"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/config"
+	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	libvirtprovider "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestBuildReconcilerRejectsMissingProvider(t *testing.T) {
@@ -116,7 +116,7 @@ func TestProductionProviderValidationRejectsScaleSetWithoutProvider(t *testing.T
 
 func TestDockerProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	commandRunner := &dockerRecordingRunner{outputs: []string{
-		`{"ID":"1","State":"running","Labels":"github-scaler.scale-set=linux,github-scaler.runner=linux-1"}`,
+		`{"ID":"1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=linux-1"}`,
 		"",
 		"",
 	}}
@@ -142,7 +142,7 @@ func TestDockerProviderAdapterConvertsProviderBehavior(t *testing.T) {
 
 func TestDockerReconcilerLeavesExitedAutoRemovingRunnerToDocker(t *testing.T) {
 	commandRunner := &dockerRecordingRunner{outputs: []string{
-		`{"ID":"1","State":"exited","Labels":"github-scaler.scale-set=linux,github-scaler.runner=linux-1"}`,
+		`{"ID":"1","State":"exited","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=linux-1"}`,
 	}}
 	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 		Name: "linux",
@@ -202,7 +202,7 @@ func TestScalerDockerRunnerStatePreservesKnownStates(t *testing.T) {
 func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	commandRunner := &libvirtRunnerStub{outputs: []string{
 		"linux-vm-1\n",
-		`<domain><metadata><github-scaler.scale-set>linux-vm</github-scaler.scale-set><github-scaler.runner>linux-vm-1</github-scaler.runner></metadata></domain>`,
+		`<domain><metadata><runnerfoundry.scale-set>linux-vm</runnerfoundry.scale-set><runnerfoundry.runner>linux-vm-1</runnerfoundry.runner></metadata></domain>`,
 		"running",
 		"",
 		"",

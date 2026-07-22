@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestPostgreSQLReadsFileBackedCredentialsForEveryConnection(t *testing.T) {

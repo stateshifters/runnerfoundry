@@ -8,10 +8,10 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
-	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 type clusterLeader struct {

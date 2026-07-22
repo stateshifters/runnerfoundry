@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 func TestRunDaemonReconcilesPeriodicDiscovery(t *testing.T) {

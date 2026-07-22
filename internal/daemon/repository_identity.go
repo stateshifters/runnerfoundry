@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 func localScaleSetName(repositoryURL string, scaleSetName string) string {

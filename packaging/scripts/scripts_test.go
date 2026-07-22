@@ -14,7 +14,7 @@ func TestDebianStateSurvivesRemoveAndIsDeletedByPurge(t *testing.T) {
 	}
 	root := t.TempDir()
 	runScript(t, root, exec.Command("sh", "postinstall.sh", "configure"))
-	stateDirectory := filepath.Join(root, "var", "lib", "github-scaler")
+	stateDirectory := filepath.Join(root, "var", "lib", "runnerfoundry")
 	statePath := filepath.Join(stateDirectory, "state.db")
 	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
@@ -32,7 +32,7 @@ func TestDebianStateSurvivesRemoveAndIsDeletedByPurge(t *testing.T) {
 
 func runScript(t *testing.T, root string, cmd *exec.Cmd) {
 	t.Helper()
-	cmd.Env = append(os.Environ(), "GITHUB_SCALER_ROOT="+root)
+	cmd.Env = append(os.Environ(), "RUNNERFOUNDRY_ROOT="+root)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s failed: %v\n%s", cmd.String(), err, output)

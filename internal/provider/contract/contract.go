@@ -2,9 +2,9 @@ package contract
 
 const (
 	JITConfigEnvironment = "ACTIONS_RUNNER_INPUT_JITCONFIG"
-	JITOEMStringPrefix   = "github-scaler.jit="
-	OwnershipScaleSet    = "github-scaler.scale-set"
-	OwnershipRunner      = "github-scaler.runner"
+	JITOEMStringPrefix   = "runnerfoundry.jit="
+	OwnershipScaleSet    = "runnerfoundry.scale-set"
+	OwnershipRunner      = "runnerfoundry.runner"
 	RunnerStateRunning   = "running"
 	RunnerStateCompleted = "completed"
 	RunnerStateUnknown   = "unknown"

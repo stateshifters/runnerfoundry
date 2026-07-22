@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/daemon"
+	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
 func TestExecuteCommandRunsDaemonWithConfigAndReloadRequests(t *testing.T) {

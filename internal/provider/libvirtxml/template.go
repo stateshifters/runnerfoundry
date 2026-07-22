@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/meza/github-scaler/internal/provider/contract"
+	"github.com/meza/RunnerFoundry/internal/provider/contract"
 	upstream "libvirt.org/go/libvirtxml"
 )
 
 const (
-	MetadataNamespace  = "urn:github-scaler"
+	MetadataNamespace  = "urn:runnerfoundry"
 	JITOEMStringPrefix = contract.JITOEMStringPrefix
 )
 
@@ -93,7 +93,7 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 
 func scalerMetadata(request RenderRequest) string {
 	return fmt.Sprintf(
-		`<github-scaler:runner xmlns:github-scaler="%s"><github-scaler:scale-set>%s</github-scaler:scale-set><github-scaler:name>%s</github-scaler:name></github-scaler:runner>`,
+		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:scale-set>%s</runnerfoundry:scale-set><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
 		MetadataNamespace,
 		escapeXML(request.ScaleSetName),
 		escapeXML(request.RunnerName),

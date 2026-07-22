@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestPostgreSQLConnectionsUseStableRoleAcrossRotatingLogins(t *testing.T) {
@@ -62,14 +62,14 @@ func newPostgreSQLRoleFixture(t *testing.T) postgreSQLRoleFixture {
 func createPostgreSQLTestRoles(t *testing.T, admin *pgx.Conn) {
 	t.Helper()
 	for _, statement := range []string{
-		`CREATE ROLE github_scaler NOLOGIN`,
+		`CREATE ROLE runnerfoundry NOLOGIN`,
 		`CREATE ROLE wrong_scaler_role NOLOGIN`,
 		`CREATE ROLE scaler_one LOGIN PASSWORD 'password-one'`,
 		`CREATE ROLE scaler_two LOGIN PASSWORD 'password-two'`,
 		`CREATE ROLE scaler_outsider LOGIN PASSWORD 'outsider-password'`,
-		`GRANT github_scaler TO scaler_one, scaler_two`,
+		`GRANT runnerfoundry TO scaler_one, scaler_two`,
 		`GRANT wrong_scaler_role TO scaler_one, scaler_two`,
-		`GRANT USAGE, CREATE ON SCHEMA public TO github_scaler`,
+		`GRANT USAGE, CREATE ON SCHEMA public TO runnerfoundry`,
 	} {
 		if _, err := admin.Exec(context.Background(), statement); err != nil {
 			t.Fatal(err)
@@ -96,7 +96,7 @@ func postgreSQLRoleSettings(t *testing.T, dsn string) roleCredentialSettings {
 	rolePath := filepath.Join(credentialDirectory, "role")
 	writePostgreSQLCredential(t, userPath, "scaler_one")
 	writePostgreSQLCredential(t, passwordPath, "password-one")
-	writePostgreSQLCredential(t, rolePath, "github_scaler")
+	writePostgreSQLCredential(t, rolePath, "runnerfoundry")
 	settings := postgresconfig.Settings{
 		Host: "localhost", Port: parsedDSN.Port(), Name: strings.TrimPrefix(parsedDSN.Path, "/"),
 		User: credentialFileURL(userPath), Password: credentialFileURL(passwordPath), Role: credentialFileURL(rolePath),
@@ -127,7 +127,7 @@ func assertStableRoleOwnership(t *testing.T, admin *pgx.Conn) {
 		if err := admin.QueryRow(context.Background(), `SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = $1`, table).Scan(&owner); err != nil {
 			t.Fatal(err)
 		}
-		if owner != "github_scaler" {
+		if owner != "runnerfoundry" {
 			t.Fatalf("%s owner = %q", table, owner)
 		}
 	}
@@ -139,7 +139,7 @@ func assertMissingRoleMembershipIsRedacted(t *testing.T, store *Store, reference
 	if err == nil {
 		t.Fatal("expected login without stable-role membership to fail")
 	}
-	for _, secret := range append([]string{"scaler_outsider", "outsider-password", "github_scaler"}, referencePaths...) {
+	for _, secret := range append([]string{"scaler_outsider", "outsider-password", "runnerfoundry"}, referencePaths...) {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("membership error exposed PostgreSQL configuration: %q", err)
 		}

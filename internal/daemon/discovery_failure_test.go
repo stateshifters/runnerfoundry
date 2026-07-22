@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 func TestReconcileDiscoveryRetainsStateOnDiscoveryFailure(t *testing.T) {

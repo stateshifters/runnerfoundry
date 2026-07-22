@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	scalesetpoller "github.com/meza/github-scaler/internal/scaleset"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 const pollRetryDelay = 5 * time.Second

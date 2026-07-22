@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/meza/github-scaler/internal/daemon"
+	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
 var exitProcess = os.Exit

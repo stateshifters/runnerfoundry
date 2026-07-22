@@ -1,6 +1,6 @@
 package cluster
 
-import "github.com/meza/github-scaler/internal/githubapp"
+import "github.com/meza/RunnerFoundry/internal/githubapp"
 
 var (
 	_ AssignmentID             = Assignment{}.ID

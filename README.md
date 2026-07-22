@@ -1,6 +1,6 @@
-# Github Scaler
+# RunnerFoundry
 
-`github-scaler` is a Go daemon for autoscaling ephemeral Github Actions runner scale sets.
+`runnerfoundry` is a Go daemon for autoscaling ephemeral Github Actions runner scale sets.
 
 It is using GitHub's new [Scaleset library](https://github.com/actions/scaleset)
 
@@ -18,7 +18,7 @@ The daemon requires `--config <path>`.
 github:
   app:
     app_id: 123456
-    private_key_file: /etc/github-scaler/github-app.pem
+    private_key_file: /etc/runnerfoundry/github-app.pem
   discovery_interval: 5m
 
 log:
@@ -26,7 +26,7 @@ log:
   level: info
 
 state:
-  path: /var/lib/github-scaler/state.db
+  path: /var/lib/runnerfoundry/state.db
 
 prune: true
 
@@ -51,12 +51,12 @@ For clustered operation, replace `state.path` with `state.postgres` on every hos
 ```yaml
 state:
   postgres:
-    role: github_scaler
+    role: runnerfoundry
     host: postgresql.internal
     port: "5432"
-    name: github_scaler
-    user: file:///run/secrets/github-scaler-postgres-user
-    password: file:///run/secrets/github-scaler-postgres-password
+    name: runnerfoundry
+    user: file:///run/secrets/runnerfoundry-postgres-user
+    password: file:///run/secrets/runnerfoundry-postgres-password
     direct:
       host: postgresql-direct.internal
       port: "5432"
@@ -81,8 +81,8 @@ Daemon startup automatically migrates an empty or outdated database upward befor
 Inspect or apply migrations explicitly with:
 
 ```sh
-github-scaler migrate status --config /etc/github-scaler/config.yaml
-github-scaler migrate up --config /etc/github-scaler/config.yaml
+runnerfoundry migrate status --config /etc/runnerfoundry/config.yaml
+runnerfoundry migrate up --config /etc/runnerfoundry/config.yaml
 ```
 
 `migrate status` is read-only. On an empty database it reports version zero without creating migration metadata. Migration commands load only `state.postgres`, so unrelated daemon configuration does not prevent database inspection or recovery.
@@ -90,12 +90,12 @@ github-scaler migrate up --config /etc/github-scaler/config.yaml
 Downgrade with the currently deployed binary, because an older binary does not contain migrations introduced by a newer release. Stop every scaler node, wait at least 30 seconds for its heartbeat to expire, then run:
 
 ```sh
-github-scaler migrate down --to <version> --config /etc/github-scaler/config.yaml
+runnerfoundry migrate down --to <version> --config /etc/runnerfoundry/config.yaml
 ```
 
 Rollback refuses to run while a leader lease or live node heartbeat remains. Deploy the older binary only after the command succeeds.
 
-Create a Github App with repository administration access for self-hosted runners, install it on the accounts the daemon should serve, and grant it either selected-repository or all-repository access. `github-scaler` discovers every installation owned by the App and every repository exposed by each installation. Github installation settings are the repository opt-in boundary.
+Create a Github App with repository administration access for self-hosted runners, install it on the accounts the daemon should serve, and grant it either selected-repository or all-repository access. `runnerfoundry` discovers every installation owned by the App and every repository exposed by each installation. Github installation settings are the repository opt-in boundary.
 
 Set `github.app.app_id` to the numeric App ID. Store the App private key outside the YAML and set `github.app.private_key_file` to its path. Plaintext private keys and legacy PAT fields are rejected. The discovery interval defaults to `5m` and cannot be shorter than `1m`.
 
@@ -111,7 +111,7 @@ Exactly one of `state.path` and `state.postgres` is required. `state.path` shoul
 
 Github runner scale sets are routed by their scale-set name. Use the configured `scale_sets[].name` value in workflow `runs-on`; do not configure runner matching labels through Docker Compose environment variables such as `LABELS`.
 
-Set `prune: true` only when `github-scaler` owns every runner scale set in the discovered repositories and runner groups. When enabled, discovery deletes Github runner scale sets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
+Set `prune: true` only when `runnerfoundry` owns every runner scale set in the discovered repositories and runner groups. When enabled, discovery deletes Github runner scale sets that are not present in the current config. Leave it unset or `false` if another controller or human-managed runner scale set shares the same repositories.
 
 `log.format` accepts `text` or `json`. `log.level` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`. Lifecycle milestones are logged at `info`. Set the level to `debug` to include individual repository, scale-set, polling, reconciliation, cleanup, reload, assignment, acquisition, repair, start, completion, migration, rollback, and leadership actions. Failures remain visible at `warn` or `error` as appropriate. Logs may include non-secret node, scale-set, repository, request, assignment, operation, and PostgreSQL SQLSTATE values. PostgreSQL migration command errors may also include the server's non-secret message, detail, hint, table name, and constraint name. They never include PostgreSQL connection settings, role names, secret-reference paths, credentials, JIT secrets, generated connection strings, SQL bodies, or raw pgx connection errors.
 
@@ -120,52 +120,52 @@ Set `prune: true` only when `github-scaler` owns every runner scale set in the d
 Install the Debian package on Ubuntu or Debian hosts:
 
 ```sh
-sudo apt install ./github-scaler_1.0.0_amd64.deb
+sudo apt install ./runnerfoundry_1.0.0_amd64.deb
 ```
 
 The package installs:
 
-- `/usr/bin/github-scaler`
-- `/lib/systemd/system/github-scaler.service`
-- `/etc/github-scaler/config.yaml`
-- `/var/lib/github-scaler` for durable queue state
+- `/usr/bin/runnerfoundry`
+- `/lib/systemd/system/runnerfoundry.service`
+- `/etc/runnerfoundry/config.yaml`
+- `/var/lib/runnerfoundry` for durable queue state
 
-Package installation creates the `github-scaler` service user and its state directory, then reloads systemd units. It does not enable or start the daemon because the config and credentials must be set first. Package upgrades, reinstalls, and `apt remove` preserve `/var/lib/github-scaler/state.db`. `apt purge github-scaler` removes the package-managed database and its sidecars. A custom `state.path` remains operator-managed and is not deleted by purge.
+Package installation creates the `runnerfoundry` service user and its state directory, then reloads systemd units. It does not enable or start the daemon because the config and credentials must be set first. Package upgrades, reinstalls, and `apt remove` preserve `/var/lib/runnerfoundry/state.db`. `apt purge runnerfoundry` removes the package-managed database and its sidecars. A custom `state.path` remains operator-managed and is not deleted by purge.
 
 If the configured providers require host group access, add the service user to those groups before starting the daemon:
 
 ```sh
-sudo usermod -aG docker github-scaler
-sudo usermod -aG libvirt github-scaler
+sudo usermod -aG docker runnerfoundry
+sudo usermod -aG libvirt runnerfoundry
 ```
 
-Edit `/etc/github-scaler/config.yaml`, place the App private key at the configured path, then enable the service:
+Edit `/etc/runnerfoundry/config.yaml`, place the App private key at the configured path, then enable the service:
 
 ```sh
-sudo systemctl enable --now github-scaler
-sudo systemctl status github-scaler
+sudo systemctl enable --now runnerfoundry
+sudo systemctl status runnerfoundry
 ```
 
-The daemon reads `/etc/github-scaler/config.yaml` at startup. It does not watch or continuously reread the file.
+The daemon reads `/etc/runnerfoundry/config.yaml` at startup. It does not watch or continuously reread the file.
 
 Systemd readiness covers local preflight only. The daemon sends `READY=1` after configuration, App credentials, and local settings validate and, in clustered mode, after database migration and contribution publication succeed. It does not claim that Github reconciliation has succeeded. The daemon reports its operational phase separately through systemd `STATUS=` values: `standby`, `leader reconciling`, `leader operational`, or `leader degraded`. Github discovery, scale-set registration, and message-session creation run immediately after readiness. A Github outage or repository-specific registration failure leaves the process ready, reports the leader as degraded, logs the failure, and retries on the configured discovery interval.
 
 After editing the config or replacing the private-key file, reload the service:
 
 ```sh
-sudo systemctl reload github-scaler
+sudo systemctl reload runnerfoundry
 ```
 
 Reload validates the replacement configuration and credentials first. In standalone mode, the daemon then drains active runners, closes the old GitHub message sessions, unregisters the old runner scale sets, and reconciles the replacement configuration. In clustered mode, the host atomically replaces its published contributions; running work continues, and an active leader immediately reconciles the changed union without waiting for the next discovery interval or deleting scale sets that another host still declares. Existing runner containers or VMs keep running until their active jobs exit. Watch progress with:
 
 ```sh
-journalctl -u github-scaler -f
+journalctl -u runnerfoundry -f
 ```
 
 Inspect logs with:
 
 ```sh
-journalctl -u github-scaler -f
+journalctl -u runnerfoundry -f
 ```
 
 ### Manual Install
@@ -173,29 +173,29 @@ journalctl -u github-scaler -f
 For local builds, install the Linux binary somewhere on `PATH` for system services:
 
 ```sh
-sudo install -m 0755 github-scaler /usr/local/bin/github-scaler
+sudo install -m 0755 runnerfoundry /usr/local/bin/runnerfoundry
 ```
 
 Create a dedicated service user and give it access to the provider sockets it needs. For Docker, that usually means the `docker` group. For libvirt, use the group required by your host policy, commonly `libvirt`.
 
 ```sh
-sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin github-scaler
-sudo usermod -aG docker github-scaler
-sudo usermod -aG libvirt github-scaler
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin runnerfoundry
+sudo usermod -aG docker runnerfoundry
+sudo usermod -aG libvirt runnerfoundry
 ```
 
 Create the config directory and store the App private key outside the YAML:
 
 ```sh
-sudo install -d -m 0750 -o root -g github-scaler /etc/github-scaler
-sudo install -d -m 0750 -o github-scaler -g github-scaler /var/lib/github-scaler
-sudo install -m 0640 -o root -g github-scaler config.yaml /etc/github-scaler/config.yaml
-sudo install -m 0640 -o root -g github-scaler github-app.pem /etc/github-scaler/github-app.pem
+sudo install -d -m 0750 -o root -g runnerfoundry /etc/runnerfoundry
+sudo install -d -m 0750 -o runnerfoundry -g runnerfoundry /var/lib/runnerfoundry
+sudo install -m 0640 -o root -g runnerfoundry config.yaml /etc/runnerfoundry/config.yaml
+sudo install -m 0640 -o root -g runnerfoundry github-app.pem /etc/runnerfoundry/github-app.pem
 ```
 
-Use absolute paths inside `/etc/github-scaler/config.yaml`, especially for the SQLite state database, Docker Compose files, and libvirt XML templates. The daemon has no required working directory.
+Use absolute paths inside `/etc/runnerfoundry/config.yaml`, especially for the SQLite state database, Docker Compose files, and libvirt XML templates. The daemon has no required working directory.
 
-Create `/etc/systemd/system/github-scaler.service`:
+Create `/etc/systemd/system/runnerfoundry.service`:
 
 ```ini
 [Unit]
@@ -206,9 +206,9 @@ Wants=network-online.target
 [Service]
 Type=notify-reload
 NotifyAccess=main
-User=github-scaler
-Group=github-scaler
-ExecStart=/usr/local/bin/github-scaler --config /etc/github-scaler/config.yaml
+User=runnerfoundry
+Group=runnerfoundry
+ExecStart=/usr/local/bin/runnerfoundry --config /etc/runnerfoundry/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
@@ -224,24 +224,24 @@ Enable and start the daemon:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now github-scaler
-sudo systemctl status github-scaler
+sudo systemctl enable --now runnerfoundry
+sudo systemctl status runnerfoundry
 ```
 
 Inspect logs with:
 
 ```sh
-journalctl -u github-scaler -f
+journalctl -u runnerfoundry -f
 ```
 
 ## Docker Provider
 
 Docker runner configuration is Compose-owned. Put images, env files, volumes, labels, networks, command, user, workdir, and other Docker-native settings in the Compose service.
 
-For each runner, `github-scaler` runs:
+For each runner, `runnerfoundry` runs:
 
 ```text
-docker compose -f <compose_file> run --detach --rm --name <runner> --label github-scaler.scale-set=<name> --label github-scaler.runner=<runner> --env ACTIONS_RUNNER_INPUT_JITCONFIG=<jit_config> <service>
+docker compose -f <compose_file> run --detach --rm --name <runner> --label runnerfoundry.scale-set=<name> --label runnerfoundry.runner=<runner> --env ACTIONS_RUNNER_INPUT_JITCONFIG=<jit_config> <service>
 ```
 
 The scaler injects the JIT config as `ACTIONS_RUNNER_INPUT_JITCONFIG`, which is the environment variable consumed by the Github Actions runner. The runner process should exit after its assigned job; `--rm` lets Docker remove the container.
@@ -255,9 +255,9 @@ Libvirt runner configuration comes from a domain XML template. The template must
 The V1 implementation parses and renders XML with `libvirt.org/go/libvirtxml`, then applies it through `virsh` against `connection_uri`. The rendered domain gets:
 
 - a unique domain name matching the runner name
-- namespaced `github-scaler` ownership metadata for restart recovery
+- namespaced `runnerfoundry` ownership metadata for restart recovery
 - `<os><smbios mode="sysinfo"/></os>`
-- `<sysinfo type="smbios"><oemStrings><entry>github-scaler.jit=<encoded JIT></entry></oemStrings></sysinfo>`
+- `<sysinfo type="smbios"><oemStrings><entry>runnerfoundry.jit=<encoded JIT></entry></oemStrings></sysinfo>`
 
 The rendered runner XML stays in memory and is sent to `virsh create /dev/stdin`, so scaler-created VM runners are transient libvirt domains. The JIT config is visible to the guest through SMBIOS OEM strings and is not stored in libvirt metadata.
 

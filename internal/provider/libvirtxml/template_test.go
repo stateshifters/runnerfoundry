@@ -25,18 +25,18 @@ func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
 		`<smbios mode="sysinfo"></smbios>`,
 		`<sysinfo type="smbios">`,
 		`<oemStrings>`,
-		`<entry>github-scaler.jit=secret</entry>`,
-		`xmlns:github-scaler="urn:github-scaler"`,
-		"github-scaler:scale-set",
+		`<entry>runnerfoundry.jit=secret</entry>`,
+		`xmlns:runnerfoundry="urn:runnerfoundry"`,
+		"runnerfoundry:scale-set",
 		"linux-vm",
-		"github-scaler:name",
+		"runnerfoundry:name",
 		"linux-vm-1",
 	} {
 		if !strings.Contains(renderedXML, expected) {
 			t.Fatalf("expected rendered XML to contain %q:\n%s", expected, renderedXML)
 		}
 	}
-	if strings.Contains(renderedXML, "github-scaler.jit-env") || strings.Contains(renderedXML, "ACTIONS_RUNNER_INPUT_JITCONFIG") {
+	if strings.Contains(renderedXML, "runnerfoundry.jit-env") || strings.Contains(renderedXML, "ACTIONS_RUNNER_INPUT_JITCONFIG") {
 		t.Fatalf("jit config must not be stored in metadata: %s", renderedXML)
 	}
 }
@@ -56,7 +56,7 @@ func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
 	}
-	if !strings.Contains(renderedXML, "github-scaler:scale-set") {
+	if !strings.Contains(renderedXML, "runnerfoundry:scale-set") {
 		t.Fatalf("expected scaler metadata: %s", renderedXML)
 	}
 	if strings.Contains(renderedXML, "<old>value</old>") {
@@ -66,7 +66,7 @@ func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
 
 func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
 	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type><smbios mode="host"/></os><sysinfo type="smbios"><oemStrings><entry>existing=value</entry><entry>github-scaler.jit=old</entry></oemStrings></sysinfo></domain>`,
+		XML: `<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type><smbios mode="host"/></os><sysinfo type="smbios"><oemStrings><entry>existing=value</entry><entry>runnerfoundry.jit=old</entry></oemStrings></sysinfo></domain>`,
 	}
 	renderedXML, err := template.Render(RenderRequest{ScaleSetName: "set", RunnerName: "runner", JITConfig: `jit<&"`})
 	if err != nil {
@@ -75,13 +75,13 @@ func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
 	for _, expected := range []string{
 		`<smbios mode="sysinfo"></smbios>`,
 		`<entry>existing=value</entry>`,
-		`<entry>github-scaler.jit=jit&lt;&amp;&#34;</entry>`,
+		`<entry>runnerfoundry.jit=jit&lt;&amp;&#34;</entry>`,
 	} {
 		if !strings.Contains(renderedXML, expected) {
 			t.Fatalf("expected rendered XML to contain %q:\n%s", expected, renderedXML)
 		}
 	}
-	if strings.Contains(renderedXML, "github-scaler.jit=old") {
+	if strings.Contains(renderedXML, "runnerfoundry.jit=old") {
 		t.Fatalf("expected old scaler JIT OEM string replaced:\n%s", renderedXML)
 	}
 }
@@ -97,7 +97,7 @@ func TestDomainTemplateAddsOEMStringsToExistingSMBIOS(t *testing.T) {
 	for _, expected := range []string{
 		`<entry name="manufacturer">test</entry>`,
 		`<oemStrings>`,
-		`<entry>github-scaler.jit=secret</entry>`,
+		`<entry>runnerfoundry.jit=secret</entry>`,
 	} {
 		if !strings.Contains(renderedXML, expected) {
 			t.Fatalf("expected rendered XML to contain %q:\n%s", expected, renderedXML)
@@ -117,7 +117,7 @@ func TestDomainTemplatePreservesNonSMBIOSSysInfo(t *testing.T) {
 		`<sysinfo type="fwcfg">`,
 		`<entry name="opt/vendor/value">existing</entry>`,
 		`<sysinfo type="smbios">`,
-		`<entry>github-scaler.jit=secret</entry>`,
+		`<entry>runnerfoundry.jit=secret</entry>`,
 	} {
 		if !strings.Contains(renderedXML, expected) {
 			t.Fatalf("expected rendered XML to contain %q:\n%s", expected, renderedXML)

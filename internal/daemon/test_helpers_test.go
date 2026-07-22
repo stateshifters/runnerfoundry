@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 type postgresCredentialFixture struct {
@@ -17,7 +17,7 @@ type postgresCredentialFixture struct {
 }
 
 func newPostgresCredentialFixture() postgresCredentialFixture {
-	return postgresCredentialFixture{missingReference: "env://GITHUB_SCALER_MISSING_POSTGRES_PASSWORD"}
+	return postgresCredentialFixture{missingReference: "env://RUNNERFOUNDRY_MISSING_POSTGRES_PASSWORD"}
 }
 
 func testAppCredentials(t *testing.T) config.GitHubAppCredentials {

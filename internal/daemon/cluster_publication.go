@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/meza/github-scaler/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/cluster"
 )
 
 func (daemon *clusteredDaemon) publish(ctx context.Context, nodeHealth cluster.NodeHealth) error {

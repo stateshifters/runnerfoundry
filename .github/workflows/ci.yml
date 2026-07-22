@@ -24,7 +24,7 @@ jobs:
     env:
       GOCACHE: /cache/go-build
       GOMODCACHE: /cache/go-mod
-      GITHUB_SCALER_POSTGRES_CACHE: /cache/embedded-postgres
+      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/embedded-postgres
       npm_config_cache: /cache/npm
     steps:
       - name: Checkout code

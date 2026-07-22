@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/meza/github-scaler/internal/provider/contract"
-	"github.com/meza/github-scaler/internal/provider/libvirtxml"
+	"github.com/meza/RunnerFoundry/internal/provider/contract"
+	"github.com/meza/RunnerFoundry/internal/provider/libvirtxml"
 )
 
 type RunnerState string
@@ -250,12 +250,12 @@ type domainMetadata struct {
 }
 
 type scalerMetadata struct {
-	Runner scalerRunnerMetadata `xml:"urn:github-scaler runner"`
+	Runner scalerRunnerMetadata `xml:"urn:runnerfoundry runner"`
 }
 
 type scalerRunnerMetadata struct {
-	ScaleSet string `xml:"urn:github-scaler scale-set"`
-	Name     string `xml:"urn:github-scaler name"`
+	ScaleSet string `xml:"urn:runnerfoundry scale-set"`
+	Name     string `xml:"urn:runnerfoundry name"`
 }
 
 func libvirtState(rawState string) RunnerState {
