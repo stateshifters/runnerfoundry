@@ -4,3 +4,5 @@ dist/
 coverage
 coverage.out
 .tmp/
+examples/libvirt-runner/output/
+examples/libvirt-runner/packer-key*

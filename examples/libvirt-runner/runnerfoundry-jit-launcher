@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly template='/opt/actions-runner-template'
+readonly runtime='/home/runner/actions-runner'
+
+finish() {
+  status=$?
+  trap - EXIT
+  set +e
+  rm -rf -- "$runtime"
+  systemctl poweroff --no-block
+  exit "$status"
+}
+trap finish EXIT
+
+jit="$({
+  dmidecode --type 11 |
+    sed -n 's/^[[:space:]]*String [0-9][0-9]*: runnerfoundry\.jit=//p' |
+    head -n 1
+} || true)"
+
+if [[ -z "$jit" || ! -x "$template/run.sh" ]]; then
+  exit 1
+fi
+
+rm -rf -- "$runtime"
+install --directory --owner=runner --group=runner --mode=0755 "$runtime"
+cp -a "$template/." "$runtime/"
+chown -R runner:runner "$runtime"
+
+runuser --user runner -- "$runtime/run.sh" --jitconfig "$jit"
