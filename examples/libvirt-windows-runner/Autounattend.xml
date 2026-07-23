@@ -4,10 +4,10 @@
     <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <DriverPaths>
         <PathAndCredentials wcm:action="add" wcm:keyValue="1" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-          <Path>F:\viostor\2k25\amd64</Path>
+          <Path>E:\viostor\2k25\amd64</Path>
         </PathAndCredentials>
         <PathAndCredentials wcm:action="add" wcm:keyValue="2" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-          <Path>F:\NetKVM\2k25\amd64</Path>
+          <Path>E:\NetKVM\2k25\amd64</Path>
         </PathAndCredentials>
       </DriverPaths>
     </component>
