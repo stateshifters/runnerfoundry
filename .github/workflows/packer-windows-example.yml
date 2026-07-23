@@ -39,8 +39,7 @@ jobs:
             kmod \
             ovmf \
             qemu-system-x86 \
-            qemu-utils \
-            xorriso
+            qemu-utils
 
       - name: Prepare nested KVM
         run: |
@@ -70,14 +69,6 @@ jobs:
           echo "$WINDOWS_ISO_SHA256  windows-server-2025.iso" | sha256sum --check
           curl --fail --location --retry 3 --output virtio-win.iso "$VIRTIO_ISO_URL"
           echo "$VIRTIO_ISO_SHA256  virtio-win.iso" | sha256sum --check
-
-      - name: Prepare VirtIO drivers
-        run: |
-          mkdir -p 'virtio-drivers/$WinPEDriver$'
-          xorriso -osirrox on -indev virtio-win.iso \
-            -extract /viostor/2k25/amd64 'virtio-drivers/$WinPEDriver$/viostor' \
-            -extract /NetKVM/2k25/amd64 'virtio-drivers/$WinPEDriver$/NetKVM'
-          chmod -R u+rwX 'virtio-drivers/$WinPEDriver$'
 
       - name: Generate temporary WinRM password
         run: |

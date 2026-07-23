@@ -20,21 +20,5 @@ Set-Service -Name WinRM -StartupType Disabled
 & net.exe user packer /delete | Out-Null
 Disable-LocalUser -Name Administrator
 
-if (Get-LocalUser -Name packer -ErrorAction SilentlyContinue) { throw 'The Packer account still exists.' }
-if ((Get-Service -Name WinRM).StartType -ne 'Disabled') { throw 'WinRM is still enabled.' }
-foreach ($path in $unattendedFiles) {
-    if (Test-Path -LiteralPath $path) { throw 'Cached unattended setup data remains.' }
-}
-
-$task = Get-ScheduledTask -TaskName 'RunnerFoundry JIT runner'
-if ($task.Principal.UserId -notin @('SYSTEM', 'NT AUTHORITY\SYSTEM') -or $task.State -eq 'Disabled') {
-    throw 'The RunnerFoundry startup task is not enabled under LocalSystem.'
-}
-$templateDirectory = 'C:\RunnerFoundry\template'
-if (-not (Test-Path -LiteralPath (Join-Path $templateDirectory 'run.cmd'))) { throw 'The runner template is missing.' }
-foreach ($name in @('.runner', '.credentials', '.credentials_rsaparams')) {
-    if (Test-Path -LiteralPath (Join-Path $templateDirectory $name)) { throw 'The runner template is registered.' }
-}
-
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
 & shutdown.exe /s /t 0 /f

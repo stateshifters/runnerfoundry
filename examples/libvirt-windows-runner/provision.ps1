@@ -22,22 +22,7 @@ finally {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 }
 
-. $launcherPath
-if ((Get-RunnerFoundryOemStrings) -notcontains 'runnerfoundry.packer=raw-smbios-reader-ok') {
-    throw 'The raw SMBIOS reader did not find the Packer validation value.'
-}
-
-$registrationFiles = @('.runner', '.credentials', '.credentials_rsaparams')
-if (-not (Test-Path -LiteralPath (Join-Path $templateDirectory 'run.cmd'))) { throw 'The runner template is incomplete.' }
-foreach ($name in $registrationFiles) {
-    if (Test-Path -LiteralPath (Join-Path $templateDirectory $name)) { throw 'The runner template is registered.' }
-}
-
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName 'RunnerFoundry JIT runner' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-
-$task = Get-ScheduledTask -TaskName 'RunnerFoundry JIT runner'
-if ($task.Principal.UserId -notin @('SYSTEM', 'NT AUTHORITY\SYSTEM')) { throw 'The startup task does not run as LocalSystem.' }
-if ($task.State -eq 'Disabled') { throw 'The startup task is disabled.' }

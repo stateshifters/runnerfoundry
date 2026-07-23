@@ -21,10 +21,17 @@ variable "windows_iso_path" {
   default     = "windows-server-2025.iso"
 }
 
+variable "virtio_iso_path" {
+  type        = string
+  description = "Path to the pinned VirtIO driver ISO."
+  default     = "virtio-win.iso"
+}
+
 locals {
   github_runner_version = "2.336.0"
   github_runner_sha256  = "d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162"
   output_directory      = abspath("${path.root}/output")
+  virtio_iso_path       = abspath("${path.root}/${var.virtio_iso_path}")
   windows_iso_path      = abspath("${path.root}/${var.windows_iso_path}")
   windows_iso_sha256    = "7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51"
 }
@@ -53,9 +60,6 @@ source "qemu" "windows" {
   shutdown_timeout  = "15m"
   vm_name           = "runnerfoundry-windows.qcow2"
 
-  cd_files = ["${path.root}/virtio-drivers/*"]
-  cd_label = "virtio-drivers"
-
   floppy_content = {
     "Autounattend.xml" = templatefile(abspath("${path.root}/Autounattend.xml"), {
       winrm_password = var.winrm_password
@@ -64,7 +68,10 @@ source "qemu" "windows" {
   }
 
   qemuargs = [
-    ["-smbios", "type=11,value=runnerfoundry.packer=raw-smbios-reader-ok"],
+    ["-boot", "once=d,order=c"],
+    ["-cpu", "host"],
+    ["-drive", "file=${local.virtio_iso_path},media=cdrom,index=3"],
+    ["-vga", "std"],
   ]
 
   communicator   = "winrm"

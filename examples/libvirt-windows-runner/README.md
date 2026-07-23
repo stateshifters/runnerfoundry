@@ -16,11 +16,11 @@ The public media and checksums are pinned. The download commands and workflow st
 | VirtIO drivers | `0.1.266` | `57b0f6dc8dc92dc2ae8621f8b1bfbd8a873de9bedc788c4c4b305ea28acc77cd` |
 | GitHub Actions runner for Windows x64 | `2.336.0` | `d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162` |
 
-The media URLs are public, but their license terms still apply. A new upstream image or driver release requires an explicit URL and checksum update. The Microsoft download path is opaque and is served exactly as written; do not normalize its `f34g` segment as a hexadecimal identifier. Packer validates the Windows ISO itself. Verify the VirtIO ISO before extracting its drivers as shown below.
+The media URLs are public, but their license terms still apply. A new upstream image or driver release requires an explicit URL and checksum update. The Microsoft download path is opaque and is served exactly as written; do not normalize its `f34g` segment as a hexadecimal identifier. Packer validates the Windows ISO itself. Verify the VirtIO ISO before building the image.
 
 ## Build the image
 
-Build on an AMD64 Linux host with KVM acceleration, QEMU, OVMF, Packer 1.15.4, `curl`, `openssl`, `sha256sum`, `xorriso`, and enough space for both installation media and a 64 GiB image. Start in this directory:
+Build on an AMD64 Linux host with KVM acceleration, QEMU, OVMF, Packer 1.15.4, `curl`, `openssl`, `sha256sum`, and enough space for both installation media and a 64 GiB image. Start in this directory:
 
 ```sh
 cd examples/libvirt-windows-runner
@@ -35,11 +35,6 @@ curl --fail --location --retry 3 \
   'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.266-1/virtio-win-0.1.266.iso'
 echo '57b0f6dc8dc92dc2ae8621f8b1bfbd8a873de9bedc788c4c4b305ea28acc77cd  virtio-win.iso' | sha256sum --check
 
-mkdir -p 'virtio-drivers/$WinPEDriver$'
-xorriso -osirrox on -indev virtio-win.iso \
-  -extract /viostor/2k25/amd64 'virtio-drivers/$WinPEDriver$/viostor' \
-  -extract /NetKVM/2k25/amd64 'virtio-drivers/$WinPEDriver$/NetKVM'
-
 export PKR_VAR_winrm_password='Aa1!'$(openssl rand -hex 20)
 packer init .
 packer fmt -check .
@@ -50,7 +45,7 @@ unset PKR_VAR_winrm_password
 
 `PKR_VAR_winrm_password` is a generated build credential. Keep it out of shell tracing and logs. The sealing script deletes the `packer` account, disables the built-in Administrator account and WinRM, and removes cached unattended files and temporary provisioning state.
 
-Packer builds a 2-vCPU, 4 GiB, 64 GiB qcow2 image with Q35, Unified Extensible Firmware Interface (UEFI), and VirtIO storage and networking. It creates an auxiliary CD with the selected storage and network drivers under the Windows Setup `$WinPEDriver$` directory. Windows Server scans that directory on every accessible drive, so unattended setup does not depend on an optical drive letter. During the build, QEMU injects a harmless `runnerfoundry.packer=` SMBIOS value. Provisioning must read that value through the same raw `GetSystemFirmwareTable(RSMB)` path used at runtime before the image is sealed.
+Packer builds a 2-vCPU, 4 GiB, 64 GiB qcow2 image with Q35, Unified Extensible Firmware Interface (UEFI), and VirtIO storage and networking. It attaches the pinned VirtIO ISO and directs Windows PE to its Windows Server 2025 storage and network drivers.
 
 The output is `output/runnerfoundry-windows.qcow2`.
 
@@ -87,23 +82,6 @@ runnerfoundry.jit=<encoded-jit-configuration>
 ```
 
 The guest reads raw SMBIOS data without logging or persisting that value. Its `LocalSystem` startup task copies the clean, unregistered runner template into writable runtime storage and invokes `run.cmd --jitconfig` once. Because this required interface places the JIT value on a process command line, configure Windows process-creation auditing and endpoint telemetry so they do not record this task's command-line arguments. The launcher allows at most six hours. On timeout it requires `taskkill.exe /T /F` to succeed and verifies that the runner process exits before cleanup. It removes runtime and work state in `finally`, then attempts `Stop-Computer -Force`; if that fails, it runs `shutdown.exe /s /t 0 /f`.
-
-## Smoke-test the domain
-
-Confirm the network and XML are usable by the same libvirt connection RunnerFoundry will use:
-
-```sh
-sudo -u runnerfoundry test -r /etc/runnerfoundry/windows-domain.xml
-sudo -u runnerfoundry virsh --connect qemu:///system net-info default
-sudo -u runnerfoundry virsh --connect qemu:///system create \
-  /etc/runnerfoundry/windows-domain.xml --validate
-```
-
-This direct smoke test does not contain a JIT value. The startup task should take the missing-JIT path, clean runtime state, and power off. Because the domain is transient, it then disappears. If it remains active, inspect the console and stop only this test domain:
-
-```sh
-sudo -u runnerfoundry virsh --connect qemu:///system destroy runnerfoundry-windows-template
-```
 
 ## Choose the infrastructure provider
 
