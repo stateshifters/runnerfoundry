@@ -11,6 +11,13 @@ apt-get update
 apt-get install --no-install-recommends --yes ca-certificates curl dmidecode
 
 id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
+runner_sudoers=/etc/sudoers.d/90-runner
+runner_sudoers_temp="${runner_sudoers}.tmp"
+install --owner=root --group=root --mode=0440 /dev/null "$runner_sudoers_temp"
+printf 'runner ALL=(ALL:ALL) NOPASSWD:ALL\n' > "$runner_sudoers_temp"
+visudo -cf "$runner_sudoers_temp"
+mv --force -- "$runner_sudoers_temp" "$runner_sudoers"
+test "$(runuser --user runner -- sudo --non-interactive -- id --user)" = "0"
 install --directory --owner=root --group=root --mode=0755 /opt/actions-runner-template
 
 runner_archive="/tmp/actions-runner-linux-x64-${GITHUB_RUNNER_VERSION}.tar.gz"

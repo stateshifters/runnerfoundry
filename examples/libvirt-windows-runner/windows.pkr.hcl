@@ -30,26 +30,28 @@ locals {
 }
 
 source "qemu" "windows" {
-  accelerator      = "kvm"
-  boot_command     = ["<spacebar><wait5>"]
-  boot_wait        = "5s"
-  cdrom_interface  = "ide"
-  cpus             = 2
-  disk_interface   = "virtio"
-  disk_size        = "64G"
-  efi_boot         = true
-  efi_drop_efivars = true
-  format           = "qcow2"
-  headless         = true
-  iso_checksum     = "sha256:${local.windows_iso_sha256}"
-  iso_url          = local.windows_iso_path
-  machine_type     = "q35"
-  memory           = 4096
-  net_device       = "virtio-net"
-  output_directory = local.output_directory
-  shutdown_command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Windows/Temp/runnerfoundry-seal.ps1"
-  shutdown_timeout = "15m"
-  vm_name          = "runnerfoundry-windows.qcow2"
+  accelerator       = "kvm"
+  boot_command      = ["<spacebar><wait5>"]
+  boot_wait         = "5s"
+  cdrom_interface   = "ide"
+  cpus              = 2
+  disk_interface    = "virtio"
+  disk_size         = "64G"
+  efi_boot          = true
+  efi_drop_efivars  = true
+  efi_firmware_code = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+  efi_firmware_vars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+  format            = "qcow2"
+  headless          = true
+  iso_checksum      = "sha256:${local.windows_iso_sha256}"
+  iso_url           = local.windows_iso_path
+  machine_type      = "q35"
+  memory            = 4096
+  net_device        = "virtio-net"
+  output_directory  = local.output_directory
+  shutdown_command  = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Windows/Temp/runnerfoundry-seal.ps1"
+  shutdown_timeout  = "15m"
+  vm_name           = "runnerfoundry-windows.qcow2"
 
   cd_files = ["${path.root}/virtio-drivers/*"]
   cd_label = "virtio-drivers"

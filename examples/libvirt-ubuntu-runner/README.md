@@ -9,7 +9,7 @@ The build host needs Packer, QEMU/KVM, OVMF, an ISO creation tool such as `xorri
 From the repository root, enter the example directory, generate a temporary build key, and build the image:
 
 ```sh
-cd examples/libvirt-runner
+cd examples/libvirt-ubuntu-runner
 ssh-keygen -q -t ed25519 -N '' -f packer-key
 packer init .
 packer build -var "ssh_private_key_file=$PWD/packer-key" .

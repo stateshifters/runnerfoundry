@@ -23,23 +23,25 @@ locals {
 }
 
 source "qemu" "ubuntu" {
-  accelerator      = "kvm"
-  cpus             = 2
-  disable_vnc      = true
-  disk_image       = true
-  disk_interface   = "virtio"
-  disk_size        = "20G"
-  efi_boot         = true
-  efi_drop_efivars = true
-  format           = "qcow2"
-  headless         = true
-  iso_checksum     = "sha256:${local.ubuntu_image_sha256}"
-  iso_url          = local.ubuntu_image_url
-  machine_type     = "q35"
-  memory           = 2048
-  net_device       = "virtio-net"
-  output_directory = "${path.root}/output"
-  vm_name          = "runnerfoundry-ubuntu.qcow2"
+  accelerator       = "kvm"
+  cpus              = 2
+  disable_vnc       = true
+  disk_image        = true
+  disk_interface    = "virtio"
+  disk_size         = "20G"
+  efi_boot          = true
+  efi_drop_efivars  = true
+  efi_firmware_code = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+  efi_firmware_vars = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+  format            = "qcow2"
+  headless          = true
+  iso_checksum      = "sha256:${local.ubuntu_image_sha256}"
+  iso_url           = local.ubuntu_image_url
+  machine_type      = "q35"
+  memory            = 2048
+  net_device        = "virtio-net"
+  output_directory  = "${path.root}/output"
+  vm_name           = "runnerfoundry-ubuntu.qcow2"
 
   cd_content = {
     "meta-data" = "instance-id: runnerfoundry-packer\nlocal-hostname: runnerfoundry-packer\n"

@@ -611,7 +611,7 @@ The guest image must be ready to execute one GitHub Actions job without interact
 
 Do not write the JIT value to logs, files, image metadata, crash output, or persistent diagnostics.
 
-The guest image and domain XML may be produced with any image-building and infrastructure tools that satisfy this contract. The [Ubuntu](examples/libvirt-runner/README.md) and [Windows Server 2025](examples/libvirt-windows-runner/README.md) Packer examples are optional operator illustrations. RunnerFoundry does not invoke Packer or require either example.
+The guest image and domain XML may be produced with any image-building and infrastructure tools that satisfy this contract. The [Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows Server 2025](examples/libvirt-windows-runner/README.md) Packer examples are optional operator illustrations. RunnerFoundry does not invoke Packer or require either example.
 
 ### Windows guest requirements
 
