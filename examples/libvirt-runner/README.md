@@ -40,11 +40,11 @@ The example XML uses EFI firmware auto-selection, a transient qcow2 disk, and an
 
 ```sh
 sudo -u runnerfoundry test -r /etc/runnerfoundry/domain.xml
-sudo virsh --connect qemu:///system net-info default
-sudo virsh --connect qemu:///system create \
+sudo -u runnerfoundry virsh --connect qemu:///system net-info default
+sudo -u runnerfoundry virsh --connect qemu:///system create \
   /etc/runnerfoundry/domain.xml --validate
 ```
 
-The final command is a host-compatibility smoke test: it verifies the XML, firmware, network, and QEMU access to the image by starting an unassigned guest. With no JIT value, the example guest powers off and the transient domain disappears. If it does not, inspect its console or libvirt logs, then stop that exact test domain with `sudo virsh --connect qemu:///system destroy runnerfoundry-template`. Host DAC, ACL, SELinux, or AppArmor policy must allow the libvirt QEMU process to traverse the image directory and read the qcow2 file; readability by the `runnerfoundry` service account alone is not sufficient.
+The final command is a host-compatibility smoke test: it verifies the service identity, XML, firmware, network, and QEMU access to the image by starting an unassigned guest. With no JIT value, the example guest powers off and the transient domain disappears. If it does not, inspect its console or libvirt logs, then stop that exact test domain with `sudo -u runnerfoundry virsh --connect qemu:///system destroy runnerfoundry-template`. Host DAC, ACL, SELinux, or AppArmor policy must allow the libvirt QEMU process to traverse the image directory and read the qcow2 file; readability by the `runnerfoundry` service account alone is not sufficient.
 
 The guest reads `runnerfoundry.jit=` from SMBIOS type 11, runs the unregistered runner once, removes its runtime directory, and powers off. The transient disk discards guest writes when the domain ends; the backing image remains operator-owned and must not be replaced while domains are using it. Add any tools required by your workflows to `provision.sh`.

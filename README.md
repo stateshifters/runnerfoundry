@@ -611,7 +611,7 @@ The guest image must be ready to execute one GitHub Actions job without interact
 
 Do not write the JIT value to logs, files, image metadata, crash output, or persistent diagnostics.
 
-The guest image and domain XML may be produced with any image-building and infrastructure tools that satisfy this contract. Operators who want a small Ubuntu reference can adapt the [optional Packer example](examples/libvirt-runner/README.md); it is an illustration, not part of RunnerFoundry's runtime or a required deployment step.
+The guest image and domain XML may be produced with any image-building and infrastructure tools that satisfy this contract. The [Ubuntu](examples/libvirt-runner/README.md) and [Windows Server 2025](examples/libvirt-windows-runner/README.md) Packer examples are optional operator illustrations. RunnerFoundry does not invoke Packer or require either example.
 
 ### Windows guest requirements
 
@@ -622,10 +622,15 @@ A Windows guest implements the same contract with Windows-native mechanisms:
 - copy an unconfigured runner template into a writable runtime directory;
 - call `run.cmd --jitconfig <jit-value>` for one job;
 - remove the runtime and work directories in a `finally` block;
-- call `Stop-Computer` after success, failure, timeout, or missing JIT data;
+- allow the one-job runner process at most six hours and terminate its process tree on timeout;
+- call `Stop-Computer -Force` after success, failure, timeout, or missing JIT data, then use `shutdown.exe /s /t 0 /f` if that call fails;
 - keep the JIT value out of event logs, transcripts, command echoes, files, and persistent diagnostics.
 
 Windows Management Instrumentation does not reliably expose every type 11 OEM string. Validate the raw firmware-table reader against the QEMU-generated SMBIOS data before sealing the image.
+
+The required `run.cmd --jitconfig` interface places the JIT value on a Windows process command line. Configure process-creation auditing and endpoint telemetry for the startup task so they do not persist its command-line arguments.
+
+Operators who want a minimal reference can adapt the [optional Windows Server 2025 Packer example](examples/libvirt-windows-runner/README.md). The image pipeline and its artifacts remain operator-owned.
 
 ## Operate RunnerFoundry
 
@@ -738,7 +743,7 @@ The authoritative startup validation is RunnerFoundry's parse-and-render check f
 
 Use the guest console or offline disk diagnostics. Confirm that the boot launcher ran, `dmidecode --type 11` or the Windows raw firmware reader found `runnerfoundry.jit=`, the runner template exists, DNS and outbound HTTPS work, and system time is correct. Do not print the JIT value while diagnosing the guest.
 
-RunnerFoundry does not impose a guest job timeout or watchdog. Set an appropriate GitHub Actions job timeout, monitor domains that outlive it, and use the configured libvirt connection to destroy a stuck transient domain after confirming that its job is no longer running. Investigate guest cleanup and shutdown before returning that image to service.
+The RunnerFoundry control plane does not impose a guest job timeout or watchdog. A guest image may add one; the optional Windows example enforces six hours. Set an appropriate GitHub Actions job timeout, monitor domains that outlive it, and use the configured libvirt connection to destroy a stuck transient domain after confirming that its job is no longer running. Investigate guest cleanup and shutdown before returning that image to service.
 
 ### PostgreSQL connections fail
 

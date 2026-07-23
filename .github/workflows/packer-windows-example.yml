@@ -1,0 +1,79 @@
+name: Verify Windows Packer example
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - examples/libvirt-windows-runner/**
+      - .github/workflows/packer-windows-example.yml
+  pull_request:
+    paths:
+      - examples/libvirt-windows-runner/**
+      - .github/workflows/packer-windows-example.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: meza-ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: examples/libvirt-windows-runner
+    env:
+      WINDOWS_ISO_URL: https://software-static.download.prss.microsoft.com/dbazure/998969d5-f34g-4e03-ac9d-1f9786c66749/26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
+      WINDOWS_ISO_SHA256: 7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51
+      VIRTIO_ISO_URL: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.266-1/virtio-win-0.1.266.iso
+      VIRTIO_ISO_SHA256: 57b0f6dc8dc92dc2ae8621f8b1bfbd8a873de9bedc788c4c4b305ea28acc77cd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install image-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            ovmf \
+            qemu-system-x86 \
+            qemu-utils \
+            xorriso
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: 1.15.4
+
+      - name: Download and verify installation media
+        run: |
+          curl --fail --location --retry 3 --output windows-server-2025.iso "$WINDOWS_ISO_URL"
+          echo "$WINDOWS_ISO_SHA256  windows-server-2025.iso" | sha256sum --check
+          curl --fail --location --retry 3 --output virtio-win.iso "$VIRTIO_ISO_URL"
+          echo "$VIRTIO_ISO_SHA256  virtio-win.iso" | sha256sum --check
+
+      - name: Prepare VirtIO drivers
+        run: |
+          mkdir -p 'virtio-drivers/$WinPEDriver$'
+          xorriso -osirrox on -indev virtio-win.iso \
+            -extract /viostor/2k25/amd64 'virtio-drivers/$WinPEDriver$/viostor' \
+            -extract /NetKVM/2k25/amd64 'virtio-drivers/$WinPEDriver$/NetKVM'
+
+      - name: Generate temporary WinRM password
+        run: |
+          password="Aa1!$(openssl rand -hex 20)"
+          echo "::add-mask::$password"
+          echo "PKR_VAR_winrm_password=$password" >> "$GITHUB_ENV"
+
+      - name: Initialize Packer
+        run: packer init .
+
+      - name: Check Packer formatting
+        run: packer fmt -check .
+
+      - name: Validate Packer template
+        run: packer validate .
+
+      - name: Build image
+        run: packer build .
