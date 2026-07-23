@@ -40,7 +40,7 @@ xorriso -osirrox on -indev virtio-win.iso \
   -extract /viostor/2k25/amd64 'virtio-drivers/$WinPEDriver$/viostor' \
   -extract /NetKVM/2k25/amd64 'virtio-drivers/$WinPEDriver$/NetKVM'
 
-export PKR_VAR_winrm_password="Aa1!$(openssl rand -hex 20)"
+export PKR_VAR_winrm_password='Aa1!'$(openssl rand -hex 20)
 packer init .
 packer fmt -check .
 packer validate .
