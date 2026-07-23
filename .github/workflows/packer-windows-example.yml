@@ -36,10 +36,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes \
+            kmod \
             ovmf \
             qemu-system-x86 \
             qemu-utils \
             xorriso
+
+      - name: Prepare nested KVM
+        run: |
+          if grep -qw vmx /proc/cpuinfo; then
+            kvm_module=kvm_intel
+          elif grep -qw svm /proc/cpuinfo; then
+            kvm_module=kvm_amd
+          else
+            echo "::error::The runner does not expose Intel VMX or AMD SVM for nested KVM."
+            exit 1
+          fi
+
+          sudo modprobe "$kvm_module"
+          test -c /dev/kvm
+          sudo chown "$(id -un)" /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
 
       - name: Install Packer
         uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
@@ -77,4 +95,6 @@ jobs:
         run: packer validate .
 
       - name: Build image
+        env:
+          PACKER_LOG: "1"
         run: packer build .
