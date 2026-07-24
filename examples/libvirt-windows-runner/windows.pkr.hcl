@@ -81,7 +81,7 @@ source "qemu" "windows" {
   communicator   = "winrm"
   winrm_insecure = true
   winrm_password = var.winrm_password
-  winrm_timeout  = "30m"
+  winrm_timeout  = "3h"
   winrm_use_ssl  = true
   winrm_username = "packer"
 }
