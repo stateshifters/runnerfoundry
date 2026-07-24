@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-winrm.exe quickconfig -q | Out-Null
+winrm.exe quickconfig -quiet | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "winrm quickconfig failed with exit code $LASTEXITCODE"
 }
