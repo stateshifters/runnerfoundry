@@ -38,8 +38,8 @@ locals {
 
 source "qemu" "windows" {
   accelerator       = "kvm"
-  boot_command      = ["<spacebar><wait5>"]
-  boot_wait         = "5s"
+  boot_command      = ["aaaaaaaaaaaa<wait>aaaaaaaaaaaa<enter><wait><enter>"]
+  boot_wait         = "-1s"
   cdrom_interface   = "ide"
   cpus              = 2
   disk_interface    = "virtio"
