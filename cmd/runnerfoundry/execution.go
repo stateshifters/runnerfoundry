@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/meza/github-scaler/internal/daemon"
+	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
 type daemonCommand func(context.Context, daemon.Options) error
@@ -28,7 +28,7 @@ func executeCommand(
 		return err
 	}
 	if err := runDaemon(ctx, daemon.Options{ConfigPath: configPath, ReloadRequests: reloadRequests}); err != nil {
-		return fmt.Errorf("run github scaler: %w", err)
+		return fmt.Errorf("run RunnerFoundry: %w", err)
 	}
 	return nil
 }

@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/config"
+	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 func TestRepositoryOwnerAndNameRejectsInvalidPath(t *testing.T) {
@@ -31,29 +31,29 @@ func TestRepositoryOwnerAndNameReportsMalformedURL(t *testing.T) {
 }
 
 func TestAPIURLReportsMalformedRepositoryURL(t *testing.T) {
-	if _, err := apiURL("http://[::1/meza/github-scaler", "/repos/meza/github-scaler/actions/runners/registration-token"); err == nil {
+	if _, err := apiURL("http://[::1/meza/runnerfoundry", "/repos/meza/runnerfoundry/actions/runners/registration-token"); err == nil {
 		t.Fatal("expected api url parse error")
 	}
 }
 
 func TestRunnerRegistrationURLReportsMalformedRepositoryURL(t *testing.T) {
-	if _, err := runnerRegistrationURL("http://[::1/meza/github-scaler"); err == nil {
+	if _, err := runnerRegistrationURL("http://[::1/meza/runnerfoundry"); err == nil {
 		t.Fatal("expected runner registration url parse error")
 	}
 }
 
 func TestRunnerRegistrationURLRejectsNonHTTPSURL(t *testing.T) {
-	if _, err := runnerRegistrationURL("http://github.com/meza/github-scaler"); err == nil {
+	if _, err := runnerRegistrationURL("http://github.com/meza/RunnerFoundry"); err == nil {
 		t.Fatal("expected non-https runner registration url error")
 	}
 }
 
 func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
-	registry, err := newGitHubScaleSetRegistry("https://github.com/meza/github-scaler", 1, testAppCredentials(t))
+	registry, err := newGitHubScaleSetRegistry("https://github.com/meza/RunnerFoundry", 1, testAppCredentials(t))
 	if err != nil {
 		t.Fatalf("expected registry, got %v", err)
 	}
-	if registry.repositoryURL != "https://github.com/meza/github-scaler" || registry.httpClient == nil {
+	if registry.repositoryURL != "https://github.com/meza/RunnerFoundry" || registry.httpClient == nil {
 		t.Fatalf("expected registry defaults, got %#v", registry)
 	}
 	if registry.httpClient == http.DefaultClient {
@@ -65,7 +65,7 @@ func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
 }
 
 func TestGitHubScaleSetRegistryRejectsInvalidPrivateKey(t *testing.T) {
-	_, err := newGitHubScaleSetRegistry("https://github.com/meza/github-scaler", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
+	_, err := newGitHubScaleSetRegistry("https://github.com/meza/RunnerFoundry", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
 	if err == nil {
 		t.Fatal("expected invalid private key error")
 	}

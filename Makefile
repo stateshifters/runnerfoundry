@@ -1,10 +1,10 @@
-APP_NAME := github-scaler
-EXECUTABLE_NAME := github-scaler
+APP_NAME := runnerfoundry
+EXECUTABLE_NAME := runnerfoundry
 BUILD_DIR := build
 DIST_DIR := dist
 METADATA_DIR := $(BUILD_DIR)/metadata
 NOTICES_FILE := $(METADATA_DIR)/THIRD_PARTY_NOTICES.txt
-SBOM_FILE := $(METADATA_DIR)/github-scaler-sbom.json
+SBOM_FILE := $(METADATA_DIR)/runnerfoundry-sbom.json
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN = go$(shell go list -m -f '{{.GoVersion}}')
@@ -82,11 +82,11 @@ build: export GOARCH := amd64
 build: export CGO_ENABLED := 0
 build:
 	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
-	go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/github-scaler
+	go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
 
 smoke: build
 	go test ./internal/daemon -run TestClusteredLifecycleSmoke -count=1
-	go test ./cmd/github-scaler -run 'Test(MigrationStatusWritesMachineReadableStdout|MigrationUpPrintsCompletion|MigrationDownPrintsCompletion|ExecuteStoreMigrationDispatchesTypedActions)' -count=1
+	go test ./cmd/runnerfoundry -run 'Test(MigrationStatusWritesMachineReadableStdout|MigrationUpPrintsCompletion|MigrationDownPrintsCompletion|ExecuteStoreMigrationDispatchesTypedActions)' -count=1
 	go test -tags=integration ./internal/cluster -run 'TestPostgreSQL(AggregatesSharedAndDisjointHostCapacity|PreservesGlobalFIFOWithinHostLimits|LeaderLeaseFailsOver|MigrationLifecycleIsReversible)' -count=1
 
 notices:

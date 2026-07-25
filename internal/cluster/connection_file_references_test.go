@@ -38,7 +38,7 @@ func assertStructuredFileReference(t *testing.T, field structuredConnectionField
 	t.Helper()
 	filePath := "/run/secrets/postgres-" + field.name
 	fixture := &credentialFileFixture{contents: map[string]string{filePath: field.want + "\n"}}
-	settings := Settings{Role: "github_scaler"}
+	settings := Settings{Role: "runnerfoundry"}
 	field.set(&settings, "file://"+filePath)
 	resolved, err := primaryConnectionConfigWithResolver(
 		settings, connectionSettingResolver{readCredentialFile: fixture.read},
@@ -74,7 +74,7 @@ func TestSettingsReadFilesAtPointOfUse(t *testing.T) {
 	const filePath = "/run/secrets/postgres-password"
 	fixture := &credentialFileFixture{contents: map[string]string{filePath: "first"}}
 	resolver := connectionSettingResolver{readCredentialFile: fixture.read}
-	settings := Settings{Password: "file://" + filePath, Role: "github_scaler"}
+	settings := Settings{Password: "file://" + filePath, Role: "runnerfoundry"}
 	first, firstErr := primaryConnectionConfigWithResolver(settings, resolver)
 	if firstErr != nil {
 		t.Fatal(firstErr)
@@ -91,18 +91,18 @@ func TestSettingsReadFilesAtPointOfUse(t *testing.T) {
 
 func TestSettingsResolveDSNFileReferenceInMemory(t *testing.T) {
 	values := newConnectionFixtureValues()
-	dsn := values.dsn("database.internal", "6432", "github_scaler")
+	dsn := values.dsn("database.internal", "6432", "runnerfoundry")
 	fixture := &credentialFileFixture{contents: map[string]string{
 		"/run/secrets/postgres-dsn": dsn + "\n",
 	}}
 	resolved, err := primaryConnectionConfigWithResolver(
-		Settings{DSN: "file:///run/secrets/postgres-dsn", Role: "github_scaler"},
+		Settings{DSN: "file:///run/secrets/postgres-dsn", Role: "runnerfoundry"},
 		connectionSettingResolver{readCredentialFile: fixture.read},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "github_scaler" || resolved.User != values.identity || resolved.Password != values.proof {
+	if resolved.Host != "database.internal" || resolved.Port != 6432 || resolved.Database != "runnerfoundry" || resolved.User != values.identity || resolved.Password != values.proof {
 		t.Fatalf("resolved DSN configuration = %#v", resolved)
 	}
 }
@@ -110,11 +110,11 @@ func TestSettingsResolveDSNFileReferenceInMemory(t *testing.T) {
 func TestSettingsRejectInvalidFileReferenceSyntaxWithoutDisclosure(t *testing.T) {
 	tests := map[string]Settings{
 		"malformed role file": {Host: "database", Role: "file://remote/role"},
-		"malformed file":      {Password: "file://", Role: "github_scaler"},
-		"file host":           {Password: "file://remote/secret", Role: "github_scaler"},
-		"file fragment":       {Password: "file:///secret#value", Role: "github_scaler"},
-		"fallback query":      {Password: "file:///secret?fallback=value", Role: "github_scaler"},
-		"short file scheme":   {Password: "file:secret", Role: "github_scaler"},
+		"malformed file":      {Password: "file://", Role: "runnerfoundry"},
+		"file host":           {Password: "file://remote/secret", Role: "runnerfoundry"},
+		"file fragment":       {Password: "file:///secret#value", Role: "runnerfoundry"},
+		"fallback query":      {Password: "file:///secret?fallback=value", Role: "runnerfoundry"},
+		"short file scheme":   {Password: "file:secret", Role: "runnerfoundry"},
 	}
 	for name, settings := range tests {
 		t.Run(name, func(t *testing.T) {

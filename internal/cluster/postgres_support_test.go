@@ -21,7 +21,7 @@ import (
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 var postgreSQLIntegrationDSN string
@@ -129,7 +129,7 @@ func assertPostgreSQLSessionRole(t *testing.T, connectionConfig *pgx.ConnConfig,
 	if err = connection.QueryRow(context.Background(), `SELECT session_user, current_user`).Scan(&sessionUser, &currentUser); err != nil {
 		t.Fatal(err)
 	}
-	if sessionUser != expectedSessionUser || currentUser != "github_scaler" {
+	if sessionUser != expectedSessionUser || currentUser != "runnerfoundry" {
 		t.Fatalf("session_user=%q current_user=%q", sessionUser, currentUser)
 	}
 }
@@ -164,7 +164,7 @@ func postgreSQLTestStore(t *testing.T) (*Store, string) {
 
 func postgreSQLTestDSN(t *testing.T) string {
 	t.Helper()
-	databaseName := fmt.Sprintf("github_scaler_test_%d", postgreSQLDatabaseSequence.Add(1))
+	databaseName := fmt.Sprintf("runnerfoundry_test_%d", postgreSQLDatabaseSequence.Add(1))
 	createPostgreSQLTestDatabase(t, databaseName)
 	t.Cleanup(func() { removePostgreSQLTestDatabase(t, databaseName) })
 	parsedDSN, err := url.Parse(postgreSQLIntegrationDSN)
@@ -265,7 +265,7 @@ func startPostgreSQLIntegrationServerOnPort(
 	port uint32,
 	cachePath string,
 ) (postgreSQLIntegrationServer, error) {
-	runtimePath, err := os.MkdirTemp("", "github-scaler-postgres-")
+	runtimePath, err := os.MkdirTemp("", "runnerfoundry-postgres-")
 	if err != nil {
 		return postgreSQLIntegrationServer{}, fmt.Errorf("create PostgreSQL runtime directory: %w", err)
 	}
@@ -299,14 +299,14 @@ func randomPostgreSQLPort() (uint32, error) {
 }
 
 func postgreSQLTestCache() (string, error) {
-	if configuredCache := os.Getenv("GITHUB_SCALER_POSTGRES_CACHE"); configuredCache != "" {
+	if configuredCache := os.Getenv("RUNNERFOUNDRY_POSTGRES_CACHE"); configuredCache != "" {
 		return configuredCache, nil
 	}
 	userCache, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("locate PostgreSQL test cache: %w", err)
 	}
-	return filepath.Join(userCache, "github-scaler", "embedded-postgres"), nil
+	return filepath.Join(userCache, "runnerfoundry", "embedded-postgres"), nil
 }
 
 func assertScaleSetStatus(t *testing.T, store *Store, now time.Time, liveFor time.Duration, expected map[string]ScaleSetStatus) {

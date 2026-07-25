@@ -65,8 +65,8 @@ If a migration fails, fix the migration or database prerequisite and restart. Th
 Rollback is explicit because an older binary cannot contain future Down migrations. Stop every scaler node, wait for its heartbeat to expire, and use the currently deployed binary:
 
 ```sh
-github-scaler migrate status --config config.yaml
-github-scaler migrate down --to <version> --config config.yaml
+runnerfoundry migrate status --config config.yaml
+runnerfoundry migrate down --to <version> --config config.yaml
 ```
 
 `down` acquires the migration and leader locks and rejects live node heartbeats. Deploy the older binary only after rollback succeeds. A full rollback to version zero removes scaler domain objects; tern's version table may remain.
@@ -81,10 +81,10 @@ Run focused tests while developing:
 
 ```sh
 go test -tags=integration ./internal/cluster -run PostgreSQLMigration -count=1
-go test ./cmd/github-scaler -run Migration -count=1
+go test ./cmd/runnerfoundry -run Migration -count=1
 ```
 
-PostgreSQL integration tests use the pinned embedded PostgreSQL binary and its deterministic cache. They are the only tests that may require that binary; `make test` remains independent of PostgreSQL provisioning. The cache defaults to `github-scaler/embedded-postgres` beneath Go's `os.UserCacheDir`; set `GITHUB_SCALER_POSTGRES_CACHE` to use another absolute directory. See the root [contribution guide](../../../CONTRIBUTING.md#postgresql-integration-tests) for the clustered smoke workflow.
+PostgreSQL integration tests use the pinned embedded PostgreSQL binary and its deterministic cache. They are the only tests that may require that binary; `make test` remains independent of PostgreSQL provisioning. The cache defaults to `runnerfoundry/embedded-postgres` beneath Go's `os.UserCacheDir`; set `RUNNERFOUNDRY_POSTGRES_CACHE` to use another absolute directory. See the root [contribution guide](../../../CONTRIBUTING.md#postgresql-integration-tests) for the clustered smoke workflow.
 
 The integration package shares one PostgreSQL server process and provisions an isolated database for each test. Migration tests must use that helper instead of starting their own server or sharing schema state with another test.
 

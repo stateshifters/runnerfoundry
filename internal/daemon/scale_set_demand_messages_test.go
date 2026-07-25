@@ -9,7 +9,7 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {

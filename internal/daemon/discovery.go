@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func coordinators(scaleSets []config.ScaleSetConfig, store scaler.DemandStore) map[string]*scaler.Coordinator {

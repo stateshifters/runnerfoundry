@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 // BeginAcquisition records the GitHub identifiers before acquisition begins.

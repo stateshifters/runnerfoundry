@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/meza/github-scaler/internal/provider/contract"
+	"github.com/meza/RunnerFoundry/internal/provider/contract"
 )
 
 type RunnerState string

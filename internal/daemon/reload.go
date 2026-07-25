@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/meza/github-scaler/internal/scaler"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func reloadConfiguration(

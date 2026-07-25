@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 
-	"github.com/meza/github-scaler/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 type Options struct {

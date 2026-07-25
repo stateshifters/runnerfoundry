@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestPublishSurfacesConnectionFailure(t *testing.T) {
@@ -111,7 +111,7 @@ func assertStoreConnectionFailure(t *testing.T, operation func(*Store) error) {
 
 func TestPostgreSQLConnectorRedactsCredentialResolutionFailure(t *testing.T) {
 	settings := settingsWithProofReference("file:///missing-postgresql-secret")
-	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{"missing-postgresql-secret", "github_scaler"})
+	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{"missing-postgresql-secret", "runnerfoundry"})
 }
 
 func TestPostgreSQLConnectorRedactsConnectionFailure(t *testing.T) {
@@ -123,8 +123,8 @@ func TestPostgreSQLConnectorRedactsConnectionFailure(t *testing.T) {
 	query := connectionURL.Query()
 	query.Set("connect_timeout", "1")
 	connectionURL.RawQuery = query.Encode()
-	settings := postgresconfig.Settings{DSN: connectionURL.String(), Role: "github_scaler"}
-	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{values.identity, values.proof, "github_scaler", "postgres://"})
+	settings := postgresconfig.Settings{DSN: connectionURL.String(), Role: "runnerfoundry"}
+	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{values.identity, values.proof, "runnerfoundry", "postgres://"})
 }
 
 func assertPostgreSQLConnectorFailureRedacts(t *testing.T, settings postgresconfig.Settings, forbiddenValues []string) {
@@ -149,7 +149,7 @@ func assertPostgreSQLConnectorFailureRedacts(t *testing.T, settings postgresconf
 }
 
 func TestStoreDefaultConnectorsRejectInvalidSettings(t *testing.T) {
-	store := NewStore(postgresconfig.Settings{Password: "env://MISSING_PRIMARY_PASSWORD", Role: "github_scaler"})
+	store := NewStore(postgresconfig.Settings{Password: "env://MISSING_PRIMARY_PASSWORD", Role: "runnerfoundry"})
 	if _, err := store.connectPostgreSQL(context.Background()); err == nil {
 		t.Fatal("expected primary connector resolution failure")
 	}

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/provider/contract"
+	"github.com/meza/RunnerFoundry/internal/provider/contract"
 )
 
 func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) {
@@ -30,8 +30,8 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 	expected := []string{
 		"compose", "-f", "compose.yaml",
 		"run", "--detach", "--rm", "--name", "linux-1",
-		"--label", "github-scaler.scale-set=linux",
-		"--label", "github-scaler.runner=linux-1",
+		"--label", "runnerfoundry.scale-set=linux",
+		"--label", "runnerfoundry.runner=linux-1",
 		"--env", "ACTIONS_RUNNER_INPUT_JITCONFIG=secret",
 		"runner",
 	}
@@ -43,11 +43,11 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 func TestListClassifiesComposeContainerStates(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		output: `[
-{"ID":"1","Names":"runner-1","State":"running","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-1"},
-{"ID":"2","Names":"runner-2","State":"exited","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-2"},
-{"ID":"3","Names":"runner-3","State":"removing","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-3"},
-{"ID":"4","Names":"runner-4","State":"dead","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-4"},
-{"ID":"5","Names":"other","State":"running","Labels":"github-scaler.scale-set=other"}
+{"ID":"1","Names":"runner-1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-1"},
+{"ID":"2","Names":"runner-2","State":"exited","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-2"},
+{"ID":"3","Names":"runner-3","State":"removing","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-3"},
+{"ID":"4","Names":"runner-4","State":"dead","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-4"},
+{"ID":"5","Names":"other","State":"running","Labels":"runnerfoundry.scale-set=other"}
 ]`,
 	}
 	provider := ComposeProvider{
@@ -76,7 +76,7 @@ func TestListClassifiesComposeContainerStates(t *testing.T) {
 func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
 	provider := ComposeProvider{
 		CommandRunner: &recordingCommandRunner{
-			output: `{"ID":"1","Names":"runner-1","State":"restarting","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-1"}`,
+			output: `{"ID":"1","Names":"runner-1","State":"restarting","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-1"}`,
 		},
 	}
 
@@ -91,7 +91,7 @@ func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
 
 func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
 	provider := ComposeProvider{
-		CommandRunner: &recordingCommandRunner{output: `{"ID":"1","Names":"runner-1","State":"running","Labels":"github-scaler.scale-set=linux,github-scaler.runner=runner-1"}`},
+		CommandRunner: &recordingCommandRunner{output: `{"ID":"1","Names":"runner-1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-1"}`},
 		Config:        ComposeConfig{},
 	}
 	instances, err := provider.List(context.Background(), "linux")

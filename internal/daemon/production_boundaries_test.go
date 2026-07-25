@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/config"
-	"github.com/meza/github-scaler/internal/githubapp"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestStandaloneRepositoryStartupRejectsAnInvalidRepositoryURL(t *testing.T) {
@@ -71,7 +71,7 @@ func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *tes
 	daemon := newClusteredDaemon()
 	credentialFixture := newPostgresCredentialFixture()
 	connection, err := daemon.openStore(postgresconfig.Settings{
-		Role: "github_scaler", Password: credentialFixture.missingReference,
+		Role: "runnerfoundry", Password: credentialFixture.missingReference,
 	})
 	if err != nil {
 		t.Fatal(err)

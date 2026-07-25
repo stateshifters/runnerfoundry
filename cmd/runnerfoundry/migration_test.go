@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/github-scaler/internal/cluster"
-	"github.com/meza/github-scaler/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	configText := "github: invalid\nstate:\n  postgres:\n    role: github_scaler\nscale_sets: invalid\n"
+	configText := "github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\nscale_sets: invalid\n"
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load migration config: %v", err)
 	}
-	if configured.Role != "github_scaler" {
+	if configured.Role != "runnerfoundry" {
 		t.Fatalf("PostgreSQL role = %q", configured.Role)
 	}
 }
@@ -42,14 +42,14 @@ func TestLoadMigrationConfigReportsFileFailures(t *testing.T) {
 
 func TestExecuteMigrationUsesOnlyPostgreSQLConfiguration(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("github: invalid\nstate:\n  postgres:\n    role: github_scaler\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
 	status, err := executeMigration(t.Context(), migrationRequest{
 		action: migrationStatusAction, configPath: configPath,
 	}, func(postgresConfig postgresconfig.Settings) migrationStore {
-		if postgresConfig.Role != "github_scaler" {
+		if postgresConfig.Role != "runnerfoundry" {
 			t.Fatalf("PostgreSQL config = %#v", postgresConfig)
 		}
 		return store

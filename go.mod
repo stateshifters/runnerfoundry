@@ -1,4 +1,4 @@
-module github.com/meza/github-scaler
+module github.com/meza/RunnerFoundry
 
 go 1.26.5
 

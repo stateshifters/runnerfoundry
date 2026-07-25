@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meza/github-scaler/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/cluster"
 )
 
 type clusterScheduler struct {

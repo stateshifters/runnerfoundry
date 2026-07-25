@@ -1,6 +1,6 @@
 # Architecture
 
-`github-scaler` is a long-running Go application that turns GitHub Actions runner scale-set demand into ephemeral Docker containers or libvirt virtual machines. It discovers repositories through a GitHub App, creates and maintains runner scale sets for those repositories, receives GitHub's scale-set messages, admits work within configured capacity, requests just-in-time (JIT) runner configuration, and starts one provider instance for each admitted runner.
+`runnerfoundry` is a long-running Go application that turns GitHub Actions runner scale-set demand into ephemeral Docker containers or libvirt virtual machines. It discovers repositories through a GitHub App, creates and maintains runner scale sets for those repositories, receives GitHub's scale-set messages, admits work within configured capacity, requests just-in-time (JIT) runner configuration, and starts one provider instance for each admitted runner.
 
 The same executable supports two runtime shapes:
 
@@ -28,14 +28,14 @@ The application currently provides the following behavior:
 
 ## System context
 
-The operator supplies configuration and credentials and observes the service. GitHub is the authority for installation access, repositories, runner groups, scale sets, job demand, acquisition, and runner registration. Docker Engine or libvirt owns the actual runner process environment. `github-scaler` coordinates these systems but does not execute workflow steps itself.
+The operator supplies configuration and credentials and observes the service. GitHub is the authority for installation access, repositories, runner groups, scale sets, job demand, acquisition, and runner registration. Docker Engine or libvirt owns the actual runner process environment. `runnerfoundry` coordinates these systems but does not execute workflow steps itself.
 
 ```mermaid
 C4Context
-    title System Context - github-scaler
+    title System Context - runnerfoundry
 
     Person(operator, "Operator", "Configures, runs, reloads, migrates, and observes the scaler")
-    System(scaler, "github-scaler", "Discovers repositories, manages runner scale sets, schedules demand, and provisions ephemeral runners")
+    System(scaler, "runnerfoundry", "Discovers repositories, manages runner scale sets, schedules demand, and provisions ephemeral runners")
     System_Ext(github, "GitHub Actions", "Owns App installations, repositories, runner scale sets, job messages, acquisition, and JIT runner registration")
     System_Ext(docker, "Docker Engine", "Runs ephemeral GitHub Actions runner containers")
     System_Ext(libvirt, "libvirt", "Runs ephemeral GitHub Actions runner virtual machines")
@@ -53,15 +53,15 @@ The executable is the only application process supplied by this project. It runs
 
 ```mermaid
 C4Container
-    title Container Diagram - github-scaler
+    title Container Diagram - runnerfoundry
 
     Person(operator, "Operator", "Runs the executable and supplies configuration")
     System_Ext(github, "GitHub Actions", "Repository, runner scale-set, message, acquisition, and JIT APIs")
     System_Ext(docker, "Docker Engine", "Ephemeral container execution")
     System_Ext(libvirt, "libvirt", "Ephemeral virtual-machine execution")
 
-    System_Boundary(scaler_system, "github-scaler") {
-        Container(executable, "github-scaler executable", "Go", "Runs the daemon or PostgreSQL migration commands")
+    System_Boundary(scaler_system, "runnerfoundry") {
+        Container(executable, "runnerfoundry executable", "Go", "Runs the daemon or PostgreSQL migration commands")
         ContainerDb(sqlite, "Standalone state", "SQLite", "Exclusively owned durable FIFO demand queue")
         ContainerDb(postgres, "Cluster state", "PostgreSQL schema", "Shared nodes, contributions, demand, assignments, compatibility metadata, and advisory locks")
     }
@@ -114,8 +114,8 @@ The daemon package is the composition root. It connects configuration and creden
 C4Component
     title Component Diagram - Shared Daemon Composition
 
-    Container_Boundary(process, "github-scaler executable") {
-        Component(cli, "Command dispatcher", "cmd/github-scaler", "Routes daemon and migration commands and owns process signals")
+    Container_Boundary(process, "runnerfoundry executable") {
+        Component(cli, "Command dispatcher", "cmd/runnerfoundry", "Routes daemon and migration commands and owns process signals")
         Component(config, "Configuration loader", "internal/config and internal/postgresconfig", "Strictly decodes, defaults, validates, and resolves configured state values")
         Component(composition, "Daemon composition", "internal/daemon", "Selects a runtime mode and wires production dependencies")
         Component(discovery, "GitHub App discovery", "internal/githubapp", "Lists App installations and installation repositories")
@@ -270,7 +270,7 @@ C4Deployment
     title Deployment Diagram - Standalone Mode
 
     Deployment_Node(host, "Provider host", "Linux, macOS, or Windows") {
-        Container(scaler, "github-scaler", "Go executable", "Runs discovery, scheduling, and provider reconciliation")
+        Container(scaler, "runnerfoundry", "Go executable", "Runs discovery, scheduling, and provider reconciliation")
         ContainerDb(sqlite, "State database", "SQLite file", "Durable FIFO demand and acquired markers")
         Deployment_Node(runtime, "Execution runtime", "Docker Engine or libvirt") {
             Container(runners, "Ephemeral runners", "Containers or virtual machines", "Execute GitHub Actions jobs")
@@ -508,19 +508,19 @@ C4Deployment
     title Deployment Diagram - Clustered Mode
 
     Deployment_Node(host_a, "Provider host A", "Operating-system host") {
-        Container(scaler_a, "github-scaler node A", "Go executable", "Publishes capacity, contends for leadership, and executes local assignments")
+        Container(scaler_a, "runnerfoundry node A", "Go executable", "Publishes capacity, contends for leadership, and executes local assignments")
         Deployment_Node(runtime_a, "Local provider A", "Docker Engine or libvirt") {
             Container(runners_a, "Ephemeral runners A", "Containers or virtual machines", "Execute assignments owned by host A")
         }
     }
     Deployment_Node(host_b, "Provider host B", "Operating-system host") {
-        Container(scaler_b, "github-scaler node B", "Go executable", "Publishes capacity, contends for leadership, and executes local assignments")
+        Container(scaler_b, "runnerfoundry node B", "Go executable", "Publishes capacity, contends for leadership, and executes local assignments")
         Deployment_Node(runtime_b, "Local provider B", "Docker Engine or libvirt") {
             Container(runners_b, "Ephemeral runners B", "Containers or virtual machines", "Execute assignments owned by host B")
         }
     }
     Deployment_Node(database, "PostgreSQL service", "Session-affine PostgreSQL") {
-        ContainerDb(state, "github-scaler schema", "PostgreSQL", "Shared nodes, contributions, demand, assignments, and locks")
+        ContainerDb(state, "runnerfoundry schema", "PostgreSQL", "Shared nodes, contributions, demand, assignments, and locks")
     }
     System_Ext(github, "GitHub Actions", "Scale-set control plane")
 

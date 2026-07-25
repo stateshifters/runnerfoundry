@@ -33,7 +33,7 @@ func TestParseConfigPathWritesHelp(t *testing.T) {
 	if _, err := parseConfigPath([]string{"--help"}, &output); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("help error = %v", err)
 	}
-	if !strings.Contains(output.String(), "Usage of github-scaler") || !strings.Contains(output.String(), "-config") {
+	if !strings.Contains(output.String(), "Usage of runnerfoundry") || !strings.Contains(output.String(), "-config") {
 		t.Fatalf("help output = %q", output.String())
 	}
 }
@@ -60,7 +60,7 @@ func TestMigrationHelpIsVisible(t *testing.T) {
 		io.Discard, &output, nil, nil); err == nil {
 		t.Fatal("expected help request")
 	}
-	if !strings.Contains(output.String(), "Usage of github-scaler migrate status") ||
+	if !strings.Contains(output.String(), "Usage of runnerfoundry migrate status") ||
 		!strings.Contains(output.String(), "-config") {
 		t.Fatalf("help output = %q", output.String())
 	}

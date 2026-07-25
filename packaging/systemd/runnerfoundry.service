@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=notify-reload
 NotifyAccess=main
-User=github-scaler
-Group=github-scaler
-ExecStart=/usr/bin/github-scaler --config /etc/github-scaler/config.yaml
+User=runnerfoundry
+Group=runnerfoundry
+ExecStart=/usr/bin/runnerfoundry --config /etc/runnerfoundry/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
