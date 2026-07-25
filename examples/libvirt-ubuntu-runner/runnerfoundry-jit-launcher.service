@@ -1,0 +1,12 @@
+[Unit]
+Description=Start one RunnerFoundry JIT runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/runnerfoundry-jit-launcher
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

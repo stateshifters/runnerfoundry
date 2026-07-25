@@ -1,0 +1,33 @@
+<domain type="kvm">
+  <name>runnerfoundry-windows-template</name>
+  <memory unit="MiB">4096</memory>
+  <vcpu placement="static">2</vcpu>
+  <os firmware="efi">
+    <type arch="x86_64" machine="q35">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <clock offset="localtime"/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>destroy</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="/var/lib/runnerfoundry/images/runnerfoundry-windows.qcow2"/>
+      <target dev="vda" bus="virtio"/>
+      <transient shareBacking="yes"/>
+    </disk>
+    <interface type="network">
+      <source network="default"/>
+      <model type="virtio"/>
+    </interface>
+    <video>
+      <model type="vga"/>
+    </video>
+    <console type="pty"/>
+  </devices>
+</domain>
