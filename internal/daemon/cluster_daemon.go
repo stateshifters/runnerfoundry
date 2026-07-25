@@ -94,9 +94,17 @@ type clusterSchedulingState interface {
 type clusterAssignmentState interface {
 	clusterDemandState
 	clusterSchedulingState
+	clusterAssignmentExecutionState
+	clusterLibvirtLifecycleState
+}
+
+type clusterAssignmentExecutionState interface {
 	ClaimForStart(ctx context.Context, nodeID cluster.NodeID) (*cluster.Assignment, error)
 	Starting(ctx context.Context, nodeID cluster.NodeID) ([]cluster.Assignment, error)
 	ConfirmRunning(ctx context.Context, assignmentID cluster.AssignmentID, nodeID cluster.NodeID) error
+}
+
+type clusterLibvirtLifecycleState interface {
 	RegisterLibvirtRunner(ctx context.Context, assignmentID cluster.AssignmentID, runner cluster.LibvirtRunnerLifecycle) error
 	PendingLibvirtReaps(ctx context.Context, nodeID cluster.NodeID) ([]cluster.LibvirtRunnerLifecycle, error)
 	ConfirmLibvirtReaped(ctx context.Context, runner cluster.LibvirtRunnerLifecycle) error

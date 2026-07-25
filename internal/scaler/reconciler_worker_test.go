@@ -192,6 +192,17 @@ func TestReconcilerRegistrationFailureRemovesJITAndDoesNotStart(t *testing.T) {
 	}
 }
 
+func TestReconcilerRegistrationAndJITCleanupFailuresAreBothReported(t *testing.T) {
+	jitter := &recordingJITGenerator{removeErr: errors.New("remove failed")}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", MaxRunners: 1, Provider: &recordingProvider{}, JITConfig: jitter,
+		RegisterRunner: func(context.Context, string, int64) error { return errors.New("register failed") },
+	}}
+	if err := reconciler.StartNamed(context.Background(), 42); err == nil || !strings.Contains(err.Error(), "remove github runner") {
+		t.Fatalf("registration error = %v", err)
+	}
+}
+
 type orderedStartProvider struct{ events *[]string }
 
 func (*orderedStartProvider) List(context.Context, string) ([]RunnerInstance, error) { return nil, nil }

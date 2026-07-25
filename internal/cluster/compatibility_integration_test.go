@@ -4,8 +4,11 @@ package cluster
 
 import (
 	"context"
+	"io/fs"
 	"testing"
 	"testing/fstest"
+
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
 func TestPostgreSQLStartupNeverDowngradesANewerCompatibleSchema(t *testing.T) {
@@ -27,9 +30,14 @@ func TestPostgreSQLStartupRejectsIncompatibleNewerSchemaWithoutDowngrade(t *test
 
 func olderBinaryAgainstFutureSchema(t *testing.T) (*Store, string) {
 	t.Helper()
-	newerStore, dsn := postgreSQLTestStore(t)
+	dsn := postgreSQLTestDSN(t)
+	newerStore := NewStore(postgresconfig.Settings{DSN: dsn, Role: "postgres"})
+	initialMigration, err := fs.ReadFile(embeddedMigrations, "migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	newerStore.migrationFiles = fstest.MapFS{
-		"migrations/001_initial.sql": {Data: []byte("SELECT 1;\n---- create above / drop below ----\nSELECT 1;")},
+		"migrations/001_initial.sql": {Data: initialMigration},
 		"migrations/002_future.sql": {Data: []byte(`
 CREATE TABLE future_schema_marker (value integer NOT NULL);
 UPDATE scaler_schema_compatibility SET oldest_binary_schema_generation = 1 WHERE singleton;
@@ -42,7 +50,7 @@ DROP TABLE future_schema_marker;
 	}
 	olderStore := NewStore(newerStore.settings)
 	olderStore.migrationFiles = fstest.MapFS{
-		"migrations/001_initial.sql": {Data: []byte("SELECT 1;\n---- create above / drop below ----\nSELECT 1;")},
+		"migrations/001_initial.sql": {Data: initialMigration},
 	}
 	return olderStore, dsn
 }

@@ -248,7 +248,9 @@ type fakeClusterState struct {
 	removedDemand            []removedClusterDemand
 	registeredLibvirtRunners []cluster.LibvirtRunnerLifecycle
 	pendingLibvirtReaps      []cluster.LibvirtRunnerLifecycle
+	pendingLibvirtReapsErr   error
 	confirmedLibvirtReaps    []cluster.LibvirtRunnerLifecycle
+	confirmLibvirtReapErr    error
 	assignments              []*cluster.Assignment
 	pendingAssignments       []cluster.Assignment
 	readyAssignments         []*cluster.Assignment
@@ -413,12 +415,12 @@ func (state *fakeClusterState) RegisterLibvirtRunner(
 }
 
 func (state *fakeClusterState) PendingLibvirtReaps(context.Context, cluster.NodeID) ([]cluster.LibvirtRunnerLifecycle, error) {
-	return append([]cluster.LibvirtRunnerLifecycle(nil), state.pendingLibvirtReaps...), nil
+	return append([]cluster.LibvirtRunnerLifecycle(nil), state.pendingLibvirtReaps...), state.pendingLibvirtReapsErr
 }
 
 func (state *fakeClusterState) ConfirmLibvirtReaped(_ context.Context, runner cluster.LibvirtRunnerLifecycle) error {
 	state.confirmedLibvirtReaps = append(state.confirmedLibvirtReaps, runner)
-	return nil
+	return state.confirmLibvirtReapErr
 }
 
 func (state *fakeClusterState) CompleteAssignment(

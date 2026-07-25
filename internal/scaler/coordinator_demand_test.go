@@ -166,8 +166,38 @@ func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
 }
 
 func TestCoordinatorCountsPendingLibvirtReapAndFencesItsRequest(t *testing.T) {
+	fixture := coordinatorWithPendingLibvirtReap(t, 1)
+	applyCoordinatorDemand(t, fixture.coordinator, []JobDemand{
+		{Repository: "repo", RequestID: 42, QueueTime: time.Now()},
+		{Repository: "repo", RequestID: 43, QueueTime: time.Now().Add(time.Second)},
+	}, nil)
+	scheduleCoordinator(t, fixture.coordinator)
+	if len(*fixture.worker.startOrder) != 0 || len(fixture.worker.acquired) != 0 {
+		t.Fatalf("pending reap admitted demand: starts=%#v acquired=%#v", *fixture.worker.startOrder, fixture.worker.acquired)
+	}
+	if err := fixture.store.ConfirmLibvirtReaped(context.Background(), fixture.runner); err != nil {
+		t.Fatal(err)
+	}
+	scheduleCoordinator(t, fixture.coordinator)
+	if len(fixture.worker.acquired) != 1 || fixture.worker.acquired[0] != 42 {
+		t.Fatalf("confirmed reap did not release fenced request first: %#v", fixture.worker.acquired)
+	}
+}
+
+type pendingLibvirtReapFixture struct {
+	coordinator *Coordinator
+	store       *MemoryDemandStore
+	worker      *recordingWorker
+	runner      LibvirtRunnerLifecycle
+}
+
+func coordinatorWithPendingLibvirtReap(
+	t *testing.T,
+	maxRunners int,
+) pendingLibvirtReapFixture {
+	t.Helper()
 	store := createMemoryDemandStore()
-	coordinator := NewDurableCoordinator("linux", 1, store)
+	coordinator := NewDurableCoordinator("linux", maxRunners, store)
 	startOrder := []string{}
 	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
 	coordinator.AddRepository("repo", worker)
@@ -175,30 +205,16 @@ func TestCoordinatorCountsPendingLibvirtReapAndFencesItsRequest(t *testing.T) {
 	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: runner.RunnerName,
-	}); err != nil {
+	if err := store.CompleteJob(context.Background(), JobCompletion(runner)); err != nil {
 		t.Fatal(err)
 	}
-	applyCoordinatorDemand(t, coordinator, []JobDemand{
-		{Repository: "repo", RequestID: 42, QueueTime: time.Now()},
-		{Repository: "repo", RequestID: 43, QueueTime: time.Now().Add(time.Second)},
-	}, nil)
+	return pendingLibvirtReapFixture{coordinator: coordinator, store: store, worker: worker, runner: runner}
+}
 
+func scheduleCoordinator(t *testing.T, coordinator *Coordinator) {
+	t.Helper()
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	if len(startOrder) != 0 || len(worker.acquired) != 0 {
-		t.Fatalf("pending reap admitted demand: starts=%#v acquired=%#v", startOrder, worker.acquired)
-	}
-	if err := store.ConfirmLibvirtReaped(context.Background(), runner); err != nil {
-		t.Fatal(err)
-	}
-	if err := coordinator.Schedule(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(worker.acquired) != 1 || worker.acquired[0] != 42 {
-		t.Fatalf("confirmed reap did not release fenced request first: %#v", worker.acquired)
 	}
 }
 

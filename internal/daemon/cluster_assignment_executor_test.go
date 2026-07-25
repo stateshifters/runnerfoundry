@@ -130,15 +130,64 @@ func TestClusteredExecutorRetainsReapWhenLocalLibvirtConfigurationIsMissing(t *t
 type clusterReapingProvider struct {
 	lists     [][]scaler.RunnerInstance
 	destroyed int
+	listErr   error
 }
 
 func (provider *clusterReapingProvider) List(context.Context, string) ([]scaler.RunnerInstance, error) {
+	if provider.listErr != nil {
+		return nil, provider.listErr
+	}
 	if len(provider.lists) == 0 {
 		return nil, nil
 	}
 	instances := provider.lists[0]
 	provider.lists = provider.lists[1:]
 	return instances, nil
+}
+
+func TestClusteredExecutorRetainsReapsOnBoundaryFailures(t *testing.T) {
+	runClusterReapBoundaryFailure(t, "load", func(_ *clusteredDaemon, state *fakeClusterState) {
+		state.pendingLibvirtReapsErr = errors.New("load failed")
+	})
+	runClusterReapBoundaryFailure(t, "build", func(daemon *clusteredDaemon, _ *fakeClusterState) {
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			return scaler.Reconciler{}, errors.New("build failed")
+		}
+	})
+	runClusterReapBoundaryFailure(t, "reap", func(daemon *clusteredDaemon, _ *fakeClusterState) {
+		daemon.buildReconciler = failingClusterReaperBuilder
+	})
+	runClusterReapBoundaryFailure(t, "confirm", func(daemon *clusteredDaemon, state *fakeClusterState) {
+		state.confirmLibvirtReapErr = errors.New("confirm failed")
+		daemon.buildReconciler = absentClusterReaperBuilder
+	})
+}
+
+func runClusterReapBoundaryFailure(
+	t *testing.T,
+	name string,
+	configure func(*clusteredDaemon, *fakeClusterState),
+) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		runner := cluster.LibvirtRunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2"}
+		state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
+		daemon := clusteredDaemonForTest(state)
+		configured := clusteredConfig(t)
+		configured.ScaleSets[0].Docker = nil
+		configured.ScaleSets[0].Libvirt = &config.LibvirtConfig{}
+		daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+		configure(daemon, state)
+		daemon.executeAssignments(context.Background())
+	})
+}
+
+func failingClusterReaperBuilder(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{listErr: errors.New("list failed")}}}, nil
+}
+
+func absentClusterReaperBuilder(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{}}}, nil
 }
 
 func (*clusterReapingProvider) Start(context.Context, scaler.RunnerStartRequest) error { return nil }

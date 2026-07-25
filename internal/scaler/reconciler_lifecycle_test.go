@@ -175,6 +175,14 @@ func TestReapRunnerConfirmsAlreadyAbsentWithoutDestroy(t *testing.T) {
 	}
 }
 
+func TestReapRunnerRejectsProviderWithoutTerminalReaping(t *testing.T) {
+	reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: &recordingProvider{}}}).
+		ReapRunner(context.Background(), "set-42")
+	if err == nil || reaped {
+		t.Fatalf("reaped=%t error=%v", reaped, err)
+	}
+}
+
 func TestReapRunnerRetainsObligationAfterDestroyOrVerificationFailure(t *testing.T) {
 	instance := RunnerInstance{ID: "domain-1", RunnerName: "set-42", State: RunnerStateUnknown}
 	tests := map[string]*failingTerminalReapingProvider{

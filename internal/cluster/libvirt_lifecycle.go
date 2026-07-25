@@ -17,6 +17,29 @@ func (store *Store) RegisterLibvirtRunner(
 		return err
 	}
 	defer finishConnection(ctx, connection, &resultErr)
+	inserted, err := insertLibvirtRunnerRegistration(ctx, connection, assignmentID, runner)
+	if err != nil {
+		return err
+	}
+	if inserted {
+		return nil
+	}
+	matches, err := registeredLibvirtRunnerMatches(ctx, connection, runner)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		return &AssignmentTransitionError{AssignmentID: assignmentID, Expected: AssignmentStarting}
+	}
+	return nil
+}
+
+func insertLibvirtRunnerRegistration(
+	ctx context.Context,
+	connection *databaseConnection,
+	assignmentID AssignmentID,
+	runner LibvirtRunnerLifecycle,
+) (bool, error) {
 	commandTag, err := connection.Exec(ctx, `
 		INSERT INTO scaler_libvirt_runner_lifecycle
 		    (node_id, scale_set, repository, request_id, runner_name, reap_requested)
@@ -27,23 +50,25 @@ func (store *Store) RegisterLibvirtRunner(
 		ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`,
 		assignmentID, runner.NodeID, runner.RunnerName)
 	if err != nil {
-		return fmt.Errorf("register clustered libvirt runner: %w", err)
+		return false, fmt.Errorf("register clustered libvirt runner: %w", err)
 	}
-	if commandTag.RowsAffected() == 1 {
-		return nil
-	}
+	return commandTag.RowsAffected() == 1, nil
+}
+
+func registeredLibvirtRunnerMatches(
+	ctx context.Context,
+	connection *databaseConnection,
+	runner LibvirtRunnerLifecycle,
+) (bool, error) {
 	var exists bool
-	if err = connection.QueryRow(ctx, `SELECT EXISTS (
+	if err := connection.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM scaler_libvirt_runner_lifecycle
 		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND request_id = $4 AND runner_name = $5
 		  AND NOT reap_requested
 	)`, runner.NodeID, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName).Scan(&exists); err != nil {
-		return fmt.Errorf("verify clustered libvirt runner registration: %w", err)
+		return false, fmt.Errorf("verify clustered libvirt runner registration: %w", err)
 	}
-	if !exists {
-		return &AssignmentTransitionError{AssignmentID: assignmentID, Expected: AssignmentStarting}
-	}
-	return nil
+	return exists, nil
 }
 
 func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (resultErr error) {

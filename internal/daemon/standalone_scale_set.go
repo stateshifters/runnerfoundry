@@ -113,7 +113,24 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 }
 
 func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) <-chan struct{} {
-	poller := scalesetpoller.Poller{
+	poller := newCoordinatedPoller(lifecycleConfig)
+	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
+		reapPendingLibvirtRunners(ctx, lifecycleConfig)
+	}
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "started",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
+	)
+	pollerDone := startCoordinatedWorkers(ctx, lifecycleConfig, &poller)
+	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
+		slog.String("repository", lifecycleConfig.RepositoryURL),
+		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
+	)
+	return pollerDone
+}
+
+func newCoordinatedPoller(lifecycleConfig coordinatedLifecycleConfig) scalesetpoller.Poller {
+	return scalesetpoller.Poller{
 		Client: lifecycleConfig.MessageClient,
 		Handler: coordinatedScaleSetHandler{
 			Coordinator: lifecycleConfig.Coordinator,
@@ -124,20 +141,20 @@ func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLife
 		},
 		MaxCapacity: lifecycleConfig.ScaleSetConfig.MaxRunners,
 	}
+}
+
+func startCoordinatedWorkers(
+	ctx context.Context,
+	lifecycleConfig coordinatedLifecycleConfig,
+	poller *scalesetpoller.Poller,
+) <-chan struct{} {
 	pollerDone := make(chan struct{})
-	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
-		reapPendingLibvirtRunners(ctx, lifecycleConfig)
-	}
-	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "started",
-		slog.String("repository", lifecycleConfig.RepositoryURL),
-		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
-	)
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
 		pollUntilShutdown(
-			ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, &poller,
+			ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, poller,
 			pollRetryAfter(lifecycleConfig.RetryDelay),
 		)
 	}()
@@ -154,10 +171,6 @@ func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLife
 		workers.Wait()
 		close(pollerDone)
 	}()
-	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
-		slog.String("repository", lifecycleConfig.RepositoryURL),
-		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
-	)
 	return pollerDone
 }
 

@@ -23,6 +23,13 @@ func TestPostgreSQLMigrationLifecycleIsReversible(t *testing.T) {
 	assertPostgreSQLDomainSchemaExists(t, dsn)
 }
 
+func TestPostgreSQLMigrationDownAtCurrentVersionIsNoOp(t *testing.T) {
+	store, _ := postgreSQLTestStore(t)
+	if err := store.MigrateDown(context.Background(), 2, time.Now(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPostgreSQLRollbackRejectsLiveNode(t *testing.T) {
 	store, _ := postgreSQLTestStore(t)
 	now := time.Now()

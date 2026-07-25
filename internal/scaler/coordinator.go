@@ -61,7 +61,10 @@ func (coordinator *Coordinator) RegisterLibvirtRunner(ctx context.Context, runne
 		return errors.New("demand store does not support libvirt runner lifecycle")
 	}
 	runner.ScaleSet = coordinator.scaleSet
-	return store.RegisterLibvirtRunner(ctx, runner)
+	if err := store.RegisterLibvirtRunner(ctx, runner); err != nil {
+		return fmt.Errorf("register libvirt runner: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) CompleteJob(ctx context.Context, completion JobCompletion) error {
@@ -70,7 +73,10 @@ func (coordinator *Coordinator) CompleteJob(ctx context.Context, completion JobC
 		return errors.New("demand store does not support libvirt runner lifecycle")
 	}
 	completion.ScaleSet = coordinator.scaleSet
-	return store.CompleteJob(ctx, completion)
+	if err := store.CompleteJob(ctx, completion); err != nil {
+		return fmt.Errorf("complete libvirt job: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) PendingLibvirtReaps(
@@ -81,7 +87,11 @@ func (coordinator *Coordinator) PendingLibvirtReaps(
 	if !supported {
 		return nil, errors.New("demand store does not support libvirt runner lifecycle")
 	}
-	return store.PendingLibvirtReaps(ctx, coordinator.scaleSet, repository)
+	pending, err := store.PendingLibvirtReaps(ctx, coordinator.scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("load pending libvirt reaps: %w", err)
+	}
+	return pending, nil
 }
 
 func (coordinator *Coordinator) ConfirmLibvirtReaped(ctx context.Context, runner LibvirtRunnerLifecycle) error {
@@ -89,7 +99,10 @@ func (coordinator *Coordinator) ConfirmLibvirtReaped(ctx context.Context, runner
 	if !supported {
 		return errors.New("demand store does not support libvirt runner lifecycle")
 	}
-	return store.ConfirmLibvirtReaped(ctx, runner)
+	if err := store.ConfirmLibvirtReaped(ctx, runner); err != nil {
+		return fmt.Errorf("confirm libvirt runner reaped: %w", err)
+	}
+	return nil
 }
 
 type AssignedReconciliation struct {
@@ -158,7 +171,7 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	pendingReaps, err := coordinator.pendingLibvirtReaps(ctx)
+	pendingReaps, err := coordinator.loadPendingLibvirtCapacity(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +192,7 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	return coordinator.reconcileRetainedAssigned(ctx, runningCount, repositoryRunningCounts)
 }
 
-func (coordinator *Coordinator) pendingLibvirtReaps(ctx context.Context) ([]LibvirtRunnerLifecycle, error) {
+func (coordinator *Coordinator) loadPendingLibvirtCapacity(ctx context.Context) ([]LibvirtRunnerLifecycle, error) {
 	store, supported := coordinator.store.(LibvirtLifecycleStore)
 	if !supported {
 		return nil, nil
@@ -420,10 +433,7 @@ func (store *MemoryDemandStore) RegisterLibvirtRunner(_ context.Context, runner 
 
 func (store *MemoryDemandStore) CompleteJob(_ context.Context, completion JobCompletion) error {
 	if completion.RunnerName != "" {
-		runner := LibvirtRunnerLifecycle{
-			ScaleSet: completion.ScaleSet, Repository: completion.Repository,
-			RequestID: completion.RequestID, RunnerName: completion.RunnerName,
-		}
+		runner := LibvirtRunnerLifecycle(completion)
 		store.libvirtRunners[runnerLifecycleKey(runner)] = memoryLibvirtLifecycle{runner: runner, reapRequested: true}
 	}
 	for key, lifecycle := range store.libvirtRunners {

@@ -243,13 +243,8 @@ func (reconciler Reconciler) startRunner(ctx context.Context, runnerName string,
 	if err != nil {
 		return fmt.Errorf("generate jit config for %q: %w", runnerName, err)
 	}
-	if reconciler.ScaleSet.RegisterRunner != nil {
-		if err = reconciler.ScaleSet.RegisterRunner(ctx, runnerName, requestID); err != nil {
-			if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner); removeErr != nil {
-				return fmt.Errorf("register runner lifecycle %q: %w; remove github runner: %w", runnerName, err, removeErr)
-			}
-			return fmt.Errorf("register runner lifecycle %q: %w", runnerName, err)
-		}
+	if err = reconciler.registerRunnerLifecycle(ctx, runnerName, requestID, jitConfig.Runner); err != nil {
+		return err
 	}
 	if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
 		ScaleSetName: reconciler.ScaleSet.Name,
@@ -260,6 +255,24 @@ func (reconciler Reconciler) startRunner(ctx context.Context, runnerName string,
 			return fmt.Errorf("start runner %q: %w; remove github runner: %w", runnerName, err, removeErr)
 		}
 		return fmt.Errorf("start runner %q: %w", runnerName, err)
+	}
+	return nil
+}
+
+func (reconciler Reconciler) registerRunnerLifecycle(
+	ctx context.Context,
+	runnerName string,
+	requestID int64,
+	githubRunner JITRunner,
+) error {
+	if reconciler.ScaleSet.RegisterRunner == nil {
+		return nil
+	}
+	if err := reconciler.ScaleSet.RegisterRunner(ctx, runnerName, requestID); err != nil {
+		if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, githubRunner); removeErr != nil {
+			return fmt.Errorf("register runner lifecycle %q: %w; remove github runner: %w", runnerName, err, removeErr)
+		}
+		return fmt.Errorf("register runner lifecycle %q: %w", runnerName, err)
 	}
 	return nil
 }

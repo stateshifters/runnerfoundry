@@ -181,6 +181,13 @@ func TestDestroyTerminalReportsCommandFailure(t *testing.T) {
 	}
 }
 
+func TestDestroyTerminalAcceptsAlreadyInactiveDomain(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}}
+	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateCompleted}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{

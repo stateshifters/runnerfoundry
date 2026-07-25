@@ -1,0 +1,91 @@
+name: Verify Windows Packer example
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - examples/libvirt-windows-runner/**
+      - .github/workflows/packer-windows-example.yml
+  pull_request:
+    paths:
+      - examples/libvirt-windows-runner/**
+      - .github/workflows/packer-windows-example.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: meza-ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: examples/libvirt-windows-runner
+    env:
+      WINDOWS_ISO_URL: https://software-static.download.prss.microsoft.com/dbazure/998969d5-f34g-4e03-ac9d-1f9786c66749/26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
+      WINDOWS_ISO_SHA256: 7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51
+      VIRTIO_ISO_URL: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/virtio-win-0.1.285.iso
+      VIRTIO_ISO_SHA256: e14cf2b94492c3e925f0070ba7fdfedeb2048c91eea9c5a5afb30232a3976331
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install image-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            kmod \
+            ovmf \
+            qemu-system-x86 \
+            qemu-utils
+
+      - name: Prepare nested KVM
+        run: |
+          if grep -qw vmx /proc/cpuinfo; then
+            kvm_module=kvm_intel
+          elif grep -qw svm /proc/cpuinfo; then
+            kvm_module=kvm_amd
+          else
+            echo "::error::The runner does not expose Intel VMX or AMD SVM for nested KVM."
+            exit 1
+          fi
+
+          sudo modprobe "$kvm_module"
+          test -c /dev/kvm
+          sudo chown "$(id -un)" /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: 1.15.4
+
+      - name: Download and verify installation media
+        run: |
+          curl --fail --location --retry 3 --output windows-server-2025.iso "$WINDOWS_ISO_URL"
+          echo "$WINDOWS_ISO_SHA256  windows-server-2025.iso" | sha256sum --check
+          curl --fail --location --retry 3 --output virtio-win.iso "$VIRTIO_ISO_URL"
+          echo "$VIRTIO_ISO_SHA256  virtio-win.iso" | sha256sum --check
+
+      - name: Generate temporary WinRM password
+        run: |
+          password="Aa1!$(openssl rand -hex 20)"
+          echo "::add-mask::$password"
+          echo "PKR_VAR_winrm_password=$password" >> "$GITHUB_ENV"
+
+      - name: Initialize Packer
+        run: packer init .
+
+      - name: Check Packer formatting
+        run: packer fmt -check .
+
+      - name: Validate Packer template
+        run: packer validate .
+
+      - name: Build image
+        env:
+          PACKER_LOG: "1"
+        run: packer build .

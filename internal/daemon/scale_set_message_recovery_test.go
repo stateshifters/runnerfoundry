@@ -176,6 +176,17 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t 
 	}
 }
 
+func TestCoordinatedScaleSetHandlerReportsCompletedDemandRemovalFailure(t *testing.T) {
+	coordinator := scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
+	err := handler.completeJob(context.Background(), &upstream.JobCompleted{
+		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+	})
+	if err == nil || !strings.Contains(err.Error(), "remove completed GitHub demand") {
+		t.Fatalf("completion error = %v", err)
+	}
+}
+
 type failingDaemonDemandStore struct{}
 
 func (failingDaemonDemandStore) Apply(context.Context, string, []scaler.JobDemand, []scaler.DemandRemoval) error {

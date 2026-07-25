@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -229,7 +230,7 @@ func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t
 	message := &upstream.RunnerScaleSetMessage{
 		Statistics: &upstream.RunnerScaleSetStatistic{},
 		JobCompletedMessages: []*upstream.JobCompleted{{
-			Result:         "cancelled",
+			Result:         "canceled",
 			RunnerName:     "repo-linux-42",
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
 		}},
@@ -269,6 +270,20 @@ func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunner
 }
 
 func TestLibvirtCompletionIsNotAcknowledgedUntilCleanupIntentPersists(t *testing.T) {
+	harness := newLibvirtCompletionAcknowledgementHarness()
+	harness.expectPersistenceFailureWithoutAcknowledgement(t)
+	harness.retryWithDurablePersistence(t)
+	harness.expectPendingReapAcknowledged(t)
+}
+
+type libvirtCompletionAcknowledgementHarness struct {
+	store   *failingCompletionLifecycleStore
+	client  *ackRecordingMessageClient
+	poller  scalesetpoller.Poller
+	message *upstream.RunnerScaleSetMessage
+}
+
+func newLibvirtCompletionAcknowledgementHarness() libvirtCompletionAcknowledgementHarness {
 	store := &failingCompletionLifecycleStore{MemoryDemandStore: scaler.NewMemoryDemandStore(), fail: true}
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
@@ -283,21 +298,34 @@ func TestLibvirtCompletionIsNotAcknowledgedUntilCleanupIntentPersists(t *testing
 	}
 	client := &ackRecordingMessageClient{message: message}
 	poller := scalesetpoller.Poller{Client: client, Handler: handler}
+	return libvirtCompletionAcknowledgementHarness{store: store, client: client, poller: poller, message: message}
+}
 
-	if err := poller.PollOnce(context.Background()); err == nil {
+func (harness libvirtCompletionAcknowledgementHarness) expectPersistenceFailureWithoutAcknowledgement(t *testing.T) {
+	t.Helper()
+	if err := harness.poller.PollOnce(context.Background()); err == nil {
 		t.Fatal("expected durable completion failure")
 	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("failed persistence acknowledged messages %#v", client.acknowledged)
+	if len(harness.client.acknowledged) != 0 {
+		t.Fatalf("failed persistence acknowledged messages %#v", harness.client.acknowledged)
 	}
-	store.fail = false
-	client.message = message
-	if err := poller.PollOnce(context.Background()); err != nil {
+}
+
+func (harness libvirtCompletionAcknowledgementHarness) retryWithDurablePersistence(t *testing.T) {
+	t.Helper()
+	harness.store.fail = false
+	harness.client.message = harness.message
+	if err := harness.poller.PollOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
-	if err != nil || len(pending) != 1 || len(client.acknowledged) != 1 || client.acknowledged[0] != 7 {
-		t.Fatalf("pending=%#v acknowledged=%#v error=%v", pending, client.acknowledged, err)
+}
+
+func (harness libvirtCompletionAcknowledgementHarness) expectPendingReapAcknowledged(t *testing.T) {
+	t.Helper()
+	pending, err := harness.store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	acknowledged := harness.client.acknowledged
+	if err != nil || len(pending) != 1 || len(acknowledged) != 1 || acknowledged[0] != 7 {
+		t.Fatalf("pending=%#v acknowledged=%#v error=%v", pending, acknowledged, err)
 	}
 }
 
@@ -310,7 +338,10 @@ func (store *failingCompletionLifecycleStore) CompleteJob(ctx context.Context, c
 	if store.fail {
 		return errors.New("persistence failed")
 	}
-	return store.MemoryDemandStore.CompleteJob(ctx, completion)
+	if err := store.MemoryDemandStore.CompleteJob(ctx, completion); err != nil {
+		return fmt.Errorf("complete in-memory job: %w", err)
+	}
+	return nil
 }
 
 type ackRecordingMessageClient struct {

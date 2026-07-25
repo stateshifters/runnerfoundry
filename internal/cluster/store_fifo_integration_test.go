@@ -126,6 +126,12 @@ func TestPostgreSQLLibvirtReapRetainsCapacityUntilConfirmed(t *testing.T) {
 	}
 	fixture.publish(t, claimed.NodeID, NodeHealthy,
 		Contribution{ScaleSet: claimed.ScaleSet, RunnerGroup: "Default", MaxRunners: 1, Healthy: true})
+	if err = fixture.store.Enqueue(context.Background(), Demand{
+		ScaleSet: claimed.ScaleSet, Repository: claimed.Repository, RequestID: 2,
+		QueueTime: fixture.now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err = fixture.store.ConfirmLibvirtReaped(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
