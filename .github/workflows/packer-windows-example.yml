@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     runs-on: meza-ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 640
     defaults:
       run:
         working-directory: examples/libvirt-windows-runner
