@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
+Start-Sleep -Seconds 5
+
 $unattendedFiles = @(
     'C:\Autounattend.xml',
     'C:\Windows\Panther\Autounattend.xml',
@@ -20,5 +22,6 @@ Set-Service -Name WinRM -StartupType Disabled
 & net.exe user packer /delete | Out-Null
 Disable-LocalUser -Name Administrator
 
+& schtasks.exe /Delete /TN RunnerFoundrySeal /F | Out-Null
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
-& shutdown.exe /s /t 0 /f
+& shutdown.exe /s /t 10 /f

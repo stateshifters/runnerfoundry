@@ -37,7 +37,7 @@
       </DiskConfiguration>
       <ImageInstall>
         <OSImage>
-          <InstallFrom><MetaData wcm:action="add" wcm:keyValue="1"><Key>/IMAGE/NAME</Key><Value>Windows Server 2025 SERVERSTANDARDCORE</Value></MetaData></InstallFrom>
+          <InstallFrom><MetaData wcm:action="add" wcm:keyValue="1"><Key>/IMAGE/NAME</Key><Value>Windows Server 2025 SERVERSTANDARD</Value></MetaData></InstallFrom>
           <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
         </OSImage>
       </ImageInstall>
@@ -47,9 +47,11 @@
   <settings pass="specialize">
     <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
       <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
+        <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
-          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -File A:\enable-winrm.ps1</Path>
+          <Description>Enable build-time WinRM</Description>
+          <Path>powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File A:\enable-winrm.ps1</Path>
+          <WillReboot>Never</WillReboot>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
