@@ -54,7 +54,7 @@ source "qemu" "windows" {
   net_device       = "virtio-net"
   output_directory = local.output_directory
   shutdown_command = "cmd.exe /c schtasks.exe /Create /TN RunnerFoundrySeal /SC ONSTART /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Windows/Temp/runnerfoundry-seal.ps1\" /RU SYSTEM /F && schtasks.exe /Run /TN RunnerFoundrySeal"
-  shutdown_timeout = "15m"
+  shutdown_timeout = "60m"
   vm_name          = "runnerfoundry-windows.qcow2"
 
   floppy_files = [
