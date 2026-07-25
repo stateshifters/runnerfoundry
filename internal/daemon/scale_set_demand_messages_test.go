@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/scaler"
+	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 func TestScaleSetHandlerReconcilesAssignedJobs(t *testing.T) {
@@ -212,4 +214,120 @@ func TestCoordinatedScaleSetHandlerRemovesRepeatedPositiveIdentityCompletionIdem
 	if len(worker.started) != 0 {
 		t.Fatalf("expected positive completion identity to remove demand, got %#v", worker.started)
 	}
+}
+
+func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t *testing.T) {
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
+	handler := coordinatedScaleSetHandler{
+		Coordinator: coordinator,
+		Repository:  "repo",
+		ScaleSet:    "linux",
+		ReapLibvirt: true,
+	}
+	message := &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{{
+			Result:         "cancelled",
+			RunnerName:     "repo-linux-42",
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+		}},
+	}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].RunnerName != "repo-linux-42" {
+		t.Fatalf("pending reaps = %#v", pending)
+	}
+}
+
+func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunnerName(t *testing.T) {
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
+	handler := coordinatedScaleSetHandler{
+		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux", ReapLibvirt: true,
+	}
+	message := &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "repo-linux-1"}},
+	}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	if err != nil || len(pending) != 1 || pending[0].RunnerName != "repo-linux-1" {
+		t.Fatalf("pending reaps = %#v, %v", pending, err)
+	}
+}
+
+func TestLibvirtCompletionIsNotAcknowledgedUntilCleanupIntentPersists(t *testing.T) {
+	store := &failingCompletionLifecycleStore{MemoryDemandStore: scaler.NewMemoryDemandStore(), fail: true}
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
+	handler := coordinatedScaleSetHandler{
+		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux", ReapLibvirt: true,
+	}
+	message := &upstream.RunnerScaleSetMessage{
+		MessageID: 7, Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{{
+			RunnerName: "linux-42", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+		}},
+	}
+	client := &ackRecordingMessageClient{message: message}
+	poller := scalesetpoller.Poller{Client: client, Handler: handler}
+
+	if err := poller.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected durable completion failure")
+	}
+	if len(client.acknowledged) != 0 {
+		t.Fatalf("failed persistence acknowledged messages %#v", client.acknowledged)
+	}
+	store.fail = false
+	client.message = message
+	if err := poller.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	if err != nil || len(pending) != 1 || len(client.acknowledged) != 1 || client.acknowledged[0] != 7 {
+		t.Fatalf("pending=%#v acknowledged=%#v error=%v", pending, client.acknowledged, err)
+	}
+}
+
+type failingCompletionLifecycleStore struct {
+	*scaler.MemoryDemandStore
+	fail bool
+}
+
+func (store *failingCompletionLifecycleStore) CompleteJob(ctx context.Context, completion scaler.JobCompletion) error {
+	if store.fail {
+		return errors.New("persistence failed")
+	}
+	return store.MemoryDemandStore.CompleteJob(ctx, completion)
+}
+
+type ackRecordingMessageClient struct {
+	message      *upstream.RunnerScaleSetMessage
+	acknowledged []int
+}
+
+func (client *ackRecordingMessageClient) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
+	message := client.message
+	client.message = nil
+	if message == nil {
+		return nil, scalesetpoller.ErrNoMessage
+	}
+	return message, nil
+}
+
+func (client *ackRecordingMessageClient) DeleteMessage(_ context.Context, messageID int) error {
+	client.acknowledged = append(client.acknowledged, messageID)
+	return nil
 }

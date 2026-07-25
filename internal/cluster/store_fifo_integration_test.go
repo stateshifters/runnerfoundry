@@ -72,6 +72,69 @@ func TestPostgreSQLCompletionReleasesCapacityForNextDemand(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLCompletionBeforeStartTerminatesAssignment(t *testing.T) {
+	fixture := newAssignmentTransitionFixture(t)
+	if err := fixture.store.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: fixture.assignment.ScaleSet, Repository: fixture.assignment.Repository,
+		RequestID: fixture.assignment.RequestID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := fixture.store.AssignOldest(context.Background(), fixture.assignment.ScaleSet, fixture.now, fixture.liveFor)
+	if err != nil || next.RequestID != 2 {
+		t.Fatalf("completion before start retained assignment: %#v, %v", next, err)
+	}
+	pending, err := fixture.store.PendingLibvirtReaps(context.Background(), fixture.assignment.NodeID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("completion without a created VM invented a reap: %#v, %v", pending, err)
+	}
+}
+
+func TestPostgreSQLLibvirtReapRetainsCapacityUntilConfirmed(t *testing.T) {
+	fixture := newAssignmentTransitionFixture(t)
+	claimed := fixture.claimForStart(t)
+	fixture.publish(t, claimed.NodeID, NodeHealthy,
+		Contribution{ScaleSet: claimed.ScaleSet, RunnerGroup: "Default", MaxRunners: 1, Healthy: true})
+	otherNode := NodeID("spock")
+	if claimed.NodeID == otherNode {
+		otherNode = "serenity"
+	}
+	fixture.publish(t, otherNode, NodeHealthy)
+	runner := LibvirtRunnerLifecycle{
+		NodeID: claimed.NodeID, ScaleSet: claimed.ScaleSet, Repository: claimed.Repository,
+		RequestID: claimed.RequestID, RunnerName: "repo-linux-1",
+	}
+	if err := fixture.store.RegisterLibvirtRunner(context.Background(), claimed.ID, runner); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: claimed.ScaleSet, Repository: claimed.Repository, RequestID: claimed.RequestID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if assignment, err := fixture.store.AssignOldest(context.Background(), claimed.ScaleSet, fixture.now, fixture.liveFor); !errors.Is(err, ErrNoAssignment) || assignment != nil {
+		t.Fatalf("pending reap released capacity: %#v, %v", assignment, err)
+	}
+	pending, err := fixture.store.PendingLibvirtReaps(context.Background(), claimed.NodeID)
+	if err != nil || len(pending) != 1 || pending[0].RunnerName != runner.RunnerName {
+		t.Fatalf("pending reaps = %#v, %v", pending, err)
+	}
+	fixture.publish(t, claimed.NodeID, NodeHealthy)
+	pending, err = fixture.store.PendingLibvirtReaps(context.Background(), claimed.NodeID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("withdrawn contribution lost pending reaps: %#v, %v", pending, err)
+	}
+	fixture.publish(t, claimed.NodeID, NodeHealthy,
+		Contribution{ScaleSet: claimed.ScaleSet, RunnerGroup: "Default", MaxRunners: 1, Healthy: true})
+	if err = fixture.store.ConfirmLibvirtReaped(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	next, err := fixture.store.AssignOldest(context.Background(), claimed.ScaleSet, fixture.now, fixture.liveFor)
+	if err != nil || next.RequestID != 2 {
+		t.Fatalf("confirmed reap did not release capacity: %#v, %v", next, err)
+	}
+}
+
 type assignmentTransitionFixture struct {
 	capacityTestCluster
 	assignment *Assignment

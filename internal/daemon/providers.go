@@ -258,6 +258,17 @@ func (adapter libvirtProviderAdapter) Destroy(ctx context.Context, instance scal
 	return nil
 }
 
+func (adapter libvirtProviderAdapter) DestroyTerminal(ctx context.Context, instance scaler.RunnerInstance) error {
+	if err := adapter.Provider.DestroyTerminal(ctx, libvirtprovider.RunnerInstance{
+		ID:         instance.ID,
+		RunnerName: instance.RunnerName,
+		State:      scalerLibvirtRunnerState(instance),
+	}); err != nil {
+		return fmt.Errorf("destroy terminal libvirt provider runner: %w", err)
+	}
+	return nil
+}
+
 func convertLibvirtInstances(instances []libvirtprovider.RunnerInstance) []scaler.RunnerInstance {
 	convertedInstances := make([]scaler.RunnerInstance, 0, len(instances))
 	for _, instance := range instances {

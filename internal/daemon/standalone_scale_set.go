@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	upstream "github.com/actions/scaleset"
@@ -88,6 +89,13 @@ type coordinatedLifecycleConfig struct {
 }
 
 func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) scaleSetLifecycle {
+	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
+		lifecycleConfig.Reconciler.ScaleSet.RegisterRunner = func(ctx context.Context, runnerName string, requestID int64) error {
+			return lifecycleConfig.Coordinator.RegisterLibvirtRunner(ctx, scaler.LibvirtRunnerLifecycle{
+				Repository: lifecycleConfig.RepositoryURL, RequestID: requestID, RunnerName: runnerName,
+			})
+		}
+	}
 	worker := coordinatedRepositoryWorker{
 		Reconciler:    lifecycleConfig.Reconciler,
 		MessageClient: lifecycleConfig.MessageClient,
@@ -112,26 +120,84 @@ func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLife
 			Repository:  lifecycleConfig.RepositoryURL,
 			Logger:      lifecycleConfig.Logger,
 			ScaleSet:    lifecycleConfig.ScaleSetConfig.Name,
+			ReapLibvirt: lifecycleConfig.ScaleSetConfig.Libvirt != nil,
 		},
 		MaxCapacity: lifecycleConfig.ScaleSetConfig.MaxRunners,
 	}
 	pollerDone := make(chan struct{})
+	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
+		reapPendingLibvirtRunners(ctx, lifecycleConfig)
+	}
 	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "started",
 		slog.String("repository", lifecycleConfig.RepositoryURL),
 		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
 	)
+	var workers sync.WaitGroup
+	workers.Add(1)
 	go func() {
-		defer close(pollerDone)
+		defer workers.Done()
 		pollUntilShutdown(
 			ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, &poller,
 			pollRetryAfter(lifecycleConfig.RetryDelay),
 		)
+	}()
+	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			runLibvirtReaper(ctx, lifecycleConfig, ticker.C)
+		}()
+	}
+	go func() {
+		workers.Wait()
+		close(pollerDone)
 	}()
 	logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "polling_start", "completed",
 		slog.String("repository", lifecycleConfig.RepositoryURL),
 		slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
 	)
 	return pollerDone
+}
+
+func runLibvirtReaper(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			reapPendingLibvirtRunners(ctx, lifecycleConfig)
+		}
+	}
+}
+
+func reapPendingLibvirtRunners(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) {
+	pending, err := lifecycleConfig.Coordinator.PendingLibvirtReaps(ctx, lifecycleConfig.RepositoryURL)
+	if err != nil {
+		logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap_load", err,
+			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
+		return
+	}
+	for _, runner := range pending {
+		reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
+		reaped, reapErr := lifecycleConfig.Reconciler.ReapRunner(reapCtx, runner.RunnerName)
+		cancelReap()
+		if reapErr != nil {
+			logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap", reapErr,
+				slog.String("repository", runner.Repository), slog.String("scaleSet", runner.ScaleSet),
+				slog.String("runner", runner.RunnerName))
+			continue
+		}
+		if !reaped {
+			continue
+		}
+		if confirmErr := lifecycleConfig.Coordinator.ConfirmLibvirtReaped(ctx, runner); confirmErr != nil {
+			logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap_confirm", confirmErr,
+				slog.String("repository", runner.Repository), slog.String("scaleSet", runner.ScaleSet),
+				slog.String("runner", runner.RunnerName))
+		}
+	}
 }
 
 func coordinatedScaleSetLifecycle(

@@ -149,7 +149,7 @@ func assertPostgreSQLDomainSchemaMissing(t *testing.T, dsn string) {
 }
 
 func postgreSQLDomainTables() []string {
-	return []string{"scaler_nodes", "scaler_contributions", "scaler_demand", "scaler_assignments", "scaler_schema_compatibility"}
+	return []string{"scaler_nodes", "scaler_contributions", "scaler_demand", "scaler_assignments", "scaler_libvirt_runner_lifecycle", "scaler_schema_compatibility"}
 }
 
 func postgreSQLTestStore(t *testing.T) (*Store, string) {

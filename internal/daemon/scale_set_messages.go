@@ -20,6 +20,7 @@ type coordinatedScaleSetHandler struct {
 	Repository  string
 	Logger      *slog.Logger
 	ScaleSet    string
+	ReapLibvirt bool
 }
 
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
@@ -32,6 +33,9 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	}
 	if applyErr := handler.Coordinator.Apply(ctx, observedDemand, removedDemand); applyErr != nil {
 		return fmt.Errorf("persist GitHub job demand: %w", applyErr)
+	}
+	if err = handler.completeJobs(ctx, message.JobCompletedMessages); err != nil {
+		return err
 	}
 	reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, message.Statistics.TotalAssignedJobs)
 	if err != nil {
@@ -55,9 +59,8 @@ func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.Runner
 	if err != nil {
 		return nil, nil, err
 	}
-	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobStartedMessages)+len(message.JobCompletedMessages))
+	removedDemand := make([]scaler.DemandRemoval, 0, len(message.JobStartedMessages))
 	removedDemand = handler.collectStartedDemand(message.JobStartedMessages, removedDemand)
-	removedDemand = handler.collectCompletedDemand(message.JobCompletedMessages, removedDemand)
 	return observedDemand, removedDemand, nil
 }
 
@@ -91,18 +94,25 @@ func (handler coordinatedScaleSetHandler) collectStartedDemand(
 	return removedDemand
 }
 
-func (handler coordinatedScaleSetHandler) collectCompletedDemand(
-	messages []*upstream.JobCompleted,
-	removedDemand []scaler.DemandRemoval,
-) []scaler.DemandRemoval {
+func (handler coordinatedScaleSetHandler) completeJobs(ctx context.Context, messages []*upstream.JobCompleted) error {
 	for _, completedJob := range messages {
-		if completedJob == nil || completedJob.RunnerRequestID <= 0 {
+		if completedJob == nil || (completedJob.RunnerRequestID <= 0 && (!handler.ReapLibvirt || completedJob.RunnerName == "")) {
 			continue
 		}
-		removedDemand = append(removedDemand, scaler.DemandRemoval{Repository: handler.Repository, RequestID: completedJob.RunnerRequestID})
+		if handler.ReapLibvirt {
+			if err := handler.Coordinator.CompleteJob(ctx, scaler.JobCompletion{
+				Repository: handler.Repository, RequestID: completedJob.RunnerRequestID, RunnerName: completedJob.RunnerName,
+			}); err != nil {
+				return fmt.Errorf("persist libvirt runner reap: %w", err)
+			}
+		} else if err := handler.Coordinator.Apply(ctx, nil, []scaler.DemandRemoval{{
+			Repository: handler.Repository, RequestID: completedJob.RunnerRequestID,
+		}}); err != nil {
+			return fmt.Errorf("remove completed GitHub demand: %w", err)
+		}
 		handler.logDemandRemoval("completed", completedJob.RunnerRequestID)
 	}
-	return removedDemand
+	return nil
 }
 
 func (handler coordinatedScaleSetHandler) logDemandRemoval(status string, requestID int64) {

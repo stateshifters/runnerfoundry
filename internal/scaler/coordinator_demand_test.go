@@ -165,6 +165,71 @@ func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCountsPendingLibvirtReapAndFencesItsRequest(t *testing.T) {
+	store := createMemoryDemandStore()
+	coordinator := NewDurableCoordinator("linux", 1, store)
+	startOrder := []string{}
+	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
+	coordinator.AddRepository("repo", worker)
+	runner := LibvirtRunnerLifecycle{ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
+	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: runner.RunnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyCoordinatorDemand(t, coordinator, []JobDemand{
+		{Repository: "repo", RequestID: 42, QueueTime: time.Now()},
+		{Repository: "repo", RequestID: 43, QueueTime: time.Now().Add(time.Second)},
+	}, nil)
+
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(startOrder) != 0 || len(worker.acquired) != 0 {
+		t.Fatalf("pending reap admitted demand: starts=%#v acquired=%#v", startOrder, worker.acquired)
+	}
+	if err := store.ConfirmLibvirtReaped(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.acquired) != 1 || worker.acquired[0] != 42 {
+		t.Fatalf("confirmed reap did not release fenced request first: %#v", worker.acquired)
+	}
+}
+
+func TestCoordinatorFencesRequeuedRequestWhileAdmittingAnotherIdentity(t *testing.T) {
+	store := createMemoryDemandStore()
+	coordinator := NewDurableCoordinator("linux", 2, store)
+	startOrder := []string{}
+	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
+	coordinator.AddRepository("repo", worker)
+	runner := LibvirtRunnerLifecycle{ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
+	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: runner.RunnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyCoordinatorDemand(t, coordinator, []JobDemand{
+		{Repository: "repo", RequestID: 42, QueueTime: time.Now()},
+		{Repository: "repo", RequestID: 43, QueueTime: time.Now().Add(time.Second)},
+	}, nil)
+
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.acquired) != 1 || worker.acquired[0] != 43 {
+		t.Fatalf("admitted request IDs = %#v, want only unfenced request 43", worker.acquired)
+	}
+}
+
 func TestCoordinatorReportsRecoveryFailure(t *testing.T) {
 	coordinator := NewCoordinator(1)
 	coordinator.AddRepository("repo", failingWorker{existsErr: errors.New("inspect failed")})
