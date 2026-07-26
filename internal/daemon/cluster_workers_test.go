@@ -246,6 +246,11 @@ type fakeClusterState struct {
 	statuses                 []cluster.ScaleSetStatus
 	demand                   []cluster.Demand
 	removedDemand            []removedClusterDemand
+	registeredLibvirtRunners []cluster.LibvirtRunnerLifecycle
+	pendingLibvirtReaps      []cluster.LibvirtRunnerLifecycle
+	pendingLibvirtReapsErr   error
+	confirmedLibvirtReaps    []cluster.LibvirtRunnerLifecycle
+	confirmLibvirtReapErr    error
 	assignments              []*cluster.Assignment
 	pendingAssignments       []cluster.Assignment
 	readyAssignments         []*cluster.Assignment
@@ -391,6 +396,31 @@ func (state *fakeClusterState) Starting(context.Context, cluster.NodeID) ([]clus
 func (state *fakeClusterState) CompleteDemand(_ context.Context, scaleSet string, repository string, requestID int64) error {
 	state.removedDemand = append(state.removedDemand, removedClusterDemand{scaleSet: scaleSet, repository: repository, requestID: requestID})
 	return state.removeErr
+}
+
+func (state *fakeClusterState) CompleteJob(_ context.Context, completion cluster.JobCompletion) error {
+	state.removedDemand = append(state.removedDemand, removedClusterDemand{
+		scaleSet: completion.ScaleSet, repository: completion.Repository, requestID: completion.RequestID,
+	})
+	return state.removeErr
+}
+
+func (state *fakeClusterState) RegisterLibvirtRunner(
+	_ context.Context,
+	_ cluster.AssignmentID,
+	runner cluster.LibvirtRunnerLifecycle,
+) error {
+	state.registeredLibvirtRunners = append(state.registeredLibvirtRunners, runner)
+	return nil
+}
+
+func (state *fakeClusterState) PendingLibvirtReaps(context.Context, cluster.NodeID) ([]cluster.LibvirtRunnerLifecycle, error) {
+	return append([]cluster.LibvirtRunnerLifecycle(nil), state.pendingLibvirtReaps...), state.pendingLibvirtReapsErr
+}
+
+func (state *fakeClusterState) ConfirmLibvirtReaped(_ context.Context, runner cluster.LibvirtRunnerLifecycle) error {
+	state.confirmedLibvirtReaps = append(state.confirmedLibvirtReaps, runner)
+	return state.confirmLibvirtReapErr
 }
 
 func (state *fakeClusterState) CompleteAssignment(

@@ -47,12 +47,10 @@ func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messa
 }
 
 func (handler clusterMessageHandler) removeStarted(ctx context.Context, messages []*upstream.JobStarted) error {
+	_ = ctx
 	for _, started := range messages {
 		if started == nil || started.RunnerRequestID <= 0 {
 			return errors.New("job started message requires a positive runner request ID")
-		}
-		if err := handler.store.CompleteDemand(ctx, handler.session.key.scaleSet, handler.session.key.repository, started.RunnerRequestID); err != nil {
-			return fmt.Errorf("remove started clustered demand: %w", err)
 		}
 	}
 	return nil
@@ -63,8 +61,11 @@ func (handler clusterMessageHandler) removeCompleted(ctx context.Context, messag
 		if completed == nil || completed.RunnerRequestID <= 0 {
 			return errors.New("job completed message requires a positive runner request ID")
 		}
-		if err := handler.store.CompleteDemand(ctx, handler.session.key.scaleSet, handler.session.key.repository, completed.RunnerRequestID); err != nil {
-			return fmt.Errorf("remove completed clustered demand: %w", err)
+		if err := handler.store.CompleteJob(ctx, cluster.JobCompletion{
+			ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
+			RequestID: completed.RunnerRequestID,
+		}); err != nil {
+			return fmt.Errorf("complete clustered job: %w", err)
 		}
 	}
 	return nil

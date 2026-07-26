@@ -157,6 +157,37 @@ func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
 	}
 }
 
+func TestDestroyTerminalForceStopsPausedOrSuspendedDomain(t *testing.T) {
+	for _, state := range []string{"paused", "pmsuspended"} {
+		t.Run(state, func(t *testing.T) {
+			commandRunner := &recordingCommandRunner{}
+			provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+			if err := provider.DestroyTerminal(context.Background(), RunnerInstance{
+				ID: "vm-set-1", RunnerName: "vm-set-1", State: libvirtState(state),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(commandRunner.commands) != 1 || commandRunner.commands[0].Args[2] != "destroy" {
+				t.Fatalf("commands = %#v", commandRunner.commands)
+			}
+		})
+	}
+}
+
+func TestDestroyTerminalReportsCommandFailure(t *testing.T) {
+	provider := Provider{CommandRunner: failingCommandRunner{}}
+	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
+		t.Fatal("expected terminal destroy failure")
+	}
+}
+
+func TestDestroyTerminalAcceptsAlreadyInactiveDomain(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}}
+	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateCompleted}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{

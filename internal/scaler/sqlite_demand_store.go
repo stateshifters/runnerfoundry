@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 2
+const currentStateSchemaVersion = 3
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -62,7 +62,13 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		version = 1
 	}
 	if version == 1 {
-		return store.removeLegacyZeroIdentityDemand(ctx)
+		if err := store.removeLegacyZeroIdentityDemand(ctx); err != nil {
+			return err
+		}
+		version = 2
+	}
+	if version == 2 {
+		return store.addLibvirtRunnerLifecycle(ctx)
 	}
 	return nil
 }
@@ -105,6 +111,25 @@ func (store *SQLiteDemandStore) removeLegacyZeroIdentityDemand(ctx context.Conte
 		}
 		if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
 			return fmt.Errorf("record legacy demand migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *SQLiteDemandStore) addLibvirtRunnerLifecycle(ctx context.Context) error {
+	return store.runMigration(ctx, "libvirt runner lifecycle migration", func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(ctx, `CREATE TABLE libvirt_runner_lifecycle (
+			scale_set TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			request_id INTEGER NOT NULL,
+			runner_name TEXT NOT NULL,
+			reap_requested INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY(scale_set, repository, runner_name)
+		)`); err != nil {
+			return fmt.Errorf("create libvirt runner lifecycle table: %w", err)
+		}
+		if _, err := transaction.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+			return fmt.Errorf("record libvirt runner lifecycle migration: %w", err)
 		}
 		return nil
 	})

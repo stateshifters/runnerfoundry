@@ -3,6 +3,7 @@ package scaler
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -154,6 +155,62 @@ func TestReconcilerDestroyActiveReportsProviderDestroyFailure(t *testing.T) {
 		t.Fatal("expected active destroy failure")
 	}
 }
+
+func TestReconcilerRegistersRunnerLifecycleBeforeProviderStart(t *testing.T) {
+	events := make([]string, 0, 2)
+	provider := &orderedStartProvider{events: &events}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", MaxRunners: 1, Provider: provider, JITConfig: &recordingJITGenerator{},
+		RegisterRunner: func(_ context.Context, runnerName string, _ int64) error {
+			events = append(events, "register:"+runnerName)
+			return nil
+		},
+	}}
+
+	if err := reconciler.StartNamed(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "register:set-42,start:set-42" {
+		t.Fatalf("events = %v", events)
+	}
+}
+
+func TestReconcilerRegistrationFailureRemovesJITAndDoesNotStart(t *testing.T) {
+	events := make([]string, 0)
+	provider := &orderedStartProvider{events: &events}
+	jit := &recordingJITGenerator{}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", MaxRunners: 1, Provider: provider, JITConfig: jit,
+		RegisterRunner: func(context.Context, string, int64) error { return errors.New("reserved") },
+	}}
+
+	if err := reconciler.StartNamed(context.Background(), 42); err == nil {
+		t.Fatal("expected lifecycle registration failure")
+	}
+	if len(events) != 0 || len(jit.removed) != 1 {
+		t.Fatalf("provider events=%#v removed JIT=%#v", events, jit.removed)
+	}
+}
+
+func TestReconcilerRegistrationAndJITCleanupFailuresAreBothReported(t *testing.T) {
+	jitter := &recordingJITGenerator{removeErr: errors.New("remove failed")}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", MaxRunners: 1, Provider: &recordingProvider{}, JITConfig: jitter,
+		RegisterRunner: func(context.Context, string, int64) error { return errors.New("register failed") },
+	}}
+	if err := reconciler.StartNamed(context.Background(), 42); err == nil || !strings.Contains(err.Error(), "remove github runner") {
+		t.Fatalf("registration error = %v", err)
+	}
+}
+
+type orderedStartProvider struct{ events *[]string }
+
+func (*orderedStartProvider) List(context.Context, string) ([]RunnerInstance, error) { return nil, nil }
+func (provider *orderedStartProvider) Start(_ context.Context, request RunnerStartRequest) error {
+	*provider.events = append(*provider.events, "start:"+request.RunnerName)
+	return nil
+}
+func (*orderedStartProvider) Destroy(context.Context, RunnerInstance) error { return nil }
 
 type recordingProvider struct {
 	instances []RunnerInstance

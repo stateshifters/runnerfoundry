@@ -5,7 +5,7 @@
 The same executable supports two runtime shapes:
 
 - Standalone mode coordinates one provider host and keeps its durable FIFO demand queue in an exclusively owned SQLite database.
-- Clustered mode combines capacity from multiple provider hosts. PostgreSQL holds shared declarations, health, demand, and assignments, while a session advisory lock selects the one host that manages GitHub-facing scale-set sessions.
+- Clustered mode combines capacity from multiple provider hosts. PostgreSQL holds shared declarations, health, demand, assignments, and node-owned libvirt cleanup obligations, while a session advisory lock selects the one host that manages GitHub-facing scale-set sessions.
 
 Both modes preserve identifiable job demand before acknowledging the GitHub message that delivered it. Neither mode can make GitHub, the state database, and the provider participate in one transaction. Stable request-derived runner names and explicit persisted states make partial operations recoverable without claiming exactly-once execution.
 
@@ -154,7 +154,7 @@ If validation, persistence, acquisition, scheduling, provider inspection, or pro
 
 Pollers issue the next receive immediately after a successful empty or handled response. A failed poll waits five seconds before retrying, and the third consecutive failure adds a sustained-degradation log entry. Cancellation interrupts both an active poll and its retry wait.
 
-Positive request identities and queue timestamps come from `JobAvailable` messages. `JobStarted` and terminal `JobCompleted` messages remove that demand. In standalone mode, identity-free assigned capacity is represented by GitHub's authoritative `TotalAssignedJobs` statistic rather than by a durable queue row.
+Positive request identities and queue timestamps come from `JobAvailable` messages. In standalone mode, `JobStarted` and terminal `JobCompleted` remove demand. In clustered mode, `JobStarted` retains demand and assignments; only `JobCompleted` makes them terminal. Identity-free assigned capacity is represented by GitHub's authoritative `TotalAssignedJobs` statistic in standalone mode rather than by a durable queue row.
 
 ### Scale-set ownership and pruning
 
@@ -174,7 +174,7 @@ Standalone mode has one process, one provider host, and one exclusively locked S
 C4Component
     title Component Diagram - Standalone Mode
 
-    ContainerDb(sqlite, "Standalone state", "SQLite", "Durable demand ordered by queue time and observation order")
+    ContainerDb(sqlite, "Standalone state", "SQLite", "Durable demand and libvirt cleanup obligations")
     System_Ext(github, "GitHub Actions", "Scale-set messages, acquisition, and JIT configuration")
     System_Ext(provider, "Docker Engine or libvirt", "Provider-visible ephemeral runners")
 
@@ -232,7 +232,7 @@ sequenceDiagram
 
     GH->>P: JobAvailable message and statistics
     P->>H: Handle message
-    H->>C: Apply observed and completed demand
+    H->>C: Apply observed and started demand
     C->>DB: Transactionally upsert and delete demand
     H->>C: Reconcile assigned capacity
     C->>DB: Read demand in FIFO order
@@ -248,16 +248,21 @@ sequenceDiagram
     P->>GH: Delete message acknowledgement
     GH->>P: Later JobStarted or JobCompleted message
     P->>H: Handle completion
-    H->>C: Remove durable demand
-    C->>DB: Delete matching row
+    alt libvirt runner
+        H->>C: Request terminal reap
+        C->>DB: Commit reap obligation and remove demand
+    else Docker runner
+        H->>C: Remove durable demand
+        C->>DB: Delete matching row
+    end
     P->>GH: Delete message acknowledgement
 ```
 
 ### Standalone recovery and lifecycle
 
-On restart, the daemon reopens SQLite, discovers repositories, recreates workers, and schedules retained demand. If a named runner is visible, it is not duplicated. If an acquired runner disappeared before GitHub reported `JobStarted`, it is reprovisioned without reacquiring the request.
+On restart, the daemon reopens SQLite, discovers repositories, recreates workers, and schedules retained demand. If a named runner is visible, it is not duplicated. If an acquired runner disappeared before GitHub reported `JobStarted`, it is reprovisioned without reacquiring the request. Pending libvirt reaps are attempted before new provisioning and then once per second. Each attempt retains its record unless an ownership-filtered inspection confirms the exact runner is absent.
 
-A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. After validation, the daemon stops pollers, waits for active runners to drain, closes old message sessions, deletes old GitHub scale sets, removes demand for scale sets absent from the replacement, creates replacement coordinators and sessions over the same store, and schedules retained demand. Demand belonging to removed repositories or scale sets is intentionally deleted.
+A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. After validation, the daemon stops pollers, waits for active runners to drain, closes old message sessions, deletes old GitHub scale sets, removes demand for scale sets absent from the replacement, creates replacement coordinators and sessions over the same store, and schedules retained demand. Demand belonging to removed repositories or scale sets is intentionally deleted. Libvirt lifecycle records remain until the owning configuration and host access return and confirm absence.
 
 Normal process shutdown stops polling and closes message sessions and scale sets with bounded, concurrent cleanup. It does not destroy active runners. Repository access removal is immediate and does destroy active runners because the repository is no longer within the App's authority.
 
@@ -385,7 +390,7 @@ stateDiagram-v2
     acquiring --> ready: GitHub confirms requested identity
     ready --> starting: Owning node atomically claims assignment
     starting --> running: Owning node observes named runner after start or repair
-    running --> complete: GitHub reports started or completed demand
+    running --> complete: GitHub reports completed demand
 
     reserved --> complete: Session unavailable, release, or node expiry
     acquiring --> complete: Acquisition failure, failed recovery, or node expiry
@@ -394,13 +399,13 @@ stateDiagram-v2
     running --> complete: Demand completes or owning node expires
 ```
 
-Every non-complete assignment consumes the selected node's local capacity. Transitions include the expected prior state and, for host-owned transitions, the expected node ID. A stale or repeated transition fails with an assignment conflict instead of silently overwriting newer state.
+Every non-complete assignment and pending libvirt reap consumes the selected node's local capacity. Transitions include the expected prior state and, for host-owned transitions, the expected node ID. A stale or repeated transition fails with an assignment conflict instead of silently overwriting newer state.
 
 The `acquiring` state is the boundary around GitHub's non-transactional acquisition API. A replacement leader may retry an interrupted acquisition only if GitHub's response confirms the requested identity. An unconfirmed acquisition never makes the assignment executable.
 
 The `starting` state is the boundary around provider startup. Before starting, and again after an ambiguous provider error, the owning node checks for the stable request-derived runner name. A process restart repairs all of its `starting` assignments before claiming new `ready` assignments. A failed or ambiguous start remains `starting` for later repair rather than returning to the ready queue.
 
-`JobStarted` and terminal `JobCompleted` messages transactionally mark active assignments complete and remove their demand. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
+`JobStarted` validates the request identity without completing clustered state. Terminal `JobCompleted` transactionally requests registered libvirt cleanup, marks active assignments complete, and removes demand before acknowledgement. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
 
 ### Clustered job sequence
 
@@ -434,9 +439,14 @@ sequenceDiagram
         E->>R: Check stable runner name again
     end
     E->>DB: starting -> running
-    GH->>L: JobStarted or JobCompleted
-    L->>DB: Complete assignment and remove demand
-    L-->>GH: Acknowledge lifecycle message
+    GH->>L: JobStarted
+    L-->>GH: Acknowledge without completing assignment
+    GH->>L: JobCompleted
+    L->>DB: Request libvirt reap; complete assignment and demand
+    L-->>GH: Acknowledge after cleanup obligation commits
+    E->>DB: Load node-owned pending reaps
+    E->>X: List exact owned domain; destroy if active; list again
+    E->>DB: Delete lifecycle only after confirmed absence
 ```
 
 ### PostgreSQL state
@@ -445,6 +455,7 @@ sequenceDiagram
 erDiagram
     SCALER_NODES ||--o{ SCALER_CONTRIBUTIONS : publishes
     SCALER_NODES ||--o{ SCALER_ASSIGNMENTS : owns
+    SCALER_NODES ||--o{ SCALER_LIBVIRT_RUNNER_LIFECYCLE : owns
     SCALER_DEMAND ||--o{ SCALER_ASSIGNMENTS : receives
 
     SCALER_SCHEMA_COMPATIBILITY {
@@ -479,9 +490,17 @@ erDiagram
         integer github_scale_set_id
         text state
     }
+    SCALER_LIBVIRT_RUNNER_LIFECYCLE {
+        text node_id PK, FK
+        text scale_set PK
+        text repository PK
+        bigint request_id
+        text runner_name PK
+        boolean reap_requested
+    }
 ```
 
-The schema enforces one active assignment per demand with a partial unique index. Additional indexes support FIFO demand selection and active-assignment counts by node. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set.
+The schema enforces one active assignment per demand with a partial unique index. Additional indexes support FIFO demand selection, active-assignment counts, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; libvirt lifecycle records remain until confirmed absence.
 
 Ordinary state calls use the primary PostgreSQL endpoint. Migrations and advisory-lock sessions use the optional direct endpoint, or the primary endpoint when it preserves session affinity. All sessions assume the configured stable role. Login credentials may rotate, but database objects and migration metadata remain owned by the stable role.
 
@@ -654,9 +673,9 @@ Listing uses Docker labels to find only scaler-owned containers for the local sc
 
 ### libvirt provider
 
-The libvirt provider treats the configured domain XML as an operator-owned template. It renders a unique domain name, scaler metadata, and the JIT configuration into SMBIOS OEM strings, then starts a transient domain through `virsh create`.
+The libvirt provider treats the configured domain XML as an operator-owned template. It renders a unique domain name, scaler metadata, and the JIT configuration into SMBIOS OEM strings, then starts a transient domain through `virsh create`. RunnerFoundry persists the runner lifecycle before that command.
 
-Listing finds domains carrying the scaler metadata, inspects their state, and translates them into the provider-independent runner model. Destruction force-stops a running transient domain but does not remove operator-managed storage. Provider validation checks both XML rendering and libvirt connectivity. libvirt execution is unavailable on Windows.
+Listing finds domains carrying the scaler metadata, inspects their state, and translates them into the provider-independent runner model. Terminal reaping matches the exact runner metadata, force-stops any active state, and lists again. The durable obligation is removed only when that second inspection, or an initial inspection, confirms absence. Provider validation checks both XML rendering and libvirt connectivity. libvirt execution is unavailable on Windows.
 
 ## Readiness, observability, and security boundaries
 
@@ -690,7 +709,8 @@ The architecture protects the following invariants:
 | A handled message is not silently lost before durable effects | Poller acknowledges only after its handler succeeds | An acknowledgement failure can redeliver an already handled message |
 | Positive-identity demand survives process restart | SQLite or PostgreSQL stores demand before acknowledgement | Identity-free assigned work relies on GitHub statistics in standalone mode |
 | Redelivery does not create duplicate demand | Unique demand identity and idempotent upsert | External APIs and providers are still separate transaction domains |
-| Capacity is not exceeded | Standalone coordinator counts provider-visible runners; PostgreSQL counts active assignments per contributor | Provider state can be temporarily ambiguous during failures |
+| Capacity is not exceeded | Standalone counts provider-visible runners and pending reaps; PostgreSQL counts active assignments and pending reaps per contributor | Pending cleanup deliberately retains capacity while provider state is ambiguous |
+| Accepted libvirt cleanup is not forgotten | Lifecycle intent commits before `JobCompleted` acknowledgement and retries until confirmed absence | The owning host must regain its configuration and libvirt access |
 | Interrupted provider starts do not blindly duplicate runners | Stable runner name is checked before and after start and during repair | A provider that cannot report accurate identity cannot provide this guarantee |
 | Cluster leadership has one active owner | Session advisory lock on a dedicated connection | PostgreSQL availability is required for leadership and shared scheduling |
 | Node loss does not lose queued demand | Expired-node assignments complete while demand remains | Work may be retried on another host after the original host becomes unreachable |

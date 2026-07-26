@@ -129,6 +129,20 @@ type Assignment struct {
 	State            AssignmentState
 }
 
+type LibvirtRunnerLifecycle struct {
+	NodeID     NodeID
+	ScaleSet   string
+	Repository string
+	RequestID  int64
+	RunnerName string
+}
+
+type JobCompletion struct {
+	ScaleSet   string
+	Repository string
+	RequestID  int64
+}
+
 type Store struct {
 	settings        postgresconfig.Settings
 	connector       func(ctx context.Context) (*databaseConnection, error)

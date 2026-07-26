@@ -1,5 +1,5 @@
 [Unit]
-Description=GitHub runner scale-set scaler
+Description=Runner Foundry shared control plane for self-hosted ephemeral CI runners
 After=network-online.target docker.service libvirtd.service
 Wants=network-online.target
 

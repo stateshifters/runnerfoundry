@@ -225,6 +225,9 @@ func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
 	if err := adapter.Destroy(context.Background(), scaler.RunnerInstance{ID: "linux-vm-1", RunnerName: "linux-vm-1", State: scaler.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
+	if err := adapter.DestroyTerminal(context.Background(), scaler.RunnerInstance{ID: "linux-vm-1", State: scaler.RunnerStateUnknown}); err != nil {
+		t.Fatalf("expected terminal destroy success, got %v", err)
+	}
 }
 
 func TestProviderAdaptersSurfaceProviderErrors(t *testing.T) {
@@ -235,6 +238,9 @@ func TestProviderAdaptersSurfaceProviderErrors(t *testing.T) {
 	t.Run("libvirt", func(t *testing.T) {
 		adapter := libvirtProviderAdapter{Provider: libvirtprovider.Provider{CommandRunner: libvirtFailingRunner{}}}
 		assertProviderAdapterSurfacesErrors(t, adapter)
+		if err := adapter.DestroyTerminal(context.Background(), scaler.RunnerInstance{State: scaler.RunnerStateRunning}); err == nil {
+			t.Fatal("expected terminal destroy error")
+		}
 	})
 }
 

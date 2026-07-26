@@ -26,13 +26,16 @@ func TestClusterMessageHandlerPersistsDemandBeforeScheduling(t *testing.T) {
 		Statistics:           &upstream.RunnerScaleSetStatistic{},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 9, QueueTime: now}}},
 		JobStartedMessages:   []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 7}}},
-		JobCompletedMessages: []*upstream.JobCompleted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 6}}},
+		JobCompletedMessages: []*upstream.JobCompleted{{Result: "failed", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 6}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.demand) != 1 || len(state.removedDemand) != 2 || len(state.ready) != 1 || len(messageClient.acquiredIDs) != 1 {
+	if len(state.demand) != 1 || len(state.removedDemand) != 1 || len(state.ready) != 1 || len(messageClient.acquiredIDs) != 1 {
 		t.Fatalf("cluster message was not applied atomically before scheduling: %#v", state)
+	}
+	if state.removedDemand[0].requestID != 6 {
+		t.Fatalf("completed demands = %#v, want only request 6", state.removedDemand)
 	}
 }
 

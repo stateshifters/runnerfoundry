@@ -28,7 +28,7 @@ func TestPostgreSQLConcurrentStartupMigratesOnceAndElectsOneLeader(t *testing.T)
 		t.Fatal(err)
 	}
 	status, err := firstStore.MigrationStatus(context.Background())
-	if err != nil || status.Current != 1 {
+	if err != nil || status.Current != status.Target {
 		t.Fatalf("migration status after simultaneous startup = %#v, %v", status, err)
 	}
 }

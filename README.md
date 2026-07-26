@@ -50,10 +50,9 @@ Download the current AMD64 Debian package from the release page and save it as `
 
 ```sh
 sudo apt install ./runnerfoundry.deb
-sudo usermod -aG docker runnerfoundry
 ```
 
-The package creates the `runnerfoundry` service account, installs the executable and systemd unit, and creates the default configuration and state directories. It does not start the service before you supply valid configuration and credentials.
+The package creates the `runnerfoundry` service account, installs the executable and systemd unit, and creates the default configuration and state directories. When the `docker` or `libvirt` group exists, installation also adds the service account to that group. A provider installed later requires a subsequent package configure or upgrade before that membership is applied. The package does not start the service before you supply valid configuration and credentials.
 
 ### 2. Create the GitHub App
 
@@ -190,6 +189,8 @@ The GitHub App installation controls which repositories participate. To add a re
 In standalone mode, `max_runners` is one shared limit for a scale-set definition across every discovered installation and repository. A value of `2` means that at most two runners visible through the configured infrastructure provider may be active, regardless of which repositories requested them.
 
 In clustered mode, `max_runners` is a per-host contribution. Compatible live hosts that declare the same scale-set name contribute to one effective pool. For example, a host contributing `4` runners and another contributing `2` runners provide an effective capacity of `6`, while each host remains bounded by its own configured maximum.
+
+For libvirt pools, a runner whose cleanup is still pending continues to consume capacity. RunnerFoundry also fences that request identity until libvirt confirms that the exact owned domain is absent.
 
 Jobs enter one FIFO admission queue per configured runner pool, ordered by GitHub queue time across repositories and hosts. RunnerFoundry gives the oldest repository demand the next available capacity. GitHub selects the exact job within that repository.
 
@@ -576,10 +577,9 @@ The host needs:
 - a domain XML template readable by the `runnerfoundry` service account;
 - service-account permission for the configured libvirt connection URI.
 
-For a system libvirt connection, group access commonly looks like:
+For a system libvirt connection, verify the package-applied group access:
 
 ```sh
-sudo usermod -aG libvirt runnerfoundry
 sudo -u runnerfoundry virsh --connect qemu:///system list --all
 ```
 
@@ -595,7 +595,9 @@ RunnerFoundry renders a unique domain name, ownership metadata under `urn:runner
 runnerfoundry.jit=<encoded-jit-configuration>
 ```
 
-It then starts the domain with `virsh create`. A running owned domain counts against local capacity. A shut-off transient domain disappears automatically. Forced cleanup runs `virsh destroy` only for an active owned domain and never requests storage removal.
+Before starting the domain with `virsh create`, RunnerFoundry stores a durable lifecycle record for the runner. When GitHub reports terminal `JobCompleted`, RunnerFoundry commits the cleanup request before acknowledging that message. It retains the request until an ownership-filtered libvirt inspection confirms that the exact runner domain is absent.
+
+An active owned domain is stopped with `virsh destroy`, then inspected again. Command success alone does not complete cleanup. Listing, destruction, verification, timeout, and connection failures retain the lifecycle record for another attempt. RunnerFoundry never requests storage removal.
 
 ### Prepare the guest image
 
@@ -662,7 +664,7 @@ sudo systemctl reload runnerfoundry
 
 Reload validates the complete replacement configuration and credentials before applying them.
 
-In standalone mode, RunnerFoundry drains active runners, closes old GitHub message sessions, unregisters old scale sets, and reconciles the replacement configuration. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted.
+In standalone mode, RunnerFoundry drains active runners, closes old GitHub message sessions, unregisters old scale sets, and reconciles the replacement configuration. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable libvirt cleanup records remain until absence is confirmed, including when their scale-set configuration is temporarily removed.
 
 In clustered mode, the node atomically replaces its contribution set. Running assignments continue. An active leader immediately reconciles the changed union. A clustered reload cannot switch state backends or change PostgreSQL configuration.
 
@@ -674,9 +676,13 @@ RunnerFoundry commits identifiable GitHub demand to SQLite or PostgreSQL before 
 
 On standalone restart, RunnerFoundry reopens SQLite, rebuilds repository sessions from discovery, and schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
 
-In clustered mode, each assignment moves through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`. PostgreSQL retains those states through process and leader failure. A replacement leader retries interrupted acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
+Standalone libvirt cleanup is retried once per second and before new provisioning. The owning host must regain the matching scale-set configuration and libvirt access before RunnerFoundry can confirm absence and release the retained capacity.
+
+In clustered mode, each assignment moves through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`. PostgreSQL retains those states through process and leader failure. `JobStarted` leaves demand and its assignment active; terminal `JobCompleted` atomically records any required libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
 
 Before starting a `starting` assignment, the selected host checks for its stable runner name. It checks again after an ambiguous infrastructure-provider error. A process restart repairs local `starting` assignments before claiming new work.
+
+Each clustered executor retries its node-owned libvirt cleanup before provisioning. Failures retain the PostgreSQL record indefinitely. If the node is unavailable or its local scale-set configuration is missing, the same operating-system hostname must return with working libvirt access before cleanup can be confirmed.
 
 When a host heartbeat expires, its active assignments complete while their demand remains available for another compatible live host. This favors retained or retried demand over silent loss. GitHub acquisition, database transitions, and infrastructure startup remain separate transaction boundaries, so operators should expect visible retries during partial failure.
 
