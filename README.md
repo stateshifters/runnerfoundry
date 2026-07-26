@@ -50,10 +50,9 @@ Download the current AMD64 Debian package from the release page and save it as `
 
 ```sh
 sudo apt install ./runnerfoundry.deb
-sudo usermod -aG docker runnerfoundry
 ```
 
-The package creates the `runnerfoundry` service account, installs the executable and systemd unit, and creates the default configuration and state directories. It does not start the service before you supply valid configuration and credentials.
+The package creates the `runnerfoundry` service account, installs the executable and systemd unit, and creates the default configuration and state directories. When the `docker` or `libvirt` group exists, installation also adds the service account to that group. A provider installed later requires a subsequent package configure or upgrade before that membership is applied. The package does not start the service before you supply valid configuration and credentials.
 
 ### 2. Create the GitHub App
 
@@ -578,10 +577,9 @@ The host needs:
 - a domain XML template readable by the `runnerfoundry` service account;
 - service-account permission for the configured libvirt connection URI.
 
-For a system libvirt connection, group access commonly looks like:
+For a system libvirt connection, verify the package-applied group access:
 
 ```sh
-sudo usermod -aG libvirt runnerfoundry
 sudo -u runnerfoundry virsh --connect qemu:///system list --all
 ```
 
