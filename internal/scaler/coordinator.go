@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -52,6 +53,56 @@ type Coordinator struct {
 	workers    map[string]RepositoryWorker
 	assigned   map[string]int
 	mutex      sync.Mutex
+}
+
+func (coordinator *Coordinator) RegisterLibvirtRunner(ctx context.Context, runner LibvirtRunnerLifecycle) error {
+	store, supported := coordinator.store.(LibvirtLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support libvirt runner lifecycle")
+	}
+	runner.ScaleSet = coordinator.scaleSet
+	if err := store.RegisterLibvirtRunner(ctx, runner); err != nil {
+		return fmt.Errorf("register libvirt runner: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *Coordinator) CompleteJob(ctx context.Context, completion JobCompletion) error {
+	store, supported := coordinator.store.(LibvirtLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support libvirt runner lifecycle")
+	}
+	completion.ScaleSet = coordinator.scaleSet
+	if err := store.CompleteJob(ctx, completion); err != nil {
+		return fmt.Errorf("complete libvirt job: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *Coordinator) PendingLibvirtReaps(
+	ctx context.Context,
+	repository string,
+) ([]LibvirtRunnerLifecycle, error) {
+	store, supported := coordinator.store.(LibvirtLifecycleStore)
+	if !supported {
+		return nil, errors.New("demand store does not support libvirt runner lifecycle")
+	}
+	pending, err := store.PendingLibvirtReaps(ctx, coordinator.scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("load pending libvirt reaps: %w", err)
+	}
+	return pending, nil
+}
+
+func (coordinator *Coordinator) ConfirmLibvirtReaped(ctx context.Context, runner LibvirtRunnerLifecycle) error {
+	store, supported := coordinator.store.(LibvirtLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support libvirt runner lifecycle")
+	}
+	if err := store.ConfirmLibvirtReaped(ctx, runner); err != nil {
+		return fmt.Errorf("confirm libvirt runner reaped: %w", err)
+	}
+	return nil
 }
 
 type AssignedReconciliation struct {
@@ -120,6 +171,11 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
+	pendingReaps, err := coordinator.loadPendingLibvirtCapacity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runningCount += len(pendingReaps)
 	orderedDemand, err := coordinator.store.Ordered(ctx, coordinator.scaleSet)
 	if err != nil {
 		return nil, fmt.Errorf("load queued demand: %w", err)
@@ -128,11 +184,38 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
+	remainingDemand = fencePendingLibvirtRequests(remainingDemand, pendingReaps)
 	runningCount, err = coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount, repositoryRunningCounts)
 	if err != nil {
 		return nil, err
 	}
 	return coordinator.reconcileRetainedAssigned(ctx, runningCount, repositoryRunningCounts)
+}
+
+func (coordinator *Coordinator) loadPendingLibvirtCapacity(ctx context.Context) ([]LibvirtRunnerLifecycle, error) {
+	store, supported := coordinator.store.(LibvirtLifecycleStore)
+	if !supported {
+		return nil, nil
+	}
+	pending, err := store.PendingLibvirtReaps(ctx, coordinator.scaleSet, "")
+	if err != nil {
+		return nil, fmt.Errorf("load pending libvirt capacity: %w", err)
+	}
+	return pending, nil
+}
+
+func fencePendingLibvirtRequests(demand []QueuedDemand, pending []LibvirtRunnerLifecycle) []QueuedDemand {
+	identities := make(map[demandKey]struct{}, len(pending))
+	for _, runner := range pending {
+		identities[demandKey{Repository: runner.Repository, RequestID: runner.RequestID}] = struct{}{}
+	}
+	result := demand[:0]
+	for _, queued := range demand {
+		if _, fenced := identities[demandKey{Repository: queued.Repository, RequestID: queued.RequestID}]; !fenced {
+			result = append(result, queued)
+		}
+	}
+	return result
 }
 
 // ReconcileAssigned starts enough identity-free runners for one repository's
@@ -278,11 +361,12 @@ func (coordinator *Coordinator) runningCounts(ctx context.Context) (int, map[str
 
 type MemoryDemandStore struct {
 	demand          map[demandKey]QueuedDemand
+	libvirtRunners  map[string]memoryLibvirtLifecycle
 	nextObservation uint64
 }
 
 func createMemoryDemandStore() *MemoryDemandStore {
-	return &MemoryDemandStore{demand: map[demandKey]QueuedDemand{}}
+	return &MemoryDemandStore{demand: map[demandKey]QueuedDemand{}, libvirtRunners: map[string]memoryLibvirtLifecycle{}}
 }
 
 // NewMemoryDemandStore provides transient demand storage for tests and embedded callers.
@@ -333,4 +417,61 @@ func (store *MemoryDemandStore) Ordered(context.Context, string) ([]QueuedDemand
 		return left.QueueTime.Before(right.QueueTime)
 	})
 	return ordered, nil
+}
+
+func (store *MemoryDemandStore) RegisterLibvirtRunner(_ context.Context, runner LibvirtRunnerLifecycle) error {
+	key := runnerLifecycleKey(runner)
+	if existing, exists := store.libvirtRunners[key]; exists {
+		if existing.runner.RequestID != runner.RequestID || existing.reapRequested {
+			return errors.New("libvirt runner identity remains reserved by another lifecycle")
+		}
+		return nil
+	}
+	store.libvirtRunners[key] = memoryLibvirtLifecycle{runner: runner}
+	return nil
+}
+
+func (store *MemoryDemandStore) CompleteJob(_ context.Context, completion JobCompletion) error {
+	if completion.RunnerName != "" {
+		runner := LibvirtRunnerLifecycle(completion)
+		store.libvirtRunners[runnerLifecycleKey(runner)] = memoryLibvirtLifecycle{runner: runner, reapRequested: true}
+	}
+	for key, lifecycle := range store.libvirtRunners {
+		if lifecycle.runner.ScaleSet == completion.ScaleSet && lifecycle.runner.Repository == completion.Repository &&
+			lifecycle.runner.RequestID == completion.RequestID {
+			lifecycle.reapRequested = true
+			store.libvirtRunners[key] = lifecycle
+		}
+	}
+	delete(store.demand, demandKey{Repository: completion.Repository, RequestID: completion.RequestID})
+	return nil
+}
+
+func (store *MemoryDemandStore) PendingLibvirtReaps(
+	_ context.Context,
+	scaleSet string,
+	repository string,
+) ([]LibvirtRunnerLifecycle, error) {
+	result := make([]LibvirtRunnerLifecycle, 0)
+	for _, lifecycle := range store.libvirtRunners {
+		if lifecycle.reapRequested && lifecycle.runner.ScaleSet == scaleSet &&
+			(repository == "" || lifecycle.runner.Repository == repository) {
+			result = append(result, lifecycle.runner)
+		}
+	}
+	return result, nil
+}
+
+func (store *MemoryDemandStore) ConfirmLibvirtReaped(_ context.Context, runner LibvirtRunnerLifecycle) error {
+	delete(store.libvirtRunners, runnerLifecycleKey(runner))
+	return nil
+}
+
+func runnerLifecycleKey(runner LibvirtRunnerLifecycle) string {
+	return runner.ScaleSet + "\x00" + runner.Repository + "\x00" + runner.RunnerName
+}
+
+type memoryLibvirtLifecycle struct {
+	runner        LibvirtRunnerLifecycle
+	reapRequested bool
 }

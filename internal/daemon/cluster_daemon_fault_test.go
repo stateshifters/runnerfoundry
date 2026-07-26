@@ -571,11 +571,6 @@ func TestClusterMessageReportsDemandPersistenceFailure(t *testing.T) {
 				RunnerRequestID: 1, QueueTime: time.Now(),
 			}}),
 		},
-		"started": {
-			state: &fakeClusterState{removeErr: failure},
-			message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{},
-				JobStartedMessages: []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1}}}},
-		},
 		"completed": {
 			state: &fakeClusterState{removeErr: failure},
 			message: &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{},

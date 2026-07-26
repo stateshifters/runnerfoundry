@@ -17,8 +17,8 @@ func TestMigrationStatusLeavesAnEmptyDatabaseEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Current != 0 || status.Target != 1 {
-		t.Fatalf("MigrationStatus() = %#v, want current 0 and target 1", status)
+	if status.Current != 0 || status.Target != 2 {
+		t.Fatalf("MigrationStatus() = %#v, want current 0 and target 2", status)
 	}
 	connection, err := pgx.Connect(context.Background(), dsn)
 	if err != nil {

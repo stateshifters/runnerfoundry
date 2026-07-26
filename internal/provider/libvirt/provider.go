@@ -181,6 +181,18 @@ func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) e
 	return nil
 }
 
+// DestroyTerminal force-stops an owned terminal runner in any active state.
+// A shut-off transient domain needs no command and will disappear from libvirt.
+func (provider Provider) DestroyTerminal(ctx context.Context, instance RunnerInstance) error {
+	if instance.State == RunnerStateCompleted {
+		return nil
+	}
+	if err := provider.CommandRunner.DestroyDomain(ctx, provider.Config.ConnectionURI, instance.ID); err != nil {
+		return fmt.Errorf("destroy terminal libvirt runner %q: %w", instance.RunnerName, err)
+	}
+	return nil
+}
+
 func (provider Provider) Validate(ctx context.Context) error {
 	if _, err := provider.renderDomainXML(StartRequest{ScaleSetName: "validation", RunnerName: "validation"}); err != nil {
 		return err

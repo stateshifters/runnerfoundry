@@ -19,6 +19,9 @@ const (
 )
 
 func (daemon *clusteredDaemon) executeAssignments(ctx context.Context) {
+	if !daemon.executePendingLibvirtReaps(ctx) {
+		return
+	}
 	starting, err := daemon.assignments.Starting(ctx, daemon.nodeID)
 	if err != nil {
 		daemon.logger.Error("load runner assignments awaiting repair failed", slog.String("error", err.Error()))
@@ -82,6 +85,14 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 	if err != nil {
 		return err
 	}
+	if scaleSet.Libvirt != nil {
+		reconciler.ScaleSet.RegisterRunner = func(registerCtx context.Context, runnerName string, requestID int64) error {
+			return daemon.assignments.RegisterLibvirtRunner(registerCtx, assignment.ID, cluster.LibvirtRunnerLifecycle{
+				NodeID: assignment.NodeID, ScaleSet: assignment.ScaleSet, Repository: assignment.Repository,
+				RequestID: requestID, RunnerName: runnerName,
+			})
+		}
+	}
 	if err = ensureAssignedRunner(ctx, reconciler, assignment.RequestID); err != nil {
 		return err
 	}
@@ -89,6 +100,64 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 		return fmt.Errorf("record started runner assignment: %w", err)
 	}
 	return nil
+}
+
+func (daemon *clusteredDaemon) executePendingLibvirtReaps(ctx context.Context) bool {
+	pending, err := daemon.assignments.PendingLibvirtReaps(ctx, daemon.nodeID)
+	if err != nil {
+		daemon.logger.Error("load pending libvirt runner reaps failed", slog.String("error", err.Error()))
+		return false
+	}
+	configuration := daemon.configurationSnapshot()
+	for _, runner := range pending {
+		daemon.executePendingLibvirtReap(ctx, configuration.config.ScaleSets, runner)
+	}
+	return true
+}
+
+func (daemon *clusteredDaemon) executePendingLibvirtReap(
+	ctx context.Context,
+	scaleSets []config.ScaleSetConfig,
+	runner cluster.LibvirtRunnerLifecycle,
+) {
+	scaleSet, exists := localScaleSet(scaleSets, runner.ScaleSet)
+	if !exists || scaleSet.Libvirt == nil {
+		daemon.logger.Warn("pending libvirt runner reap retained because local configuration is unavailable",
+			slog.String("scaleSet", runner.ScaleSet), slog.String("repository", runner.Repository),
+			slog.String("runnerName", runner.RunnerName))
+		return
+	}
+	absent, err := daemon.reapClusterLibvirtRunner(ctx, scaleSet, runner)
+	if err != nil {
+		daemon.logger.Error("pending libvirt runner reap failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+		return
+	}
+	if !absent {
+		return
+	}
+	if err := daemon.assignments.ConfirmLibvirtReaped(ctx, runner); err != nil {
+		daemon.logger.Error("confirm pending libvirt runner absence failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+	}
+}
+
+func (daemon *clusteredDaemon) reapClusterLibvirtRunner(
+	ctx context.Context,
+	scaleSet config.ScaleSetConfig,
+	runner cluster.LibvirtRunnerLifecycle,
+) (bool, error) {
+	reconciler, err := daemon.buildReconciler(ctx, runner.Repository, scaleSet, nil, 0)
+	if err != nil {
+		return false, fmt.Errorf("build pending libvirt runner reaper: %w", err)
+	}
+	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
+	defer cancelReap()
+	absent, err := reconciler.ReapRunner(reapCtx, runner.RunnerName)
+	if err != nil {
+		return false, fmt.Errorf("reap runner %q: %w", runner.RunnerName, err)
+	}
+	return absent, nil
 }
 
 func (daemon *clusteredDaemon) completeRemovedScaleSetAssignment(

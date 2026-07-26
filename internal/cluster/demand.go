@@ -123,6 +123,13 @@ func loadOldestDemand(ctx context.Context, transaction *databaseTransaction, sca
 		FROM scaler_demand
 		WHERE scale_set = $1
 		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments WHERE scaler_assignments.demand_id = scaler_demand.demand_id AND state <> 'complete')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
+		      WHERE lifecycle.scale_set = scaler_demand.scale_set
+		        AND lifecycle.repository = scaler_demand.repository
+		        AND lifecycle.request_id = scaler_demand.request_id
+		        AND lifecycle.reap_requested
+		  )
 		ORDER BY queue_time, observation_id
 		LIMIT 1
 		FOR UPDATE`, scaleSet).Scan(&demandID, &assignment.Repository, &assignment.RequestID, &assignment.QueueTime)
@@ -156,6 +163,12 @@ func selectContributor(
 		      WHERE assignment.node_id = contribution.node_id
 		        AND assignment_demand.scale_set = contribution.scale_set
 		        AND assignment.state <> 'complete'
+		  ) + (
+		      SELECT COUNT(*)
+		      FROM scaler_libvirt_runner_lifecycle lifecycle
+		      WHERE lifecycle.node_id = contribution.node_id
+		        AND lifecycle.scale_set = contribution.scale_set
+		        AND lifecycle.reap_requested
 		  )
 		ORDER BY contribution.node_id
 		LIMIT 1

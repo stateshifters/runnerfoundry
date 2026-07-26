@@ -43,8 +43,8 @@ func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target := migrationTarget(catalog); target != 1 {
-		t.Fatalf("migration target = %d, want 1", target)
+	if target := migrationTarget(catalog); target != 2 {
+		t.Fatalf("migration target = %d, want 2", target)
 	}
 }
 

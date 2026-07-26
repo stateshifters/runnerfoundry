@@ -136,6 +136,111 @@ func TestReconcilerDoesNotDestroyUnknownRunnerState(t *testing.T) {
 	}
 }
 
+func TestReapRunnerConfirmsOwnedRunnerIsAbsentAfterTerminalDestroy(t *testing.T) {
+	provider := &terminalReapingProvider{listResults: [][]RunnerInstance{
+		{{ID: "domain-1", RunnerName: "set-42", State: RunnerStateUnknown}},
+		{},
+	}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}
+
+	reaped, err := reconciler.ReapRunner(context.Background(), "set-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reaped || len(provider.destroyed) != 1 || provider.destroyed[0] != "domain-1" {
+		t.Fatalf("reaped=%t destroyed=%v", reaped, provider.destroyed)
+	}
+}
+
+func TestReapRunnerRetainsObligationWhenRunnerStillExists(t *testing.T) {
+	instance := RunnerInstance{ID: "domain-1", RunnerName: "set-42", State: RunnerStateRunning}
+	provider := &terminalReapingProvider{listResults: [][]RunnerInstance{{instance}, {instance}}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}
+
+	reaped, err := reconciler.ReapRunner(context.Background(), "set-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped {
+		t.Fatal("runner still present was reported reaped")
+	}
+}
+
+func TestReapRunnerConfirmsAlreadyAbsentWithoutDestroy(t *testing.T) {
+	provider := &terminalReapingProvider{listResults: [][]RunnerInstance{{}}}
+	reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}).
+		ReapRunner(context.Background(), "set-42")
+	if err != nil || !reaped || len(provider.destroyed) != 0 {
+		t.Fatalf("reaped=%t destroyed=%#v error=%v", reaped, provider.destroyed, err)
+	}
+}
+
+func TestReapRunnerRejectsProviderWithoutTerminalReaping(t *testing.T) {
+	reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: &recordingProvider{}}}).
+		ReapRunner(context.Background(), "set-42")
+	if err == nil || reaped {
+		t.Fatalf("reaped=%t error=%v", reaped, err)
+	}
+}
+
+func TestReapRunnerRetainsObligationAfterDestroyOrVerificationFailure(t *testing.T) {
+	instance := RunnerInstance{ID: "domain-1", RunnerName: "set-42", State: RunnerStateUnknown}
+	tests := map[string]*failingTerminalReapingProvider{
+		"listing":      {instance: instance, listErrOnCall: 1},
+		"destroy":      {instance: instance, destroyErr: errors.New("destroy failed")},
+		"verification": {instance: instance, listErrOnCall: 2},
+	}
+	for name, provider := range tests {
+		t.Run(name, func(t *testing.T) {
+			reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: provider}}).
+				ReapRunner(context.Background(), "set-42")
+			if err == nil || reaped {
+				t.Fatalf("reaped=%t error=%v", reaped, err)
+			}
+		})
+	}
+}
+
+type failingTerminalReapingProvider struct {
+	instance      RunnerInstance
+	listCalls     int
+	listErrOnCall int
+	destroyErr    error
+}
+
+func (provider *failingTerminalReapingProvider) List(context.Context, string) ([]RunnerInstance, error) {
+	provider.listCalls++
+	if provider.listCalls == provider.listErrOnCall {
+		return nil, errors.New("verification failed")
+	}
+	return []RunnerInstance{provider.instance}, nil
+}
+
+func (*failingTerminalReapingProvider) Start(context.Context, RunnerStartRequest) error { return nil }
+func (*failingTerminalReapingProvider) Destroy(context.Context, RunnerInstance) error   { return nil }
+func (provider *failingTerminalReapingProvider) DestroyTerminal(context.Context, RunnerInstance) error {
+	return provider.destroyErr
+}
+
+type terminalReapingProvider struct {
+	listResults [][]RunnerInstance
+	destroyed   []string
+}
+
+func (provider *terminalReapingProvider) List(context.Context, string) ([]RunnerInstance, error) {
+	instances := provider.listResults[0]
+	provider.listResults = provider.listResults[1:]
+	return instances, nil
+}
+
+func (*terminalReapingProvider) Start(context.Context, RunnerStartRequest) error { return nil }
+func (*terminalReapingProvider) Destroy(context.Context, RunnerInstance) error   { return nil }
+
+func (provider *terminalReapingProvider) DestroyTerminal(_ context.Context, instance RunnerInstance) error {
+	provider.destroyed = append(provider.destroyed, instance.ID)
+	return nil
+}
+
 func TestReconcilerDrainSurfacesProviderFailures(t *testing.T) {
 	tests := map[string]Provider{
 		"list": failingProvider{failure: "list"},

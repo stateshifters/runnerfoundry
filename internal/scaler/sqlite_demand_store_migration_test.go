@@ -41,6 +41,9 @@ func seedLegacyZeroIdentityDemand(t *testing.T, databasePath string) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.database.Exec("DROP TABLE libvirt_runner_lifecycle"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.database.Exec("PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}
