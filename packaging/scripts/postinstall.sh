@@ -13,6 +13,14 @@ if [ -z "$root" ] && ! id runnerfoundry >/dev/null 2>&1; then
 	useradd --system --gid runnerfoundry --home-dir /nonexistent --shell /usr/sbin/nologin runnerfoundry
 fi
 
+if [ -z "$root" ]; then
+	for provider_group in docker libvirt; do
+		if getent group "$provider_group" >/dev/null 2>&1; then
+			usermod --append --groups "$provider_group" runnerfoundry
+		fi
+	done
+fi
+
 install -d -m 0750 "$state_dir"
 if [ -z "$root" ]; then
 	chown runnerfoundry:runnerfoundry "$state_dir"

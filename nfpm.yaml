@@ -6,7 +6,7 @@ version_schema: semver
 section: utils
 priority: optional
 maintainer: Meza <meza@users.noreply.github.com>
-description: GitHub Actions runner scale-set scaler
+description: Runner Foundry shared control plane for self-hosted ephemeral CI runners
 vendor: meza
 homepage: https://github.com/meza/RunnerFoundry
 license: MIT
