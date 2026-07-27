@@ -1,0 +1,170 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+)
+
+// Validate applies defaults and rejects unsafe startup state.
+func (loadedConfig *Config) Validate() error {
+	if err := loadedConfig.GitHub.validate(); err != nil {
+		return err
+	}
+	if loadedConfig.Log.Format == "" {
+		loadedConfig.Log.Format = "text"
+	}
+	if loadedConfig.Log.Format != "text" && loadedConfig.Log.Format != "json" {
+		return fmt.Errorf("unsupported log.format %q", loadedConfig.Log.Format)
+	}
+	if loadedConfig.Log.Level == "" {
+		loadedConfig.Log.Level = "info"
+	}
+	switch loadedConfig.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("unsupported log.level %q", loadedConfig.Log.Level)
+	}
+	if err := loadedConfig.State.validate(); err != nil {
+		return err
+	}
+	return loadedConfig.validateScaleSets()
+}
+
+func (stateConfig StateConfig) validate() error {
+	hasSQLite := strings.TrimSpace(stateConfig.Path) != ""
+	hasPostgreSQL := stateConfig.Postgres != nil
+	if hasSQLite && hasPostgreSQL {
+		return errors.New("state.path and state.postgres are mutually exclusive")
+	}
+	if !hasSQLite && !hasPostgreSQL {
+		return errors.New("state.path is required when state.postgres is not configured")
+	}
+	if !hasPostgreSQL {
+		return nil
+	}
+	if err := postgresconfig.Validate(*stateConfig.Postgres); err != nil {
+		return fmt.Errorf("validate PostgreSQL state: %w", err)
+	}
+	return nil
+}
+
+func (githubConfig *GitHubConfig) validate() error {
+	if githubConfig.TokenEnv != "" || githubConfig.TokenFile != "" || githubConfig.Token != "" {
+		return errors.New("PAT authentication is not supported; configure github.app")
+	}
+	if githubConfig.App.AppID <= 0 {
+		return errors.New("github.app.app_id must be positive")
+	}
+	if githubConfig.App.PrivateKey != "" {
+		return errors.New("github.app.private_key is not allowed; use private_key_file")
+	}
+	if githubConfig.App.PrivateKeyFile == "" {
+		return errors.New("github.app.private_key_file is required")
+	}
+	if githubConfig.DiscoveryInterval == "" {
+		githubConfig.DiscoveryInterval = defaultDiscoveryInterval
+	}
+	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
+	if err != nil {
+		return fmt.Errorf("github.discovery_interval: %w", err)
+	}
+	if discoveryInterval < time.Minute {
+		return errors.New("github.discovery_interval must be at least 1m")
+	}
+	return nil
+}
+
+func (loadedConfig *Config) validateScaleSets() error {
+	if len(loadedConfig.ScaleSets) == 0 {
+		return errors.New("at least one scale set is required")
+	}
+	seenNames := map[string]bool{}
+	for scaleSetIndex := range loadedConfig.ScaleSets {
+		if err := loadedConfig.ScaleSets[scaleSetIndex].validate(seenNames); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
+	if scaleSet.Name == "" {
+		return errors.New("scale_sets[].name is required")
+	}
+	if seenNames[scaleSet.Name] {
+		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	}
+	seenNames[scaleSet.Name] = true
+	if scaleSet.RunnerGroup == "" {
+		scaleSet.RunnerGroup = "default"
+	}
+	if scaleSet.MaxRunners <= 0 {
+		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
+	}
+	if scaleSet.JobStartTimeout == "" {
+		scaleSet.JobStartTimeout = defaultJobStartTimeout
+	}
+	jobStartTimeout, err := time.ParseDuration(scaleSet.JobStartTimeout)
+	if err != nil {
+		return fmt.Errorf("scale set %q job_start_timeout: %w", scaleSet.Name, err)
+	}
+	if jobStartTimeout <= 0 {
+		return fmt.Errorf("scale set %q job_start_timeout must be positive", scaleSet.Name)
+	}
+	if err := scaleSet.validateProvider(); err != nil {
+		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
+	}
+	return nil
+}
+
+// JobStartDuration returns the validated maximum time a confirmed runner may
+// wait for JobStarted before it is replaced.
+func (scaleSet ScaleSetConfig) JobStartDuration() (time.Duration, error) {
+	configuredTimeout := scaleSet.JobStartTimeout
+	if configuredTimeout == "" {
+		configuredTimeout = defaultJobStartTimeout
+	}
+	jobStartTimeout, err := time.ParseDuration(configuredTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("parse validated job start timeout: %w", err)
+	}
+	if jobStartTimeout <= 0 {
+		return 0, errors.New("parse validated job start timeout: duration must be positive")
+	}
+	return jobStartTimeout, nil
+}
+
+func (scaleSet *ScaleSetConfig) validateProvider() error {
+	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
+		return errors.New("exactly one of docker or libvirt is required")
+	}
+	if scaleSet.Docker != nil {
+		if scaleSet.Docker.ComposeFile == "" {
+			return errors.New("docker.compose_file is required")
+		}
+		if scaleSet.Docker.Service == "" {
+			return errors.New("docker.service is required")
+		}
+		return nil
+	}
+	if scaleSet.Libvirt.ConnectionURI == "" {
+		return errors.New("libvirt.connection_uri is required")
+	}
+	if scaleSet.Libvirt.DomainXMLTemplate == "" {
+		return errors.New("libvirt.domain_xml_template is required")
+	}
+	return nil
+}
+
+// DiscoveryDuration returns the validated repository discovery interval.
+func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
+	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
+	if err != nil {
+		return 0, fmt.Errorf("parse validated discovery interval: %w", err)
+	}
+	return discoveryInterval, nil
+}

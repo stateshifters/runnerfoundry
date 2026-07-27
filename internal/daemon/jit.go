@@ -68,6 +68,17 @@ func (generator scalesetJITGenerator) Remove(ctx context.Context, runner scaler.
 	return nil
 }
 
+func (generator scalesetJITGenerator) Find(ctx context.Context, runnerName string) (scaler.JITRunner, bool, error) {
+	runner, err := generator.Client.GetRunnerByName(ctx, runnerName)
+	if err != nil {
+		return scaler.JITRunner{}, false, fmt.Errorf("find github runner: %w", err)
+	}
+	if runner == nil {
+		return scaler.JITRunner{}, false, nil
+	}
+	return scaler.JITRunner{ID: int64(runner.ID), Name: runner.Name}, true, nil
+}
+
 func jitRunnerReference(runner *upstream.RunnerReference) scaler.JITRunner {
 	if runner == nil {
 		return scaler.JITRunner{}

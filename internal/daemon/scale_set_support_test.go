@@ -30,7 +30,7 @@ func fakeExistingScaleSetClient(
 	runnerScaleSet *upstream.RunnerScaleSet,
 	messageClient scaleSetMessageClient,
 ) *fakeScaleSetClient {
-	return &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
+	client := &fakeScaleSetClient{fakeScaleSetSessionClient: fakeScaleSetSessionClient{
 		fakeRunnerGroupClient: fakeRunnerGroupClient{getRunnerGroupByName: func(context.Context, string) (*upstream.RunnerGroup, error) {
 			return runnerGroup, nil
 		}},
@@ -41,6 +41,10 @@ func fakeExistingScaleSetClient(
 			return messageClient, nil
 		}},
 	}}
+	client.listRunnerScaleSets = func(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+		return []upstream.RunnerScaleSet{*runnerScaleSet}, nil
+	}
+	return client
 }
 
 type fakeScaleSetClient struct {

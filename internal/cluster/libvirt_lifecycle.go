@@ -83,6 +83,12 @@ func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
+	if _, err = transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
+		SET phase = 'reap_pending', reap_reason = 'job_completed', updated_at = clock_timestamp()
+		WHERE scale_set = $1 AND repository = $2 AND request_id = $3`,
+		completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
+		return fmt.Errorf("request clustered runner reap: %w", err)
+	}
 	if _, err = transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
 		WHERE scale_set = $1 AND repository = $2 AND request_id = $3`,
 		completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {

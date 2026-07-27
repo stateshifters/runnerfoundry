@@ -107,7 +107,7 @@ func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixt
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
 	fixture.successClient = fakeExistingScaleSetClient(
 		&upstream.RunnerGroup{ID: 1},
-		&upstream.RunnerScaleSet{ID: 2},
+		&upstream.RunnerScaleSet{ID: 2, Name: "linux"},
 		scaleSetMessageClient{Client: messageClient},
 	)
 	fixture.daemon.newGitHubClient = func(
@@ -226,6 +226,39 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 			return ctx.Err() == nil
 		},
 	}
+}
+
+func TestClusterRegistrationReconciliationRunsAtDiscoveryCadence(t *testing.T) {
+	daemon := clusteredDaemonForTest(&fakeClusterState{})
+	daemon.config = clusteredConfig(t)
+	daemon.config.GitHub.DiscoveryInterval = "1ms"
+	daemon.logger = slog.Default()
+	requests := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	daemon.workers.Add(1)
+	go daemon.runPeriodicReconciliationLoop(ctx, requests)
+	select {
+	case <-requests:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("periodic registration reconciliation was not requested")
+	}
+	daemon.workers.Wait()
+}
+
+func TestClusterRegistrationReconciliationHandlesInvalidIntervalAndFullRequestQueue(t *testing.T) {
+	daemon := clusteredDaemonForTest(&fakeClusterState{})
+	daemon.config = clusteredConfig(t)
+	daemon.config.GitHub.DiscoveryInterval = "invalid"
+	daemon.logger = slog.Default()
+	requests := make(chan struct{}, 1)
+	requestReconciliation(requests)
+	requestReconciliation(requests)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	daemon.workers.Add(1)
+	daemon.runPeriodicReconciliationLoop(ctx, requests)
 }
 
 type clusterPublication struct {

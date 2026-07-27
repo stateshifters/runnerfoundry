@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type RunnerState string
@@ -41,6 +42,10 @@ type JITConfigGenerator interface {
 	Remove(ctx context.Context, runner JITRunner) error
 }
 
+type jitRunnerRegistry interface {
+	Find(ctx context.Context, runnerName string) (JITRunner, bool, error)
+}
+
 type JITRunnerConfig struct {
 	Runner    JITRunner
 	JITConfig string
@@ -52,11 +57,20 @@ type JITRunner struct {
 }
 
 type ScaleSetRuntime struct {
-	Name           string
-	MaxRunners     int
-	Provider       Provider
-	JITConfig      JITConfigGenerator
-	RegisterRunner func(ctx context.Context, runnerName string, requestID int64) error
+	Name              string
+	LifecycleScaleSet string
+	Repository        string
+	MaxRunners        int
+	ProviderKind      RunnerProvider
+	Provider          Provider
+	JITConfig         JITConfigGenerator
+	Lifecycle         RunnerLifecycleStore
+	NodeID            string
+	AssignmentID      int64
+	InstallationID    int64
+	GitHubScaleSetID  int
+	Now               func() time.Time
+	RegisterRunner    func(ctx context.Context, runnerName string, requestID int64) error
 }
 
 type Reconciler struct {
@@ -91,13 +105,21 @@ func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerNam
 		return err
 	}
 	if runningCount >= reconciler.ScaleSet.MaxRunners {
-		return nil
+		return reconciler.reconcileBlockedCapacity(ctx)
 	}
 	if runnerName != "" {
 		usedRunnerNames[runnerName] = true
 		return reconciler.startRunner(ctx, runnerName, requestID)
 	}
 	return reconciler.startMissingRunners(ctx, runningCount, runningCount+1, usedRunnerNames)
+}
+
+func (reconciler Reconciler) reconcileBlockedCapacity(ctx context.Context) error {
+	if reconciler.ScaleSet.Lifecycle == nil {
+		return nil
+	}
+	_, err := reconciler.ReconcileRunnerUsability(ctx)
+	return err
 }
 
 // Exists reports whether the identified runner is currently running in this scale set.
@@ -118,41 +140,6 @@ func (reconciler Reconciler) Exists(ctx context.Context, identifier int64) (bool
 // ReapRunner force-removes one terminal runner and confirms that its owned
 // provider instance is absent. A false result is successful but incomplete;
 // callers must retain and retry their durable cleanup obligation.
-func (reconciler Reconciler) ReapRunner(ctx context.Context, runnerName string) (bool, error) {
-	terminalDestroyer, supported := reconciler.ScaleSet.Provider.(terminalRunnerDestroyer)
-	if !supported {
-		return false, errors.New("provider does not support terminal runner reaping")
-	}
-	instance, exists, err := reconciler.runnerInstance(ctx, runnerName)
-	if err != nil {
-		return false, err
-	}
-	if !exists {
-		return true, nil
-	}
-	if err = terminalDestroyer.DestroyTerminal(ctx, instance); err != nil {
-		return false, fmt.Errorf("destroy terminal runner %q: %w", runnerName, err)
-	}
-	_, exists, err = reconciler.runnerInstance(ctx, runnerName)
-	if err != nil {
-		return false, err
-	}
-	return !exists, nil
-}
-
-func (reconciler Reconciler) runnerInstance(ctx context.Context, runnerName string) (RunnerInstance, bool, error) {
-	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
-	if err != nil {
-		return RunnerInstance{}, false, fmt.Errorf("list runner instances: %w", err)
-	}
-	for _, instance := range instances {
-		if instance.RunnerName == runnerName {
-			return instance, true, nil
-		}
-	}
-	return RunnerInstance{}, false, nil
-}
-
 func (reconciler Reconciler) DestroyActive(ctx context.Context) error {
 	instances, err := reconciler.ScaleSet.Provider.List(ctx, reconciler.ScaleSet.Name)
 	if err != nil {
@@ -246,15 +233,47 @@ func (reconciler Reconciler) startRunner(ctx context.Context, runnerName string,
 	if err = reconciler.registerRunnerLifecycle(ctx, runnerName, requestID, jitConfig.Runner); err != nil {
 		return err
 	}
-	if err := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
+	if err = reconciler.startProviderRunner(ctx, runnerName, requestID, jitConfig); err != nil {
+		return err
+	}
+	return reconciler.confirmRunnerWaiting(ctx, runnerName, jitConfig.Runner.ID)
+}
+
+func (reconciler Reconciler) startProviderRunner(
+	ctx context.Context,
+	runnerName string,
+	requestID int64,
+	jitConfig JITRunnerConfig,
+) error {
+	startErr := reconciler.ScaleSet.Provider.Start(ctx, RunnerStartRequest{
 		ScaleSetName: reconciler.ScaleSet.Name,
 		RunnerName:   runnerName,
 		JITConfig:    jitConfig.JITConfig,
-	}); err != nil {
-		if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner); removeErr != nil {
-			return fmt.Errorf("start runner %q: %w; remove github runner: %w", runnerName, err, removeErr)
-		}
-		return fmt.Errorf("start runner %q: %w", runnerName, err)
+	})
+	if startErr == nil {
+		return nil
+	}
+	if reconciler.ScaleSet.Lifecycle != nil {
+		return reconciler.retainFailedStart(ctx, runnerName, requestID, startErr)
+	}
+	removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, jitConfig.Runner)
+	if removeErr != nil {
+		startErr = errors.Join(startErr, fmt.Errorf("remove github runner: %w", removeErr))
+	}
+	return fmt.Errorf("start runner %q: %w", runnerName, startErr)
+}
+
+func (reconciler Reconciler) confirmRunnerWaiting(ctx context.Context, runnerName string, githubRunnerID int64) error {
+	if reconciler.ScaleSet.Lifecycle == nil {
+		return nil
+	}
+	confirmedAt := reconciler.now()
+	err := reconciler.ScaleSet.Lifecycle.ConfirmRunnerWaiting(ctx, RunnerLifecycle{
+		NodeID: reconciler.ScaleSet.NodeID, ScaleSet: reconciler.lifecycleScaleSet(), Repository: reconciler.ScaleSet.Repository,
+		RunnerName: runnerName, GitHubRunnerID: githubRunnerID,
+	}, confirmedAt)
+	if err != nil {
+		return fmt.Errorf("confirm runner lifecycle %q: %w", runnerName, err)
 	}
 	return nil
 }
@@ -265,16 +284,74 @@ func (reconciler Reconciler) registerRunnerLifecycle(
 	requestID int64,
 	githubRunner JITRunner,
 ) error {
+	if reconciler.ScaleSet.Lifecycle != nil {
+		if err := reconciler.registerDurableRunner(ctx, runnerName, requestID, githubRunner); err != nil {
+			return reconciler.cleanupFailedRegistration(ctx, runnerName, githubRunner, err)
+		}
+	}
 	if reconciler.ScaleSet.RegisterRunner == nil {
 		return nil
 	}
 	if err := reconciler.ScaleSet.RegisterRunner(ctx, runnerName, requestID); err != nil {
-		if removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, githubRunner); removeErr != nil {
-			return fmt.Errorf("register runner lifecycle %q: %w; remove github runner: %w", runnerName, err, removeErr)
-		}
-		return fmt.Errorf("register runner lifecycle %q: %w", runnerName, err)
+		return reconciler.cleanupFailedRegistration(ctx, runnerName, githubRunner, err)
 	}
 	return nil
+}
+
+func (reconciler Reconciler) registerDurableRunner(
+	ctx context.Context,
+	runnerName string,
+	requestID int64,
+	githubRunner JITRunner,
+) error {
+	if err := reconciler.ScaleSet.Lifecycle.RegisterRunner(ctx, RunnerLifecycle{
+		NodeID: reconciler.ScaleSet.NodeID, ScaleSet: reconciler.lifecycleScaleSet(), Repository: reconciler.ScaleSet.Repository,
+		Provider: reconciler.ScaleSet.ProviderKind, RunnerName: runnerName,
+		RequestID: requestID, AssignmentID: reconciler.ScaleSet.AssignmentID,
+		InstallationID: reconciler.ScaleSet.InstallationID, GitHubScaleSetID: reconciler.ScaleSet.GitHubScaleSetID,
+		GitHubRunnerID: githubRunner.ID, Phase: RunnerProvisioning, CreatedAt: reconciler.now(),
+	}); err != nil {
+		return fmt.Errorf("persist runner lifecycle: %w", err)
+	}
+	return nil
+}
+
+func (reconciler Reconciler) cleanupFailedRegistration(
+	ctx context.Context,
+	runnerName string,
+	githubRunner JITRunner,
+	registrationErr error,
+) error {
+	removeErr := reconciler.ScaleSet.JITConfig.Remove(ctx, githubRunner)
+	if removeErr != nil {
+		registrationErr = errors.Join(registrationErr, fmt.Errorf("remove github runner: %w", removeErr))
+	}
+	return fmt.Errorf("register runner lifecycle %q: %w", runnerName, registrationErr)
+}
+
+func (reconciler Reconciler) retainFailedStart(ctx context.Context, runnerName string, requestID int64, startErr error) error {
+	reapErr := reconciler.ScaleSet.Lifecycle.RequestRunnerReap(
+		ctx, reconciler.lifecycleScaleSet(), reconciler.ScaleSet.Repository, requestID, runnerName,
+		"provider_start_failed", reconciler.now(),
+	)
+	if reapErr != nil {
+		return fmt.Errorf("start runner %q: %w", runnerName, errors.Join(startErr, fmt.Errorf("retain cleanup obligation: %w", reapErr)))
+	}
+	return fmt.Errorf("start runner %q: %w", runnerName, startErr)
+}
+
+func (reconciler Reconciler) lifecycleScaleSet() string {
+	if reconciler.ScaleSet.LifecycleScaleSet != "" {
+		return reconciler.ScaleSet.LifecycleScaleSet
+	}
+	return reconciler.ScaleSet.Name
+}
+
+func (reconciler Reconciler) now() time.Time {
+	if reconciler.ScaleSet.Now != nil {
+		return reconciler.ScaleSet.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (reconciler Reconciler) nextRunnerName(usedRunnerNames map[string]bool, nextRunnerIndex *int) string {

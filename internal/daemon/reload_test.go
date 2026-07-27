@@ -28,6 +28,101 @@ func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 	}
 }
 
+func TestReloadKeepsOldSessionsWhenReplacementRegistrationsCannotBeConfirmed(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	stopped := false
+	activeConfig := testActiveConfiguration()
+	activeConfig.Config.State.Path = loadedConfig.State.Path
+	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+		StopPolling: func() { stopped = true },
+		Drain:       func(context.Context) (int, error) { return 0, nil },
+		Shutdown:    func(context.Context) error { return nil },
+	}}}
+	daemonUnderTest := successfulReloadDaemon(loadedConfig)
+	daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
+			InstallationID: 1, URL: "https://github.com/acme/repo",
+		}}, InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
+	}
+	registry := successfulRegistrationReconciliationClient()
+	registry.listErr = errors.New("audit unavailable")
+	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+		return registry, nil
+	}
+	if _, err := reloadConfiguration(context.Background(), "config", daemonUnderTest, activeConfig); err == nil {
+		t.Fatal("expected replacement registration audit failure")
+	}
+	if stopped {
+		t.Fatal("old session stopped before replacement registrations were confirmed")
+	}
+}
+
+func TestConfirmReloadRegistrationsReportsDiscoveryFailure(t *testing.T) {
+	reloaded := testActiveConfiguration()
+	reloaded.Discoverer = staticDiscoverer{err: errors.New("discovery failed")}
+	if err := confirmReloadRegistrations(context.Background(), standaloneDaemon{}, &reloaded); err == nil {
+		t.Fatal("expected discovery failure")
+	}
+}
+
+func TestConfirmReloadRegistrationsRejectsRepositoryNameCollision(t *testing.T) {
+	reloaded := testActiveConfiguration()
+	reloaded.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{
+		{URL: "https://github.com/acme/repo.a"}, {URL: "https://github.com/acme/repo-a"},
+	}}}
+	if err := confirmReloadRegistrations(context.Background(), standaloneDaemon{}, &reloaded); err == nil {
+		t.Fatal("expected repository name collision")
+	}
+}
+
+func TestConfirmReloadRegistrationsReportsClientCreationFailure(t *testing.T) {
+	reloaded := reloadRegistrationConfiguration()
+	daemon := standaloneDaemon{newGitHubClient: func(
+		string, githubapp.InstallationID, config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		return nil, errors.New("client failed")
+	}}
+	if err := confirmReloadRegistrations(context.Background(), daemon, &reloaded); err == nil {
+		t.Fatal("expected client creation failure")
+	}
+}
+
+func TestConfirmReloadRegistrationsRejectsUnsupportedAuditClient(t *testing.T) {
+	reloaded := reloadRegistrationConfiguration()
+	daemon := standaloneDaemon{newGitHubClient: func(
+		string, githubapp.InstallationID, config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		return nonPruningScaleSetClient{}, nil
+	}}
+	if err := confirmReloadRegistrations(context.Background(), daemon, &reloaded); err == nil {
+		t.Fatal("expected unsupported audit client")
+	}
+}
+
+func TestConfirmReloadRegistrationsRetainsConfirmedClient(t *testing.T) {
+	reloaded := reloadRegistrationConfiguration()
+	client := successfulRegistrationReconciliationClient()
+	daemon := standaloneDaemon{newGitHubClient: func(
+		string, githubapp.InstallationID, config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		return client, nil
+	}}
+	if err := confirmReloadRegistrations(context.Background(), daemon, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Repositories["https://github.com/acme/repo"].Client != client {
+		t.Fatal("confirmed client was not retained for activation")
+	}
+}
+
+func reloadRegistrationConfiguration() activeConfiguration {
+	reloaded := testActiveConfiguration()
+	reloaded.Discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
+		InstallationID: 1, URL: "https://github.com/acme/repo",
+	}}}}
+	return reloaded
+}
+
 func TestReloadConfigurationReportsReloadNotificationFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	if _, err := reloadConfiguration(context.Background(), "config", standaloneDaemon{notifier: failingNotifier{reloadErr: errors.New("reload failed")}}, activeConfig); err == nil {
@@ -175,7 +270,7 @@ func TestReloadConfigurationReportsShutdownFailure(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	active := activeWithLifecycle(scaleSetLifecycle{
 		Drain: func(context.Context) (int, error) { return 0, nil }, StopPolling: func() {},
-		Shutdown: func(context.Context) error { return errors.New("shutdown failed") },
+		CloseSession: func(context.Context) error { return errors.New("shutdown failed") },
 	})
 	if _, err := reloadConfiguration(context.Background(), "config", successfulReloadDaemon(loadedConfig), active); err == nil {
 		t.Fatal("expected shutdown failure")

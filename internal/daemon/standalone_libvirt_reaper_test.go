@@ -12,6 +12,19 @@ import (
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
+type lifecycleUnsupportedDemandStore struct{}
+
+func (lifecycleUnsupportedDemandStore) Apply(context.Context, string, []scaler.JobDemand, []scaler.DemandRemoval) error {
+	return nil
+}
+func (lifecycleUnsupportedDemandStore) RemoveRepository(context.Context, string, string) error {
+	return nil
+}
+func (lifecycleUnsupportedDemandStore) RemoveScaleSet(context.Context, string) error { return nil }
+func (lifecycleUnsupportedDemandStore) Ordered(context.Context, string) ([]scaler.QueuedDemand, error) {
+	return nil, nil
+}
+
 func TestStandaloneLibvirtReaperRetriesOnInjectedTicks(t *testing.T) {
 	harness := newStandaloneLibvirtReaperHarness(t)
 	defer harness.stop()
@@ -48,6 +61,18 @@ func TestStandaloneLibvirtLifecycleRegistersBeforeStartingRunner(t *testing.T) {
 	if len(provider.started) != 1 || provider.started[0].RunnerName != "linux-42" {
 		t.Fatalf("started runners = %#v", provider.started)
 	}
+}
+
+func TestStandaloneLifecycleContinuesWhenStoreCannotPersistRunnerLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	coordinator := scaler.NewDurableCoordinator("linux", 1, lifecycleUnsupportedDemandStore{})
+	lifecycle := startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
+		Logger: slog.Default(), RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
+		Coordinator: coordinator, MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{}}},
+	})
+	cancel()
+	lifecycle.StopPolling()
 }
 
 func TestStandaloneLibvirtReaperRetainsFailuresForRetry(t *testing.T) {

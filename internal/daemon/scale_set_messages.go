@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,12 +21,15 @@ type coordinatedScaleSetHandler struct {
 	Repository  string
 	Logger      *slog.Logger
 	ScaleSet    string
-	ReapLibvirt bool
+	ReapLibvirt bool // retained for source compatibility; lifecycle cleanup is provider-independent
 }
 
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
 	if message.Statistics == nil {
 		return errors.New("scale set message statistics are required")
+	}
+	if err := handler.markStartedRunnersBusy(ctx, message.JobStartedMessages); err != nil {
+		return err
 	}
 	observedDemand, removedDemand, err := handler.collectDemand(message)
 	if err != nil {
@@ -96,7 +100,7 @@ func (handler coordinatedScaleSetHandler) collectStartedDemand(
 
 func (handler coordinatedScaleSetHandler) completeJobs(ctx context.Context, messages []*upstream.JobCompleted) error {
 	for _, completedJob := range messages {
-		if completedJob == nil || (completedJob.RunnerRequestID <= 0 && (!handler.ReapLibvirt || completedJob.RunnerName == "")) {
+		if completedJob == nil || (completedJob.RunnerRequestID <= 0 && completedJob.RunnerName == "") {
 			continue
 		}
 		if err := handler.completeJob(ctx, completedJob); err != nil {
@@ -116,10 +120,47 @@ func (handler coordinatedScaleSetHandler) completeJob(ctx context.Context, compl
 		}
 		return nil
 	}
+	if handler.Coordinator.HasRunnerLifecycle() {
+		if err := handler.Coordinator.CompleteRunnerLifecycleJob(ctx, scaler.JobCompletion{
+			Repository: handler.Repository, RequestID: completedJob.RunnerRequestID, RunnerName: completedJob.RunnerName,
+		}, time.Now().UTC()); err != nil {
+			return fmt.Errorf("persist runner cleanup: %w", err)
+		}
+		effectiveLogger(handler.Logger).Info("completed runner cleanup requested",
+			slog.String("action", "runner_cleanup_request"), slog.String("phase", "completed"),
+			slog.String("repository", handler.Repository), slog.String("scaleSet", handler.ScaleSet),
+			slog.String("runner", completedJob.RunnerName), slog.Int64("requestID", completedJob.RunnerRequestID),
+			slog.String("reason", "job_completed"),
+		)
+		return nil
+	}
 	if err := handler.Coordinator.Apply(ctx, nil, []scaler.DemandRemoval{{
 		Repository: handler.Repository, RequestID: completedJob.RunnerRequestID,
 	}}); err != nil {
 		return fmt.Errorf("remove completed GitHub demand: %w", err)
+	}
+	return nil
+}
+
+func (handler coordinatedScaleSetHandler) markStartedRunnersBusy(ctx context.Context, messages []*upstream.JobStarted) error {
+	for _, startedJob := range messages {
+		if startedJob == nil || (startedJob.RunnerRequestID <= 0 && startedJob.RunnerName == "") {
+			continue
+		}
+		err := handler.Coordinator.MarkRunnerBusy(
+			ctx, handler.Repository, startedJob.RunnerRequestID, startedJob.RunnerName, int64(startedJob.RunnerID), time.Now().UTC(),
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("persist started runner lifecycle: %w", err)
+		}
+		effectiveLogger(handler.Logger).Info("runner marked busy",
+			slog.String("action", "runner_lifecycle"), slog.String("phase", "busy"),
+			slog.String("repository", handler.Repository), slog.String("scaleSet", handler.ScaleSet),
+			slog.String("runner", startedJob.RunnerName), slog.Int64("requestID", startedJob.RunnerRequestID),
+		)
 	}
 	return nil
 }

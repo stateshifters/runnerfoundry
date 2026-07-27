@@ -14,6 +14,7 @@ type shutdownMode int
 const (
 	drainShutdown shutdownMode = iota
 	immediateShutdown
+	sessionOnlyShutdown
 )
 
 type lifecycleCleanup struct {
@@ -77,10 +78,15 @@ func cleanupLifecycle(ctx context.Context, target lifecycleCleanup, mode shutdow
 		slog.Bool("destroyActive", mode == immediateShutdown),
 	)
 	var err error
-	if mode == immediateShutdown {
+	switch mode {
+	case sessionOnlyShutdown:
+		err = target.lifecycle.CloseSession(shutdownCtx)
+	case immediateShutdown:
 		err = errors.Join(err, target.lifecycle.DestroyActive(shutdownCtx))
+		err = errors.Join(err, target.lifecycle.Shutdown(shutdownCtx))
+	case drainShutdown:
+		err = errors.Join(err, target.lifecycle.Shutdown(shutdownCtx))
 	}
-	err = errors.Join(err, target.lifecycle.Shutdown(shutdownCtx))
 	if err == nil {
 		logAction(shutdownCtx, target.logger, slog.LevelDebug, "scale_set_shutdown", "completed",
 			slog.String("repository", target.repositoryURL),

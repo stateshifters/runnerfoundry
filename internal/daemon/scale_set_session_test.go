@@ -382,6 +382,49 @@ func TestScaleSetSessionReportsReconcilerConstructionFailure(t *testing.T) {
 	assertScaleSetSessionFailure(t, client, operations, "build reconciler")
 }
 
+func TestStartConfirmedCoordinatedScaleSetUsesConfirmedIdentityAndClosesOnBuildFailure(t *testing.T) {
+	messageClient := &fakeMessageClient{}
+	client := fakeExistingScaleSetClient(
+		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 7, Name: "linux"},
+		scaleSetMessageClient{Client: messageClient},
+	)
+	_, err := startConfirmedCoordinatedScaleSet(
+		context.Background(), slog.Default(), client, "repo", config.ScaleSetConfig{Name: "linux", MaxRunners: 1},
+		scaler.NewCoordinator(1), &upstream.RunnerScaleSet{ID: 7, Name: "linux"},
+	)
+	if err == nil || !messageClient.closed {
+		t.Fatalf("error=%v closed=%t", err, messageClient.closed)
+	}
+}
+
+func TestStartConfirmedCoordinatedScaleSetReportsMessageSessionFailure(t *testing.T) {
+	client := &fakeScaleSetClient{}
+	client.messageSessionClient = func(context.Context, int, string) (scaleSetMessageClient, error) {
+		return scaleSetMessageClient{}, errors.New("session failed")
+	}
+	_, err := startConfirmedCoordinatedScaleSet(
+		context.Background(), slog.Default(), client, "repo", config.ScaleSetConfig{Name: "linux"},
+		scaler.NewCoordinator(1), &upstream.RunnerScaleSet{ID: 7},
+	)
+	if err == nil {
+		t.Fatal("expected message session failure")
+	}
+}
+
+func TestCoordinatedLifecycleCanCloseOnlyItsMessageSession(t *testing.T) {
+	messageClient := &fakeMessageClient{}
+	lifecycle := coordinatedScaleSetLifecycle(coordinatedLifecycleConfig{
+		Logger: slog.Default(), RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux"},
+		MessageClient: scaleSetMessageClient{Client: messageClient},
+	}, func() {}, closedChannel())
+	if err := lifecycle.CloseSession(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !messageClient.closed {
+		t.Fatal("message session was not closed")
+	}
+}
+
 func assertScaleSetSessionFailure(
 	t *testing.T,
 	client scaleSetClient,

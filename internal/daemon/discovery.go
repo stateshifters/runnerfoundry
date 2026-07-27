@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
@@ -61,7 +62,11 @@ func applyDiscovery(
 	if err := removeUndiscoveredRepositories(ctx, activeConfig, desired); err != nil {
 		return err
 	}
-	startupErr := startDiscoveredRepositories(ctx, daemon, activeConfig, desired)
+	discovered := make(map[string]githubapp.Repository, len(discovery.Repositories))
+	for _, repository := range discovery.Repositories {
+		discovered[repository.URL] = repository
+	}
+	startupErr := startDiscoveredRepositories(ctx, daemon, activeConfig, discovered)
 	recoveryErr := schedulePersistedDemand(ctx, activeConfig)
 	return errors.Join(startupErr, recoveryErr)
 }
@@ -136,10 +141,9 @@ func startDiscoveredRepositories(
 ) error {
 	var startupErr error
 	for repositoryURL, repository := range desired {
-		if _, exists := activeConfig.Repositories[repositoryURL]; exists {
-			continue
-		}
-		managed, err := startRepository(ctx, daemon, activeConfig, repository)
+		managed := activeConfig.Repositories[repositoryURL]
+		managed, err := reconcileRepository(ctx, daemon, activeConfig, repository, managed)
+		activeConfig.Repositories[repositoryURL] = managed
 		if err != nil {
 			activeConfig.Logger.Error(
 				"repository startup failed",
@@ -152,7 +156,6 @@ func startDiscoveredRepositories(
 			startupErr = errors.Join(startupErr, fmt.Errorf("start repository %q: %w", repositoryURL, err))
 			continue
 		}
-		activeConfig.Repositories[repositoryURL] = managed
 	}
 	if startupErr == nil {
 		return nil
@@ -182,32 +185,132 @@ func startRepository(
 	activeConfig *activeConfiguration,
 	repository githubapp.Repository,
 ) (managedRepository, error) {
+	return reconcileRepository(ctx, daemon, activeConfig, repository, managedRepository{})
+}
+
+func reconcileRepository(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	repository githubapp.Repository,
+	managed managedRepository,
+) (managedRepository, error) {
 	initialAttributes := []slog.Attr{
 		slog.String("repository", repository.URL),
 		slog.Int64("installationID", int64(repository.InstallationID)),
 	}
-	var managed managedRepository
 	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "repository_start", initialAttributes, func() tracedOperationResult {
-		client, clientErr := daemon.newGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
-		if clientErr != nil {
-			return tracedOperationResult{
-				terminalAttributes: nil,
-				err:                fmt.Errorf("create GitHub client for %q: %w", repository.URL, clientErr),
-			}
-		}
-		if pruneErr := pruneRepositoryWhenEnabled(ctx, activeConfig, client, repository.URL); pruneErr != nil {
-			return tracedOperationResult{terminalAttributes: nil, err: pruneErr}
-		}
-		managed = managedRepository{InstallationID: repository.InstallationID, Lifecycles: map[string]scaleSetLifecycle{}}
-		return tracedOperationResult{
-			terminalAttributes: nil,
-			err:                startRepositoryScaleSets(ctx, daemon, activeConfig, repository.URL, &managed, client),
-		}
+		return tracedOperationResult{terminalAttributes: nil, err: reconcileRepositoryState(
+			ctx, daemon, activeConfig, repository, &managed,
+		)}
 	})
 	if err != nil {
-		return managedRepository{}, err
+		managed.RegistrationStatus = repositoryRegistrationDegraded
+		logAction(ctx, activeConfig.Logger, slog.LevelWarn, "repository_registration_state", "degraded",
+			slog.String("repository", repository.URL), slog.String("error", err.Error()))
+		return managed, err
 	}
+	managed.RegistrationStatus = repositoryRegistrationOperational
+	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_registration_state", "operational",
+		slog.String("repository", repository.URL), slog.Int("activeSessionCount", len(managed.Lifecycles)))
 	return managed, nil
+}
+
+func reconcileRepositoryState(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	repository githubapp.Repository,
+	managed *managedRepository,
+) error {
+	if err := ensureManagedRepositoryClient(daemon, activeConfig, repository, managed); err != nil {
+		return err
+	}
+	registrations, err := auditRepositoryRegistrations(ctx, activeConfig, repository.URL, *managed)
+	if err != nil {
+		return err
+	}
+	if repositoryRegistrationMatches(*managed, registrations, activeConfig.Config.ScaleSets) {
+		return nil
+	}
+	if err = suspendDriftedRepository(ctx, activeConfig, repository.URL, managed); err != nil {
+		return err
+	}
+	if err = startRepositoryScaleSets(
+		ctx, daemon, activeConfig, repository.URL, managed, managed.Client, registrations,
+	); err != nil {
+		return err
+	}
+	return pruneRepositoryWhenEnabled(ctx, activeConfig, managed.Client, repository.URL)
+}
+
+func ensureManagedRepositoryClient(
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	repository githubapp.Repository,
+	managed *managedRepository,
+) error {
+	if managed.Client != nil {
+		return nil
+	}
+	client, err := daemon.newGitHubClient(repository.URL, repository.InstallationID, activeConfig.Credentials)
+	if err != nil {
+		return fmt.Errorf("create GitHub client for %q: %w", repository.URL, err)
+	}
+	*managed = managedRepository{InstallationID: repository.InstallationID, Client: client, Lifecycles: map[string]scaleSetLifecycle{}}
+	return nil
+}
+
+func auditRepositoryRegistrations(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	repositoryURL string,
+	managed managedRepository,
+) (map[string]*upstream.RunnerScaleSet, error) {
+	auditClient, supported := managed.Client.(scaleSetRegistrationAuditClient)
+	if !supported {
+		return nil, fmt.Errorf("GitHub client for %q does not support registration audits", repositoryURL)
+	}
+	registrations, err := ensureRepositoryScaleSetRegistrations(
+		ctx, activeConfig.Logger, repositoryURL, auditClient, activeConfig.Config.ScaleSets,
+	)
+	if err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "repository_registration_audit", err,
+			slog.String("repository", repositoryURL), slog.Int("activeSessionCount", len(managed.Lifecycles)))
+	}
+	return registrations, err
+}
+
+func suspendDriftedRepository(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	repositoryURL string,
+	managed *managedRepository,
+) error {
+	if len(managed.Lifecycles) == 0 {
+		return nil
+	}
+	logAction(ctx, activeConfig.Logger, slog.LevelWarn, "repository_registration_drift", "confirmed",
+		slog.String("repository", repositoryURL), slog.Int("activeSessionCount", len(managed.Lifecycles)))
+	return suspendRepositoryActivation(ctx, activeConfig, repositoryURL, managed)
+}
+
+func repositoryRegistrationMatches(
+	managed managedRepository,
+	registrations map[string]*upstream.RunnerScaleSet,
+	configuredScaleSets []config.ScaleSetConfig,
+) bool {
+	if len(managed.Lifecycles) != len(configuredScaleSets) {
+		return false
+	}
+	for _, scaleSetConfig := range configuredScaleSets {
+		lifecycle, active := managed.Lifecycles[scaleSetConfig.Name]
+		registration := registrations[scaleSetConfig.Name]
+		if !active || registration == nil || lifecycle.RunnerScaleSetID != registration.ID {
+			return false
+		}
+	}
+	return true
 }
 
 func startRepositoryScaleSets(
@@ -217,16 +320,24 @@ func startRepositoryScaleSets(
 	repositoryURL string,
 	managed *managedRepository,
 	client scaleSetClient,
+	registrations map[string]*upstream.RunnerScaleSet,
 ) error {
 	for _, scaleSetConfig := range activeConfig.Config.ScaleSets {
-		lifecycle, startErr := startRepositoryScaleSet(ctx, daemon, activeConfig, client, repositoryURL, scaleSetConfig)
+		registration := registrations[scaleSetConfig.Name]
+		if registration == nil {
+			return fmt.Errorf("confirmed registration %q is missing from the complete repository set", scaleSetConfig.Name)
+		}
+		lifecycle, startErr := startRepositoryScaleSet(
+			ctx, daemon, activeConfig, client, repositoryURL, scaleSetConfig, registration,
+		)
 		if startErr != nil {
-			rollbackErr := rollbackRepositoryStartup(ctx, activeConfig, repositoryURL, *managed)
+			rollbackErr := suspendRepositoryActivation(ctx, activeConfig, repositoryURL, managed)
 			return errors.Join(
 				fmt.Errorf("start scale set %q for %q: %w", scaleSetConfig.Name, repositoryURL, startErr),
 				rollbackErr,
 			)
 		}
+		lifecycle.RunnerScaleSetID = registration.ID
 		managed.Lifecycles[scaleSetConfig.Name] = lifecycle
 	}
 	return nil
@@ -239,6 +350,7 @@ func startRepositoryScaleSet(
 	client scaleSetClient,
 	repositoryURL string,
 	scaleSetConfig config.ScaleSetConfig,
+	registration *upstream.RunnerScaleSet,
 ) (scaleSetLifecycle, error) {
 	initialAttributes := []slog.Attr{
 		slog.String("repository", repositoryURL),
@@ -246,8 +358,8 @@ func startRepositoryScaleSet(
 	}
 	var lifecycle scaleSetLifecycle
 	err := runTracedOperation(ctx, activeConfig.Logger, slog.LevelDebug, "scale_set_start", initialAttributes, func() tracedOperationResult {
-		startedLifecycle, startErr := daemon.startScaleSet(
-			ctx, activeConfig.Logger, client, repositoryURL, scaleSetConfig, activeConfig.Coordinators[scaleSetConfig.Name],
+		startedLifecycle, startErr := startConfiguredRepositoryScaleSet(
+			ctx, daemon, activeConfig, client, repositoryURL, scaleSetConfig, registration,
 		)
 		if startErr == nil {
 			lifecycle = startedLifecycle
@@ -258,6 +370,24 @@ func startRepositoryScaleSet(
 		return scaleSetLifecycle{}, err
 	}
 	return lifecycle, nil
+}
+
+func startConfiguredRepositoryScaleSet(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	client scaleSetClient,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	registration *upstream.RunnerScaleSet,
+) (scaleSetLifecycle, error) {
+	coordinator := activeConfig.Coordinators[scaleSetConfig.Name]
+	if daemon.startConfirmedScaleSet != nil {
+		return daemon.startConfirmedScaleSet(
+			ctx, activeConfig.Logger, client, repositoryURL, scaleSetConfig, coordinator, registration,
+		)
+	}
+	return daemon.startScaleSet(ctx, activeConfig.Logger, client, repositoryURL, scaleSetConfig, coordinator)
 }
 
 func pruneRepositoryWhenEnabled(
@@ -276,21 +406,25 @@ func pruneRepositoryWhenEnabled(
 	return pruneRepository(ctx, activeConfig.Logger, pruneClient, repositoryURL, activeConfig.Config.ScaleSets)
 }
 
-func rollbackRepositoryStartup(
+func suspendRepositoryActivation(
 	ctx context.Context,
 	activeConfig *activeConfiguration,
 	repositoryURL string,
-	repository managedRepository,
+	repository *managedRepository,
 ) error {
-	var rollbackErr error
+	var suspensionErr error
 	for scaleSetName, lifecycle := range repository.Lifecycles {
-		rollbackErr = errors.Join(rollbackErr, activeConfig.Coordinators[scaleSetName].RemoveRepository(context.WithoutCancel(ctx), repositoryURL))
-		lifecycle.StopPolling()
-		rollbackErr = errors.Join(rollbackErr, lifecycle.DestroyActive(context.WithoutCancel(ctx)))
-		rollbackErr = errors.Join(rollbackErr, lifecycle.Shutdown(context.WithoutCancel(ctx)))
+		activeConfig.Coordinators[scaleSetName].DetachRepository(repositoryURL)
+		if lifecycle.StopPolling != nil {
+			lifecycle.StopPolling()
+		}
+		if lifecycle.CloseSession != nil {
+			suspensionErr = errors.Join(suspensionErr, lifecycle.CloseSession(context.WithoutCancel(ctx)))
+		}
+		delete(repository.Lifecycles, scaleSetName)
 	}
-	if rollbackErr != nil {
-		return fmt.Errorf("rollback repository %q startup: %w", repositoryURL, rollbackErr)
+	if suspensionErr != nil {
+		return fmt.Errorf("suspend repository %q activation: %w", repositoryURL, suspensionErr)
 	}
 	return nil
 }

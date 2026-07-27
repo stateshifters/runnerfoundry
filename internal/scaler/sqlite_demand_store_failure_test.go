@@ -96,6 +96,17 @@ func TestSQLitePendingLibvirtReapsReportsRowCloseFailure(t *testing.T) {
 	}
 }
 
+func TestSQLitePendingLibvirtReapsJoinsCloseFailureAfterSuccessfulScan(t *testing.T) {
+	fixture := mockDemandStore(t)
+	closeErr := errors.New("close failed")
+	rows := sqlmock.NewRows([]string{"scale_set", "repository", "request_id", "runner_name"}).
+		AddRow("linux", "repo", 42, "linux-42").CloseError(closeErr)
+	fixture.mock.ExpectQuery("SELECT scale_set").WillReturnRows(rows)
+	if _, err := fixture.store.PendingLibvirtReaps(context.Background(), "linux", "repo"); !errors.Is(err, closeErr) {
+		t.Fatalf("pending reap error = %v", err)
+	}
+}
+
 func TestSQLiteConfirmLibvirtReapedReportsBoundaryFailures(t *testing.T) {
 	runner := sqliteLifecycleRunner()
 	operations := []func(demandStoreMock) error{
@@ -270,6 +281,61 @@ func TestSQLiteDemandStoreReportsLibvirtVersionWriteFailure(t *testing.T) {
 	fixture.mock.ExpectRollback()
 	if err := fixture.store.migrate(context.Background()); err == nil {
 		t.Fatal("expected libvirt lifecycle version write failure")
+	}
+}
+
+var genericLifecycleMigrationPatterns = []string{
+	"CREATE TABLE runner_lifecycle", "CREATE INDEX runner_lifecycle_pending_reaps", "INSERT INTO runner_lifecycle",
+	"CREATE TRIGGER mirror_libvirt_runner_lifecycle_insert", "CREATE TRIGGER mirror_libvirt_runner_lifecycle_update",
+	"CREATE TRIGGER mirror_libvirt_runner_lifecycle_delete", "PRAGMA user_version = 4",
+}
+
+func TestSQLiteDemandStoreReportsGenericLifecycleMigrationStepFailures(t *testing.T) {
+	for failedIndex := range genericLifecycleMigrationPatterns {
+		t.Run(fmt.Sprintf("step-%d", failedIndex), func(t *testing.T) {
+			assertGenericLifecycleMigrationStepFailure(t, failedIndex)
+		})
+	}
+}
+
+func assertGenericLifecycleMigrationStepFailure(t *testing.T, failedIndex int) {
+	t.Helper()
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 3)
+	fixture.mock.ExpectBegin()
+	for index, pattern := range genericLifecycleMigrationPatterns {
+		expectation := fixture.mock.ExpectExec(pattern)
+		if index == failedIndex {
+			expectation.WillReturnError(errors.New("failed"))
+			break
+		}
+		expectation.WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	fixture.mock.ExpectRollback()
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected generic lifecycle migration failure")
+	}
+}
+
+func TestSQLiteDemandStoreReportsGenericLifecycleMigrationBeginFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 3)
+	fixture.mock.ExpectBegin().WillReturnError(errors.New("failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected generic lifecycle begin failure")
+	}
+}
+
+func TestSQLiteDemandStoreReportsGenericLifecycleMigrationCommitFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 3)
+	fixture.mock.ExpectBegin()
+	for _, pattern := range genericLifecycleMigrationPatterns {
+		fixture.mock.ExpectExec(pattern).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	fixture.mock.ExpectCommit().WillReturnError(errors.New("failed"))
+	if err := fixture.store.migrate(context.Background()); err == nil {
+		t.Fatal("expected generic lifecycle commit failure")
 	}
 }
 

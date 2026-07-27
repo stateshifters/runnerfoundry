@@ -165,10 +165,10 @@ func selectContributor(
 		        AND assignment.state <> 'complete'
 		  ) + (
 		      SELECT COUNT(*)
-		      FROM scaler_libvirt_runner_lifecycle lifecycle
+		      FROM scaler_runner_lifecycle lifecycle
 		      WHERE lifecycle.node_id = contribution.node_id
 		        AND lifecycle.scale_set = contribution.scale_set
-		        AND lifecycle.reap_requested
+		        AND lifecycle.phase = 'reap_pending'
 		  )
 		ORDER BY contribution.node_id
 		LIMIT 1

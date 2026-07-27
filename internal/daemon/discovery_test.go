@@ -32,60 +32,6 @@ func TestApplyDiscoveryAddsRepositoriesAndRetainsFailedInstallations(t *testing.
 	}
 }
 
-func TestRepositoryReconciliationLogsDetailedActionsAtDebugLevel(t *testing.T) {
-	fixture := newDiscoveryStartFixture()
-	logs := &bytes.Buffer{}
-	fixture.active.Logger = newLoggerForWriter(logs, "json", "debug")
-	discovery := githubapp.DiscoveryResult{
-		Repositories:         []githubapp.Repository{{InstallationID: 7, URL: "https://github.com/acme/repo"}},
-		InstallationFailures: map[githubapp.InstallationID]error{},
-	}
-	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, discovery); err != nil {
-		t.Fatalf("expected repository reconciliation, got %v", err)
-	}
-	for _, expected := range []struct {
-		action string
-		phase  string
-	}{
-		{action: "repository_start", phase: "started"},
-		{action: "scale_set_start", phase: "started"},
-		{action: "scale_set_start", phase: "completed"},
-		{action: "repository_start", phase: "completed"},
-		{action: "demand_recovery", phase: "completed"},
-	} {
-		assertStructuredAction(t, logs.Bytes(), expected.action, expected.phase)
-	}
-}
-
-type discoveryStartFixture struct {
-	daemon  standaloneDaemon
-	active  activeConfiguration
-	started []string
-}
-
-func newDiscoveryStartFixture() *discoveryStartFixture {
-	fixture := &discoveryStartFixture{active: testActiveConfiguration()}
-	fixture.daemon = standaloneDaemon{
-		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
-		},
-		startScaleSet: fixture.startScaleSet,
-	}
-	return fixture
-}
-
-func (fixture *discoveryStartFixture) startScaleSet(
-	_ context.Context,
-	_ *slog.Logger,
-	_ scaleSetClient,
-	repositoryURL string,
-	scaleSetConfig config.ScaleSetConfig,
-	_ *scaler.Coordinator,
-) (scaleSetLifecycle, error) {
-	fixture.started = append(fixture.started, repositoryURL+"/"+scaleSetConfig.Name)
-	return inertLifecycle(), nil
-}
-
 func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *testing.T) {
 	const repositoryURL = "https://github.com/acme/repo"
 	store := scaler.NewMemoryDemandStore()
@@ -115,7 +61,7 @@ func TestApplyDiscoveryResumesPersistedAcquiredDemandWithoutGitHubMessage(t *tes
 func recoveryDaemonForTest(worker scaler.RepositoryWorker) standaloneDaemon {
 	return standaloneDaemon{
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
+			return successfulRegistrationReconciliationClient(), nil
 		},
 		startScaleSet: func(
 			_ context.Context,
@@ -241,7 +187,7 @@ func newPartialRecoveryFixture(t *testing.T) partialRecoveryFixture {
 		if repositoryURL == unavailableRepositoryURL {
 			return nil, errors.New("unavailable")
 		}
-		return &fakeScaleSetClient{}, nil
+		return successfulRegistrationReconciliationClient(), nil
 	}
 
 	return partialRecoveryFixture{
@@ -254,6 +200,12 @@ func newPartialRecoveryFixture(t *testing.T) partialRecoveryFixture {
 			InstallationFailures: map[githubapp.InstallationID]error{},
 		},
 	}
+}
+
+func successfulRegistrationReconciliationClient() *registrationReconciliationClient {
+	client := newRegistrationReconciliationClient()
+	client.failWindows = false
+	return client
 }
 
 func TestReconcileDiscoveryRetriesPersistedDemandAfterRecoveryFailure(t *testing.T) {
@@ -371,16 +323,19 @@ func successfulDiscoveryScaleSetStart(
 	return inertLifecycle(), nil
 }
 
-func TestStartRepositoryRollsBackEarlierScaleSetsWhenLaterStartupFails(t *testing.T) {
+func TestStartRepositorySuspendsEarlierScaleSetsWithoutDeletingStateWhenLaterStartupFails(t *testing.T) {
 	fixture := repositoryRollbackFixture()
-	_, err := startRepository(context.Background(), fixture.daemon, &fixture.active, githubapp.Repository{
+	managed, err := startRepository(context.Background(), fixture.daemon, &fixture.active, githubapp.Repository{
 		InstallationID: 1, URL: "https://github.com/acme/repo",
 	})
 	if err == nil {
 		t.Fatal("expected later startup failure")
 	}
-	if !fixture.stopped || !fixture.shutdown {
-		t.Fatalf("expected earlier scale set rollback, stopped=%t shutdown=%t", fixture.stopped, fixture.shutdown)
+	if !fixture.stopped || !fixture.closed || fixture.destroyed || fixture.shutdown {
+		t.Fatalf("stopped=%t closed=%t destroyed=%t shutdown=%t", fixture.stopped, fixture.closed, fixture.destroyed, fixture.shutdown)
+	}
+	if len(managed.Lifecycles) != 0 {
+		t.Fatalf("partial lifecycles=%#v", managed.Lifecycles)
 	}
 }
 
@@ -389,6 +344,8 @@ type repositoryRollbackTestFixture struct {
 	daemon     standaloneDaemon
 	startCalls int
 	stopped    bool
+	closed     bool
+	destroyed  bool
 	shutdown   bool
 }
 
@@ -396,9 +353,11 @@ func repositoryRollbackFixture() *repositoryRollbackTestFixture {
 	fixture := &repositoryRollbackTestFixture{active: testActiveConfiguration()}
 	fixture.active.Config.ScaleSets = append(fixture.active.Config.ScaleSets, config.ScaleSetConfig{Name: "windows", MaxRunners: 1})
 	fixture.active.Coordinators["windows"] = scaler.NewCoordinator(1)
+	registry := newRegistrationReconciliationClient()
+	registry.failWindows = false
 	fixture.daemon = standaloneDaemon{
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
+			return registry, nil
 		},
 		startScaleSet: fixture.startScaleSet,
 	}
@@ -418,8 +377,13 @@ func (fixture *repositoryRollbackTestFixture) startScaleSet(
 		return scaleSetLifecycle{}, errors.New("second failed")
 	}
 	return scaleSetLifecycle{
-		StopPolling: func() { fixture.stopped = true }, DestroyActive: func(context.Context) error { return nil },
-		Shutdown: func(context.Context) error { fixture.shutdown = true; return nil },
+		StopPolling: func() { fixture.stopped = true },
+		CloseSession: func(context.Context) error {
+			fixture.closed = true
+			return nil
+		},
+		DestroyActive: func(context.Context) error { fixture.destroyed = true; return nil },
+		Shutdown:      func(context.Context) error { fixture.shutdown = true; return nil },
 	}, nil
 }
 
@@ -450,14 +414,13 @@ func TestRemoveRepositoryImmediatelyReportsLifecycleCleanupFailure(t *testing.T)
 	}
 }
 
-func TestRollbackRepositoryStartupReportsLifecycleCleanupFailure(t *testing.T) {
+func TestSuspendRepositoryActivationReportsSessionCloseFailure(t *testing.T) {
 	activeConfig := testActiveConfiguration()
 	repository := managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		StopPolling:   func() {},
-		DestroyActive: func(context.Context) error { return errors.New("destroy failed") },
-		Shutdown:      func(context.Context) error { return errors.New("shutdown failed") },
+		StopPolling:  func() {},
+		CloseSession: func(context.Context) error { return errors.New("close failed") },
 	}}}
-	if err := rollbackRepositoryStartup(context.Background(), &activeConfig, "repo", repository); err == nil {
-		t.Fatal("expected rollback failure")
+	if err := suspendRepositoryActivation(context.Background(), &activeConfig, "repo", &repository); err == nil {
+		t.Fatal("expected suspension failure")
 	}
 }

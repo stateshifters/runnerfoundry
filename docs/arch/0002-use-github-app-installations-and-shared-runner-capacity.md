@@ -6,6 +6,8 @@ Date: 2026-07-11
 
 Superseded by [3. Persist shared queue state in SQLite](0003-persist-shared-queue-state-in-sqlite.md)
 
+Amended by [6. Continuously reconcile repository scale-set registration](0006-continuously-reconcile-repository-scale-set-registration.md)
+
 ## Context
 
 The daemon authenticated with a personal access token and required every repository to be repeated in local configuration. PAT ownership tied the service to a user, while repository selection duplicated the access policy already maintained by GitHub App installations.

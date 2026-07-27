@@ -28,6 +28,49 @@ func TestSQLiteDemandStoreMigratesLegacyZeroIdentityDemand(t *testing.T) {
 	}
 }
 
+func TestSQLiteDemandStoreMigratesLibvirtLifecycleToGenericLifecycle(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := OpenSQLiteDemandStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.database.Exec(`DROP TRIGGER mirror_libvirt_runner_lifecycle_insert;
+		DROP TRIGGER mirror_libvirt_runner_lifecycle_update;
+		DROP TRIGGER mirror_libvirt_runner_lifecycle_delete;
+		DELETE FROM runner_lifecycle;
+		INSERT INTO libvirt_runner_lifecycle(scale_set, repository, request_id, runner_name, reap_requested)
+		VALUES('linux', 'repo', 42, 'linux-42', 1), ('linux', 'repo', 43, 'linux-43', 0);
+		DROP TABLE runner_lifecycle;
+		PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenSQLiteDemandStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeSQLiteDemandStore(t, reopened)
+	var provider, phase, reason string
+	if err = reopened.database.QueryRow(`SELECT provider, phase, reap_reason FROM runner_lifecycle
+		WHERE scale_set = 'linux' AND repository = 'repo' AND runner_name = 'linux-42'`).Scan(&provider, &phase, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "libvirt" || phase != "reap_pending" || reason != "legacy_reap_requested" {
+		t.Fatalf("migrated lifecycle = provider %q phase %q reason %q", provider, phase, reason)
+	}
+	var waitingSince int64
+	if err = reopened.database.QueryRow(`SELECT phase, waiting_since FROM runner_lifecycle
+		WHERE scale_set = 'linux' AND repository = 'repo' AND runner_name = 'linux-43'`).Scan(&phase, &waitingSince); err != nil {
+		t.Fatal(err)
+	}
+	if phase != "waiting_for_job" || waitingSince <= 0 {
+		t.Fatalf("waiting migration = phase %q waiting_since %d", phase, waitingSince)
+	}
+}
+
 func seedLegacyZeroIdentityDemand(t *testing.T, databasePath string) {
 	t.Helper()
 	store, openErr := OpenSQLiteDemandStore(databasePath)
@@ -41,7 +84,7 @@ func seedLegacyZeroIdentityDemand(t *testing.T, databasePath string) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.database.Exec("DROP TABLE libvirt_runner_lifecycle"); err != nil {
+	if _, err := store.database.Exec("DROP TABLE runner_lifecycle; DROP TABLE libvirt_runner_lifecycle"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.database.Exec("PRAGMA user_version = 1"); err != nil {

@@ -132,7 +132,7 @@ sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
-RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. It then discovers App installations and repositories, creates the `linux-docker` runner scale set in each selected repository, and begins polling for demand.
+RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. It then discovers App installations and repositories, confirms every configured runner scale set in each selected repository, and begins polling only after that repository's complete session group is ready.
 
 ### 6. Send a workflow to the pool
 
@@ -276,6 +276,7 @@ scale_sets:
   - name: linux-docker
     runner_group: default
     max_runners: 4
+    job_start_timeout: 10m
     docker:
       compose_file: /etc/runnerfoundry/linux-runner.yaml
       service: runner
@@ -283,6 +284,7 @@ scale_sets:
   - name: linux-vm
     runner_group: default
     max_runners: 2
+    job_start_timeout: 10m
     libvirt:
       connection_uri: qemu:///system
       domain_xml_template: /etc/runnerfoundry/domain.xml
@@ -331,6 +333,7 @@ At least one scale set is required. Names must be unique in one configuration.
 | `scale_sets[].name` | Required | GitHub runner scale-set name and the value workflows use in `runs-on`. |
 | `scale_sets[].runner_group` | Optional; default `default` | GitHub runner group for the scale set. |
 | `scale_sets[].max_runners` | Required; positive integer | Standalone shared limit or clustered per-host contribution. Omit a scale set instead of setting zero. |
+| `scale_sets[].job_start_timeout` | Optional; default `10m`; strictly positive Go duration | Maximum time a confirmed provider runner may wait for `JobStarted`. It cannot be disabled. Reloaded values apply to existing waiting runners from their persisted start time. |
 | `scale_sets[].docker` | Exactly one infrastructure provider required | Docker Compose settings for the local host. |
 | `scale_sets[].libvirt` | Exactly one infrastructure provider required | libvirt settings for the local host. |
 
@@ -493,6 +496,7 @@ scale_sets:
   - name: linux-build
     runner_group: default
     max_runners: 4
+    job_start_timeout: 10m
     docker:
       compose_file: /etc/runnerfoundry/linux-build.yaml
       service: runner
@@ -505,6 +509,7 @@ scale_sets:
   - name: linux-build
     runner_group: default
     max_runners: 2
+    job_start_timeout: 10m
     libvirt:
       connection_uri: qemu:///system
       domain_xml_template: /etc/runnerfoundry/linux-build.xml
@@ -664,7 +669,7 @@ sudo systemctl reload runnerfoundry
 
 Reload validates the complete replacement configuration and credentials before applying them.
 
-In standalone mode, RunnerFoundry drains active runners, closes old GitHub message sessions, unregisters old scale sets, and reconciles the replacement configuration. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable libvirt cleanup records remain until absence is confirmed, including when their scale-set configuration is temporarily removed.
+In standalone mode, RunnerFoundry confirms the replacement registration set before it drains active runners and closes old GitHub message sessions. It retains confirmed registrations, activates the complete replacement session group, and only then applies optional pruning. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable Docker and libvirt cleanup records remain until provider and GitHub absence are confirmed, including when their scale-set configuration is temporarily removed. A changed `job_start_timeout` is evaluated against each waiting runner's persisted start time after reload.
 
 In clustered mode, the node atomically replaces its contribution set. Running assignments continue. An active leader immediately reconciles the changed union. A clustered reload cannot switch state backends or change PostgreSQL configuration.
 
@@ -676,13 +681,13 @@ RunnerFoundry commits identifiable GitHub demand to SQLite or PostgreSQL before 
 
 On standalone restart, RunnerFoundry reopens SQLite, rebuilds repository sessions from discovery, and schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
 
-Standalone libvirt cleanup is retried once per second and before new provisioning. The owning host must regain the matching scale-set configuration and libvirt access before RunnerFoundry can confirm absence and release the retained capacity.
+Standalone runner cleanup is retried once per second and before new provisioning. The owning host must regain the matching scale-set configuration and provider access, and GitHub must become reachable, before RunnerFoundry can confirm both absences and release retained capacity.
 
-In clustered mode, each assignment moves through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`. PostgreSQL retains those states through process and leader failure. `JobStarted` leaves demand and its assignment active; terminal `JobCompleted` atomically records any required libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
+In clustered mode, each assignment moves through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`. PostgreSQL separately retains provider-independent runner states through process and leader failure. `JobStarted` marks the exact runner busy before acknowledgement. Terminal `JobCompleted` atomically records exact Docker or libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
 
 Before starting a `starting` assignment, the selected host checks for its stable runner name. It checks again after an ambiguous infrastructure-provider error. A process restart repairs local `starting` assignments before claiming new work.
 
-Each clustered executor retries its node-owned libvirt cleanup before provisioning. Failures retain the PostgreSQL record indefinitely. If the node is unavailable or its local scale-set configuration is missing, the same operating-system hostname must return with working libvirt access before cleanup can be confirmed.
+Each clustered executor retries its node-owned runner cleanup before provisioning. Failures retain the PostgreSQL record and its capacity charge. If the node is unavailable or its local scale-set configuration is missing, the same operating-system hostname must return with working provider access before cleanup can be confirmed.
 
 When a host heartbeat expires, its active assignments complete while their demand remains available for another compatible live host. This favors retained or retried demand over silent loss. GitHub acquisition, database transitions, and infrastructure startup remain separate transaction boundaries, so operators should expect visible retries during partial failure.
 
@@ -712,15 +717,19 @@ SQLite backups and moves require the standalone service to be stopped.
 
 ### Configuration is rejected
 
-Read the first validation error from `journalctl`. Common causes are unknown YAML fields, a missing App ID or key file, a discovery interval shorter than `1m`, no scale sets, a non-positive `max_runners`, both state backends being configured, or a scale set containing both infrastructure providers.
+Read the first validation error from `journalctl`. Common causes are unknown YAML fields, a missing App ID or key file, a discovery interval shorter than `1m`, no scale sets, a non-positive `max_runners`, a zero, negative, malformed, or disabled `job_start_timeout`, both state backends being configured, or a scale set containing both infrastructure providers.
 
 ### The service is ready but scale sets are missing
 
-Readiness covers local preflight, not GitHub reconciliation. Check the operational status and logs. Verify the GitHub App's repository Administration write permission, App installation scope, selected repositories, private-key file, and discovery interval.
+Readiness covers local preflight, not GitHub reconciliation. Check the operational status and structured `repository_registration_audit`, `runner_scale_set_registration`, and `repository_registration_drift` actions. Verify the GitHub App's repository Administration write permission, App installation scope, selected repositories, private-key file, and discovery interval. RunnerFoundry retains successful registrations when another scale set fails, retries only the missing definitions, and activates no sessions until the repository set is complete.
+
+If a scale set was deleted or replaced externally, the next discovery-cadence audit suspends that repository's admission, recreates the missing registration, and replaces its complete session group. An audit timeout leaves an already healthy generation active and reports degraded reconciliation. Do not manually delete provider instances or lifecycle rows to repair registration drift.
 
 ### Jobs remain queued
 
 Confirm that workflow `runs-on` exactly matches `scale_sets[].name`. Check that the local infrastructure provider is healthy, the configured limit has free capacity, and the runner group exists. In a cluster, confirm that live hosts sharing the scale-set name use the same `runner_group`.
+
+If capacity appears full but no job is running, inspect structured logs for `runner_orphan_detect`, `runner_timeout`, and `runner_reap`. RunnerFoundry verifies GitHub registration when waiting capacity blocks demand, retains the exact cleanup obligation until both provider and GitHub absence are confirmed, and then schedules retained demand. Repeated cleanup failures indicate that GitHub or the owning provider is still unreachable; do not manually delete the lifecycle database row.
 
 ### Docker capacity is unhealthy
 
@@ -757,7 +766,7 @@ Confirm that the login identity can connect, belongs to the stable role, and can
 
 ### PostgreSQL rollback is refused
 
-A leader lease or live node heartbeat still exists. Stop all nodes, wait at least 30 seconds, run `migrate status`, and retry with the currently deployed executable.
+A leader lease, live node heartbeat, or Docker cleanup obligation that the older schema cannot represent still exists. Stop all nodes, wait at least 30 seconds, run `migrate status`, and inspect `runner_reap` failures. Retry with the currently deployed executable only after durable cleanup completes.
 
 ### A cluster leader remains degraded
 
@@ -773,6 +782,7 @@ This changes capacity from a per-repository model to one shared `max_runners` li
 
 - [Architecture](docs/architecture.md) explains system boundaries, scheduling, state, leadership, recovery, and security mechanisms behind the operator behavior summarized here.
 - [Architecture decisions](docs/arch/decisions.md) record why RunnerFoundry uses GitHub App installations, SQLite demand state, and PostgreSQL multi-host coordination.
+- [Registration-recovery validation](docs/registration-recovery-validation.md) is the operator checklist for a later authorized deployment test.
 - [Releases](https://github.com/meza/RunnerFoundry/releases) provide current packages and release notes.
 
 ## Security

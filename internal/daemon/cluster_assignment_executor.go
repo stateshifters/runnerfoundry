@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -19,7 +21,7 @@ const (
 )
 
 func (daemon *clusteredDaemon) executeAssignments(ctx context.Context) {
-	if !daemon.executePendingLibvirtReaps(ctx) {
+	if !daemon.executePendingRunnerReaps(ctx) {
 		return
 	}
 	starting, err := daemon.assignments.Starting(ctx, daemon.nodeID)
@@ -36,6 +38,107 @@ func (daemon *clusteredDaemon) executeAssignments(ctx context.Context) {
 		if !daemon.executeNextAssignment(ctx) {
 			return
 		}
+	}
+}
+
+type clusteredRunnerLifecycleState interface {
+	scaler.RunnerLifecycleStore
+	PendingNodeRunnerReaps(ctx context.Context, nodeID cluster.NodeID) ([]scaler.RunnerLifecycle, error)
+}
+
+func (daemon *clusteredDaemon) executePendingRunnerReaps(ctx context.Context) bool {
+	lifecycleStore, supported := daemon.assignments.(clusteredRunnerLifecycleState)
+	if !supported {
+		return daemon.executePendingLibvirtReaps(ctx)
+	}
+	configuration := daemon.configurationSnapshot()
+	now := time.Now().UTC()
+	for _, scaleSet := range configuration.config.ScaleSets {
+		timeout, err := scaleSet.JobStartDuration()
+		if err != nil {
+			daemon.logger.Error("parse clustered runner waiting lease failed",
+				slog.String("scaleSet", scaleSet.Name), slog.String("error", err.Error()))
+			return false
+		}
+		if _, err = lifecycleStore.RequestExpiredRunnerReaps(ctx, scaleSet.Name, "", now.Add(-timeout), now); err != nil {
+			daemon.logger.Error("expire clustered waiting runners failed",
+				slog.String("scaleSet", scaleSet.Name), slog.String("error", err.Error()))
+			return false
+		}
+	}
+	pending, err := lifecycleStore.PendingNodeRunnerReaps(ctx, daemon.nodeID)
+	if err != nil {
+		daemon.logger.Error("load pending runner reaps failed", slog.String("error", err.Error()))
+		return false
+	}
+	for _, runner := range pending {
+		daemon.executePendingRunnerReap(ctx, configuration, lifecycleStore, runner)
+	}
+	return true
+}
+
+func (daemon *clusteredDaemon) executePendingRunnerReap(
+	ctx context.Context,
+	configuration clusteredConfigurationSnapshot,
+	lifecycleStore clusteredRunnerLifecycleState,
+	runner scaler.RunnerLifecycle,
+) {
+	reconciler, ready := daemon.pendingRunnerReconciler(ctx, configuration, runner)
+	if !ready {
+		return
+	}
+	daemon.reapPendingRunnerLifecycle(ctx, lifecycleStore, reconciler, runner)
+}
+
+func (daemon *clusteredDaemon) pendingRunnerReconciler(
+	ctx context.Context,
+	configuration clusteredConfigurationSnapshot,
+	runner scaler.RunnerLifecycle,
+) (scaler.Reconciler, bool) {
+	scaleSet, exists := localScaleSet(configuration.config.ScaleSets, runner.ScaleSet)
+	if !exists {
+		daemon.logger.Warn("pending runner reap retained because local configuration is unavailable",
+			slog.String("scaleSet", runner.ScaleSet), slog.String("repository", runner.Repository),
+			slog.String("runnerName", runner.RunnerName))
+		return scaler.Reconciler{}, false
+	}
+	client, err := daemon.newGitHubClient(
+		runner.Repository, githubapp.InstallationID(runner.InstallationID), configuration.credentials,
+	)
+	if err != nil {
+		daemon.logger.Error("create pending runner cleanup GitHub client failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+		return scaler.Reconciler{}, false
+	}
+	reconciler, err := daemon.buildReconciler(ctx, runner.Repository, scaleSet, client, runner.GitHubScaleSetID)
+	if err != nil {
+		daemon.logger.Error("build pending runner reaper failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+		return scaler.Reconciler{}, false
+	}
+	return reconciler, true
+}
+
+func (daemon *clusteredDaemon) reapPendingRunnerLifecycle(
+	ctx context.Context,
+	lifecycleStore clusteredRunnerLifecycleState,
+	reconciler scaler.Reconciler,
+	runner scaler.RunnerLifecycle,
+) {
+	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
+	absent, err := reconciler.ReapRunnerLifecycle(reapCtx, runner)
+	cancelReap()
+	if err != nil {
+		daemon.logger.Error("pending runner reap failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+		return
+	}
+	if !absent {
+		return
+	}
+	if err = lifecycleStore.ConfirmRunnerReaped(ctx, runner); err != nil {
+		daemon.logger.Error("confirm pending runner absence failed",
+			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
 	}
 }
 
@@ -85,13 +188,10 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 	if err != nil {
 		return err
 	}
-	if scaleSet.Libvirt != nil {
-		reconciler.ScaleSet.RegisterRunner = func(registerCtx context.Context, runnerName string, requestID int64) error {
-			return daemon.assignments.RegisterLibvirtRunner(registerCtx, assignment.ID, cluster.LibvirtRunnerLifecycle{
-				NodeID: assignment.NodeID, ScaleSet: assignment.ScaleSet, Repository: assignment.Repository,
-				RequestID: requestID, RunnerName: runnerName,
-			})
-		}
+	if lifecycleStore, supported := daemon.assignments.(scaler.RunnerLifecycleStore); supported {
+		configureAssignmentRunnerLifecycle(&reconciler, lifecycleStore, scaleSet, assignment)
+	} else if scaleSet.Libvirt != nil {
+		configureLegacyAssignmentLifecycle(daemon, &reconciler, assignment)
 	}
 	if err = ensureAssignedRunner(ctx, reconciler, assignment.RequestID); err != nil {
 		return err
@@ -100,6 +200,39 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 		return fmt.Errorf("record started runner assignment: %w", err)
 	}
 	return nil
+}
+
+func configureAssignmentRunnerLifecycle(
+	reconciler *scaler.Reconciler,
+	lifecycleStore scaler.RunnerLifecycleStore,
+	scaleSet config.ScaleSetConfig,
+	assignment *cluster.Assignment,
+) {
+	provider := scaler.RunnerProviderDocker
+	if scaleSet.Libvirt != nil {
+		provider = scaler.RunnerProviderLibvirt
+	}
+	reconciler.ScaleSet.Lifecycle = lifecycleStore
+	reconciler.ScaleSet.LifecycleScaleSet = assignment.ScaleSet
+	reconciler.ScaleSet.Repository = assignment.Repository
+	reconciler.ScaleSet.ProviderKind = provider
+	reconciler.ScaleSet.NodeID = string(assignment.NodeID)
+	reconciler.ScaleSet.AssignmentID = int64(assignment.ID)
+	reconciler.ScaleSet.InstallationID = int64(assignment.InstallationID)
+	reconciler.ScaleSet.GitHubScaleSetID = assignment.GitHubScaleSetID
+}
+
+func configureLegacyAssignmentLifecycle(
+	daemon *clusteredDaemon,
+	reconciler *scaler.Reconciler,
+	assignment *cluster.Assignment,
+) {
+	reconciler.ScaleSet.RegisterRunner = func(registerCtx context.Context, runnerName string, requestID int64) error {
+		return daemon.assignments.RegisterLibvirtRunner(registerCtx, assignment.ID, cluster.LibvirtRunnerLifecycle{
+			NodeID: assignment.NodeID, ScaleSet: assignment.ScaleSet, Repository: assignment.Repository,
+			RequestID: requestID, RunnerName: runnerName,
+		})
+	}
 }
 
 func (daemon *clusteredDaemon) executePendingLibvirtReaps(ctx context.Context) bool {

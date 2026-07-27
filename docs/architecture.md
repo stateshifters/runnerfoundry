@@ -5,7 +5,7 @@
 The same executable supports two runtime shapes:
 
 - Standalone mode coordinates one provider host and keeps its durable FIFO demand queue in an exclusively owned SQLite database.
-- Clustered mode combines capacity from multiple provider hosts. PostgreSQL holds shared declarations, health, demand, assignments, and node-owned libvirt cleanup obligations, while a session advisory lock selects the one host that manages GitHub-facing scale-set sessions.
+- Clustered mode combines capacity from multiple provider hosts. PostgreSQL holds shared declarations, health, demand, assignments, and node-owned Docker or libvirt lifecycle obligations, while a session advisory lock selects the one host that manages GitHub-facing scale-set sessions.
 
 Both modes preserve identifiable job demand before acknowledging the GitHub message that delivered it. Neither mode can make GitHub, the state database, and the provider participate in one transaction. Stable request-derived runner names and explicit persisted states make partial operations recoverable without claiming exactly-once execution.
 
@@ -21,6 +21,7 @@ The application currently provides the following behavior:
 - Per-host capacity contributions, global scheduling, and leader failover in clustered mode.
 - Ephemeral runner provisioning through Docker Compose or libvirt.
 - Durable recovery of positive-identity demand across restart and reload.
+- Durable provider-independent runner ownership with a bounded waiting lease.
 - Optional removal of unmanaged GitHub runner scale sets during standalone repository discovery.
 - Validated `SIGHUP` reload with mode-specific replacement behavior.
 - Automatic upward PostgreSQL migration at clustered startup and explicit status, upgrade, and rollback commands.
@@ -144,7 +145,9 @@ The GitHub App installation boundary decides which repositories the scaler may m
 
 Failure to list installations fails the discovery pass because no reliable repository authority is available. Failure to list one installation's repositories is isolated and returned alongside successful repositories. Standalone reconciliation retains the last-known repositories for a failed installation so a transient installation failure does not look like access revocation. A repository missing from a successful discovery result is outside the current authority and is removed immediately.
 
-For each desired repository and scale-set definition, the scaler resolves the configured runner group, finds or creates the GitHub runner scale set, and opens a scale-set message session. A cluster leader performs the same operation for the union of scale sets declared in PostgreSQL, including scale sets that the leader cannot run locally.
+For each desired repository, the scaler audits the complete configured registration set before it admits work. One snapshot is read per distinct runner group. Missing scale sets are created independently, so a later failure never rolls back registrations that already succeeded. Message polling and scheduling begin only after every registration and every session in the repository generation succeeds. A partial generation is closed and detached without deleting registrations, demand, runners, or lifecycle ownership.
+
+Each active session records its confirmed GitHub scale-set ID. Discovery-cadence audits compare that ID with the current registration snapshot. A transient audit failure leaves a healthy generation serving work and reports degraded reconciliation. Confirmed absence or ID replacement suspends the repository, repairs registrations, replaces its complete session group, and resumes admission atomically. A cluster leader applies the same contract to the union declared in PostgreSQL, including scale sets that the leader cannot run locally.
 
 ### Message acknowledgement boundary
 
@@ -154,7 +157,7 @@ If validation, persistence, acquisition, scheduling, provider inspection, or pro
 
 Pollers issue the next receive immediately after a successful empty or handled response. A failed poll waits five seconds before retrying, and the third consecutive failure adds a sustained-degradation log entry. Cancellation interrupts both an active poll and its retry wait.
 
-Positive request identities and queue timestamps come from `JobAvailable` messages. In standalone mode, `JobStarted` and terminal `JobCompleted` remove demand. In clustered mode, `JobStarted` retains demand and assignments; only `JobCompleted` makes them terminal. Identity-free assigned capacity is represented by GitHub's authoritative `TotalAssignedJobs` statistic in standalone mode rather than by a durable queue row.
+Positive request identities and queue timestamps come from `JobAvailable` messages. `JobStarted` first persists the exact runner as busy. Terminal `JobCompleted` atomically requests exact runner cleanup and removes terminal demand. In clustered mode, `JobStarted` retains demand and assignments; only `JobCompleted` makes them terminal. Identity-free assigned capacity is represented by GitHub's authoritative `TotalAssignedJobs` statistic in standalone mode rather than by a durable queue row.
 
 ### Scale-set ownership and pruning
 
@@ -174,7 +177,7 @@ Standalone mode has one process, one provider host, and one exclusively locked S
 C4Component
     title Component Diagram - Standalone Mode
 
-    ContainerDb(sqlite, "Standalone state", "SQLite", "Durable demand and libvirt cleanup obligations")
+    ContainerDb(sqlite, "Standalone state", "SQLite", "Durable demand and provider-independent runner lifecycle")
     System_Ext(github, "GitHub Actions", "Scale-set messages, acquisition, and JIT configuration")
     System_Ext(provider, "Docker Engine or libvirt", "Provider-visible ephemeral runners")
 
@@ -248,21 +251,20 @@ sequenceDiagram
     P->>GH: Delete message acknowledgement
     GH->>P: Later JobStarted or JobCompleted message
     P->>H: Handle completion
-    alt libvirt runner
-        H->>C: Request terminal reap
-        C->>DB: Commit reap obligation and remove demand
-    else Docker runner
-        H->>C: Remove durable demand
-        C->>DB: Delete matching row
-    end
+    H->>C: Request exact runner cleanup
+    C->>DB: Atomically commit reap obligation and remove terminal demand
     P->>GH: Delete message acknowledgement
 ```
 
 ### Standalone recovery and lifecycle
 
-On restart, the daemon reopens SQLite, discovers repositories, recreates workers, and schedules retained demand. If a named runner is visible, it is not duplicated. If an acquired runner disappeared before GitHub reported `JobStarted`, it is reprovisioned without reacquiring the request. Pending libvirt reaps are attempted before new provisioning and then once per second. Each attempt retains its record unless an ownership-filtered inspection confirms the exact runner is absent.
+On restart, the daemon reopens SQLite, discovers repositories, recreates workers, and schedules retained demand. Provider startup is bracketed by durable `provisioning` and `waiting_for_job` states. `JobStarted` moves the exact runner to `busy`; only waiting runners can expire. If a named runner is visible, it is not duplicated. Pre-upgrade provider instances with a GitHub registration are conservatively protected, while instances already absent from GitHub are reaped.
 
-A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. After validation, the daemon stops pollers, waits for active runners to drain, closes old message sessions, deletes old GitHub scale sets, removes demand for scale sets absent from the replacement, creates replacement coordinators and sessions over the same store, and schedules retained demand. Demand belonging to removed repositories or scale sets is intentionally deleted. Libvirt lifecycle records remain until the owning configuration and host access return and confirm absence.
+Each scale set applies `job_start_timeout`, defaulting to `10m`, to the persisted `waiting_since` timestamp. A reload therefore changes the lease for existing waiting runners without resetting their age. A decrease in `TotalAssignedJobs` condemns excess identity-free waiting runners immediately. When apparent capacity blocks demand, the coordinator verifies GitHub registration and condemns missing registrations without waiting for the lease.
+
+Pending Docker and libvirt reaps are attempted before new provisioning and then once per second. Cleanup destroys only the exact owned provider instance, removes its exact GitHub registration, and retains `reap_pending` plus its capacity charge until both absences are confirmed. Confirmed cleanup immediately reschedules retained demand.
+
+A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. It discovers replacement repositories and confirms their complete registration sets before stopping the old generation. The daemon then stops pollers, waits for active runners to drain, closes old message sessions without deleting registrations, removes demand for scale sets absent from the replacement, creates replacement coordinators and sessions over the same store, and schedules retained demand. Optional pruning runs only after replacement activation succeeds. Demand belonging to removed repositories or scale sets is intentionally deleted. Durable provider lifecycle records remain until the owning configuration and host access return and confirm absence.
 
 Normal process shutdown stops polling and closes message sessions and scale sets with bounded, concurrent cleanup. It does not destroy active runners. Repository access removal is immediate and does destroy active runners because the repository is no longer within the App's authority.
 
@@ -314,9 +316,9 @@ Live, healthy contributors sharing a name must agree on the runner group. Compat
 
 Leadership is a session-scoped PostgreSQL advisory lock held on a dedicated direct connection. Closing or losing that connection releases the lock. Standby nodes block on the same lock instead of polling for leadership. The heartbeat loop checks the current lease; after loss, the old leader stops its sessions without deleting GitHub scale sets and returns to contention.
 
-When leadership is acquired, the leader reconciles GitHub sessions. It discovers repositories, reads the current aggregate scale-set statuses from PostgreSQL, and creates one session for every compatible repository and declared scale-set pair. The session's advertised maximum is the current effective cluster capacity. A leader reconciliation is requested after initial leadership acquisition and after a successful local configuration reload. Clustered mode has no separate periodic discovery or session-reconciliation timer. Heartbeats continue publishing state independently of session reconciliation, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
+When leadership is acquired, the leader reconciles GitHub sessions. It discovers repositories, reads the current aggregate scale-set statuses from PostgreSQL, audits each repository's complete registration set, and creates one atomic session group per repository. The session's advertised maximum is the current effective cluster capacity. Reconciliation runs after leadership acquisition, after a successful local configuration reload, and periodically at `github.discovery_interval`. Heartbeats continue publishing state independently of session reconciliation, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
 
-An incompatible scale set receives no session. When effective capacity changes, reconciliation replaces the affected session. When the last declaration is explicitly withdrawn, the leader stops the session and deletes the GitHub scale set. Leadership loss retains the GitHub scale set so a successor can attach a replacement session.
+An incompatible scale set receives no session. When effective capacity or a confirmed registration ID changes, reconciliation replaces the repository's complete session generation. A transient registration audit failure preserves the healthy generation and reports `leader degraded`. When the last declaration is explicitly withdrawn, the leader stops the session and deletes the GitHub scale set. Leadership loss retains the GitHub scale set so a successor can attach a replacement session.
 
 As long as incompatible live declarations remain, the aggregate capacity is zero, the leader logs the conflict during reconciliation, and no message session is created for that scale set. Stale or unhealthy conflicting declarations do not have this effect because compatibility considers only live, healthy contributors.
 
@@ -399,13 +401,13 @@ stateDiagram-v2
     running --> complete: Demand completes or owning node expires
 ```
 
-Every non-complete assignment and pending libvirt reap consumes the selected node's local capacity. Transitions include the expected prior state and, for host-owned transitions, the expected node ID. A stale or repeated transition fails with an assignment conflict instead of silently overwriting newer state.
+Every non-complete assignment and pending runner reap consumes the selected node's local capacity. Transitions include the expected prior state and, for host-owned transitions, the expected node ID. A stale or repeated transition fails with an assignment conflict instead of silently overwriting newer state.
 
 The `acquiring` state is the boundary around GitHub's non-transactional acquisition API. A replacement leader may retry an interrupted acquisition only if GitHub's response confirms the requested identity. An unconfirmed acquisition never makes the assignment executable.
 
 The `starting` state is the boundary around provider startup. Before starting, and again after an ambiguous provider error, the owning node checks for the stable request-derived runner name. A process restart repairs all of its `starting` assignments before claiming new `ready` assignments. A failed or ambiguous start remains `starting` for later repair rather than returning to the ready queue.
 
-`JobStarted` validates the request identity without completing clustered state. Terminal `JobCompleted` transactionally requests registered libvirt cleanup, marks active assignments complete, and removes demand before acknowledgement. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
+`JobStarted` persists the exact runner as busy without completing clustered demand. Terminal `JobCompleted` transactionally requests registered Docker or libvirt cleanup, marks active assignments complete, and removes demand before acknowledgement. An expired waiting lease makes the runner `reap_pending`, completes its assignment, and retains demand for a fresh assignment after capacity is safe. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
 
 ### Clustered job sequence
 
@@ -442,9 +444,9 @@ sequenceDiagram
     GH->>L: JobStarted
     L-->>GH: Acknowledge without completing assignment
     GH->>L: JobCompleted
-    L->>DB: Request libvirt reap; complete assignment and demand
+    L->>DB: Request exact runner reap; complete assignment and demand
     L-->>GH: Acknowledge after cleanup obligation commits
-    E->>DB: Load node-owned pending reaps
+    E->>DB: Load node-owned Docker and libvirt pending reaps
     E->>X: List exact owned domain; destroy if active; list again
     E->>DB: Delete lifecycle only after confirmed absence
 ```
@@ -455,6 +457,7 @@ sequenceDiagram
 erDiagram
     SCALER_NODES ||--o{ SCALER_CONTRIBUTIONS : publishes
     SCALER_NODES ||--o{ SCALER_ASSIGNMENTS : owns
+    SCALER_NODES ||--o{ SCALER_RUNNER_LIFECYCLE : owns
     SCALER_NODES ||--o{ SCALER_LIBVIRT_RUNNER_LIFECYCLE : owns
     SCALER_DEMAND ||--o{ SCALER_ASSIGNMENTS : receives
 
@@ -490,17 +493,30 @@ erDiagram
         integer github_scale_set_id
         text state
     }
+    SCALER_RUNNER_LIFECYCLE {
+        text node_id PK, FK
+        text scale_set PK
+        text repository PK
+        text provider
+        text runner_name PK
+        bigint request_id
+        bigint assignment_id FK
+        bigint github_runner_id
+        text phase
+        timestamptz waiting_since
+        text reap_reason
+    }
     SCALER_LIBVIRT_RUNNER_LIFECYCLE {
         text node_id PK, FK
         text scale_set PK
         text repository PK
         bigint request_id
         text runner_name PK
-        boolean reap_requested
+        boolean reap_requested "legacy compatibility"
     }
 ```
 
-The schema enforces one active assignment per demand with a partial unique index. Additional indexes support FIFO demand selection, active-assignment counts, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; libvirt lifecycle records remain until confirmed absence.
+The schema enforces one active assignment per demand with a partial unique index. The generic lifecycle table records provider, exact identities, lifecycle phase, timestamps, and reap reason. Additional indexes support FIFO demand selection, active-assignment counts, waiting leases, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; runner lifecycle records remain until confirmed provider and GitHub absence.
 
 Ordinary state calls use the primary PostgreSQL endpoint. Migrations and advisory-lock sessions use the optional direct endpoint, or the primary endpoint when it preserves session affinity. All sessions assume the configured stable role. Login credentials may rotate, but database objects and migration metadata remain owned by the stable role.
 
@@ -510,7 +526,7 @@ Configuration values may be literals, environment references, or file references
 
 Cluster startup inspects the schema and automatically migrates upward before contribution publication. A dedicated advisory lock serializes version inspection, migration, and compatibility validation among simultaneous nodes. Migrations are embedded, ordered, transactional, and reversible.
 
-`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. `migrate down --to` must be run with the currently deployed binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. The compatibility row prevents a binary from using a schema generation below the schema's supported floor.
+`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. Migration 003 expands lifecycle ownership to both providers, backfills the retained libvirt table, mirrors old-binary writes, and keeps new libvirt writes compatible for one release window. `migrate down --to` must be run with the currently deployed binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. It also refuses to discard Docker cleanup obligations that the legacy schema cannot represent. The compatibility row prevents a binary from using a schema generation below the schema's supported floor.
 
 ### Reload, failover, and shutdown
 
@@ -560,7 +576,7 @@ The scheduling layers do not know Docker or libvirt command details. They depend
 - `Provider` lists, starts, and destroys instances identified by scale-set and runner names.
 - `JITConfigGenerator` creates GitHub runner registrations and removes a generated registration when provider startup fails.
 
-This boundary centralizes runner capacity checks, completed-runner cleanup, stable identity, JIT cleanup, and provider-independent recovery.
+This boundary centralizes runner capacity checks, lifecycle registration before provider startup, bounded waiting, completed-runner cleanup, stable identity, JIT cleanup, and provider-independent recovery.
 
 ```mermaid
 classDiagram
@@ -710,7 +726,9 @@ The architecture protects the following invariants:
 | Positive-identity demand survives process restart | SQLite or PostgreSQL stores demand before acknowledgement | Identity-free assigned work relies on GitHub statistics in standalone mode |
 | Redelivery does not create duplicate demand | Unique demand identity and idempotent upsert | External APIs and providers are still separate transaction domains |
 | Capacity is not exceeded | Standalone counts provider-visible runners and pending reaps; PostgreSQL counts active assignments and pending reaps per contributor | Pending cleanup deliberately retains capacity while provider state is ambiguous |
-| Accepted libvirt cleanup is not forgotten | Lifecycle intent commits before `JobCompleted` acknowledgement and retries until confirmed absence | The owning host must regain its configuration and libvirt access |
+| Accepted runner cleanup is not forgotten | Provider-independent lifecycle intent commits before `JobCompleted` acknowledgement and retries until provider and GitHub absence are confirmed | The owning host must regain its configuration and provider access; GitHub must respond |
+| Waiting capacity cannot strand demand forever | `job_start_timeout`, assigned-count cancellation, and GitHub registration checks move unusable waiting runners to durable cleanup | Busy runners are protected; cleanup retains capacity while absence is ambiguous |
+| A discovered repository cannot silently lose part of its configured registration set | Discovery-cadence grouped audits retain successful creations and activate only complete repository session generations | Active generations remain in use while an audit result is inconclusive |
 | Interrupted provider starts do not blindly duplicate runners | Stable runner name is checked before and after start and during repair | A provider that cannot report accurate identity cannot provide this guarantee |
 | Cluster leadership has one active owner | Session advisory lock on a dedicated connection | PostgreSQL availability is required for leadership and shared scheduling |
 | Node loss does not lose queued demand | Expired-node assignments complete while demand remains | Work may be retried on another host after the original host becomes unreachable |
