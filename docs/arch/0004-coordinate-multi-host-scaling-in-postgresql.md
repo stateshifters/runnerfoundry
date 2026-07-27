@@ -8,6 +8,8 @@ Accepted
 
 Supersedes [3. Persist shared queue state in SQLite](0003-persist-shared-queue-state-in-sqlite.md)
 
+Amended by [5. Own runner lifecycle with a bounded waiting lease](0005-own-runner-lifecycle-with-a-bounded-waiting-lease.md)
+
 ## Context
 
 ADR 3 made queued demand durable but intentionally retained a single-writer SQLite boundary. One daemon therefore owned Github discovery, message polling, provider execution, and the full capacity limit. It could not combine capacity from multiple provider hosts or fail leadership over without moving the SQLite database and stopping the original writer.

@@ -208,6 +208,35 @@ func TestJITGeneratorSurfacesRemoveFailure(t *testing.T) {
 	}
 }
 
+func TestJITGeneratorFindsRunnerRegistration(t *testing.T) {
+	generator := scalesetJITGenerator{Client: fakeScaleSetJITClient{getRunnerByName: func(context.Context, string) (*upstream.RunnerReference, error) {
+		return &upstream.RunnerReference{ID: 99, Name: "linux-1"}, nil
+	}}}
+	runner, found, err := generator.Find(context.Background(), "linux-1")
+	if err != nil || !found || runner.ID != 99 || runner.Name != "linux-1" {
+		t.Fatalf("runner=%#v found=%t err=%v", runner, found, err)
+	}
+}
+
+func TestJITGeneratorFindReportsAbsentRegistration(t *testing.T) {
+	var missingRunner *upstream.RunnerReference
+	generator := scalesetJITGenerator{Client: fakeScaleSetJITClient{getRunnerByName: func(context.Context, string) (*upstream.RunnerReference, error) {
+		return missingRunner, nil
+	}}}
+	if runner, found, err := generator.Find(context.Background(), "missing"); err != nil || found || runner != (scaler.JITRunner{}) {
+		t.Fatalf("runner=%#v found=%t err=%v", runner, found, err)
+	}
+}
+
+func TestJITGeneratorFindReportsLookupFailure(t *testing.T) {
+	generator := scalesetJITGenerator{Client: fakeScaleSetJITClient{getRunnerByName: func(context.Context, string) (*upstream.RunnerReference, error) {
+		return nil, errors.New("lookup failed")
+	}}}
+	if _, _, err := generator.Find(context.Background(), "linux-1"); err == nil {
+		t.Fatal("expected lookup failure")
+	}
+}
+
 func waitForPoll(t *testing.T, messageClient *fakeMessageClient) {
 	t.Helper()
 	select {

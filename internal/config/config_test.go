@@ -19,8 +19,52 @@ func TestLoadAcceptsGitHubAppSettings(t *testing.T) {
 
 func TestLoadAppliesGitHubDefaults(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
-	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.ScaleSets[0].RunnerGroup != "default" {
+	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.ScaleSets[0].RunnerGroup != "default" ||
+		loadedConfig.ScaleSets[0].JobStartTimeout != "10m" {
 		t.Fatalf("loaded defaults = %#v", loadedConfig)
+	}
+}
+
+func TestLoadAcceptsAnyStrictlyPositiveJobStartTimeout(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	configText := strings.Replace(validConfig(privateKeyPath), "    max_runners: 1\n", "    max_runners: 1\n    job_start_timeout: 1ns\n", 1)
+	loadedConfig, err := Load(strings.NewReader(configText))
+	if err != nil {
+		t.Fatalf("load positive job start timeout: %v", err)
+	}
+	timeout, err := loadedConfig.ScaleSets[0].JobStartDuration()
+	if err != nil || timeout != time.Nanosecond {
+		t.Fatalf("job start timeout = %s, %v", timeout, err)
+	}
+}
+
+func TestLoadRejectsNonPositiveOrMalformedJobStartTimeout(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	for name, value := range map[string]string{
+		"zero":      "0s",
+		"negative":  "-1ns",
+		"malformed": "disabled",
+	} {
+		t.Run(name, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "    max_runners: 1\n", "    max_runners: 1\n    job_start_timeout: "+value+"\n", 1)
+			if _, err := Load(strings.NewReader(configText)); err == nil {
+				t.Fatalf("job_start_timeout %q was accepted", value)
+			}
+		})
+	}
+}
+
+func TestJobStartDurationRejectsInvalidUnvalidatedValue(t *testing.T) {
+	if duration, err := (ScaleSetConfig{}).JobStartDuration(); err != nil || duration != 10*time.Minute {
+		t.Fatalf("default duration=%v err=%v", duration, err)
+	}
+	if _, err := (ScaleSetConfig{JobStartTimeout: "invalid"}).JobStartDuration(); err == nil {
+		t.Fatal("expected invalid job start timeout error")
+	}
+	for _, value := range []string{"0s", "-1ns"} {
+		if _, err := (ScaleSetConfig{JobStartTimeout: value}).JobStartDuration(); err == nil {
+			t.Fatalf("expected non-positive job start timeout %q error", value)
+		}
 	}
 }
 

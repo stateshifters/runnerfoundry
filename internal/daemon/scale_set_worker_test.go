@@ -73,3 +73,17 @@ func TestCoordinatedRepositoryWorkerUsesCompactedRunnerNameForStartAndRecovery(t
 		t.Fatalf("expected compacted runner lookup to find the runner, got exists=%t err=%v", exists, err)
 	}
 }
+
+func TestCoordinatedRepositoryWorkerInspectsExactRunner(t *testing.T) {
+	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "set", Provider: &fakeScalerProvider{instances: []scaler.RunnerInstance{{RunnerName: "runner"}}},
+	}}}
+	present, err := worker.RunnerPresent(context.Background(), "runner")
+	if err != nil || !present {
+		t.Fatalf("present=%t err=%v", present, err)
+	}
+	worker.Reconciler.ScaleSet.Provider = &fakeScalerProvider{listErr: errors.New("list")}
+	if _, err = worker.RunnerPresent(context.Background(), "runner"); err == nil || !strings.Contains(err.Error(), "inspect repository runner") {
+		t.Fatalf("error=%v", err)
+	}
+}

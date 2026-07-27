@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReconcilerRepositoryWorkerCountsRecoveredRunnersAndStartsOne(t *testing.T) {
@@ -175,6 +176,29 @@ func TestReconcilerRegistersRunnerLifecycleBeforeProviderStart(t *testing.T) {
 	}
 }
 
+func TestReconcilerDurablyRegistersThenConfirmsProviderIndependentLifecycle(t *testing.T) {
+	events := make([]string, 0, 3)
+	provider := &lifecycleStartProvider{events: &events}
+	lifecycle := &recordingRunnerLifecycleStore{events: &events}
+	now := time.Date(2026, time.July, 27, 17, 0, 0, 0, time.UTC)
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", Repository: "repo", MaxRunners: 1, ProviderKind: RunnerProviderDocker,
+		Provider: provider, JITConfig: &recordingJITGenerator{}, Lifecycle: lifecycle,
+		Now: func() time.Time { return now },
+	}}
+
+	if err := reconciler.StartNamed(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "register:set-42,start:set-42,waiting:set-42" {
+		t.Fatalf("events = %v", events)
+	}
+	if lifecycle.registered.Provider != RunnerProviderDocker || lifecycle.registered.GitHubRunnerID != 1 ||
+		lifecycle.registered.RequestID != 42 || lifecycle.registered.CreatedAt != now {
+		t.Fatalf("registered lifecycle = %#v", lifecycle.registered)
+	}
+}
+
 func TestReconcilerRegistrationFailureRemovesJITAndDoesNotStart(t *testing.T) {
 	events := make([]string, 0)
 	provider := &orderedStartProvider{events: &events}
@@ -211,6 +235,63 @@ func (provider *orderedStartProvider) Start(_ context.Context, request RunnerSta
 	return nil
 }
 func (*orderedStartProvider) Destroy(context.Context, RunnerInstance) error { return nil }
+
+type lifecycleStartProvider struct {
+	events    *[]string
+	instances []RunnerInstance
+}
+
+func (provider *lifecycleStartProvider) List(context.Context, string) ([]RunnerInstance, error) {
+	return append([]RunnerInstance(nil), provider.instances...), nil
+}
+
+func (provider *lifecycleStartProvider) Start(_ context.Context, request RunnerStartRequest) error {
+	*provider.events = append(*provider.events, "start:"+request.RunnerName)
+	provider.instances = append(provider.instances, RunnerInstance{ID: request.RunnerName, RunnerName: request.RunnerName, State: RunnerStateRunning})
+	return nil
+}
+
+func (*lifecycleStartProvider) Destroy(context.Context, RunnerInstance) error { return nil }
+
+type recordingRunnerLifecycleStore struct {
+	events     *[]string
+	registered RunnerLifecycle
+}
+
+func (store *recordingRunnerLifecycleStore) RegisterRunner(_ context.Context, runner RunnerLifecycle) error {
+	store.registered = runner
+	*store.events = append(*store.events, "register:"+runner.RunnerName)
+	return nil
+}
+
+func (store *recordingRunnerLifecycleStore) ConfirmRunnerWaiting(_ context.Context, runner RunnerLifecycle, _ time.Time) error {
+	*store.events = append(*store.events, "waiting:"+runner.RunnerName)
+	return nil
+}
+
+func (*recordingRunnerLifecycleStore) MarkRunnerBusy(context.Context, string, string, int64, string, int64, time.Time) error {
+	return nil
+}
+
+func (*recordingRunnerLifecycleStore) RequestRunnerReap(context.Context, string, string, int64, string, string, time.Time) error {
+	return nil
+}
+
+func (*recordingRunnerLifecycleStore) RequestExpiredRunnerReaps(context.Context, string, string, time.Time, time.Time) (int, error) {
+	return 0, nil
+}
+
+func (*recordingRunnerLifecycleStore) RequestExcessWaitingRunnerReaps(context.Context, string, string, int, string, time.Time) (int, error) {
+	return 0, nil
+}
+
+func (*recordingRunnerLifecycleStore) PendingRunnerReaps(context.Context, string, string) ([]RunnerLifecycle, error) {
+	return nil, nil
+}
+
+func (*recordingRunnerLifecycleStore) ConfirmRunnerReaped(context.Context, RunnerLifecycle) error {
+	return nil
+}
 
 type recordingProvider struct {
 	instances []RunnerInstance

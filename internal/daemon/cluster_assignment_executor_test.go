@@ -4,16 +4,105 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/jackc/pgx/v5"
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
+
+type lifecycleClusterState struct {
+	*fakeClusterState
+	store      *scaler.MemoryDemandStore
+	pending    []scaler.RunnerLifecycle
+	expireErr  error
+	pendingErr error
+	confirmErr error
+	busyErr    error
+	confirmed  []scaler.RunnerLifecycle
+}
+
+func newLifecycleClusterState(state *fakeClusterState) *lifecycleClusterState {
+	return &lifecycleClusterState{fakeClusterState: state, store: scaler.NewMemoryDemandStore()}
+}
+
+func (state *lifecycleClusterState) RegisterRunner(ctx context.Context, runner scaler.RunnerLifecycle) error {
+	if err := state.store.RegisterRunner(ctx, runner); err != nil {
+		return fmt.Errorf("register runner: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) ConfirmRunnerWaiting(ctx context.Context, runner scaler.RunnerLifecycle, at time.Time) error {
+	if err := state.store.ConfirmRunnerWaiting(ctx, runner, at); err != nil {
+		return fmt.Errorf("confirm runner waiting: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, runnerID int64, at time.Time) error {
+	if state.busyErr != nil {
+		return state.busyErr
+	}
+	if err := state.store.MarkRunnerBusy(ctx, scaleSet, repository, requestID, runnerName, runnerID, at); err != nil {
+		return fmt.Errorf("mark runner busy: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) RequestRunnerReap(ctx context.Context, scaleSet, repository string, requestID int64, runnerName, reason string, at time.Time) error {
+	if err := state.store.RequestRunnerReap(ctx, scaleSet, repository, requestID, runnerName, reason, at); err != nil {
+		return fmt.Errorf("request runner reap: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) RequestExpiredRunnerReaps(ctx context.Context, scaleSet, repository string, deadline, at time.Time) (int, error) {
+	if state.expireErr != nil {
+		return 0, state.expireErr
+	}
+	changed, err := state.store.RequestExpiredRunnerReaps(ctx, scaleSet, repository, deadline, at)
+	if err != nil {
+		return 0, fmt.Errorf("request expired runners: %w", err)
+	}
+	return changed, nil
+}
+func (state *lifecycleClusterState) RequestExcessWaitingRunnerReaps(ctx context.Context, scaleSet, repository string, retain int, reason string, at time.Time) (int, error) {
+	changed, err := state.store.RequestExcessWaitingRunnerReaps(ctx, scaleSet, repository, retain, reason, at)
+	if err != nil {
+		return 0, fmt.Errorf("request excess runners: %w", err)
+	}
+	return changed, nil
+}
+func (state *lifecycleClusterState) PendingRunnerReaps(ctx context.Context, scaleSet, repository string) ([]scaler.RunnerLifecycle, error) {
+	pending, err := state.store.PendingRunnerReaps(ctx, scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("pending runner reaps: %w", err)
+	}
+	return pending, nil
+}
+func (state *lifecycleClusterState) PendingNodeRunnerReaps(context.Context, cluster.NodeID) ([]scaler.RunnerLifecycle, error) {
+	if state.pendingErr != nil {
+		return nil, state.pendingErr
+	}
+	return append([]scaler.RunnerLifecycle(nil), state.pending...), nil
+}
+func (state *lifecycleClusterState) ConfirmRunnerReaped(ctx context.Context, runner scaler.RunnerLifecycle) error {
+	state.confirmed = append(state.confirmed, runner)
+	if state.confirmErr != nil {
+		return state.confirmErr
+	}
+	if err := state.store.ConfirmRunnerReaped(ctx, runner); err != nil {
+		return fmt.Errorf("confirm runner reaped: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) CompleteJob(ctx context.Context, completion cluster.JobCompletion) error {
+	return state.fakeClusterState.CompleteJob(ctx, completion)
+}
 
 func TestAssignmentExecutionPhasesRetainStructuredLogValues(t *testing.T) {
 	if assignmentExecutionPhaseStart != "start" {
@@ -83,6 +172,155 @@ func TestClusteredExecutorRegistersLibvirtRunnerBeforeStart(t *testing.T) {
 	registered := state.registeredLibvirtRunners[0]
 	if registered.NodeID != "spock" || registered.RequestID != 2 || registered.RunnerName != provider.started[0].RunnerName {
 		t.Fatalf("registered lifecycle = %#v; start = %#v", registered, provider.started[0])
+	}
+}
+
+func TestClusteredExecutorRegistersProviderIndependentLifecycle(t *testing.T) {
+	daemon, base, provider := clusteredAssignmentExecutorFixture(t)
+	state := newLifecycleClusterState(base)
+	daemon.assignments = state
+	daemon.executeAssignments(context.Background())
+	lifecycles, err := state.store.RunnerLifecycles(context.Background(), "linux", "repo")
+	if err != nil || len(lifecycles) != 1 || lifecycles[0].Provider != scaler.RunnerProviderDocker ||
+		lifecycles[0].AssignmentID != 2 || len(provider.started) != 1 {
+		t.Fatalf("lifecycles=%#v started=%#v err=%v", lifecycles, provider.started, err)
+	}
+}
+
+func TestClusteredExecutorRecordsGenericLibvirtProvider(t *testing.T) {
+	daemon, base, _ := clusteredAssignmentExecutorFixture(t)
+	daemon.config.ScaleSets[0].Docker = nil
+	daemon.config.ScaleSets[0].Libvirt = &config.LibvirtConfig{}
+	state := newLifecycleClusterState(base)
+	daemon.assignments = state
+	daemon.executeAssignments(context.Background())
+	lifecycles, err := state.store.RunnerLifecycles(context.Background(), "linux", "repo")
+	if err != nil || len(lifecycles) != 1 || lifecycles[0].Provider != scaler.RunnerProviderLibvirt {
+		t.Fatalf("lifecycles=%#v err=%v", lifecycles, err)
+	}
+}
+
+func TestClusterMessageHandlerMarksRunnerBusyBeforeAcknowledgement(t *testing.T) {
+	handler, state := busyClusterMessageFixture(t)
+	if err := handler.removeStarted(context.Background(), []*upstream.JobStarted{{
+		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 7}, RunnerName: "linux-7", RunnerID: 99,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := state.store.RunnerLifecycles(context.Background(), "linux", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lifecycles) != 1 || lifecycles[0].Phase != scaler.RunnerBusy {
+		t.Fatalf("lifecycles=%#v", lifecycles)
+	}
+}
+
+func TestClusterMessageHandlerReportsBusyPersistenceBoundaries(t *testing.T) {
+	handler, state := busyClusterMessageFixture(t)
+	state.busyErr = pgx.ErrNoRows
+	if err := handler.removeStarted(context.Background(), []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 8}}}); err != nil {
+		t.Fatal(err)
+	}
+	state.busyErr = errors.New("busy")
+	if err := handler.removeStarted(context.Background(), []*upstream.JobStarted{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 9}}}); err == nil {
+		t.Fatal("expected busy persistence failure")
+	}
+}
+
+func busyClusterMessageFixture(t *testing.T) (clusterMessageHandler, *lifecycleClusterState) {
+	t.Helper()
+	state := newLifecycleClusterState(&fakeClusterState{})
+	runner := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+		RunnerName: "linux-7", RequestID: 7, Phase: scaler.RunnerWaitingForJob}
+	if err := state.store.RegisterRunner(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	return clusterMessageHandler{store: state, session: &repositoryScaleSetSession{
+		key: repositoryScaleSetSessionKey{scaleSet: "linux", repository: "repo"},
+	}}, state
+}
+
+func TestClusteredExecutorProcessesProviderIndependentReaps(t *testing.T) {
+	configured := clusteredConfig(t)
+	runner := scaler.RunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+		RunnerName: "linux-2", InstallationID: 3, GitHubScaleSetID: 4, Phase: scaler.RunnerReapPending}
+	base := &fakeClusterState{}
+	state := newLifecycleClusterState(base)
+	state.pending = []scaler.RunnerLifecycle{runner}
+	if err := state.store.RegisterRunner(context.Background(), runner); err != nil {
+		t.Fatal(err)
+	}
+	daemon := clusteredDaemonForTest(base)
+	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+	daemon.credentials = testAppCredentials(t)
+	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: newIncidentJITRegistry()}}, nil
+	}
+	if !daemon.executePendingRunnerReaps(context.Background()) || len(state.confirmed) != 1 {
+		t.Fatalf("confirmed=%#v", state.confirmed)
+	}
+}
+
+var clusteredRunnerReapBoundaryCases = []struct {
+	name      string
+	configure func(*clusteredDaemon, *lifecycleClusterState)
+	want      bool
+}{
+	{name: "invalid timeout", want: false, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) {
+		daemon.config.ScaleSets[0].JobStartTimeout = "invalid"
+	}},
+	{name: "expire", want: false, configure: func(_ *clusteredDaemon, state *lifecycleClusterState) { state.expireErr = errors.New("expire") }},
+	{name: "load", want: false, configure: func(_ *clusteredDaemon, state *lifecycleClusterState) { state.pendingErr = errors.New("load") }},
+	{name: "missing config", want: true, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) { daemon.config.ScaleSets[0].Name = "different" }},
+	{name: "client", want: true, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) {
+		daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+			return nil, errors.New("client")
+		}
+	}},
+	{name: "build", want: true, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) {
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			return scaler.Reconciler{}, errors.New("build")
+		}
+	}},
+	{name: "reap", want: true, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) {
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{listErr: errors.New("list")}, JITConfig: newIncidentJITRegistry()}}, nil
+		}
+	}},
+	{name: "incomplete", want: true, configure: func(daemon *clusteredDaemon, _ *lifecycleClusterState) {
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			instance := scaler.RunnerInstance{ID: "id", RunnerName: "linux-2"}
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{lists: [][]scaler.RunnerInstance{{instance}, {instance}}}, JITConfig: newIncidentJITRegistry()}}, nil
+		}
+	}},
+	{name: "confirm", want: true, configure: func(daemon *clusteredDaemon, state *lifecycleClusterState) {
+		state.confirmErr = errors.New("confirm")
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: newIncidentJITRegistry()}}, nil
+		}
+	}},
+}
+
+func TestClusteredExecutorRetainsProviderIndependentReapsAtBoundaries(t *testing.T) {
+	runner := scaler.RunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+		RunnerName: "linux-2", InstallationID: 3, GitHubScaleSetID: 4, Phase: scaler.RunnerReapPending}
+	for _, test := range clusteredRunnerReapBoundaryCases {
+		t.Run(test.name, func(t *testing.T) {
+			base := &fakeClusterState{}
+			state := newLifecycleClusterState(base)
+			state.pending = []scaler.RunnerLifecycle{runner}
+			if err := state.store.RegisterRunner(context.Background(), runner); err != nil {
+				t.Fatal(err)
+			}
+			daemon := clusteredDaemonForTest(base)
+			daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", clusteredConfig(t), slog.Default(), state
+			daemon.credentials = testAppCredentials(t)
+			test.configure(daemon, state)
+			if got := daemon.executePendingRunnerReaps(context.Background()); got != test.want {
+				t.Fatalf("result=%t want=%t", got, test.want)
+			}
+		})
 	}
 }
 

@@ -13,7 +13,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultDiscoveryInterval = "5m"
+const (
+	defaultDiscoveryInterval = "5m"
+	defaultJobStartTimeout   = "10m"
+)
 
 type Config struct {
 	GitHub    GitHubConfig     `yaml:"github"`
@@ -53,11 +56,12 @@ type LogConfig struct {
 }
 
 type ScaleSetConfig struct {
-	Name        string         `yaml:"name"`
-	RunnerGroup string         `yaml:"runner_group"`
-	MaxRunners  int            `yaml:"max_runners"`
-	Docker      *DockerConfig  `yaml:"docker"`
-	Libvirt     *LibvirtConfig `yaml:"libvirt"`
+	Name            string         `yaml:"name"`
+	RunnerGroup     string         `yaml:"runner_group"`
+	MaxRunners      int            `yaml:"max_runners"`
+	JobStartTimeout string         `yaml:"job_start_timeout"`
+	Docker          *DockerConfig  `yaml:"docker"`
+	Libvirt         *LibvirtConfig `yaml:"libvirt"`
 }
 
 type DockerConfig struct {
@@ -229,10 +233,37 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	if scaleSet.MaxRunners <= 0 {
 		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
 	}
+	if scaleSet.JobStartTimeout == "" {
+		scaleSet.JobStartTimeout = defaultJobStartTimeout
+	}
+	jobStartTimeout, err := time.ParseDuration(scaleSet.JobStartTimeout)
+	if err != nil {
+		return fmt.Errorf("scale set %q job_start_timeout: %w", scaleSet.Name, err)
+	}
+	if jobStartTimeout <= 0 {
+		return fmt.Errorf("scale set %q job_start_timeout must be positive", scaleSet.Name)
+	}
 	if err := scaleSet.validateProvider(); err != nil {
 		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
 	}
 	return nil
+}
+
+// JobStartDuration returns the validated maximum time a confirmed runner may
+// wait for JobStarted before it is replaced.
+func (scaleSet ScaleSetConfig) JobStartDuration() (time.Duration, error) {
+	configuredTimeout := scaleSet.JobStartTimeout
+	if configuredTimeout == "" {
+		configuredTimeout = defaultJobStartTimeout
+	}
+	jobStartTimeout, err := time.ParseDuration(configuredTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("parse validated job start timeout: %w", err)
+	}
+	if jobStartTimeout <= 0 {
+		return 0, errors.New("parse validated job start timeout: duration must be positive")
+	}
+	return jobStartTimeout, nil
 }
 
 func (scaleSet *ScaleSetConfig) validateProvider() error {

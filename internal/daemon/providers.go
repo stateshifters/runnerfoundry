@@ -130,11 +130,18 @@ func newReconciler(
 	client scaleSetJITClient,
 	scaleSetID int,
 ) scaler.Reconciler {
+	providerKind := scaler.RunnerProviderDocker
+	if scaleSetConfig.Libvirt != nil {
+		providerKind = scaler.RunnerProviderLibvirt
+	}
 	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
-		Name:       localScaleSetName(repositoryURL, scaleSetConfig.Name),
-		MaxRunners: scaleSetConfig.MaxRunners,
-		Provider:   provider,
-		JITConfig:  scalesetJITGenerator{Client: client, ScaleSetID: scaleSetID},
+		Name:             localScaleSetName(repositoryURL, scaleSetConfig.Name),
+		Repository:       repositoryURL,
+		MaxRunners:       scaleSetConfig.MaxRunners,
+		ProviderKind:     providerKind,
+		Provider:         provider,
+		JITConfig:        scalesetJITGenerator{Client: client, ScaleSetID: scaleSetID},
+		GitHubScaleSetID: scaleSetID,
 	}}
 }
 

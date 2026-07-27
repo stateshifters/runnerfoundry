@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/jackc/pgx/v5"
 	"github.com/meza/RunnerFoundry/internal/cluster"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 type clusterMessageHandler struct {
@@ -47,10 +50,18 @@ func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messa
 }
 
 func (handler clusterMessageHandler) removeStarted(ctx context.Context, messages []*upstream.JobStarted) error {
-	_ = ctx
 	for _, started := range messages {
 		if started == nil || started.RunnerRequestID <= 0 {
 			return errors.New("job started message requires a positive runner request ID")
+		}
+		if lifecycleStore, supported := handler.store.(scaler.RunnerLifecycleStore); supported {
+			err := lifecycleStore.MarkRunnerBusy(
+				ctx, handler.session.key.scaleSet, handler.session.key.repository,
+				started.RunnerRequestID, started.RunnerName, int64(started.RunnerID), time.Now().UTC(),
+			)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("persist clustered started runner lifecycle: %w", err)
+			}
 		}
 	}
 	return nil

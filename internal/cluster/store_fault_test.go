@@ -662,6 +662,7 @@ func (connection *fakeDatabaseConnection) QueryRow(context.Context, string, ...a
 
 type fakeDatabaseTransaction struct {
 	execErrors    []error
+	execTags      []pgconn.CommandTag
 	rowResults    []fakeRow
 	commitErr     error
 	rollbackErr   error
@@ -684,6 +685,11 @@ func (transaction *fakeDatabaseTransaction) Commit(context.Context) error {
 func (transaction *fakeDatabaseTransaction) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	if err := nextScriptedError(&transaction.execErrors); err != nil {
 		return pgconn.CommandTag{}, err
+	}
+	if len(transaction.execTags) > 0 {
+		tag := transaction.execTags[0]
+		transaction.execTags = transaction.execTags[1:]
+		return tag, nil
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }

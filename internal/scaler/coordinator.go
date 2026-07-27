@@ -24,6 +24,14 @@ type RepositoryWorker interface {
 	StartAssigned(ctx context.Context) error
 }
 
+type runnerUsabilityReconciler interface {
+	ReconcileRunnerUsability(ctx context.Context) (int, error)
+}
+
+type runnerIdentityInspector interface {
+	RunnerPresent(ctx context.Context, runnerName string) (bool, error)
+}
+
 type demandKey struct {
 	Repository string
 	RequestID  int64
@@ -53,6 +61,101 @@ type Coordinator struct {
 	workers    map[string]RepositoryWorker
 	assigned   map[string]int
 	mutex      sync.Mutex
+}
+
+func (coordinator *Coordinator) ConfigureRunnerLifecycle(
+	reconciler *Reconciler,
+	repository string,
+	provider RunnerProvider,
+) error {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support runner lifecycle")
+	}
+	reconciler.ScaleSet.Repository = repository
+	reconciler.ScaleSet.ProviderKind = provider
+	reconciler.ScaleSet.LifecycleScaleSet = coordinator.scaleSet
+	reconciler.ScaleSet.Lifecycle = store
+	return nil
+}
+
+func (coordinator *Coordinator) HasRunnerLifecycle() bool {
+	_, supported := coordinator.store.(RunnerLifecycleStore)
+	return supported
+}
+
+func (coordinator *Coordinator) MarkRunnerBusy(
+	ctx context.Context,
+	repository string,
+	requestID int64,
+	runnerName string,
+	githubRunnerID int64,
+	startedAt time.Time,
+) error {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support runner lifecycle")
+	}
+	if err := store.MarkRunnerBusy(ctx, coordinator.scaleSet, repository, requestID, runnerName, githubRunnerID, startedAt); err != nil {
+		return fmt.Errorf("mark runner busy: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *Coordinator) CompleteRunnerLifecycleJob(
+	ctx context.Context,
+	completion JobCompletion,
+	completedAt time.Time,
+) error {
+	store, supported := coordinator.store.(RunnerJobCompletionStore)
+	if !supported {
+		return errors.New("demand store does not support atomic runner job completion")
+	}
+	completion.ScaleSet = coordinator.scaleSet
+	if err := store.CompleteRunnerLifecycleJob(ctx, completion, completedAt); err != nil {
+		return fmt.Errorf("complete runner lifecycle job: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *Coordinator) RequestExpiredRunnerReaps(
+	ctx context.Context,
+	repository string,
+	jobStartTimeout time.Duration,
+	now time.Time,
+) (int, error) {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return 0, errors.New("demand store does not support runner lifecycle")
+	}
+	changed, err := store.RequestExpiredRunnerReaps(ctx, coordinator.scaleSet, repository, now.Add(-jobStartTimeout), now)
+	if err != nil {
+		return 0, fmt.Errorf("request expired runner reaps: %w", err)
+	}
+	return changed, nil
+}
+
+func (coordinator *Coordinator) PendingRunnerReaps(ctx context.Context, repository string) ([]RunnerLifecycle, error) {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return nil, errors.New("demand store does not support runner lifecycle")
+	}
+	pending, err := store.PendingRunnerReaps(ctx, coordinator.scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("load pending runner reaps: %w", err)
+	}
+	return pending, nil
+}
+
+func (coordinator *Coordinator) ConfirmRunnerReaped(ctx context.Context, runner RunnerLifecycle) error {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support runner lifecycle")
+	}
+	if err := store.ConfirmRunnerReaped(ctx, runner); err != nil {
+		return fmt.Errorf("confirm runner reaped: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) RegisterLibvirtRunner(ctx context.Context, runner LibvirtRunnerLifecycle) error {
@@ -171,11 +274,14 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	pendingReaps, err := coordinator.loadPendingLibvirtCapacity(ctx)
+	pendingReaps, err := coordinator.loadPendingRunnerCapacity(ctx)
 	if err != nil {
 		return nil, err
 	}
-	runningCount += len(pendingReaps)
+	runningCount, err = coordinator.countPendingRunnerCapacity(ctx, pendingReaps, runningCount)
+	if err != nil {
+		return nil, err
+	}
 	orderedDemand, err := coordinator.store.Ordered(ctx, coordinator.scaleSet)
 	if err != nil {
 		return nil, fmt.Errorf("load queued demand: %w", err)
@@ -184,12 +290,85 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	remainingDemand = fencePendingLibvirtRequests(remainingDemand, pendingReaps)
+	remainingDemand = fencePendingRunnerRequests(remainingDemand, pendingReaps)
 	runningCount, err = coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount, repositoryRunningCounts)
 	if err != nil {
 		return nil, err
 	}
 	return coordinator.reconcileRetainedAssigned(ctx, runningCount, repositoryRunningCounts)
+}
+
+func (coordinator *Coordinator) countPendingRunnerCapacity(
+	ctx context.Context,
+	pendingReaps []RunnerLifecycle,
+	runningCount int,
+) (int, error) {
+	for _, runner := range pendingReaps {
+		worker := coordinator.workers[runner.Repository]
+		inspector, supported := worker.(runnerIdentityInspector)
+		if !supported {
+			runningCount++
+			continue
+		}
+		present, inspectErr := inspector.RunnerPresent(ctx, runner.RunnerName)
+		if inspectErr != nil {
+			return 0, fmt.Errorf("inspect pending runner capacity %q: %w", runner.RunnerName, inspectErr)
+		}
+		if !present {
+			runningCount++
+		}
+	}
+	return runningCount, nil
+}
+
+func (coordinator *Coordinator) loadPendingRunnerCapacity(ctx context.Context) ([]RunnerLifecycle, error) {
+	if store, supported := coordinator.store.(RunnerLifecycleStore); supported {
+		pending, err := loadGenericPendingRunnerCapacity(ctx, store, coordinator.scaleSet)
+		if err != nil {
+			return nil, err
+		}
+		if len(pending) > 0 {
+			return pending, nil
+		}
+	}
+	legacy, err := coordinator.loadPendingLibvirtCapacity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pending := make([]RunnerLifecycle, 0, len(legacy))
+	for _, runner := range legacy {
+		pending = append(pending, RunnerLifecycle{
+			ScaleSet: runner.ScaleSet, Repository: runner.Repository, Provider: RunnerProviderLibvirt,
+			RunnerName: runner.RunnerName, RequestID: runner.RequestID, Phase: RunnerReapPending,
+		})
+	}
+	return pending, nil
+}
+
+func loadGenericPendingRunnerCapacity(
+	ctx context.Context,
+	store RunnerLifecycleStore,
+	scaleSet string,
+) ([]RunnerLifecycle, error) {
+	pending, err := store.PendingRunnerReaps(ctx, scaleSet, "")
+	if err != nil {
+		return nil, fmt.Errorf("load pending runner capacity: %w", err)
+	}
+	return pending, nil
+}
+
+func fencePendingRunnerRequests(demand []QueuedDemand, pending []RunnerLifecycle) []QueuedDemand {
+	identities := make(map[demandKey]struct{}, len(pending))
+	for _, runner := range pending {
+		identities[demandKey{Repository: runner.Repository, RequestID: runner.RequestID}] = struct{}{}
+	}
+	result := demand[:0]
+	for _, queued := range demand {
+		if _, fenced := identities[demandKey{Repository: queued.Repository, RequestID: queued.RequestID}]; !fenced {
+			result = append(result, queued)
+		}
+	}
+	return result
 }
 
 func (coordinator *Coordinator) loadPendingLibvirtCapacity(ctx context.Context) ([]LibvirtRunnerLifecycle, error) {
@@ -204,26 +383,19 @@ func (coordinator *Coordinator) loadPendingLibvirtCapacity(ctx context.Context) 
 	return pending, nil
 }
 
-func fencePendingLibvirtRequests(demand []QueuedDemand, pending []LibvirtRunnerLifecycle) []QueuedDemand {
-	identities := make(map[demandKey]struct{}, len(pending))
-	for _, runner := range pending {
-		identities[demandKey{Repository: runner.Repository, RequestID: runner.RequestID}] = struct{}{}
-	}
-	result := demand[:0]
-	for _, queued := range demand {
-		if _, fenced := identities[demandKey{Repository: queued.Repository, RequestID: queued.RequestID}]; !fenced {
-			result = append(result, queued)
-		}
-	}
-	return result
-}
-
 // ReconcileAssigned starts enough identity-free runners for one repository's
 // assigned-job statistic without exceeding shared scale-set capacity.
 func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repository string, assignedJobs int) (AssignedReconciliation, error) {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	coordinator.assigned[repository] = assignedJobs
+	if store, supported := coordinator.store.(RunnerLifecycleStore); supported {
+		if _, err := store.RequestExcessWaitingRunnerReaps(
+			ctx, coordinator.scaleSet, repository, assignedJobs, "assigned_jobs_decreased", time.Now().UTC(),
+		); err != nil {
+			return AssignedReconciliation{}, fmt.Errorf("request excess waiting runner cleanup: %w", err)
+		}
+	}
 	reconciliations, err := coordinator.reconcileCapacity(ctx)
 	if err != nil {
 		return AssignedReconciliation{}, err
@@ -246,6 +418,9 @@ func (coordinator *Coordinator) provisionAssignedForRepository(
 	missingAssignedRunners := assignedJobs - repositoryRunningCount
 	availableCapacity := coordinator.maxRunners - runningCount
 	result := AssignedReconciliation{AssignedJobs: assignedJobs, RunningRunners: repositoryRunningCount}
+	if err := reconcileBlockedRepositoryCapacity(ctx, worker, repository, missingAssignedRunners, availableCapacity); err != nil {
+		return AssignedReconciliation{}, err
+	}
 	for missingAssignedRunners > 0 && availableCapacity > 0 {
 		if err := worker.StartAssigned(ctx); err != nil {
 			return AssignedReconciliation{}, fmt.Errorf("start assigned runner for repository %q: %w", repository, err)
@@ -257,6 +432,25 @@ func (coordinator *Coordinator) provisionAssignedForRepository(
 		result.StartedRunners++
 	}
 	return result, nil
+}
+
+func reconcileBlockedRepositoryCapacity(
+	ctx context.Context,
+	worker RepositoryWorker,
+	repository string,
+	missingAssignedRunners, availableCapacity int,
+) error {
+	if missingAssignedRunners <= 0 || availableCapacity > 0 {
+		return nil
+	}
+	usability, supported := worker.(runnerUsabilityReconciler)
+	if !supported {
+		return nil
+	}
+	if _, err := usability.ReconcileRunnerUsability(ctx); err != nil {
+		return fmt.Errorf("reconcile blocked runner usability for repository %q: %w", repository, err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) reconcileRetainedAssigned(
@@ -362,11 +556,15 @@ func (coordinator *Coordinator) runningCounts(ctx context.Context) (int, map[str
 type MemoryDemandStore struct {
 	demand          map[demandKey]QueuedDemand
 	libvirtRunners  map[string]memoryLibvirtLifecycle
+	runners         map[string]RunnerLifecycle
 	nextObservation uint64
 }
 
 func createMemoryDemandStore() *MemoryDemandStore {
-	return &MemoryDemandStore{demand: map[demandKey]QueuedDemand{}, libvirtRunners: map[string]memoryLibvirtLifecycle{}}
+	return &MemoryDemandStore{
+		demand: map[demandKey]QueuedDemand{}, libvirtRunners: map[string]memoryLibvirtLifecycle{},
+		runners: map[string]RunnerLifecycle{},
+	}
 }
 
 // NewMemoryDemandStore provides transient demand storage for tests and embedded callers.

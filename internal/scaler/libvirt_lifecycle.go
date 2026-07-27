@@ -104,11 +104,7 @@ func (store *SQLiteDemandStore) PendingLibvirtReaps(
 	if err != nil {
 		return nil, fmt.Errorf("load pending libvirt reaps: %w", err)
 	}
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close pending libvirt reaps: %w", closeErr))
-		}
-	}()
+	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
 	for rows.Next() {
 		var runner LibvirtRunnerLifecycle
 		if err = rows.Scan(&runner.ScaleSet, &runner.Repository, &runner.RequestID, &runner.RunnerName); err != nil {

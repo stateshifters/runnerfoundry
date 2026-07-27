@@ -11,6 +11,7 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
@@ -127,6 +128,375 @@ func TestCoordinatedScaleSetHandlerAppliesLowerAssignedCountBeforeScheduling(t *
 	}
 }
 
+func TestCanceledAssignedRunnerIsReapedBeforeReplacementConsumesCapacity(t *testing.T) {
+	ctx := context.Background()
+	handler, coordinator, reconciler, provider, _ := incidentLifecycleFixture(t, 1)
+
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reapPendingRunners(ctx, coordinatedLifecycleConfig{
+		RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
+		Coordinator: coordinator, Reconciler: reconciler,
+	})
+	if len(provider.destroyed) != 1 || len(provider.instances) != 0 {
+		t.Fatalf("stale runner was not removed: destroyed=%#v instances=%#v", provider.destroyed, provider.instances)
+	}
+
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.started) != 2 || provider.started[0].ID == provider.started[1].ID {
+		t.Fatalf("fresh runner was not started: %#v", provider.started)
+	}
+}
+
+func incidentLifecycleFixture(
+	t *testing.T,
+	maxRunners int,
+) (coordinatedScaleSetHandler, *scaler.Coordinator, scaler.Reconciler, *incidentLifecycleProvider, *scaler.MemoryDemandStore) {
+	t.Helper()
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", maxRunners, store)
+	provider := &incidentLifecycleProvider{}
+	registry := newIncidentJITRegistry()
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "local", MaxRunners: maxRunners, Provider: provider, JITConfig: registry,
+	}}
+	if err := coordinator.ConfigureRunnerLifecycle(&reconciler, "repo", scaler.RunnerProviderDocker); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: reconciler})
+	return coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}, coordinator, reconciler, provider, store
+}
+
+func TestExpiredStandaloneWaitingRunnerIsReapedForEveryProvider(t *testing.T) {
+	for name, providerKind := range map[string]scaler.RunnerProvider{
+		"docker": scaler.RunnerProviderDocker, "libvirt": scaler.RunnerProviderLibvirt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertExpiredStandaloneRunnerReaped(t, providerKind)
+		})
+	}
+}
+
+func assertExpiredStandaloneRunnerReaped(t *testing.T, providerKind scaler.RunnerProvider) {
+	t.Helper()
+	ctx := context.Background()
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	provider := &incidentLifecycleProvider{}
+	oldStart := time.Now().UTC().Add(-time.Hour)
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "local", MaxRunners: 1,
+		Provider: provider, JITConfig: newIncidentJITRegistry(), Now: func() time.Time { return oldStart }}}
+	if err := coordinator.ConfigureRunnerLifecycle(&reconciler, "repo", providerKind); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: reconciler})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	reapPendingRunners(ctx, coordinatedLifecycleConfig{RepositoryURL: "repo",
+		ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"}, Coordinator: coordinator, Reconciler: reconciler})
+	if len(provider.destroyed) != 1 {
+		t.Fatalf("expired runner was not reaped: %#v", provider.instances)
+	}
+}
+
+type faultLifecycleDemandStore struct {
+	*scaler.MemoryDemandStore
+	expireErr    error
+	pendingErr   error
+	confirmErr   error
+	orderedErr   error
+	busyErr      error
+	completeErr  error
+	inventoryErr error
+}
+
+func (store *faultLifecycleDemandStore) RequestExpiredRunnerReaps(ctx context.Context, scaleSet, repository string, deadline, at time.Time) (int, error) {
+	if store.expireErr != nil {
+		return 0, store.expireErr
+	}
+	changed, err := store.MemoryDemandStore.RequestExpiredRunnerReaps(ctx, scaleSet, repository, deadline, at)
+	if err != nil {
+		return 0, fmt.Errorf("request expired runners: %w", err)
+	}
+	return changed, nil
+}
+
+func (store *faultLifecycleDemandStore) PendingRunnerReaps(ctx context.Context, scaleSet, repository string) ([]scaler.RunnerLifecycle, error) {
+	if store.pendingErr != nil {
+		return nil, store.pendingErr
+	}
+	pending, err := store.MemoryDemandStore.PendingRunnerReaps(ctx, scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("pending runner reaps: %w", err)
+	}
+	return pending, nil
+}
+
+func (store *faultLifecycleDemandStore) ConfirmRunnerReaped(ctx context.Context, runner scaler.RunnerLifecycle) error {
+	if store.confirmErr != nil {
+		return store.confirmErr
+	}
+	if err := store.MemoryDemandStore.ConfirmRunnerReaped(ctx, runner); err != nil {
+		return fmt.Errorf("confirm runner reaped: %w", err)
+	}
+	return nil
+}
+
+func (store *faultLifecycleDemandStore) Ordered(ctx context.Context, scaleSet string) ([]scaler.QueuedDemand, error) {
+	if store.orderedErr != nil {
+		return nil, store.orderedErr
+	}
+	demand, err := store.MemoryDemandStore.Ordered(ctx, scaleSet)
+	if err != nil {
+		return nil, fmt.Errorf("load demand: %w", err)
+	}
+	return demand, nil
+}
+
+func (store *faultLifecycleDemandStore) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, runnerID int64, at time.Time) error {
+	if store.busyErr != nil {
+		return store.busyErr
+	}
+	if err := store.MemoryDemandStore.MarkRunnerBusy(ctx, scaleSet, repository, requestID, runnerName, runnerID, at); err != nil {
+		return fmt.Errorf("mark runner busy: %w", err)
+	}
+	return nil
+}
+
+func (store *faultLifecycleDemandStore) CompleteRunnerLifecycleJob(ctx context.Context, completion scaler.JobCompletion, at time.Time) error {
+	if store.completeErr != nil {
+		return store.completeErr
+	}
+	if err := store.MemoryDemandStore.CompleteRunnerLifecycleJob(ctx, completion, at); err != nil {
+		return fmt.Errorf("complete runner job: %w", err)
+	}
+	return nil
+}
+
+func (store *faultLifecycleDemandStore) RunnerLifecycles(ctx context.Context, scaleSet, repository string) ([]scaler.RunnerLifecycle, error) {
+	if store.inventoryErr != nil {
+		return nil, store.inventoryErr
+	}
+	lifecycles, err := store.MemoryDemandStore.RunnerLifecycles(ctx, scaleSet, repository)
+	if err != nil {
+		return nil, fmt.Errorf("load runner lifecycles: %w", err)
+	}
+	return lifecycles, nil
+}
+
+var standaloneRunnerReapBoundaryCases = []struct {
+	name      string
+	configure func(*faultLifecycleDemandStore, *config.ScaleSetConfig, *scaler.Reconciler)
+}{
+	{name: "invalid timeout", configure: func(_ *faultLifecycleDemandStore, scaleSet *config.ScaleSetConfig, _ *scaler.Reconciler) {
+		scaleSet.JobStartTimeout = "invalid"
+	}},
+	{name: "expire", configure: func(store *faultLifecycleDemandStore, _ *config.ScaleSetConfig, _ *scaler.Reconciler) {
+		store.expireErr = errors.New("expire")
+	}},
+	{name: "load", configure: func(store *faultLifecycleDemandStore, _ *config.ScaleSetConfig, _ *scaler.Reconciler) {
+		store.pendingErr = errors.New("load")
+	}},
+	{name: "reap", configure: func(_ *faultLifecycleDemandStore, _ *config.ScaleSetConfig, reconciler *scaler.Reconciler) {
+		reconciler.ScaleSet.Provider = &clusterReapingProvider{listErr: errors.New("list")}
+	}},
+	{name: "incomplete", configure: func(_ *faultLifecycleDemandStore, _ *config.ScaleSetConfig, reconciler *scaler.Reconciler) {
+		instance := scaler.RunnerInstance{ID: "id", RunnerName: "linux-1"}
+		reconciler.ScaleSet.Provider = &clusterReapingProvider{lists: [][]scaler.RunnerInstance{{instance}, {instance}}}
+	}},
+	{name: "confirm", configure: func(store *faultLifecycleDemandStore, _ *config.ScaleSetConfig, _ *scaler.Reconciler) {
+		store.confirmErr = errors.New("confirm")
+	}},
+	{name: "replacement", configure: func(store *faultLifecycleDemandStore, _ *config.ScaleSetConfig, _ *scaler.Reconciler) {
+		store.orderedErr = errors.New("schedule")
+	}},
+}
+
+func TestStandaloneRunnerReaperRetainsCleanupAtBoundaries(t *testing.T) {
+	runner := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+		RunnerName: "linux-1", Phase: scaler.RunnerReapPending}
+	for _, test := range standaloneRunnerReapBoundaryCases {
+		t.Run(test.name, func(t *testing.T) {
+			store := &faultLifecycleDemandStore{MemoryDemandStore: scaler.NewMemoryDemandStore()}
+			if err := store.RegisterRunner(context.Background(), runner); err != nil {
+				t.Fatal(err)
+			}
+			coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+			reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: newIncidentJITRegistry()}}
+			scaleSet := config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"}
+			test.configure(store, &scaleSet, &reconciler)
+			reapPendingRunners(context.Background(), coordinatedLifecycleConfig{RepositoryURL: "repo", ScaleSetConfig: scaleSet,
+				Coordinator: coordinator, Reconciler: reconciler})
+		})
+	}
+}
+
+func TestRunnerReaperStopsWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		runRunnerReaper(ctx, coordinatedLifecycleConfig{}, make(chan time.Time))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner reaper did not stop")
+	}
+}
+
+func TestRunnerReaperProcessesTickBeforeStopping(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	ticks := make(chan time.Time, 1)
+	done := make(chan struct{})
+	go func() {
+		runRunnerReaper(ctx, coordinatedLifecycleConfig{RepositoryURL: "repo",
+			ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"}, Coordinator: coordinator}, ticks)
+		close(done)
+	}()
+	ticks <- time.Now()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	<-done
+}
+
+func TestCoordinatedWorkerReportsUsabilityFailure(t *testing.T) {
+	store := &faultLifecycleDemandStore{MemoryDemandStore: scaler.NewMemoryDemandStore(), inventoryErr: errors.New("inventory")}
+	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", Repository: "repo", Provider: &incidentLifecycleProvider{}, JITConfig: newIncidentJITRegistry(), Lifecycle: store,
+	}}}
+	if _, err := worker.ReconcileRunnerUsability(context.Background()); err == nil {
+		t.Fatal("expected usability failure")
+	}
+}
+
+func TestCoordinatedHandlerReportsLifecyclePersistenceFailures(t *testing.T) {
+	store := &faultLifecycleDemandStore{MemoryDemandStore: scaler.NewMemoryDemandStore(), busyErr: errors.New("busy")}
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}
+	message := &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobStartedMessages: []*upstream.JobStarted{{RunnerName: "runner"}}}
+	if err := handler.HandleMessage(context.Background(), message); err == nil {
+		t.Fatal("expected busy persistence failure")
+	}
+	store.busyErr = nil
+	store.completeErr = errors.New("complete")
+	if err := handler.completeJob(context.Background(), &upstream.JobCompleted{RunnerName: "runner"}); err == nil {
+		t.Fatal("expected cleanup persistence failure")
+	}
+	fallback := coordinatedScaleSetHandler{Coordinator: scaler.NewDurableCoordinator("linux", 1, lifecycleUnsupportedDemandStore{}), Repository: "repo"}
+	if err := fallback.completeJob(context.Background(), &upstream.JobCompleted{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 7}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMissingGitHubRegistrationIsReapedWhenItBlocksDemand(t *testing.T) {
+	ctx := context.Background()
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	provider := &incidentLifecycleProvider{}
+	jit := newIncidentJITRegistry()
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "local", MaxRunners: 1, Provider: provider, JITConfig: jit,
+	}}
+	if err := coordinator.ConfigureRunnerLifecycle(&reconciler, "repo", scaler.RunnerProviderDocker); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: reconciler, Repository: "repo", ScaleSet: "linux"})
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delete(jit.runners, provider.started[0].RunnerName)
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingRunnerReaps(ctx, "linux", "repo")
+	if err != nil || len(pending) != 1 || pending[0].ReapReason != "github_registration_absent" {
+		t.Fatalf("missing registration pending reaps = %#v, %v", pending, err)
+	}
+}
+
+func TestJobStartedMarksExactRunnerBusyBeforeMessageSucceeds(t *testing.T) {
+	ctx := context.Background()
+	handler, _, _, provider, store := incidentLifecycleFixture(t, 1)
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobStartedMessages: []*upstream.JobStarted{{
+			RunnerID: 99, RunnerName: provider.started[0].RunnerName,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := store.RunnerLifecycles(ctx, "linux", "repo")
+	if err != nil || len(lifecycles) != 1 || lifecycles[0].Phase != scaler.RunnerBusy || lifecycles[0].GitHubRunnerID != 99 {
+		t.Fatalf("started lifecycle = %#v, %v", lifecycles, err)
+	}
+}
+
+func TestCanceledCompletionsReapIdentityBoundAndIdentityFreeRunners(t *testing.T) {
+	ctx := context.Background()
+	store := scaler.NewMemoryDemandStore()
+	coordinator := scaler.NewDurableCoordinator("linux", 2, store)
+	now := time.Now().UTC()
+	seedCanceledCompletionRunners(t, store, now)
+	if err := coordinator.Apply(ctx, []scaler.JobDemand{{Repository: "repo", RequestID: 42, QueueTime: now}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}
+	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{
+			{Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42}},
+			{Result: "canceled", RunnerName: "linux-1"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingRunnerReaps(ctx, "linux", "repo")
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("canceled pending reaps = %#v, %v", pending, err)
+	}
+}
+
+func seedCanceledCompletionRunners(t *testing.T, store *scaler.MemoryDemandStore, now time.Time) {
+	t.Helper()
+	for _, runner := range []scaler.RunnerLifecycle{
+		{ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker, RunnerName: "linux-42", RequestID: 42, Phase: scaler.RunnerWaitingForJob, CreatedAt: now},
+		{ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker, RunnerName: "linux-1", Phase: scaler.RunnerWaitingForJob, CreatedAt: now},
+	} {
+		if err := store.RegisterRunner(context.Background(), runner); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCoordinatedScaleSetHandlerRejectsMalformedAvailableDemand(t *testing.T) {
 	worker := &recordingRecoveryWorker{}
 	coordinator := scaler.NewCoordinator(1)
@@ -143,6 +513,62 @@ func TestCoordinatedScaleSetHandlerRejectsMalformedAvailableDemand(t *testing.T)
 	if len(worker.acquired) != 0 || len(worker.started) != 0 {
 		t.Fatalf("expected no malformed demand side effects, acquired=%#v started=%#v", worker.acquired, worker.started)
 	}
+}
+
+type incidentLifecycleProvider struct {
+	instances []scaler.RunnerInstance
+	started   []scaler.RunnerInstance
+	destroyed []string
+}
+
+func (provider *incidentLifecycleProvider) List(context.Context, string) ([]scaler.RunnerInstance, error) {
+	return append([]scaler.RunnerInstance(nil), provider.instances...), nil
+}
+
+func (provider *incidentLifecycleProvider) Start(_ context.Context, request scaler.RunnerStartRequest) error {
+	instance := scaler.RunnerInstance{
+		ID: fmt.Sprintf("instance-%d", len(provider.started)+1), RunnerName: request.RunnerName, State: scaler.RunnerStateRunning,
+	}
+	provider.started = append(provider.started, instance)
+	provider.instances = append(provider.instances, instance)
+	return nil
+}
+
+func (provider *incidentLifecycleProvider) Destroy(_ context.Context, instance scaler.RunnerInstance) error {
+	provider.destroyed = append(provider.destroyed, instance.ID)
+	for index := range provider.instances {
+		if provider.instances[index].ID == instance.ID {
+			provider.instances = append(provider.instances[:index], provider.instances[index+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+type incidentJITRegistry struct {
+	nextID  int64
+	runners map[string]scaler.JITRunner
+}
+
+func newIncidentJITRegistry() *incidentJITRegistry {
+	return &incidentJITRegistry{runners: map[string]scaler.JITRunner{}}
+}
+
+func (registry *incidentJITRegistry) Generate(_ context.Context, runnerName string) (scaler.JITRunnerConfig, error) {
+	registry.nextID++
+	runner := scaler.JITRunner{ID: registry.nextID, Name: runnerName}
+	registry.runners[runnerName] = runner
+	return scaler.JITRunnerConfig{Runner: runner, JITConfig: "jit"}, nil
+}
+
+func (registry *incidentJITRegistry) Remove(_ context.Context, runner scaler.JITRunner) error {
+	delete(registry.runners, runner.Name)
+	return nil
+}
+
+func (registry *incidentJITRegistry) Find(_ context.Context, runnerName string) (scaler.JITRunner, bool, error) {
+	runner, found := registry.runners[runnerName]
+	return runner, found, nil
 }
 
 func TestCoordinatedScaleSetHandlerRequiresStatisticsAndStartsAssignedWorker(t *testing.T) {

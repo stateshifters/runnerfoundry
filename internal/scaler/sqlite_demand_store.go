@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 3
+const currentStateSchemaVersion = 4
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -55,22 +55,100 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 	if version > currentStateSchemaVersion {
 		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentStateSchemaVersion)
 	}
-	if version == 0 {
-		if err := store.createSchema(ctx); err != nil {
+	migrations := []func(context.Context) error{
+		store.createSchema,
+		store.removeLegacyZeroIdentityDemand,
+		store.addLibvirtRunnerLifecycle,
+		store.addRunnerLifecycle,
+	}
+	for ; version < currentStateSchemaVersion; version++ {
+		if err = migrations[version](ctx); err != nil {
 			return err
 		}
-		version = 1
-	}
-	if version == 1 {
-		if err := store.removeLegacyZeroIdentityDemand(ctx); err != nil {
-			return err
-		}
-		version = 2
-	}
-	if version == 2 {
-		return store.addLibvirtRunnerLifecycle(ctx)
 	}
 	return nil
+}
+
+type sqliteMigrationStep struct {
+	statement string
+	operation string
+}
+
+var runnerLifecycleMigrationSteps = []sqliteMigrationStep{
+	{operation: "create generic runner lifecycle table", statement: `CREATE TABLE runner_lifecycle (
+			node_id TEXT NOT NULL DEFAULT '',
+			scale_set TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			provider TEXT NOT NULL CHECK(provider IN ('docker', 'libvirt')),
+			runner_name TEXT NOT NULL,
+			request_id INTEGER NOT NULL,
+			assignment_id INTEGER NOT NULL DEFAULT 0,
+			installation_id INTEGER NOT NULL DEFAULT 0,
+			github_scale_set_id INTEGER NOT NULL DEFAULT 0,
+			github_runner_id INTEGER NOT NULL DEFAULT 0,
+			phase TEXT NOT NULL CHECK(phase IN ('provisioning', 'waiting_for_job', 'busy', 'reap_pending')),
+			created_at INTEGER NOT NULL,
+			waiting_since INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL,
+			reap_reason TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(scale_set, repository, runner_name)
+		)`},
+	{operation: "index pending runner lifecycle", statement: `CREATE INDEX runner_lifecycle_pending_reaps
+			ON runner_lifecycle(scale_set, repository, phase)`},
+	{operation: "backfill generic runner lifecycle", statement: `INSERT INTO runner_lifecycle(
+			scale_set, repository, provider, runner_name, request_id, phase,
+			created_at, waiting_since, updated_at, reap_reason)
+			SELECT scale_set, repository, 'libvirt', runner_name, request_id,
+				CASE WHEN reap_requested = 1 THEN 'reap_pending' ELSE 'waiting_for_job' END,
+				unixepoch('now') * 1000000000,
+				CASE WHEN reap_requested = 1 THEN 0 ELSE unixepoch('now') * 1000000000 END,
+				unixepoch('now') * 1000000000,
+				CASE WHEN reap_requested = 1 THEN 'legacy_reap_requested' ELSE '' END
+			FROM libvirt_runner_lifecycle`},
+	{operation: "mirror legacy libvirt lifecycle inserts", statement: `CREATE TRIGGER mirror_libvirt_runner_lifecycle_insert
+			AFTER INSERT ON libvirt_runner_lifecycle BEGIN
+				INSERT INTO runner_lifecycle(
+					scale_set, repository, provider, runner_name, request_id, phase,
+					created_at, waiting_since, updated_at, reap_reason)
+				VALUES(NEW.scale_set, NEW.repository, 'libvirt', NEW.runner_name, NEW.request_id,
+					CASE WHEN NEW.reap_requested = 1 THEN 'reap_pending' ELSE 'waiting_for_job' END,
+					unixepoch('now') * 1000000000,
+					CASE WHEN NEW.reap_requested = 1 THEN 0 ELSE unixepoch('now') * 1000000000 END,
+					unixepoch('now') * 1000000000,
+					CASE WHEN NEW.reap_requested = 1 THEN 'legacy_reap_requested' ELSE '' END)
+				ON CONFLICT(scale_set, repository, runner_name) DO UPDATE SET
+					request_id = excluded.request_id,
+					phase = CASE WHEN NEW.reap_requested = 1 THEN 'reap_pending' ELSE runner_lifecycle.phase END,
+					reap_reason = CASE
+						WHEN NEW.reap_requested = 1 AND runner_lifecycle.reap_reason = '' THEN 'legacy_reap_requested'
+						ELSE runner_lifecycle.reap_reason END;
+			END`},
+	{operation: "mirror legacy libvirt lifecycle updates", statement: `CREATE TRIGGER mirror_libvirt_runner_lifecycle_update
+			AFTER UPDATE ON libvirt_runner_lifecycle BEGIN
+				UPDATE runner_lifecycle SET request_id = NEW.request_id,
+					phase = CASE WHEN NEW.reap_requested = 1 THEN 'reap_pending' ELSE phase END,
+					reap_reason = CASE
+						WHEN NEW.reap_requested = 1 AND reap_reason = '' THEN 'legacy_reap_requested'
+						ELSE reap_reason END
+				WHERE scale_set = NEW.scale_set AND repository = NEW.repository AND runner_name = NEW.runner_name;
+			END`},
+	{operation: "mirror legacy libvirt lifecycle deletes", statement: `CREATE TRIGGER mirror_libvirt_runner_lifecycle_delete
+			AFTER DELETE ON libvirt_runner_lifecycle BEGIN
+				DELETE FROM runner_lifecycle
+				WHERE scale_set = OLD.scale_set AND repository = OLD.repository AND runner_name = OLD.runner_name;
+			END`},
+	{operation: "record generic runner lifecycle migration", statement: "PRAGMA user_version = 4"},
+}
+
+func (store *SQLiteDemandStore) addRunnerLifecycle(ctx context.Context) error {
+	return store.runMigration(ctx, "generic runner lifecycle migration", func(transaction *sql.Tx) error {
+		for _, step := range runnerLifecycleMigrationSteps {
+			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
+				return fmt.Errorf("%s: %w", step.operation, err)
+			}
+		}
+		return nil
+	})
 }
 
 func (store *SQLiteDemandStore) schemaVersion(ctx context.Context) (int, error) {
