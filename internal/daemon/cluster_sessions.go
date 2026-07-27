@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -112,8 +114,8 @@ func (leader *clusterLeader) stopOutdatedSessions(
 ) error {
 	var resultErr error
 	for key, session := range leader.sessions {
-		status, wanted := desired[key]
-		if wanted && session.capacity == status.EffectiveCapacity {
+		_, wanted := desired[key]
+		if wanted {
 			continue
 		}
 		scaleSetStillDeclared := hasClusterStatus(statuses, key.scaleSet)
@@ -134,19 +136,155 @@ func (leader *clusterLeader) startMissingSessions(
 	repositories map[string]githubapp.Repository,
 ) error {
 	var resultErr error
+	for repositoryURL, repository := range repositories {
+		statuses := desiredRepositoryStatuses(repositoryURL, desired)
+		if len(statuses) == 0 {
+			continue
+		}
+		if err := leader.reconcileRepositorySessions(ctx, repository, statuses); err != nil {
+			leader.daemon.logger.Error("leader repository session group failed",
+				slog.String("repository", repositoryURL), slog.String("error", err.Error()))
+			resultErr = errors.Join(resultErr, err)
+		}
+	}
+	return resultErr
+}
+
+func desiredRepositoryStatuses(
+	repository string,
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+) []cluster.ScaleSetStatus {
+	statuses := make([]cluster.ScaleSetStatus, 0)
 	for key, status := range desired {
-		if _, exists := leader.sessions[key]; exists {
-			continue
+		if key.repository == repository {
+			statuses = append(statuses, status)
 		}
-		session, startErr := leader.startSession(ctx, repositories[key.repository], status)
+	}
+	sort.Slice(statuses, func(left, right int) bool { return statuses[left].Name < statuses[right].Name })
+	return statuses
+}
+
+func (leader *clusterLeader) reconcileRepositorySessions(
+	ctx context.Context,
+	repository githubapp.Repository,
+	statuses []cluster.ScaleSetStatus,
+) error {
+	audit, err := leader.auditClusterRepositoryRegistrations(ctx, repository, statuses)
+	if err != nil {
+		return err
+	}
+	if leader.repositorySessionsMatch(repository.URL, statuses, audit.registrations) {
+		return nil
+	}
+	if suspendErr := leader.suspendRepositorySessions(ctx, repository.URL); suspendErr != nil {
+		return suspendErr
+	}
+	started, err := leader.startRepositorySessionGeneration(ctx, repository, statuses, audit.client, audit.registrations)
+	if err != nil {
+		return err
+	}
+	leader.activateRepositorySessionGeneration(started)
+	return nil
+}
+
+type clusterRepositoryRegistrationAudit struct {
+	client        scaleSetClient
+	registrations map[string]*upstream.RunnerScaleSet
+}
+
+func (leader *clusterLeader) auditClusterRepositoryRegistrations(
+	ctx context.Context,
+	repository githubapp.Repository,
+	statuses []cluster.ScaleSetStatus,
+) (clusterRepositoryRegistrationAudit, error) {
+	configuration := leader.daemon.configurationSnapshot()
+	client, err := leader.daemon.newGitHubClient(repository.URL, repository.InstallationID, configuration.credentials)
+	if err != nil {
+		return clusterRepositoryRegistrationAudit{}, err
+	}
+	auditClient, supported := client.(scaleSetRegistrationAuditClient)
+	if !supported {
+		return clusterRepositoryRegistrationAudit{}, errors.New("GitHub client does not support registration audits")
+	}
+	configured := make([]config.ScaleSetConfig, 0, len(statuses))
+	for _, status := range statuses {
+		configured = append(configured, config.ScaleSetConfig{
+			Name: status.Name, RunnerGroup: status.RunnerGroup, MaxRunners: status.EffectiveCapacity,
+		})
+	}
+	registrations, err := ensureRepositoryScaleSetRegistrations(
+		ctx, leader.daemon.logger, repository.URL, auditClient, configured,
+	)
+	return clusterRepositoryRegistrationAudit{client: client, registrations: registrations}, err
+}
+
+func (leader *clusterLeader) startRepositorySessionGeneration(
+	ctx context.Context,
+	repository githubapp.Repository,
+	statuses []cluster.ScaleSetStatus,
+	client scaleSetClient,
+	registrations map[string]*upstream.RunnerScaleSet,
+) ([]*repositoryScaleSetSession, error) {
+	started := make([]*repositoryScaleSetSession, 0, len(statuses))
+	for _, status := range statuses {
+		registration := registrations[status.Name]
+		if registration == nil {
+			return nil, errors.New("confirmed registration is missing from the complete repository set")
+		}
+		session, startErr := leader.startConfirmedSession(ctx, repository, status, client, registration)
 		if startErr != nil {
-			leader.daemon.logger.Error("leader repository scale-set session failed",
-				slog.String("repository", key.repository), slog.String("scaleSet", key.scaleSet), slog.String("error", startErr.Error()))
-			resultErr = errors.Join(resultErr, startErr)
+			return nil, errors.Join(startErr, leader.closePartialSessionGeneration(ctx, started))
+		}
+		started = append(started, session)
+	}
+	return started, nil
+}
+
+func (leader *clusterLeader) closePartialSessionGeneration(
+	ctx context.Context,
+	started []*repositoryScaleSetSession,
+) error {
+	var resultErr error
+	for _, partial := range started {
+		resultErr = errors.Join(
+			resultErr, leader.stopSession(context.WithoutCancel(ctx), partial, retainGitHubScaleSet),
+		)
+	}
+	return resultErr
+}
+
+func (leader *clusterLeader) activateRepositorySessionGeneration(started []*repositoryScaleSetSession) {
+	for _, session := range started {
+		leader.sessions[session.key] = session
+		leader.scheduler.add(session)
+	}
+}
+
+func (leader *clusterLeader) repositorySessionsMatch(
+	repository string,
+	statuses []cluster.ScaleSetStatus,
+	registrations map[string]*upstream.RunnerScaleSet,
+) bool {
+	for _, status := range statuses {
+		session := leader.sessions[repositoryScaleSetSessionKey{repository: repository, scaleSet: status.Name}]
+		registration := registrations[status.Name]
+		if session == nil || registration == nil || session.runnerScaleSet.ID != registration.ID ||
+			session.capacity != status.EffectiveCapacity {
+			return false
+		}
+	}
+	return true
+}
+
+func (leader *clusterLeader) suspendRepositorySessions(ctx context.Context, repository string) error {
+	var resultErr error
+	for key, session := range leader.sessions {
+		if key.repository != repository {
 			continue
 		}
-		leader.sessions[key] = session
-		leader.scheduler.add(session)
+		resultErr = errors.Join(resultErr, leader.stopSession(ctx, session, retainGitHubScaleSet))
+		delete(leader.sessions, key)
+		leader.scheduler.remove(key)
 	}
 	return resultErr
 }
@@ -180,6 +318,28 @@ func (leader *clusterLeader) startSession(
 	)
 	if err != nil {
 		return nil, err
+	}
+	session := &repositoryScaleSetSession{
+		key:            repositoryScaleSetSessionKey{repository: repository.URL, scaleSet: status.Name},
+		installationID: repository.InstallationID, capacity: status.EffectiveCapacity,
+		client: client, messageClient: messageClient, runnerScaleSet: runnerScaleSet,
+	}
+	pollerCtx, stopPolling := context.WithCancel(context.WithoutCancel(ctx))
+	session.stopPolling = stopPolling
+	session.pollerDone = leader.startSessionPoller(pollerCtx, session)
+	return session, nil
+}
+
+func (leader *clusterLeader) startConfirmedSession(
+	ctx context.Context,
+	repository githubapp.Repository,
+	status cluster.ScaleSetStatus,
+	client scaleSetClient,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (*repositoryScaleSetSession, error) {
+	messageClient, err := client.MessageSessionClient(ctx, runnerScaleSet.ID, runnerHostname())
+	if err != nil {
+		return nil, fmt.Errorf("create confirmed scale-set message session: %w", err)
 	}
 	session := &repositoryScaleSetSession{
 		key:            repositoryScaleSetSessionKey{repository: repository.URL, scaleSet: status.Name},

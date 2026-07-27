@@ -136,7 +136,7 @@ func clusteredLeaderStatusFixture(t *testing.T) (context.Context, *clusteredLead
 	}
 	fixture := &clusteredLeaderStatusTestFixture{config: clusteredConfig(t), daemon: clusteredDaemonForTest(state)}
 	fixture.successfulClient = fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 2},
+		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 2, Name: "linux"},
 		scaleSetMessageClient{Client: &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}},
 	)
 	fixture.notifier = &clusterStatusSnapshotNotifier{cancel: cancel, onStatus: fixture.captureActiveSessions}

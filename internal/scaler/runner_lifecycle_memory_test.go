@@ -97,6 +97,24 @@ func TestMemoryRunnerLifecycleExactReapAndReservedIdentity(t *testing.T) {
 	}
 }
 
+func TestMemoryPendingRunnerReapsOrdersNamesWithinRepository(t *testing.T) {
+	ctx := context.Background()
+	store := createMemoryDemandStore()
+	for _, name := range []string{"second", "first"} {
+		mustRegisterMemoryRunner(t, store, RunnerLifecycle{
+			ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker,
+			RunnerName: name, Phase: RunnerReapPending,
+		})
+	}
+	pending, err := store.PendingRunnerReaps(ctx, "set", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].RunnerName != "first" || pending[1].RunnerName != "second" {
+		t.Fatalf("pending=%#v", pending)
+	}
+}
+
 func TestMemoryRunnerLifecycleExcessWaitingCapacity(t *testing.T) {
 	ctx := context.Background()
 	store := createMemoryDemandStore()

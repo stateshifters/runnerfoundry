@@ -234,6 +234,14 @@ func (coordinator *Coordinator) AddRepository(repository string, worker Reposito
 	coordinator.workers[repository] = worker
 }
 
+// DetachRepository stops scheduling through the repository worker while retaining
+// its durable demand and assigned-job observation for a later session generation.
+func (coordinator *Coordinator) DetachRepository(repository string) {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	delete(coordinator.workers, repository)
+}
+
 func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository string) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()

@@ -5,3 +5,4 @@
 - [3. Persist shared queue state in SQLite](0003-persist-shared-queue-state-in-sqlite.md)
 - [4. Coordinate multi-host scaling in PostgreSQL](0004-coordinate-multi-host-scaling-in-postgresql.md)
 - [5. Own runner lifecycle with a bounded waiting lease](0005-own-runner-lifecycle-with-a-bounded-waiting-lease.md)
+- [6. Continuously reconcile repository scale-set registration](0006-continuously-reconcile-repository-scale-set-registration.md)

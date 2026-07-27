@@ -81,7 +81,7 @@ func TestLeaderDoesNotRestartExistingRepositorySession(t *testing.T) {
 	}
 }
 
-func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
+func TestLeaderRetainsCapacitySessionUntilRepositoryGroupCanBeReconciled(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
@@ -97,8 +97,8 @@ func TestLeaderReplacesCapacityWithoutDeletingDeclaredScaleSet(t *testing.T) {
 	}, []cluster.ScaleSetStatus{{Name: "linux"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := leader.sessions[key]; exists {
-		t.Fatal("outdated capacity session was retained")
+	if _, exists := leader.sessions[key]; !exists {
+		t.Fatal("capacity session was removed before its repository group was audited")
 	}
 	if len(deletedScaleSetIDs) != 0 {
 		t.Fatalf("declared scale set was deleted: %v", deletedScaleSetIDs)

@@ -56,7 +56,7 @@ func standaloneLifecycleFixture(t *testing.T) (context.Context, *standaloneLifec
 			return fixture.discovery(), nil
 		},
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
+			return successfulRegistrationReconciliationClient(), nil
 		},
 		newLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		notifier:      cancellingNotifier{cancel: cancel},

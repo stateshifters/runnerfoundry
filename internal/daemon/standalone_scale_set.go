@@ -59,20 +59,64 @@ func runCoordinatedScaleSet(
 	if err != nil {
 		return scaleSetLifecycle{}, err
 	}
-	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "started",
-		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
-	reconciler, err := scaleSets.BuildReconciler(ctx, repositoryURL, scaleSetConfig, client, runnerScaleSet.ID)
+	return runPreparedCoordinatedScaleSet(ctx, preparedCoordinatedScaleSet{
+		logger: logger, client: client, repositoryURL: repositoryURL, scaleSetConfig: scaleSetConfig,
+		coordinator: coordinator, operations: scaleSets, runnerScaleSet: runnerScaleSet, messageClient: messageClient,
+	})
+}
+
+func startConfirmedCoordinatedScaleSet(
+	ctx context.Context,
+	logger *slog.Logger,
+	client scaleSetClient,
+	repositoryURL string,
+	scaleSetConfig config.ScaleSetConfig,
+	coordinator *scaler.Coordinator,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (scaleSetLifecycle, error) {
+	scaleSets := productionScaleSetSessionOperations()
+	messageClient, err := createMessageSession(
+		ctx, logger, client, repositoryURL, scaleSetConfig.Name, scaleSets.RunnerHostname(), runnerScaleSet.ID,
+	)
 	if err != nil {
-		logActionFailure(ctx, logger, "reconciler_build", err,
-			slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
-		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(ctx, scaleSetConfig.Name, messageClient, err)
+		return scaleSetLifecycle{}, err
 	}
-	logAction(ctx, logger, slog.LevelDebug, "reconciler_build", "completed",
-		slog.String("repository", repositoryURL), slog.String("scaleSet", scaleSetConfig.Name))
+	return runPreparedCoordinatedScaleSet(ctx, preparedCoordinatedScaleSet{
+		logger: logger, client: client, repositoryURL: repositoryURL, scaleSetConfig: scaleSetConfig,
+		coordinator: coordinator, operations: scaleSets, runnerScaleSet: runnerScaleSet, messageClient: messageClient,
+	})
+}
+
+type preparedCoordinatedScaleSet struct {
+	logger         *slog.Logger
+	client         scaleSetClient
+	repositoryURL  string
+	scaleSetConfig config.ScaleSetConfig
+	coordinator    *scaler.Coordinator
+	operations     scaleSetSessionOperations
+	runnerScaleSet *upstream.RunnerScaleSet
+	messageClient  scaleSetMessageClient
+}
+
+func runPreparedCoordinatedScaleSet(ctx context.Context, prepared preparedCoordinatedScaleSet) (scaleSetLifecycle, error) {
+	logAction(ctx, prepared.logger, slog.LevelDebug, "reconciler_build", "started",
+		slog.String("repository", prepared.repositoryURL), slog.String("scaleSet", prepared.scaleSetConfig.Name))
+	reconciler, err := prepared.operations.BuildReconciler(
+		ctx, prepared.repositoryURL, prepared.scaleSetConfig, prepared.client, prepared.runnerScaleSet.ID,
+	)
+	if err != nil {
+		logActionFailure(ctx, prepared.logger, "reconciler_build", err,
+			slog.String("repository", prepared.repositoryURL), slog.String("scaleSet", prepared.scaleSetConfig.Name))
+		return scaleSetLifecycle{}, closeMessageSessionAfterReconcilerFailure(
+			ctx, prepared.scaleSetConfig.Name, prepared.messageClient, err,
+		)
+	}
+	logAction(ctx, prepared.logger, slog.LevelDebug, "reconciler_build", "completed",
+		slog.String("repository", prepared.repositoryURL), slog.String("scaleSet", prepared.scaleSetConfig.Name))
 	return startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
-		Logger: logger, Client: client, RepositoryURL: repositoryURL,
-		ScaleSetConfig: scaleSetConfig, Coordinator: coordinator, RunnerScaleSet: runnerScaleSet,
-		MessageClient: messageClient, Reconciler: reconciler, RetryDelay: scaleSets.PollRetryDelay,
+		Logger: prepared.logger, Client: prepared.client, RepositoryURL: prepared.repositoryURL,
+		ScaleSetConfig: prepared.scaleSetConfig, Coordinator: prepared.coordinator, RunnerScaleSet: prepared.runnerScaleSet,
+		MessageClient: prepared.messageClient, Reconciler: reconciler, RetryDelay: prepared.operations.PollRetryDelay,
 	}), nil
 }
 
@@ -288,6 +332,12 @@ func coordinatedScaleSetLifecycle(
 		StopPolling: func() {
 			stopPolling()
 			<-pollerDone
+		},
+		CloseSession: func(ctx context.Context) error {
+			return closeScaleSetMessageSession(
+				ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name,
+				lifecycleConfig.MessageClient,
+			)
 		},
 		Drain:         lifecycleConfig.Reconciler.Drain,
 		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,

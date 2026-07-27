@@ -129,41 +129,55 @@ func TestCoordinatedScaleSetHandlerAppliesLowerAssignedCountBeforeScheduling(t *
 }
 
 func TestCanceledAssignedRunnerIsReapedBeforeReplacementConsumesCapacity(t *testing.T) {
-	ctx := context.Background()
-	handler, coordinator, reconciler, provider, _ := incidentLifecycleFixture(t, 1)
+	fixture := incidentLifecycleFixture(t, 1)
+	fixture.observeAssigned(t, 1)
+	fixture.observeAssigned(t, 0)
+	fixture.reapPending()
+	fixture.assertStaleRunnerRemoved(t)
+	fixture.observeAssigned(t, 1)
+	fixture.assertFreshRunnerStarted(t)
+}
 
-	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
-		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
-		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reapPendingRunners(ctx, coordinatedLifecycleConfig{
-		RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
-		Coordinator: coordinator, Reconciler: reconciler,
-	})
-	if len(provider.destroyed) != 1 || len(provider.instances) != 0 {
-		t.Fatalf("stale runner was not removed: destroyed=%#v instances=%#v", provider.destroyed, provider.instances)
-	}
+type incidentLifecycleTestFixture struct {
+	handler     coordinatedScaleSetHandler
+	coordinator *scaler.Coordinator
+	reconciler  scaler.Reconciler
+	provider    *incidentLifecycleProvider
+	store       *scaler.MemoryDemandStore
+}
 
-	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
-		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+func (fixture incidentLifecycleTestFixture) observeAssigned(t *testing.T, assigned int) {
+	t.Helper()
+	if err := fixture.handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: assigned},
 	}); err != nil {
 		t.Fatal(err)
-	}
-	if len(provider.started) != 2 || provider.started[0].ID == provider.started[1].ID {
-		t.Fatalf("fresh runner was not started: %#v", provider.started)
 	}
 }
 
-func incidentLifecycleFixture(
-	t *testing.T,
-	maxRunners int,
-) (coordinatedScaleSetHandler, *scaler.Coordinator, scaler.Reconciler, *incidentLifecycleProvider, *scaler.MemoryDemandStore) {
+func (fixture incidentLifecycleTestFixture) reapPending() {
+	reapPendingRunners(context.Background(), coordinatedLifecycleConfig{
+		RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
+		Coordinator: fixture.coordinator, Reconciler: fixture.reconciler,
+	})
+}
+
+func (fixture incidentLifecycleTestFixture) assertStaleRunnerRemoved(t *testing.T) {
+	t.Helper()
+	if len(fixture.provider.destroyed) != 1 || len(fixture.provider.instances) != 0 {
+		t.Fatalf("stale runner was not removed: destroyed=%#v instances=%#v",
+			fixture.provider.destroyed, fixture.provider.instances)
+	}
+}
+
+func (fixture incidentLifecycleTestFixture) assertFreshRunnerStarted(t *testing.T) {
+	t.Helper()
+	if len(fixture.provider.started) != 2 || fixture.provider.started[0].ID == fixture.provider.started[1].ID {
+		t.Fatalf("fresh runner was not started: %#v", fixture.provider.started)
+	}
+}
+
+func incidentLifecycleFixture(t *testing.T, maxRunners int) incidentLifecycleTestFixture {
 	t.Helper()
 	store := scaler.NewMemoryDemandStore()
 	coordinator := scaler.NewDurableCoordinator("linux", maxRunners, store)
@@ -176,7 +190,10 @@ func incidentLifecycleFixture(
 		t.Fatal(err)
 	}
 	coordinator.AddRepository("repo", coordinatedRepositoryWorker{Reconciler: reconciler})
-	return coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"}, coordinator, reconciler, provider, store
+	return incidentLifecycleTestFixture{
+		handler:     coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo", ScaleSet: "linux"},
+		coordinator: coordinator, reconciler: reconciler, provider: provider, store: store,
+	}
 }
 
 func TestExpiredStandaloneWaitingRunnerIsReapedForEveryProvider(t *testing.T) {
@@ -440,7 +457,8 @@ func TestMissingGitHubRegistrationIsReapedWhenItBlocksDemand(t *testing.T) {
 
 func TestJobStartedMarksExactRunnerBusyBeforeMessageSucceeds(t *testing.T) {
 	ctx := context.Background()
-	handler, _, _, provider, store := incidentLifecycleFixture(t, 1)
+	fixture := incidentLifecycleFixture(t, 1)
+	handler, provider, store := fixture.handler, fixture.provider, fixture.store
 	if err := handler.HandleMessage(ctx, &upstream.RunnerScaleSetMessage{
 		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
 	}); err != nil {

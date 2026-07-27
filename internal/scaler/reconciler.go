@@ -284,13 +284,41 @@ func (reconciler Reconciler) adoptUntrackedRunners(
 	if err != nil {
 		return 0, fmt.Errorf("list provider instances for lifecycle adoption: %w", err)
 	}
-	reapRequests := 0
+	reapRequests, err := reconciler.requestAbsentBusyRunnerReaps(ctx, tracked, instances)
+	if err != nil {
+		return reapRequests, err
+	}
 	for _, instance := range instances {
 		reapRequested, adoptErr := reconciler.adoptRunnerInstance(ctx, registry, tracked, instance)
 		if adoptErr != nil {
 			return reapRequests, adoptErr
 		}
 		reapRequests += reapRequested
+	}
+	return reapRequests, nil
+}
+
+func (reconciler Reconciler) requestAbsentBusyRunnerReaps(
+	ctx context.Context,
+	tracked map[string]RunnerLifecycle,
+	instances []RunnerInstance,
+) (int, error) {
+	present := make(map[string]bool, len(instances))
+	for _, instance := range instances {
+		present[instance.RunnerName] = true
+	}
+	reapRequests := 0
+	for _, runner := range tracked {
+		if runner.Phase != RunnerBusy || present[runner.RunnerName] {
+			continue
+		}
+		if err := reconciler.ScaleSet.Lifecycle.RequestRunnerReap(
+			ctx, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName,
+			"provider_instance_absent", reconciler.now(),
+		); err != nil {
+			return reapRequests, fmt.Errorf("request absent busy runner reap %q: %w", runner.RunnerName, err)
+		}
+		reapRequests++
 	}
 	return reapRequests, nil
 }

@@ -227,6 +227,47 @@ func TestReconcileRunnerUsabilityReapsOrphansAndAdoptsInstances(t *testing.T) {
 	}
 }
 
+func TestReconcileRunnerUsabilityRetainsBusyRunnerUntilExactProviderAbsence(t *testing.T) {
+	ctx := context.Background()
+	store := createMemoryDemandStore()
+	seedUsabilityLifecycles(t, store, []RunnerLifecycle{{
+		ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker,
+		RunnerName: "busy", Phase: RunnerBusy,
+	}})
+	provider := &lifecycleProvider{instances: []RunnerInstance{{RunnerName: "busy", State: RunnerStateRunning}}}
+	reconciler := Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", Repository: "repo", ProviderKind: RunnerProviderDocker,
+		Provider: provider, JITConfig: &lifecycleRegistry{runners: map[string]JITRunner{}}, Lifecycle: store,
+	}}
+	if changed, err := reconciler.ReconcileRunnerUsability(ctx); err != nil || changed != 0 {
+		t.Fatalf("busy runner present: changed=%d err=%v", changed, err)
+	}
+	provider.instances = nil
+	if changed, err := reconciler.ReconcileRunnerUsability(ctx); err != nil || changed != 1 {
+		t.Fatalf("busy runner absent: changed=%d err=%v", changed, err)
+	}
+	lifecycles, err := store.RunnerLifecycles(ctx, "set", "repo")
+	if err != nil || len(lifecycles) != 1 || lifecycles[0].Phase != RunnerReapPending ||
+		lifecycles[0].ReapReason != "provider_instance_absent" {
+		t.Fatalf("lifecycles=%#v err=%v", lifecycles, err)
+	}
+}
+
+func TestReconcileRunnerUsabilityReportsAbsentBusyRunnerReapFailure(t *testing.T) {
+	ctx := context.Background()
+	store := &lifecycleErrorStore{MemoryDemandStore: createMemoryDemandStore(), reapErr: errors.New("reap")}
+	seedUsabilityLifecycles(t, store.MemoryDemandStore, []RunnerLifecycle{{
+		ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker, RunnerName: "busy", Phase: RunnerBusy,
+	}})
+	_, err := (Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", Repository: "repo", Provider: &lifecycleProvider{}, ProviderKind: RunnerProviderDocker,
+		JITConfig: &lifecycleRegistry{runners: map[string]JITRunner{}}, Lifecycle: store,
+	}}).ReconcileRunnerUsability(ctx)
+	if err == nil || !strings.Contains(err.Error(), "request absent busy runner reap") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func usableRunnerReconciler(t *testing.T) (Reconciler, *MemoryDemandStore) {
 	t.Helper()
 	store := createMemoryDemandStore()

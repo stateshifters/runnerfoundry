@@ -75,7 +75,7 @@ func (fixture *reloadRecoveryFixture) daemon() standaloneDaemon {
 			return fixture.nextDiscoverer(), nil
 		},
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
+			return successfulRegistrationReconciliationClient(), nil
 		},
 		newLogger:                func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		openDemandStore:          openRecoveryStore("reload"),
@@ -111,8 +111,12 @@ func (fixture *reloadRecoveryFixture) startScaleSet(
 	if fixture.scaleSetStarts == 1 {
 		return scaleSetLifecycle{
 			StopPolling: func() { fixture.oldPollingStopped = true },
-			Drain:       func(context.Context) (int, error) { return 0, nil },
-			Shutdown:    func(context.Context) error { fixture.oldLifecycleShutdown = true; return nil },
+			CloseSession: func(context.Context) error {
+				fixture.oldLifecycleShutdown = true
+				return nil
+			},
+			Drain:    func(context.Context) (int, error) { return 0, nil },
+			Shutdown: func(context.Context) error { fixture.t.Fatal("reload deleted a confirmed registration"); return nil },
 		}, nil
 	}
 	if !fixture.oldPollingStopped || !fixture.oldLifecycleShutdown {
@@ -164,7 +168,7 @@ func (fixture restartRecoveryFixture) daemon() standaloneDaemon {
 			return staticDiscoverer{result: recoveryDiscovery()}, nil
 		},
 		newGitHubClient: func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
-			return &fakeScaleSetClient{}, nil
+			return successfulRegistrationReconciliationClient(), nil
 		},
 		newLogger:       func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 		openDemandStore: openRecoveryStore("restart"), notifier: noopNotifier{},

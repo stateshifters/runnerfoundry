@@ -10,11 +10,31 @@ import (
 
 func (daemon *clusteredDaemon) startClusterWorkers(ctx context.Context, events clusterEvents) chan<- struct{} {
 	reconciliationRequests := make(chan struct{}, 1)
-	daemon.workers.Add(3)
+	daemon.workers.Add(4)
 	go daemon.runHeartbeatLoop(ctx, events.heartbeat)
 	go daemon.runExecutorLoop(ctx, events.executor)
 	go daemon.runReconciliationLoop(ctx, reconciliationRequests)
+	go daemon.runPeriodicReconciliationLoop(ctx, reconciliationRequests)
 	return reconciliationRequests
+}
+
+func (daemon *clusteredDaemon) runPeriodicReconciliationLoop(ctx context.Context, requests chan<- struct{}) {
+	defer daemon.workers.Done()
+	for {
+		delay, err := daemon.configurationSnapshot().config.GitHub.DiscoveryDuration()
+		if err != nil {
+			daemon.logger.Error("load clustered registration reconciliation interval failed", slog.String("error", err.Error()))
+			delay = pollRetryDelay
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			requestReconciliation(requests)
+		}
+	}
 }
 
 func (daemon *clusteredDaemon) runHeartbeatLoop(ctx context.Context, ticks <-chan time.Time) {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
@@ -28,6 +29,15 @@ type standaloneDaemon struct {
 		scaleSetConfig config.ScaleSetConfig,
 		coordinator *scaler.Coordinator,
 	) (scaleSetLifecycle, error)
+	startConfirmedScaleSet func(
+		ctx context.Context,
+		logger *slog.Logger,
+		client scaleSetClient,
+		repositoryURL string,
+		scaleSetConfig config.ScaleSetConfig,
+		coordinator *scaler.Coordinator,
+		registration *upstream.RunnerScaleSet,
+	) (scaleSetLifecycle, error)
 	drainInterval            time.Duration
 	reconciliationRetryDelay time.Duration
 }
@@ -38,9 +48,18 @@ func (noopNotifier) Ready(context.Context) error     { return nil }
 func (noopNotifier) Reloading(context.Context) error { return nil }
 
 type managedRepository struct {
-	InstallationID githubapp.InstallationID
-	Lifecycles     map[string]scaleSetLifecycle
+	InstallationID     githubapp.InstallationID
+	Client             scaleSetClient
+	Lifecycles         map[string]scaleSetLifecycle
+	RegistrationStatus repositoryRegistrationStatus
 }
+
+type repositoryRegistrationStatus string
+
+const (
+	repositoryRegistrationDegraded    repositoryRegistrationStatus = "degraded"
+	repositoryRegistrationOperational repositoryRegistrationStatus = "operational"
+)
 
 type activeConfiguration struct {
 	Config                config.Config
@@ -73,6 +92,7 @@ func newStandaloneDaemon() standaloneDaemon {
 		},
 		notifier:                 systemdNotifier{},
 		startScaleSet:            startCoordinatedScaleSet,
+		startConfirmedScaleSet:   startConfirmedCoordinatedScaleSet,
 		drainInterval:            time.Second,
 		reconciliationRetryDelay: pollRetryDelay,
 	}

@@ -525,7 +525,7 @@ func newRemoteScaleSetLeaderFixture(t *testing.T) *remoteScaleSetLeaderFixture {
 func remoteScaleSetGitHubClient(fixture *remoteScaleSetLeaderFixture) *fakeScaleSetClient {
 	messageClient := &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}
 	client := fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 20},
+		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 20, Name: "remote-only"},
 		scaleSetMessageClient{Client: messageClient},
 	)
 	client.fakeScaleSetDeletionClient = fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, scaleSetID int) error {

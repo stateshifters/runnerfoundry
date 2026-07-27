@@ -22,10 +22,50 @@ func reloadConfiguration(
 	if err != nil {
 		return activeConfiguration{}, err
 	}
+	if err := confirmReloadRegistrations(ctx, daemon, &reloaded); err != nil {
+		logActionFailure(ctx, activeConfig.Logger, "reload", err)
+		return activeConfiguration{}, err
+	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "registrations_confirmed")
 	if err := stopActiveConfigurationForReload(ctx, daemon, activeConfig, reloaded); err != nil {
 		return activeConfiguration{}, err
 	}
 	return reloaded, nil
+}
+
+func confirmReloadRegistrations(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	reloaded *activeConfiguration,
+) error {
+	discovery, err := reloaded.Discoverer.Discover(ctx)
+	if err != nil {
+		return fmt.Errorf("discover repositories before reload activation: %w", err)
+	}
+	if err := validateDiscoveredNames(desiredRepositories(reloaded, discovery), reloaded.Config.ScaleSets); err != nil {
+		return err
+	}
+	for _, repository := range discovery.Repositories {
+		client, clientErr := daemon.newGitHubClient(repository.URL, repository.InstallationID, reloaded.Credentials)
+		if clientErr != nil {
+			return fmt.Errorf("create GitHub client for %q before reload activation: %w", repository.URL, clientErr)
+		}
+		auditClient, supported := client.(scaleSetRegistrationAuditClient)
+		if !supported {
+			return fmt.Errorf("GitHub client for %q does not support registration audits", repository.URL)
+		}
+		if _, auditErr := ensureRepositoryScaleSetRegistrations(
+			ctx, reloaded.Logger, repository.URL, auditClient, reloaded.Config.ScaleSets,
+		); auditErr != nil {
+			return fmt.Errorf("confirm reload registrations for %q: %w", repository.URL, auditErr)
+		}
+		reloaded.Repositories[repository.URL] = managedRepository{
+			InstallationID: repository.InstallationID,
+			Client:         client,
+			Lifecycles:     map[string]scaleSetLifecycle{},
+		}
+	}
+	return nil
 }
 
 func loadReloadedConfiguration(
@@ -66,7 +106,7 @@ func stopActiveConfigurationForReload(
 		return err
 	}
 	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "drain_completed")
-	if err := shutdownWithTimeout(ctx, activeConfig, drainShutdown); err != nil {
+	if err := shutdownWithTimeout(ctx, activeConfig, sessionOnlyShutdown); err != nil {
 		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return err
 	}

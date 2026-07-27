@@ -132,7 +132,7 @@ sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
-RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. It then discovers App installations and repositories, creates the `linux-docker` runner scale set in each selected repository, and begins polling for demand.
+RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. It then discovers App installations and repositories, confirms every configured runner scale set in each selected repository, and begins polling only after that repository's complete session group is ready.
 
 ### 6. Send a workflow to the pool
 
@@ -669,7 +669,7 @@ sudo systemctl reload runnerfoundry
 
 Reload validates the complete replacement configuration and credentials before applying them.
 
-In standalone mode, RunnerFoundry drains active runners, closes old GitHub message sessions, unregisters old scale sets, and reconciles the replacement configuration. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable Docker and libvirt cleanup records remain until provider and GitHub absence are confirmed, including when their scale-set configuration is temporarily removed. A changed `job_start_timeout` is evaluated against each waiting runner's persisted start time after reload.
+In standalone mode, RunnerFoundry confirms the replacement registration set before it drains active runners and closes old GitHub message sessions. It retains confirmed registrations, activates the complete replacement session group, and only then applies optional pruning. Existing containers or virtual machines continue until their active jobs exit. Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable Docker and libvirt cleanup records remain until provider and GitHub absence are confirmed, including when their scale-set configuration is temporarily removed. A changed `job_start_timeout` is evaluated against each waiting runner's persisted start time after reload.
 
 In clustered mode, the node atomically replaces its contribution set. Running assignments continue. An active leader immediately reconciles the changed union. A clustered reload cannot switch state backends or change PostgreSQL configuration.
 
@@ -721,7 +721,9 @@ Read the first validation error from `journalctl`. Common causes are unknown YAM
 
 ### The service is ready but scale sets are missing
 
-Readiness covers local preflight, not GitHub reconciliation. Check the operational status and logs. Verify the GitHub App's repository Administration write permission, App installation scope, selected repositories, private-key file, and discovery interval.
+Readiness covers local preflight, not GitHub reconciliation. Check the operational status and structured `repository_registration_audit`, `runner_scale_set_registration`, and `repository_registration_drift` actions. Verify the GitHub App's repository Administration write permission, App installation scope, selected repositories, private-key file, and discovery interval. RunnerFoundry retains successful registrations when another scale set fails, retries only the missing definitions, and activates no sessions until the repository set is complete.
+
+If a scale set was deleted or replaced externally, the next discovery-cadence audit suspends that repository's admission, recreates the missing registration, and replaces its complete session group. An audit timeout leaves an already healthy generation active and reports degraded reconciliation. Do not manually delete provider instances or lifecycle rows to repair registration drift.
 
 ### Jobs remain queued
 
@@ -780,6 +782,7 @@ This changes capacity from a per-repository model to one shared `max_runners` li
 
 - [Architecture](docs/architecture.md) explains system boundaries, scheduling, state, leadership, recovery, and security mechanisms behind the operator behavior summarized here.
 - [Architecture decisions](docs/arch/decisions.md) record why RunnerFoundry uses GitHub App installations, SQLite demand state, and PostgreSQL multi-host coordination.
+- [Registration-recovery validation](docs/registration-recovery-validation.md) is the operator checklist for a later authorized deployment test.
 - [Releases](https://github.com/meza/RunnerFoundry/releases) provide current packages and release notes.
 
 ## Security

@@ -119,6 +119,22 @@ func TestCoordinatorRemovesAssignedDemandWithRepository(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDetachRetainsDemandForReplacementSession(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	oldWorker := &recordingWorker{}
+	coordinator.AddRepository("repo", oldWorker)
+	coordinator.ObserveAssigned("repo", 1)
+	coordinator.DetachRepository("repo")
+	replacement := &recordingWorker{}
+	coordinator.AddRepository("repo", replacement)
+	if err := coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if oldWorker.assignedStarts != 0 || replacement.assignedStarts != 1 {
+		t.Fatalf("old starts=%d replacement starts=%d", oldWorker.assignedStarts, replacement.assignedStarts)
+	}
+}
+
 func TestCoordinatorSchedulesDurableFIFOBeforeAssignedCapacity(t *testing.T) {
 	startOrder := []string{}
 	coordinator := NewCoordinator(1)
