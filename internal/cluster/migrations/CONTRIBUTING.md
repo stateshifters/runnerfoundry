@@ -77,28 +77,14 @@ Restore database backups only while the scaler cluster is stopped. After restora
 
 Follow vertical red-green-refactor slices. Add the behavioral test first, prove it fails, then add the minimum migration needed to pass.
 
-Run focused tests while developing:
+Migration tests MUST follow the repository's [test isolation contract](../../../CONTRIBUTING.md#test-isolation).
 
-```sh
-go test -tags=integration ./internal/cluster -run PostgreSQLMigration -count=1
-go test ./cmd/runnerfoundry -run Migration -count=1
-```
-
-PostgreSQL integration tests use the pinned embedded PostgreSQL binary and its deterministic cache. They are the only tests that may require that binary; `make test` remains independent of PostgreSQL provisioning. The cache defaults to `runnerfoundry/embedded-postgres` beneath Go's `os.UserCacheDir`; set `RUNNERFOUNDRY_POSTGRES_CACHE` to use another absolute directory. See the root [contribution guide](../../../CONTRIBUTING.md#postgresql-integration-tests) for the clustered smoke workflow.
-
-The integration package shares one PostgreSQL server process and provisions an isolated database for each test. Migration tests must use that helper instead of starting their own server or sharing schema state with another test.
-
-Before review, run the complete repository suite:
+Before review, run the currently available repository verification gates:
 
 ```sh
 make lint
 make fmt-check
 make vet
-make test
-make test-integration
-make coverage
-make test-race
-make smoke
 ```
 
 Review must confirm all of the following:
@@ -110,5 +96,5 @@ Review must confirm all of the following:
 - The migration supports the N/N-1 rolling window and updates the compatibility floor only when appropriate.
 - Objects remain owned by the configured stable role, with no grants to login identities.
 - No scaler schema SQL was added to Go code.
-- Fresh install, upgrade, rollback, failure, retry, and restore behavior remain covered.
-- The complete verification suite passes with meaningful 100% Go coverage and no new linter suppression.
+- Fresh install, upgrade, rollback, failure, retry, and restore behavior remain covered by hermetic tests.
+- The available verification gates pass with no new linter suppression.

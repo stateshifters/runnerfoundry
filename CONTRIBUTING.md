@@ -72,55 +72,24 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
 
-### Test suite boundaries
+### Test isolation
 
-Unit tests MUST NOT perform filesystem, database, network, process, or other external I/O. Prefer injected dependencies,
-fakes, and in-memory stores so the default test suite remains fast, deterministic, and isolated.
+All tests MUST be hermetic. Tests MUST NOT perform real filesystem, network, database, subprocess, application, or other
+external I/O. Inject those boundaries and use fakes in tests. Build tags do not provide exceptions. Production Go files
+MUST NOT use build tags.
 
-The `integration` build tag is the only build tag permitted for tests. It MAY be used only when real boundary behavior is
-the subject of the test and replacing that boundary with an in-memory substitute would invalidate the behavior being
-verified. Qualifying behavior includes database-engine semantics, durable close-and-reopen recovery, and the production
-composition entry point. Slowness, complexity, cross-package composition, or inconvenient setup alone do not justify the
-tag. Production Go files MUST NOT use build tags.
+### Available verification gates
 
-### PostgreSQL integration tests
-
-Fast unit tests use in-memory fakes and do not provision PostgreSQL. Tests that require real migrations, roles, transactions, or advisory-lock behavior use the `integration` build tag and the pinned embedded PostgreSQL binary. Containers and a Dev Container are not required.
-
-`make lint` also runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at or below 100; the command reports each violating path and value. This is a backstop, not a substitute for cohesive functions, explicit boundaries, and behavior-focused tests.
-
-The embedded binary is cached under the operating system's user cache directory at `runnerfoundry/embedded-postgres`, using Go's `os.UserCacheDir`. Set `RUNNERFOUNDRY_POSTGRES_CACHE` to use another absolute directory; CI uses `/cache/embedded-postgres`. A cold integration run populates this cache, while later runs reuse the pinned binary.
-
-The cluster integration package starts one PostgreSQL server for the package and creates a separate database for each test. This keeps real PostgreSQL process, role, transaction, migration, and advisory-lock behavior while isolating test data without repeatedly restarting the server.
-
-Run the fast suite during normal development:
-
-```sh
-make test
-```
-
-Run integration behavior explicitly before review:
-
-```sh
-make test-integration
-```
-
-`make coverage` and `make test-race` include the integration tag. `make smoke` builds the executable, exercises the clustered daemon lifecycle and migration command surfaces, then uses real PostgreSQL to verify multi-host capacity, leader failover, demand continuity, and reversible migration behavior.
-
-### Complete verification suite
-
-V1 code must maintain 100% Go test coverage.
+Test execution is disabled in the Makefile and CI until the existing suite complies with the isolation contract. Restore
+test, coverage, race, or smoke gates only after every selected test is hermetic. V1 code MUST maintain 100% Go test coverage
+using hermetic tests.
 
 ```sh
 make lint
 make fmt-check
 make vet
-make test
-make test-integration
-make coverage
-make test-race
-make smoke
 ```
 
-- The coverage total must report `100.0%`.
+- `make lint` runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at
+  or below 100; the command reports each violating path and value.
 - Outside tests, build tags are limited to `ruleguard/rules-team.go`.

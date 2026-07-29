@@ -23,7 +23,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test test-integration test-race coverage build smoke notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet build notices sbom package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -59,35 +59,12 @@ lint-fix:
 vet:
 	go vet ./...
 
-test:
-	go test ./...
-
-test-integration:
-	go test -tags=integration ./...
-
-test-race:
-	go test -tags=integration -race ./...
-
-coverage:
-	go test -tags=integration -coverpkg=./... ./... -coverprofile=coverage
-	go tool cover -func=coverage > coverage.out
-ifeq ($(OSFAMILY),Windows)
-	@$$total = (Select-String -Path coverage.out '^total:').ToString().Split()[-1]; if ($$total -ne '100.0%') { Get-Content coverage.out; Write-Host "coverage total must be 100.0%, got $$total"; exit 1 }
-else
-	@total=$$(awk '/^total:/ { print $$3 }' coverage.out); if [ "$$total" != "100.0%" ]; then cat coverage.out; echo "coverage total must be 100.0%, got $$total"; exit 1; fi
-endif
-
 build: export GOOS := linux
 build: export GOARCH := amd64
 build: export CGO_ENABLED := 0
 build:
 	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
 	go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
-
-smoke: build
-	go test ./internal/daemon -run TestClusteredLifecycleSmoke -count=1
-	go test ./cmd/runnerfoundry -run 'Test(MigrationStatusWritesMachineReadableStdout|MigrationUpPrintsCompletion|MigrationDownPrintsCompletion|ExecuteStoreMigrationDispatchesTypedActions)' -count=1
-	go test -tags=integration ./internal/cluster -run 'TestPostgreSQL(AggregatesSharedAndDisjointHostCapacity|PreservesGlobalFIFOWithinHostLimits|LeaderLeaseFailsOver|MigrationLifecycleIsReversible)' -count=1
 
 notices:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null

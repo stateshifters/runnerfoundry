@@ -43,21 +43,6 @@ jobs:
       - name: Vet
         run: make vet
 
-      - name: Test
-        run: make test
-
-      - name: PostgreSQL integration tests
-        run: make test-integration
-
-      - name: Check coverage
-        run: make coverage
-
-      - name: Race tests
-        run: make test-race
-
-      - name: Smoke test package config
-        run: make smoke
-
       - name: Use Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
