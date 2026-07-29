@@ -87,7 +87,7 @@ func TestConfirmReloadRegistrationsReportsClientCreationFailure(t *testing.T) {
 	}
 }
 
-func TestConfirmReloadRegistrationsRejectsUnsupportedAuditClient(t *testing.T) {
+func TestConfirmReloadRegistrationsReportsRegistrationClientFailure(t *testing.T) {
 	reloaded := reloadRegistrationConfiguration()
 	daemon := standaloneDaemon{newGitHubClient: func(
 		string, githubapp.InstallationID, config.GitHubAppCredentials,
@@ -95,7 +95,7 @@ func TestConfirmReloadRegistrationsRejectsUnsupportedAuditClient(t *testing.T) {
 		return nonPruningScaleSetClient{}, nil
 	}}
 	if err := confirmReloadRegistrations(context.Background(), daemon, &reloaded); err == nil {
-		t.Fatal("expected unsupported audit client")
+		t.Fatal("expected registration client failure")
 	}
 }
 

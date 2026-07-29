@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
@@ -83,7 +84,7 @@ func TestClusterRepositoryAuditKeepsMatchingSessionGeneration(t *testing.T) {
 	fixture.leader.stop(context.Background())
 }
 
-func TestClusterRepositoryRegistrationAuditRejectsUnsupportedClient(t *testing.T) {
+func TestClusterRepositoryRegistrationAuditReportsClientFailure(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
 	fixture.leader.daemon.newGitHubClient = func(
 		string, githubapp.InstallationID, config.GitHubAppCredentials,
@@ -91,7 +92,7 @@ func TestClusterRepositoryRegistrationAuditRejectsUnsupportedClient(t *testing.T
 		return nonPruningScaleSetClient{}, nil
 	}
 	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err == nil {
-		t.Fatal("expected unsupported audit client")
+		t.Fatal("expected registration client failure")
 	}
 }
 
@@ -119,6 +120,24 @@ func TestClusterRepositorySessionSuspensionIsIsolatedAndReportsCloseFailure(t *t
 	}
 	if fixture.leader.sessions[otherKey] == nil {
 		t.Fatal("other repository session was removed")
+	}
+}
+
+func TestClusterRepositoryReconciliationLeavesFailedGenerationAbsentWhenSuspensionFails(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	active := stoppedSession(key, fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(context.Context, int) error { return nil }},
+		&fakeMessageClient{closeErr: errors.New("close failed")})
+	active.runnerScaleSet = &upstream.RunnerScaleSet{ID: 999, Name: "linux"}
+	fixture.leader.sessions[key] = active
+	err := fixture.leader.reconcileRepositorySessions(
+		context.Background(), fixture.repositories["repo"], desiredRepositoryStatuses("repo", fixture.desired),
+	)
+	if err == nil || !strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("reconciliation error = %v", err)
+	}
+	if fixture.leader.sessions[key] != nil || fixture.registry.closedSessions != 0 {
+		t.Fatalf("session=%#v replacement close calls=%d", fixture.leader.sessions[key], fixture.registry.closedSessions)
 	}
 }
 

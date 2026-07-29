@@ -202,10 +202,6 @@ func (leader *clusterLeader) auditClusterRepositoryRegistrations(
 	if err != nil {
 		return clusterRepositoryRegistrationAudit{}, err
 	}
-	auditClient, supported := client.(scaleSetRegistrationReconciliationClient)
-	if !supported {
-		return clusterRepositoryRegistrationAudit{}, errors.New("GitHub client does not support registration audits")
-	}
 	configured := make([]config.ScaleSetConfig, 0, len(statuses))
 	for _, status := range statuses {
 		configured = append(configured, config.ScaleSetConfig{
@@ -213,7 +209,7 @@ func (leader *clusterLeader) auditClusterRepositoryRegistrations(
 		})
 	}
 	registrations, err := ensureRepositoryScaleSetRegistrations(
-		ctx, leader.daemon.logger, repository.URL, auditClient, configured,
+		ctx, leader.daemon.logger, repository.URL, client, configured,
 	)
 	return clusterRepositoryRegistrationAudit{client: client, registrations: registrations}, err
 }

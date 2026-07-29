@@ -267,12 +267,8 @@ func auditRepositoryRegistrations(
 	repositoryURL string,
 	managed managedRepository,
 ) (map[string]*upstream.RunnerScaleSet, error) {
-	auditClient, supported := managed.Client.(scaleSetRegistrationReconciliationClient)
-	if !supported {
-		return nil, fmt.Errorf("GitHub client for %q does not support registration audits", repositoryURL)
-	}
 	registrations, err := ensureRepositoryScaleSetRegistrations(
-		ctx, activeConfig.Logger, repositoryURL, auditClient, activeConfig.Config.ScaleSets,
+		ctx, activeConfig.Logger, repositoryURL, managed.Client, activeConfig.Config.ScaleSets,
 	)
 	if err != nil {
 		logActionFailure(ctx, activeConfig.Logger, "repository_registration_audit", err,

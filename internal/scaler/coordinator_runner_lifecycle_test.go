@@ -64,6 +64,7 @@ type lifecycleIdentityWorker struct {
 	present      bool
 	presentErr   error
 	usabilityErr error
+	usabilityRun *int
 }
 
 func (worker lifecycleIdentityWorker) Running(context.Context) (int, error) {
@@ -77,6 +78,9 @@ func (worker lifecycleIdentityWorker) RunnerPresent(context.Context, string) (bo
 	return worker.present, worker.presentErr
 }
 func (worker lifecycleIdentityWorker) ReconcileRunnerUsability(context.Context) (int, error) {
+	if worker.usabilityRun != nil {
+		*worker.usabilityRun++
+	}
 	return 0, worker.usabilityErr
 }
 
@@ -200,6 +204,19 @@ func TestCoordinatorBlockedCapacitySurfacesUsabilityFailure(t *testing.T) {
 	coordinator.AddRepository("repo", lifecycleIdentityWorker{running: 1, usabilityErr: errors.New("usability")})
 	if _, err := coordinator.ReconcileAssigned(context.Background(), "repo", 2); err == nil {
 		t.Fatal("expected blocked usability failure")
+	}
+}
+
+func TestCoordinatorBlockedCapacityReconcilesUnusableRunnersBeforeReturning(t *testing.T) {
+	coordinator := NewCoordinator(1)
+	usabilityRuns := 0
+	coordinator.AddRepository("repo", lifecycleIdentityWorker{running: 1, usabilityRun: &usabilityRuns})
+	result, err := coordinator.ReconcileAssigned(context.Background(), "repo", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usabilityRuns != 1 || result.StartedRunners != 0 {
+		t.Fatalf("usability reconciliations=%d started runners=%d", usabilityRuns, result.StartedRunners)
 	}
 }
 

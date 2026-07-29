@@ -28,9 +28,11 @@ var postgreSQLIntegrationDSN string
 var postgreSQLDatabaseSequence atomic.Uint64
 
 const (
-	minimumPostgreSQLTestPort     = 1024
-	postgreSQLStartAttemptLimit   = 5
-	postgreSQLTestPortOptionCount = math.MaxUint16 - minimumPostgreSQLTestPort + 1
+	minimumPostgreSQLTestPort            = 1024
+	postgreSQLStartAttemptLimit          = 5
+	postgreSQLTestPortOptionCount        = math.MaxUint16 - minimumPostgreSQLTestPort + 1
+	postgreSQLRuntimeRemovalAttemptLimit = 20
+	postgreSQLRuntimeRemovalRetryDelay   = 100 * time.Millisecond
 )
 
 func TestMain(testSuite *testing.M) {
@@ -45,7 +47,7 @@ func TestMain(testSuite *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "stop embedded PostgreSQL: %v\n", err)
 		exitCode = 1
 	}
-	if err = os.RemoveAll(server.runtimePath); err != nil {
+	if err = removePostgreSQLRuntime(server.runtimePath); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove embedded PostgreSQL runtime: %v\n", err)
 		exitCode = 1
 	}
@@ -276,13 +278,39 @@ func startPostgreSQLIntegrationServerOnPort(
 		RuntimePath(runtimePath).
 		Logger(io.Discard))
 	if err := database.Start(); err != nil {
-		if removeErr := os.RemoveAll(runtimePath); removeErr != nil {
+		if removeErr := removePostgreSQLRuntime(runtimePath); removeErr != nil {
 			return postgreSQLIntegrationServer{}, errors.Join(err, fmt.Errorf("remove PostgreSQL runtime: %w", removeErr))
 		}
 		return postgreSQLIntegrationServer{}, fmt.Errorf("start embedded PostgreSQL: %w", err)
 	}
 	dsn := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
 	return postgreSQLIntegrationServer{dsn: dsn, database: database, runtimePath: runtimePath}, nil
+}
+
+func removePostgreSQLRuntime(runtimePath string) error {
+	return removePostgreSQLRuntimeWithRetry(runtimePath, os.RemoveAll, time.Sleep)
+}
+
+func removePostgreSQLRuntimeWithRetry(
+	runtimePath string,
+	removeAll func(string) error,
+	wait func(time.Duration),
+) error {
+	var err error
+	for attempt := 1; attempt <= postgreSQLRuntimeRemovalAttemptLimit; attempt++ {
+		if err = removeAll(runtimePath); err == nil {
+			return nil
+		}
+		if attempt < postgreSQLRuntimeRemovalAttemptLimit {
+			wait(postgreSQLRuntimeRemovalRetryDelay)
+		}
+	}
+	return fmt.Errorf(
+		"remove PostgreSQL runtime %q after %d attempts: %w",
+		runtimePath,
+		postgreSQLRuntimeRemovalAttemptLimit,
+		err,
+	)
 }
 
 func randomPostgreSQLPort() (uint32, error) {

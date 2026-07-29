@@ -232,13 +232,13 @@ func TestRepositoryReconciliationReportsSessionSuspensionFailure(t *testing.T) {
 	}
 }
 
-func TestRepositoryRegistrationAuditRejectsUnsupportedClient(t *testing.T) {
+func TestRepositoryRegistrationAuditReportsClientFailure(t *testing.T) {
 	active := testActiveConfiguration()
 	_, err := auditRepositoryRegistrations(context.Background(), &active, "repo", managedRepository{
 		Client: nonPruningScaleSetClient{},
 	})
 	if err == nil {
-		t.Fatal("expected unsupported audit client")
+		t.Fatal("expected registration client failure")
 	}
 }
 

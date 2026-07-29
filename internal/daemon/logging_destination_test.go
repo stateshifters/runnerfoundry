@@ -28,6 +28,13 @@ func TestLogDestinationFactoryUsesStandardOutputWithoutFileConfiguration(t *test
 	}
 }
 
+func TestProductionLogDestinationFactoryProvidesEveryOperatingSystemBoundary(t *testing.T) {
+	factory := newProductionLogDestinationFactory()
+	if factory.standardOutput == nil || factory.standardError == nil || factory.inspectPath == nil || factory.openRotatingFile == nil {
+		t.Fatalf("incomplete production log destination factory: %#v", factory)
+	}
+}
+
 func TestLogDestinationFactoryConfiguresBoundedFileRotation(t *testing.T) {
 	logPath := testDaemonAbsolutePath("logs", "runnerfoundry.log")
 	standardError := &bytes.Buffer{}
@@ -100,6 +107,40 @@ func TestLogDestinationFactoryRejectsUnavailableParentDirectory(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "inspect log file directory") {
 		t.Fatalf("open error = %v", err)
+	}
+}
+
+func TestLogDestinationFactoryRejectsParentPathThatIsNotADirectory(t *testing.T) {
+	maxSize := 1
+	maxBackups := 1
+	factory := productionLogDestinationFactory{inspectPath: func(string) (fs.FileInfo, error) {
+		return fakeFileInfo{directory: false}, nil
+	}}
+	_, err := factory.Open(config.LogConfig{File: &config.LogFileConfig{
+		Path: testDaemonAbsolutePath("not-a-directory", "runnerfoundry.log"), MaxSizeMB: &maxSize, MaxBackups: &maxBackups,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("open error = %v", err)
+	}
+}
+
+func TestLogDestinationFactoryDoesNotFailOpeningWhenMaintenanceErrorReportingFails(t *testing.T) {
+	maxSize := 1
+	maxBackups := 1
+	openedDestination := &recordingLogDestination{}
+	factory := productionLogDestinationFactory{
+		standardError: errorWriter{err: errors.New("stderr unavailable")},
+		inspectPath:   func(string) (fs.FileInfo, error) { return fakeFileInfo{directory: true}, nil },
+		openRotatingFile: func(_ rotatingFileSettings, reportError func(error)) (io.WriteCloser, error) {
+			reportError(errors.New("rotation failed"))
+			return openedDestination, nil
+		},
+	}
+	destination, err := factory.Open(config.LogConfig{File: &config.LogFileConfig{
+		Path: testDaemonAbsolutePath("logs", "runnerfoundry.log"), MaxSizeMB: &maxSize, MaxBackups: &maxBackups,
+	}})
+	if err != nil || destination != openedDestination {
+		t.Fatalf("destination=%T error=%v", destination, err)
 	}
 }
 
