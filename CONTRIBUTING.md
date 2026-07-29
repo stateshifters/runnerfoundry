@@ -19,14 +19,23 @@ This is how we contribute quality code.
 
 ### Test-first workflow (mandatory)
 
-The expectation of the system MUST be expressed in proper automated tests first.
+The expected behavior of production code MUST be expressed in proper automated tests first.
+
+Automated software tests MUST exercise production code through a stable interface and verify durable observable behavior or a
+genuine code invariant. They MUST NOT prove that work was performed. Do not commit tests that scan source files for words or
+symbols, assert incidental file layout or implementation structure, or otherwise encode the mechanics of a requested edit.
+
+Checks that confirm an edit was completed are work verification, not software tests. Run searches, diff inspection, linters, and
+other appropriate commands as one-time verification evidence without adding them to the test suite.
 
 - Write the test first.
   - If the behavior is user-facing, the test MUST be a snapshot test that captures the rendered user-visible output.
 - Verify the new test fails (prove the gap).
 - Then, and only then, implement the code change that makes the test pass.
 
-Completion means the tests prove it. If you cannot write a test for the expectation, stop and resolve that before proceeding.
+For a behavior change, completion means the tests prove the production behavior. A valid failing test fails because production
+code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
+documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
 
 ## Shared infrastructure risk
 

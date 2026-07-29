@@ -9,6 +9,14 @@ description: Test-driven development. Use when the user wants to build features 
 
 **Core principle**: Tests should verify behaviour through public interfaces, not implementation details. Code can change entirely; tests shouldn't.
 
+Software tests verify production code, not the work performed to change it. A valid RED test fails because production code does
+not yet provide the required behaviour. A check that fails only because an edit, rename, deletion, move, or documentation update
+has not been performed is work verification, not a software test, and MUST NOT be committed to the test suite.
+
+Use one-time verification commands to confirm that requested work is complete. Do not add tests that scan source files for words
+or symbols, assert incidental file layout or implementation structure, or otherwise encode patch mechanics. Refactors, internal
+removals, documentation changes, and mechanical cleanups do not require new tests solely to prove that the work occurred.
+
 **Good tests** are integration-style: they exercise real code paths through public APIs. They describe _what_ the system does, not _how_ it does it. A good test reads like a specification - "user can checkout with valid cart" tells you exactly what capability exists. These tests survive refactors because they don't care about internal structure.
 
 **Bad tests** are coupled to implementation. They mock internal collaborators, test private methods, or verify through external means (like querying a database directly instead of using the interface). The warning sign: your test breaks when you refactor, but behaviour hasn't changed. If you rename an internal function and tests fail, those tests were testing implementation, not behaviour.
