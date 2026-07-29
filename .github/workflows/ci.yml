@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: self-hosted
+    runs-on: ubuntu-slim
     env:
       GOCACHE: /cache/go-build
       GOMODCACHE: /cache/go-mod
