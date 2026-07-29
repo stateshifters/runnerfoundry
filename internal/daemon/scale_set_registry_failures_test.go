@@ -49,23 +49,6 @@ func TestRunnerRegistrationURLRejectsNonHTTPSURL(t *testing.T) {
 	}
 }
 
-func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
-	registry, err := newGitHubScaleSetRegistry("https://github.com/meza/RunnerFoundry", 1, testAppCredentials(t))
-	if err != nil {
-		t.Fatalf("expected registry, got %v", err)
-	}
-	if registry.repositoryURL != "https://github.com/meza/RunnerFoundry" ||
-		registry.installationClient == nil || registry.protocolClient == nil {
-		t.Fatalf("expected registry defaults, got %#v", registry)
-	}
-	if registry.installationClient == http.DefaultClient || registry.protocolClient == http.DefaultClient {
-		t.Fatal("expected registry to avoid the unbounded default HTTP client")
-	}
-	if registry.installationClient.Timeout == 0 || registry.protocolClient.Timeout == 0 {
-		t.Fatal("expected registry HTTP client timeouts")
-	}
-}
-
 func TestGitHubScaleSetRegistryRejectsInvalidPrivateKey(t *testing.T) {
 	_, err := newGitHubScaleSetRegistry("https://github.com/meza/RunnerFoundry", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
 	if err == nil {

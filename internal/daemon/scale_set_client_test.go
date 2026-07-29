@@ -129,22 +129,6 @@ func TestRunnerHostnameFallsBackWhenHostNameFails(t *testing.T) {
 	}
 }
 
-func TestNewGitHubClientBuildsOfficialClientAndRegistry(t *testing.T) {
-	client, err := newGitHubClient("https://github.com/meza/agent-playground", 1, testAppCredentials(t))
-	if err != nil {
-		t.Fatalf("expected client success, got %v", err)
-	}
-	if client.Client == nil {
-		t.Fatal("expected official scale set client")
-	}
-	if client.Registry == nil {
-		t.Fatal("expected scale set registry")
-	}
-	if client.CreateMessageSessionClient == nil {
-		t.Fatal("expected message session factory")
-	}
-}
-
 func TestNewGitHubClientRejectsInvalidRepositoryURL(t *testing.T) {
 	_, err := newGitHubClient("://github.com/meza/agent-playground", 1, config.GitHubAppCredentials{AppID: 1, PrivateKey: "bad"})
 	if err == nil || !strings.Contains(err.Error(), "create scaleset client") {

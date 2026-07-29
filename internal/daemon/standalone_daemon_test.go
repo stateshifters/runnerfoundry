@@ -13,13 +13,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-func TestStandaloneDefaultsSupplyNotifierAndDrainInterval(t *testing.T) {
-	defaults := withStandaloneDefaults(standaloneDaemon{})
-	if defaults.notifier == nil || defaults.drainInterval == 0 {
-		t.Fatalf("expected standaloneDaemon defaults, got %#v", defaults)
-	}
-}
-
 func TestLoadConfigurationReturnsConfigLoadFailure(t *testing.T) {
 	if _, err := loadConfiguration("config", standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("load failed") },

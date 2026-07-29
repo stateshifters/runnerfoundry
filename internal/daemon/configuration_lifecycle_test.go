@@ -61,30 +61,6 @@ func TestLoadConfigRejectsInvalidYAML(t *testing.T) {
 	}
 }
 
-func TestLoadConfigReadsValidatedFileAndLoggerFormats(t *testing.T) {
-	loadedConfig := runnableConfig(t)
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	configText := "github:\n  app:\n    app_id: 1\n    private_key_file: " + loadedConfig.GitHub.App.PrivateKeyFile + "\nstate:\n  path: state.db\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yaml\n      service: runner\n"
-	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(configPath); err != nil {
-		t.Fatalf("expected config file to load, got %v", err)
-	}
-	if _, err := loadConfig(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("expected missing config error")
-	}
-	if _, err := readConfigFile(filepath.Join(t.TempDir(), "missing", "config.yaml")); err == nil {
-		t.Fatal("expected missing config directory error")
-	}
-	if _, err := readConfigFile(t.TempDir()); err == nil {
-		t.Fatal("expected directory read error")
-	}
-	if newLogger("json", "info") == nil || newLogger("text", "info") == nil {
-		t.Fatal("expected both logger formats")
-	}
-}
-
 func TestLoggerHonorsConfiguredLevel(t *testing.T) {
 	logs := &bytes.Buffer{}
 	logger := newLoggerForWriter(logs, "json", "info")

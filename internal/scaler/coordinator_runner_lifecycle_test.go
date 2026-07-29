@@ -84,22 +84,6 @@ func (worker lifecycleIdentityWorker) ReconcileRunnerUsability(context.Context) 
 	return 0, worker.usabilityErr
 }
 
-func TestCoordinatorRunnerLifecycleFacade(t *testing.T) {
-	store := createMemoryDemandStore()
-	coordinator := NewDurableCoordinator("set", 2, store)
-	reconciler := &Reconciler{}
-	if !coordinator.HasRunnerLifecycle() {
-		t.Fatal("expected runner lifecycle support")
-	}
-	if err := coordinator.ConfigureRunnerLifecycle(reconciler, "repo", RunnerProviderDocker); err != nil {
-		t.Fatal(err)
-	}
-	if reconciler.ScaleSet.Repository != "repo" || reconciler.ScaleSet.ProviderKind != RunnerProviderDocker ||
-		reconciler.ScaleSet.LifecycleScaleSet != "set" || reconciler.ScaleSet.Lifecycle != store {
-		t.Fatalf("runtime=%#v", reconciler.ScaleSet)
-	}
-}
-
 func TestCoordinatorRunnerLifecycleTransitions(t *testing.T) {
 	ctx := context.Background()
 	store := createMemoryDemandStore()

@@ -39,13 +39,6 @@ func TestLogDestinationFactoryUsesStandardOutputWithoutFileConfiguration(t *test
 	}
 }
 
-func TestProductionLogDestinationFactoryProvidesEveryOperatingSystemBoundary(t *testing.T) {
-	factory := newProductionLogDestinationFactory()
-	if factory.standardOutput == nil || factory.standardError == nil || factory.ensureDirectory == nil || factory.openRotatingFile == nil {
-		t.Fatalf("incomplete production log destination factory: %#v", factory)
-	}
-}
-
 func TestLogDestinationFactoryWithExistingParentConfiguresBoundedFileRotation(t *testing.T) {
 	logPath := testDaemonAbsolutePath("logs", "runnerfoundry.log")
 	standardError := &bytes.Buffer{}

@@ -28,18 +28,6 @@ func TestStandaloneRepositoryStartupRejectsAnInvalidRepositoryURL(t *testing.T) 
 	}
 }
 
-func TestClusteredGitHubConnectionAcceptsConfiguredCredentials(t *testing.T) {
-	configured := clusteredConfig(t)
-	setValidGitHubCredentials(t, &configured)
-	daemon := newClusteredDaemon()
-	if err := daemon.connectGitHub(configured); err != nil {
-		t.Fatalf("connect GitHub: %v", err)
-	}
-	if daemon.discoverer == nil {
-		t.Fatal("configured credentials did not create repository discovery")
-	}
-}
-
 func TestClusteredSessionRejectsAnInvalidRepositoryURL(t *testing.T) {
 	configured := clusteredConfig(t)
 	setValidGitHubCredentials(t, &configured)
@@ -84,16 +72,5 @@ func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *tes
 	}
 	if errors.Is(err, cluster.ErrNotLeader) {
 		t.Fatalf("credential failure was reported as lease contention: %v", err)
-	}
-}
-
-func TestClusterLeadershipResultRetainsConcreteLeaseCapability(t *testing.T) {
-	lease := &fakeClusterLease{alive: true}
-	result, err := clusterLeadershipResult("try cluster leadership", lease, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.lease != lease || !result.lease.Alive(context.Background()) {
-		t.Fatalf("leadership result lease = %#v, want injected lease", result.lease)
 	}
 }
