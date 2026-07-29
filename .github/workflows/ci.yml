@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
 #    env:
 #      GOCACHE: /cache/go-build
 #      GOMODCACHE: /cache/go-mod
