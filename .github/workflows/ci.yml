@@ -21,19 +21,12 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-slim
-    env:
-      GOCACHE: /cache/go-build
-      GOMODCACHE: /cache/go-mod
-      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/embedded-postgres
-      npm_config_cache: /cache/npm
+#    env:
+#      GOCACHE: /cache/go-build
+#      GOMODCACHE: /cache/go-mod
+#      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/embedded-postgres
+#      npm_config_cache: /cache/npm
     steps:
-      - name: Ensue cache directories exist
-        run: |
-          mkdir -p /cache/go-build
-          mkdir -p /cache/go-mod
-          mkdir -p /cache/embedded-postgres
-          mkdir -p /cache/npm
-
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
