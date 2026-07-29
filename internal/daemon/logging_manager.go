@@ -94,6 +94,7 @@ func openLoggingTarget(logConfig config.LogConfig, factory logDestinationFactory
 	}
 	handlerOptions := &slog.HandlerOptions{Level: configuredLogLevel(logConfig.Level)}
 	if logConfig.Format == "json" {
+		handlerOptions.ReplaceAttr = renameJSONTimestamp
 		return loggingTarget{handler: slog.NewJSONHandler(destination, handlerOptions), destination: destination}, nil
 	}
 	return loggingTarget{handler: slog.NewTextHandler(destination, handlerOptions), destination: destination}, nil

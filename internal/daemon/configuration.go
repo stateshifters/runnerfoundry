@@ -50,9 +50,17 @@ func newLogger(format string, level string) *slog.Logger {
 func newLoggerForWriter(writer io.Writer, format string, level string) *slog.Logger {
 	handlerOptions := &slog.HandlerOptions{Level: configuredLogLevel(level)}
 	if format == "json" {
+		handlerOptions.ReplaceAttr = renameJSONTimestamp
 		return slog.New(slog.NewJSONHandler(writer, handlerOptions))
 	}
 	return slog.New(slog.NewTextHandler(writer, handlerOptions))
+}
+
+func renameJSONTimestamp(groups []string, attribute slog.Attr) slog.Attr {
+	if len(groups) == 0 && attribute.Key == slog.TimeKey {
+		attribute.Key = "@timestamp"
+	}
+	return attribute
 }
 
 func configuredLogLevel(level string) slog.Level {

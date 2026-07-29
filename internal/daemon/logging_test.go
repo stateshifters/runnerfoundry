@@ -27,6 +27,9 @@ func TestRunTracedOperationLogsSuccessfulStart(t *testing.T) {
 	if events[0]["phase"] != "started" || events[0]["repository"] != "https://github.com/acme/repo" {
 		t.Fatalf("started event = %#v", events[0])
 	}
+	if _, exists := events[0]["@timestamp"]; !exists {
+		t.Fatalf("started event is missing @timestamp: %#v", events[0])
+	}
 	if _, exists := events[0]["duration"]; exists {
 		t.Fatalf("started event contains duration: %#v", events[0])
 	}
