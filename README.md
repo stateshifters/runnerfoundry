@@ -329,15 +329,17 @@ log:
     max_backups: 5
 ```
 
-RunnerFoundry creates the active file with mode `0600`, rotates it at the configured size, and retains the configured number of backups. Rotation does not compress files and does not remove them by age. Do not configure multiple RunnerFoundry processes to write to the same path.
+RunnerFoundry creates missing parent directories with mode `0750` and creates the active file with mode `0600`. Existing directory permissions and ownership are preserved. The active file rotates at the configured size and retains the configured number of backups. Rotation does not compress files and does not remove them by age. Do not configure multiple RunnerFoundry processes to write to the same path.
 
-The package does not create the parent directory. Create it before enabling file logging and make it writable by the service account, for example:
+The packaged systemd service provisions `/var/log/runnerfoundry` with mode `0750` and ownership matching the `runnerfoundry` service account before every start. The example path therefore requires no separate directory setup.
+
+For a custom path or a non-systemd deployment, the daemon can create the parent only when its service identity can write to an existing ancestor. If it cannot, provision the directory with appropriate ownership before starting RunnerFoundry, for example:
 
 ```sh
 sudo install -d -m 0750 -o runnerfoundry -g runnerfoundry /var/log/runnerfoundry
 ```
 
-A successful reload atomically applies destination, format, level, and rotation changes. If the replacement cannot be prepared, the existing logger remains active. A failure while closing the replaced destination fails the reload so the service manager can restart RunnerFoundry and release resources. Bootstrap failures, file-open and rotation-maintenance failures, and terminal lifecycle failures still appear on standard error and may therefore remain visible in journald even when normal daemon logs use a file.
+A successful reload atomically applies destination, format, level, and rotation changes. If the replacement directory or file cannot be prepared, the existing logger remains active. Startup and reload return a clear error when directory creation fails; they do not change existing directory permissions or ownership. A failure while closing the replaced destination fails the reload so the service manager can restart RunnerFoundry and release resources. Bootstrap failures, file-open and rotation-maintenance failures, and terminal lifecycle failures still appear on standard error and may therefore remain visible in journald even when normal daemon logs use a file.
 
 ### State settings
 

@@ -23,15 +23,15 @@ type rotatingFileSettings struct {
 type productionLogDestinationFactory struct {
 	standardOutput   io.Writer
 	standardError    io.Writer
-	inspectPath      func(string) (fs.FileInfo, error)
+	ensureDirectory  func(string, fs.FileMode) error
 	openRotatingFile func(rotatingFileSettings, func(error)) (io.WriteCloser, error)
 }
 
 func newProductionLogDestinationFactory() productionLogDestinationFactory {
 	return productionLogDestinationFactory{
-		standardOutput: os.Stdout,
-		standardError:  os.Stderr,
-		inspectPath:    os.Stat,
+		standardOutput:  os.Stdout,
+		standardError:   os.Stderr,
+		ensureDirectory: os.MkdirAll,
 		openRotatingFile: func(settings rotatingFileSettings, reportError func(error)) (io.WriteCloser, error) {
 			return logrotate.New(
 				settings.Path,
@@ -50,12 +50,8 @@ func (factory productionLogDestinationFactory) Open(logConfig config.LogConfig) 
 	}
 
 	parentDirectory := filepath.Dir(logConfig.File.Path)
-	info, err := factory.inspectPath(parentDirectory)
-	if err != nil {
-		return nil, fmt.Errorf("inspect log file directory %q: %w", parentDirectory, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("log file parent %q is not a directory", parentDirectory)
+	if err := factory.ensureDirectory(parentDirectory, 0o750); err != nil {
+		return nil, fmt.Errorf("create log file directory %q: %w", parentDirectory, err)
 	}
 
 	settings := rotatingFileSettings{

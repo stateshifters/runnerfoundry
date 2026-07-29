@@ -3,19 +3,30 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 )
 
 func TestLogDestinationFactoryUsesStandardOutputWithoutFileConfiguration(t *testing.T) {
 	standardOutput := &bytes.Buffer{}
-	factory := productionLogDestinationFactory{standardOutput: standardOutput}
+	factory := productionLogDestinationFactory{
+		standardOutput: standardOutput,
+		ensureDirectory: func(string, fs.FileMode) error {
+			t.Fatal("stdout logging attempted to create a directory")
+			return nil
+		},
+		openRotatingFile: func(rotatingFileSettings, func(error)) (io.WriteCloser, error) {
+			t.Fatal("stdout logging attempted to open a rotating file")
+			return nil, errors.New("unexpected rotating file request")
+		},
+	}
 	destination, err := factory.Open(config.LogConfig{})
 	if err != nil {
 		t.Fatalf("open standard output destination: %v", err)
@@ -30,12 +41,12 @@ func TestLogDestinationFactoryUsesStandardOutputWithoutFileConfiguration(t *test
 
 func TestProductionLogDestinationFactoryProvidesEveryOperatingSystemBoundary(t *testing.T) {
 	factory := newProductionLogDestinationFactory()
-	if factory.standardOutput == nil || factory.standardError == nil || factory.inspectPath == nil || factory.openRotatingFile == nil {
+	if factory.standardOutput == nil || factory.standardError == nil || factory.ensureDirectory == nil || factory.openRotatingFile == nil {
 		t.Fatalf("incomplete production log destination factory: %#v", factory)
 	}
 }
 
-func TestLogDestinationFactoryConfiguresBoundedFileRotation(t *testing.T) {
+func TestLogDestinationFactoryWithExistingParentConfiguresBoundedFileRotation(t *testing.T) {
 	logPath := testDaemonAbsolutePath("logs", "runnerfoundry.log")
 	standardError := &bytes.Buffer{}
 	openedDestination := &recordingLogDestination{}
@@ -52,6 +63,33 @@ func TestLogDestinationFactoryConfiguresBoundedFileRotation(t *testing.T) {
 	assertBoundedRotation(t, destination, openedDestination, captured, logPath, standardError.String())
 }
 
+func TestLogDestinationFactoryCreatesParentBeforeOpeningRotator(t *testing.T) {
+	logPath := testDaemonAbsolutePath("missing", "nested", "runnerfoundry.log")
+	maxSize := 1
+	maxBackups := 1
+	operations := []string{}
+	factory := productionLogDestinationFactory{
+		ensureDirectory: func(path string, mode fs.FileMode) error {
+			operations = append(operations, fmt.Sprintf("ensure %s %04o", path, mode))
+			return nil
+		},
+		openRotatingFile: func(rotatingFileSettings, func(error)) (io.WriteCloser, error) {
+			operations = append(operations, "open rotator")
+			return &recordingLogDestination{}, nil
+		},
+	}
+	_, err := factory.Open(config.LogConfig{File: &config.LogFileConfig{
+		Path: logPath, MaxSizeMB: &maxSize, MaxBackups: &maxBackups,
+	}})
+	if err != nil {
+		t.Fatalf("open file logging: %v", err)
+	}
+	expected := []string{fmt.Sprintf("ensure %s 0750", filepath.Dir(logPath)), "open rotator"}
+	if !slices.Equal(operations, expected) {
+		t.Fatalf("operations = %#v, want %#v", operations, expected)
+	}
+}
+
 func boundedRotationFactory(
 	t *testing.T,
 	logPath string,
@@ -62,11 +100,14 @@ func boundedRotationFactory(
 	t.Helper()
 	return productionLogDestinationFactory{
 		standardError: standardError,
-		inspectPath: func(path string) (fs.FileInfo, error) {
+		ensureDirectory: func(path string, mode fs.FileMode) error {
 			if path != filepath.Dir(logPath) {
 				t.Fatalf("inspected path = %q", path)
 			}
-			return fakeFileInfo{directory: true}, nil
+			if mode != 0o750 {
+				t.Fatalf("directory mode = %04o", mode)
+			}
+			return nil
 		},
 		openRotatingFile: func(settings rotatingFileSettings, reportError func(error)) (io.WriteCloser, error) {
 			*captured = settings
@@ -99,13 +140,18 @@ func assertBoundedRotation(
 func TestLogDestinationFactoryRejectsUnavailableParentDirectory(t *testing.T) {
 	maxSize := 1
 	maxBackups := 1
-	factory := productionLogDestinationFactory{inspectPath: func(string) (fs.FileInfo, error) {
-		return nil, errors.New("missing directory")
-	}}
+	rotatorOpened := false
+	factory := productionLogDestinationFactory{
+		ensureDirectory: func(string, fs.FileMode) error { return errors.New("permission denied") },
+		openRotatingFile: func(rotatingFileSettings, func(error)) (io.WriteCloser, error) {
+			rotatorOpened = true
+			return &recordingLogDestination{}, nil
+		},
+	}
 	_, err := factory.Open(config.LogConfig{File: &config.LogFileConfig{
 		Path: testDaemonAbsolutePath("missing", "runnerfoundry.log"), MaxSizeMB: &maxSize, MaxBackups: &maxBackups,
 	}})
-	if err == nil || !strings.Contains(err.Error(), "inspect log file directory") {
+	if err == nil || !strings.Contains(err.Error(), "create log file directory") || rotatorOpened {
 		t.Fatalf("open error = %v", err)
 	}
 }
@@ -113,13 +159,13 @@ func TestLogDestinationFactoryRejectsUnavailableParentDirectory(t *testing.T) {
 func TestLogDestinationFactoryRejectsParentPathThatIsNotADirectory(t *testing.T) {
 	maxSize := 1
 	maxBackups := 1
-	factory := productionLogDestinationFactory{inspectPath: func(string) (fs.FileInfo, error) {
-		return fakeFileInfo{directory: false}, nil
+	factory := productionLogDestinationFactory{ensureDirectory: func(string, fs.FileMode) error {
+		return errors.New("not a directory")
 	}}
 	_, err := factory.Open(config.LogConfig{File: &config.LogFileConfig{
 		Path: testDaemonAbsolutePath("not-a-directory", "runnerfoundry.log"), MaxSizeMB: &maxSize, MaxBackups: &maxBackups,
 	}})
-	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("open error = %v", err)
 	}
 }
@@ -130,7 +176,9 @@ func TestLogDestinationFactoryDoesNotFailOpeningWhenMaintenanceErrorReportingFai
 	openedDestination := &recordingLogDestination{}
 	factory := productionLogDestinationFactory{
 		standardError: errorWriter{err: errors.New("stderr unavailable")},
-		inspectPath:   func(string) (fs.FileInfo, error) { return fakeFileInfo{directory: true}, nil },
+		ensureDirectory: func(string, fs.FileMode) error {
+			return nil
+		},
 		openRotatingFile: func(_ rotatingFileSettings, reportError func(error)) (io.WriteCloser, error) {
 			reportError(errors.New("rotation failed"))
 			return openedDestination, nil
@@ -148,7 +196,7 @@ func TestLogDestinationFactoryReportsRotatorOpenFailure(t *testing.T) {
 	maxSize := 1
 	maxBackups := 1
 	factory := productionLogDestinationFactory{
-		inspectPath: func(string) (fs.FileInfo, error) { return fakeFileInfo{directory: true}, nil },
+		ensureDirectory: func(string, fs.FileMode) error { return nil },
 		openRotatingFile: func(rotatingFileSettings, func(error)) (io.WriteCloser, error) {
 			return nil, errors.New("open failed")
 		},
@@ -160,17 +208,6 @@ func TestLogDestinationFactoryReportsRotatorOpenFailure(t *testing.T) {
 		t.Fatalf("open error = %v", err)
 	}
 }
-
-type fakeFileInfo struct {
-	directory bool
-}
-
-func (fakeFileInfo) Name() string       { return "logs" }
-func (fakeFileInfo) Size() int64        { return 0 }
-func (fakeFileInfo) Mode() fs.FileMode  { return 0o750 }
-func (fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (info fakeFileInfo) IsDir() bool   { return info.directory }
-func (fakeFileInfo) Sys() any           { return nil }
 
 func testDaemonAbsolutePath(elements ...string) string {
 	if filepath.Separator == '\\' {

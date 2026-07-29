@@ -68,6 +68,28 @@ func TestLoggingClusterReloadActivatesPreparedDestination(t *testing.T) {
 	}
 }
 
+func TestLoggingClusterReloadKeepsActiveDestinationWhenDirectoryCreationFails(t *testing.T) {
+	configured := mockedClusteredLoggingConfig()
+	state := &fakeClusterState{}
+	daemon := clusteredDaemonForTest(state)
+	daemon.config = configured
+	daemon.credentials = config.GitHubAppCredentials{AppID: 1, PrivateKey: "mocked"}
+	daemon.loadConfig = func(string) (config.Config, error) { return configured, nil }
+	daemon.loadCredentials = mockedLoggingCredentials
+	daemon.nodes = state
+	manager, activeDestination := newDirectoryFailingReloadManager(t)
+	daemon.logger = manager.Logger()
+	daemon.logging = manager
+
+	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
+		t.Fatal("expected reloaded log directory creation failure")
+	}
+	daemon.logger.Info("cluster remains active")
+	if !strings.Contains(activeDestination.String(), "cluster remains active") || activeDestination.closeCalls != 0 {
+		t.Fatalf("active destination = %q, closes=%d", activeDestination.String(), activeDestination.closeCalls)
+	}
+}
+
 func TestLoggingStandaloneShutdownClosesActiveDestination(t *testing.T) {
 	destination := &recordingLogDestination{}
 	manager := newTestLoggingManager(t, destination)
@@ -114,6 +136,44 @@ func TestLoggingStandaloneReloadClosesUnactivatedCandidate(t *testing.T) {
 	if candidateDestination.closeCalls != 1 {
 		t.Fatalf("candidate destination close calls = %d", candidateDestination.closeCalls)
 	}
+}
+
+func TestLoggingStandaloneReloadKeepsActiveDestinationWhenDirectoryCreationFails(t *testing.T) {
+	manager, activeDestination := newDirectoryFailingReloadManager(t)
+	loadedConfig := mockedStandaloneLoggingConfig()
+	active := testActiveConfiguration()
+	active.Config.State.Path = loadedConfig.State.Path
+	active.Logger = manager.Logger()
+	active.Logging = manager
+	daemon := successfulReloadDaemon(loadedConfig)
+	daemon.loadCredentials = mockedLoggingCredentials
+
+	if _, err := reloadConfiguration(context.Background(), "config", daemon, active); err == nil {
+		t.Fatal("expected reloaded log directory creation failure")
+	}
+	manager.Logger().Info("standalone remains active")
+	if !strings.Contains(activeDestination.String(), "standalone remains active") || activeDestination.closeCalls != 0 {
+		t.Fatalf("active destination = %q, closes=%d", activeDestination.String(), activeDestination.closeCalls)
+	}
+}
+
+func newDirectoryFailingReloadManager(t *testing.T) (*loggingManager, *recordingLogDestination) {
+	t.Helper()
+	activeDestination := &recordingLogDestination{}
+	openCalls := 0
+	manager, err := newLoggingManager(config.LogConfig{Format: "text", Level: "info"}, logDestinationFactoryFunc(
+		func(config.LogConfig) (io.WriteCloser, error) {
+			openCalls++
+			if openCalls == 1 {
+				return activeDestination, nil
+			}
+			return nil, errors.New("create log file directory: permission denied")
+		},
+	))
+	if err != nil {
+		t.Fatalf("create logging manager: %v", err)
+	}
+	return manager, activeDestination
 }
 
 func mockedStandaloneLoggingConfig() config.Config {
