@@ -12,6 +12,7 @@ require (
 	github.com/google/go-github/v80 v80.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jackc/tern/v2 v2.4.1
+	github.com/libtnb/logrotate v0.1.2
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	gopkg.in/yaml.v3 v3.0.1
 	libvirt.org/go/libvirtxml v1.12005.0

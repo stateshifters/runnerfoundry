@@ -15,6 +15,8 @@ import (
 const (
 	defaultDiscoveryInterval = "5m"
 	defaultJobStartTimeout   = "10m"
+	defaultLogFileMaxSizeMB  = 100
+	defaultLogFileMaxBackups = 5
 )
 
 type Config struct {
@@ -50,8 +52,15 @@ type GitHubAppCredentials struct {
 }
 
 type LogConfig struct {
-	Format string `yaml:"format"`
-	Level  string `yaml:"level"`
+	Format string         `yaml:"format"`
+	Level  string         `yaml:"level"`
+	File   *LogFileConfig `yaml:"file"`
+}
+
+type LogFileConfig struct {
+	Path       string `yaml:"path"`
+	MaxSizeMB  *int   `yaml:"max_size_mb"`
+	MaxBackups *int   `yaml:"max_backups"`
 }
 
 type ScaleSetConfig struct {

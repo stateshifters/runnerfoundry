@@ -16,9 +16,11 @@ import (
 
 type standaloneDaemon struct {
 	loadConfig      func(configPath string) (config.Config, error)
+	loadCredentials func(config.GitHubConfig) (config.GitHubAppCredentials, error)
 	newDiscoverer   func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error)
 	newGitHubClient func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error)
 	newLogger       func(format string, level string) *slog.Logger
+	newLogging      func(config.LogConfig) (*loggingManager, error)
 	openDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
 	notifier        serviceNotifier
 	startScaleSet   func(
@@ -68,6 +70,8 @@ type activeConfiguration struct {
 	Coordinators          map[string]*scaler.Coordinator
 	Repositories          map[string]managedRepository
 	Logger                *slog.Logger
+	Logging               *loggingManager
+	PreparedLogging       *preparedLogging
 	DemandStore           scaler.DemandStore
 	StateCloser           io.Closer
 	ReconciliationPending bool
@@ -76,6 +80,9 @@ type activeConfiguration struct {
 func newStandaloneDaemon() standaloneDaemon {
 	return standaloneDaemon{
 		loadConfig: loadConfig,
+		loadCredentials: func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
+			return githubConfig.AppCredentials()
+		},
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
 		},
@@ -83,6 +90,9 @@ func newStandaloneDaemon() standaloneDaemon {
 			return newGitHubClient(repositoryURL, installationID, credentials)
 		},
 		newLogger: newLogger,
+		newLogging: func(logConfig config.LogConfig) (*loggingManager, error) {
+			return newLoggingManager(logConfig, newProductionLogDestinationFactory())
+		},
 		openDemandStore: func(path string) (scaler.DemandStore, io.Closer, error) {
 			store, err := scaler.OpenSQLiteDemandStore(path)
 			if err != nil {
@@ -110,7 +120,12 @@ func runDaemon(ctx context.Context, options Options, daemon standaloneDaemon) (r
 		slog.String("logFormat", activeConfig.Config.Log.Format),
 		slog.String("logLevel", activeConfig.Config.Log.Level),
 	)
-	defer func() { runErr = errors.Join(runErr, activeConfig.StateCloser.Close()) }()
+	defer func() {
+		runErr = errors.Join(runErr, activeConfig.StateCloser.Close())
+		if activeConfig.Logging != nil {
+			runErr = errors.Join(runErr, activeConfig.Logging.Close())
+		}
+	}()
 	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
 	if err != nil {
 		return fmt.Errorf("load discovery interval: %w", err)
@@ -202,6 +217,11 @@ func withStandaloneDefaults(daemon standaloneDaemon) standaloneDaemon {
 			return scaler.NewMemoryDemandStore(), noOpCloser{}, nil
 		}
 	}
+	if daemon.loadCredentials == nil {
+		daemon.loadCredentials = func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
+			return githubConfig.AppCredentials()
+		}
+	}
 	return daemon
 }
 
@@ -215,7 +235,31 @@ func loadConfiguration(configPath string, daemon standaloneDaemon) (activeConfig
 	if err != nil {
 		return activeConfiguration{}, err
 	}
-	credentials, err := loadedConfig.GitHub.AppCredentials()
+	var logging *loggingManager
+	var logger *slog.Logger
+	if daemon.newLogging != nil {
+		logging, err = daemon.newLogging(loadedConfig.Log)
+		if err != nil {
+			return activeConfiguration{}, fmt.Errorf("open log destination: %w", err)
+		}
+		logger = logging.Logger()
+	} else {
+		logger = daemon.newLogger(loadedConfig.Log.Format, loadedConfig.Log.Level)
+	}
+	activeConfig, err := buildActiveConfiguration(loadedConfig, daemon, logger, logging)
+	if err != nil && logging != nil {
+		err = errors.Join(err, logging.Close())
+	}
+	return activeConfig, err
+}
+
+func buildActiveConfiguration(
+	loadedConfig config.Config,
+	daemon standaloneDaemon,
+	logger *slog.Logger,
+	logging *loggingManager,
+) (activeConfiguration, error) {
+	credentials, err := daemon.loadCredentials(loadedConfig.GitHub)
 	if err != nil {
 		return activeConfiguration{}, fmt.Errorf("load GitHub App credentials: %w", err)
 	}
@@ -233,7 +277,8 @@ func loadConfiguration(configPath string, daemon standaloneDaemon) (activeConfig
 		Discoverer:   discoverer,
 		Coordinators: coordinators(loadedConfig.ScaleSets, demandStore),
 		Repositories: map[string]managedRepository{},
-		Logger:       daemon.newLogger(loadedConfig.Log.Format, loadedConfig.Log.Level),
+		Logger:       logger,
+		Logging:      logging,
 		DemandStore:  demandStore,
 		StateCloser:  stateCloser,
 	}

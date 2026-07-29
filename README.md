@@ -308,10 +308,36 @@ The private key remains in process memory after it is read. It is not written to
 | --- | --- | --- |
 | `log.format` | Optional; default `text` | Accepts `text` or `json`. |
 | `log.level` | Optional; default `info` | Accepts `debug`, `info`, `warn`, or `error`. |
+| `log.file` | Optional; omitted by default | When present, sends normal daemon logs only to the configured rotating file instead of standard output and journald. |
+| `log.file.path` | Required with `log.file` | Absolute path to the active log file. One RunnerFoundry process may use a given path. |
+| `log.file.max_size_mb` | Optional; default `100` | Positive active-file size limit in MiB before rotation. |
+| `log.file.max_backups` | Optional; default `5` | Positive number of rotated files to retain. |
 
 `info` records lifecycle milestones. `debug` adds repository discovery, polling, scheduling, recovery, migration, reload, infrastructure-provider, and cleanup actions. Logs may contain non-secret repository, scale-set, node, request, assignment, operation, and PostgreSQL SQLSTATE values.
 
 RunnerFoundry deliberately excludes App keys, PostgreSQL credentials, JIT values, generated connection strings, secret-reference paths, SQL bodies, and raw PostgreSQL connection errors from logs.
+
+Omitting `log.file` preserves standard-output logging, which the packaged systemd service collects in journald. To select file-only daemon logging, configure the file block:
+
+```yaml
+log:
+  format: json
+  level: info
+  file:
+    path: /var/log/runnerfoundry/runnerfoundry.log
+    max_size_mb: 100
+    max_backups: 5
+```
+
+RunnerFoundry creates the active file with mode `0600`, rotates it at the configured size, and retains the configured number of backups. Rotation does not compress files and does not remove them by age. Do not configure multiple RunnerFoundry processes to write to the same path.
+
+The package does not create the parent directory. Create it before enabling file logging and make it writable by the service account, for example:
+
+```sh
+sudo install -d -m 0750 -o runnerfoundry -g runnerfoundry /var/log/runnerfoundry
+```
+
+A successful reload atomically applies destination, format, level, and rotation changes. If the replacement cannot be prepared, the existing logger remains active. A failure while closing the replaced destination fails the reload so the service manager can restart RunnerFoundry and release resources. Bootstrap failures, file-open and rotation-maintenance failures, and terminal lifecycle failures still appear on standard error and may therefore remain visible in journald even when normal daemon logs use a file.
 
 ### State settings
 

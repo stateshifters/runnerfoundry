@@ -23,10 +23,17 @@ func reloadConfiguration(
 		return activeConfiguration{}, err
 	}
 	if err := confirmReloadRegistrations(ctx, daemon, &reloaded); err != nil {
+		err = errors.Join(err, closePreparedLogging(&reloaded))
 		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
 	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "registrations_confirmed")
+	if reloaded.PreparedLogging != nil {
+		if err := reloaded.PreparedLogging.Activate(); err != nil {
+			return activeConfiguration{}, fmt.Errorf("activate reloaded logging: %w", err)
+		}
+		reloaded.PreparedLogging = nil
+	}
 	if err := stopActiveConfigurationForReload(ctx, daemon, activeConfig, reloaded); err != nil {
 		return activeConfiguration{}, err
 	}
@@ -79,17 +86,54 @@ func loadReloadedConfiguration(
 		return activeConfiguration{}, fmt.Errorf("notify reloading: %w", err)
 	}
 	reloadedDaemon := standaloneForReload(daemon, activeConfig)
-	reloaded, err := loadConfiguration(configPath, reloadedDaemon)
+	reloaded, err := prepareStandaloneReloadConfiguration(configPath, reloadedDaemon, activeConfig)
 	if err != nil {
 		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, err
 	}
 	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "reload", "replacement_validated")
 	if err := daemon.notifier.Ready(ctx); err != nil {
+		err = errors.Join(err, closePreparedLogging(&reloaded))
 		logActionFailure(ctx, activeConfig.Logger, "reload", err)
 		return activeConfiguration{}, fmt.Errorf("notify ready after reload: %w", err)
 	}
 	return reloaded, nil
+}
+
+func prepareStandaloneReloadConfiguration(
+	configPath string,
+	daemon standaloneDaemon,
+	activeConfig activeConfiguration,
+) (activeConfiguration, error) {
+	loadedConfig, err := daemon.loadConfig(configPath)
+	if err != nil {
+		return activeConfiguration{}, err
+	}
+	var prepared *preparedLogging
+	if activeConfig.Logging != nil {
+		prepared, err = activeConfig.Logging.Prepare(loadedConfig.Log)
+		if err != nil {
+			return activeConfiguration{}, fmt.Errorf("prepare reloaded logging: %w", err)
+		}
+	}
+	reloaded, err := buildActiveConfiguration(loadedConfig, daemon, activeConfig.Logger, activeConfig.Logging)
+	if err != nil {
+		if prepared != nil {
+			err = errors.Join(err, prepared.Close())
+		}
+		return activeConfiguration{}, err
+	}
+	reloaded.PreparedLogging = prepared
+	return reloaded, nil
+}
+
+func closePreparedLogging(configuration *activeConfiguration) error {
+	if configuration.PreparedLogging == nil {
+		return nil
+	}
+	err := configuration.PreparedLogging.Close()
+	configuration.PreparedLogging = nil
+	return err
 }
 
 func stopActiveConfigurationForReload(

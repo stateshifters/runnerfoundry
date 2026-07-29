@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,10 +30,42 @@ func (loadedConfig *Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported log.level %q", loadedConfig.Log.Level)
 	}
+	if err := loadedConfig.Log.validateFile(); err != nil {
+		return err
+	}
 	if err := loadedConfig.State.validate(); err != nil {
 		return err
 	}
 	return loadedConfig.validateScaleSets()
+}
+
+func (logConfig *LogConfig) validateFile() error {
+	if logConfig.File == nil {
+		return nil
+	}
+	if !filepath.IsAbs(logConfig.File.Path) {
+		return errors.New("log.file.path must be absolute")
+	}
+	if logConfig.File.MaxSizeMB == nil {
+		logConfig.File.MaxSizeMB = intPointer(defaultLogFileMaxSizeMB)
+	}
+	if *logConfig.File.MaxSizeMB <= 0 {
+		return errors.New("log.file.max_size_mb must be positive")
+	}
+	if int64(*logConfig.File.MaxSizeMB) > math.MaxInt64/(1024*1024) {
+		return errors.New("log.file.max_size_mb is too large")
+	}
+	if logConfig.File.MaxBackups == nil {
+		logConfig.File.MaxBackups = intPointer(defaultLogFileMaxBackups)
+	}
+	if *logConfig.File.MaxBackups <= 0 {
+		return errors.New("log.file.max_backups must be positive")
+	}
+	return nil
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func (stateConfig StateConfig) validate() error {

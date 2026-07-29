@@ -25,7 +25,7 @@ The application currently provides the following behavior:
 - Optional removal of unmanaged GitHub runner scale sets during standalone repository discovery.
 - Validated `SIGHUP` reload with mode-specific replacement behavior.
 - Automatic upward PostgreSQL migration at clustered startup and explicit status, upgrade, and rollback commands.
-- Text or JSON structured logging and systemd readiness, reload, and clustered-status notifications.
+- Text or JSON structured logging to standard output or one exclusively selected rotating file, plus systemd readiness, reload, and clustered-status notifications. Logging reloads prepare a replacement before atomically swapping the process-wide handler; exceptional bootstrap, destination, maintenance, and terminal failures remain visible on standard error.
 
 ## System context
 

@@ -39,10 +39,13 @@ type clusteredDaemon struct {
 	credentials               config.GitHubAppCredentials
 	discoverer                repositoryDiscoverer
 	logger                    *slog.Logger
+	logging                   *loggingManager
 	hostname                  func() (string, error)
 	newLogger                 func(string, string) *slog.Logger
+	newLogging                func(config.LogConfig) (*loggingManager, error)
 	openStore                 clusterStateOpener
 	loadConfig                func(string) (config.Config, error)
+	loadCredentials           func(config.GitHubConfig) (config.GitHubAppCredentials, error)
 	newDiscoverer             func(config.GitHubAppCredentials) (repositoryDiscoverer, error)
 	newGitHubClient           func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error)
 	providerHealthy           func(context.Context, config.ScaleSetConfig) error
@@ -127,6 +130,12 @@ type clusterStateOpener func(postgresconfig.Settings) (clusterStoreConnection, e
 func newClusteredDaemon() *clusteredDaemon {
 	return &clusteredDaemon{
 		hostname: os.Hostname, newLogger: newLogger, loadConfig: loadConfig,
+		loadCredentials: func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
+			return githubConfig.AppCredentials()
+		},
+		newLogging: func(logConfig config.LogConfig) (*loggingManager, error) {
+			return newLoggingManager(logConfig, newProductionLogDestinationFactory())
+		},
 		openStore: openClusterStore,
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
@@ -173,7 +182,7 @@ func runClusteredDaemon(
 	options Options,
 	daemon *clusteredDaemon,
 	configured config.Config,
-) error {
+) (runErr error) {
 	var err error
 	daemon, err = prepareClusteredDaemon(ctx, daemon, configured)
 	if err != nil {
@@ -182,7 +191,12 @@ func runClusteredDaemon(
 	if err = daemon.publish(ctx, cluster.NodeHealthy); err != nil {
 		return err
 	}
-	defer daemon.shutdown(context.WithoutCancel(ctx))
+	defer func() {
+		daemon.shutdown(context.WithoutCancel(ctx))
+		if daemon.logging != nil {
+			runErr = errors.Join(runErr, daemon.logging.Close())
+		}
+	}()
 	daemon.tryLeadership(ctx)
 	if daemon.currentLeader() == nil {
 		daemon.startContender(ctx)
@@ -201,18 +215,40 @@ func prepareClusteredDaemon(ctx context.Context, daemon *clusteredDaemon, config
 	if err != nil {
 		return nil, err
 	}
-	logger := daemon.newLogger(configured.Log.Format, configured.Log.Level)
-	if err = daemon.connectState(ctx, configured, logger); err != nil {
+	logger, logging, err := daemon.prepareLogging(configured.Log)
+	if err != nil {
 		return nil, err
 	}
+	if err = daemon.connectState(ctx, configured, logger); err != nil {
+		return nil, closePreparedDaemonLogging(err, logging)
+	}
 	if err = daemon.connectGitHub(configured); err != nil {
-		return nil, err
+		return nil, closePreparedDaemonLogging(err, logging)
 	}
 	daemon.nodeID = nodeID
 	daemon.config = configured
 	daemon.logger = logger
+	daemon.logging = logging
 	daemon.leadershipResults = make(chan leadershipResult, 1)
 	return daemon, nil
+}
+
+func (daemon *clusteredDaemon) prepareLogging(logConfig config.LogConfig) (*slog.Logger, *loggingManager, error) {
+	if daemon.newLogging == nil {
+		return daemon.newLogger(logConfig.Format, logConfig.Level), nil, nil
+	}
+	logging, err := daemon.newLogging(logConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open log destination: %w", err)
+	}
+	return logging.Logger(), logging, nil
+}
+
+func closePreparedDaemonLogging(preparationError error, logging *loggingManager) error {
+	if logging == nil {
+		return preparationError
+	}
+	return errors.Join(preparationError, logging.Close())
 }
 
 func (daemon *clusteredDaemon) connectState(ctx context.Context, configured config.Config, logger *slog.Logger) error {
@@ -234,7 +270,7 @@ func (daemon *clusteredDaemon) connectState(ctx context.Context, configured conf
 }
 
 func (daemon *clusteredDaemon) connectGitHub(configured config.Config) error {
-	credentials, err := configured.GitHub.AppCredentials()
+	credentials, err := daemon.credentialsFor(configured.GitHub)
 	if err != nil {
 		return fmt.Errorf("load GitHub App credentials: %w", err)
 	}
@@ -245,6 +281,17 @@ func (daemon *clusteredDaemon) connectGitHub(configured config.Config) error {
 	daemon.credentials = credentials
 	daemon.discoverer = discoverer
 	return nil
+}
+
+func (daemon *clusteredDaemon) credentialsFor(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
+	if daemon.loadCredentials != nil {
+		return daemon.loadCredentials(githubConfig)
+	}
+	credentials, err := githubConfig.AppCredentials()
+	if err != nil {
+		return config.GitHubAppCredentials{}, fmt.Errorf("read configured GitHub App credentials: %w", err)
+	}
+	return credentials, nil
 }
 
 func clusteredNodeID(hostname func() (string, error)) (cluster.NodeID, error) {
