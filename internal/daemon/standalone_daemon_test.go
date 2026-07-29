@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -131,29 +130,35 @@ func standaloneLoggingFixture(t *testing.T) (context.Context, standaloneLogFixtu
 	}}
 }
 
-func TestLoadConfigurationSurfacesLocalPreflightFailures(t *testing.T) {
-	valid := runnableConfig(t)
-	tests := map[string]standaloneDaemon{
-		"credentials": {
-			loadConfig: func(string) (config.Config, error) {
-				invalid := valid
-				invalid.GitHub.App.PrivateKeyFile = filepath.Join(t.TempDir(), "missing")
-				return invalid, nil
-			},
-		},
-		"discoverer": {
-			loadConfig: func(string) (config.Config, error) { return valid, nil },
-			newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-				return nil, errors.New("factory failed")
-			},
-		},
+func TestLoadConfigurationSurfacesCredentialPreflightFailure(t *testing.T) {
+	expectedErr := errors.New("credentials failed")
+	daemonUnderTest := localPreflightTestDaemon()
+	daemonUnderTest.loadCredentials = func(config.GitHubConfig) (config.GitHubAppCredentials, error) {
+		return config.GitHubAppCredentials{}, expectedErr
 	}
-	for testName, daemonUnderTest := range tests {
-		t.Run(testName, func(t *testing.T) {
-			if _, err := loadConfiguration("config", daemonUnderTest); err == nil {
-				t.Fatal("expected startup failure")
-			}
-		})
+	if _, err := loadConfiguration("config", daemonUnderTest); !errors.Is(err, expectedErr) {
+		t.Fatalf("startup failure = %v, want %v", err, expectedErr)
+	}
+}
+
+func TestLoadConfigurationSurfacesDiscovererPreflightFailure(t *testing.T) {
+	expectedErr := errors.New("discoverer failed")
+	daemonUnderTest := localPreflightTestDaemon()
+	daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return nil, expectedErr
+	}
+	if _, err := loadConfiguration("config", daemonUnderTest); !errors.Is(err, expectedErr) {
+		t.Fatalf("startup failure = %v, want %v", err, expectedErr)
+	}
+}
+
+func localPreflightTestDaemon() standaloneDaemon {
+	return standaloneDaemon{
+		loadConfig: func(string) (config.Config, error) { return config.Config{}, nil },
+		loadCredentials: func(config.GitHubConfig) (config.GitHubAppCredentials, error) {
+			return config.GitHubAppCredentials{}, nil
+		},
+		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	}
 }
 
