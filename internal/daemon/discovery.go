@@ -231,7 +231,7 @@ func reconcileRepositoryState(
 		return err
 	}
 	if repositoryRegistrationMatches(*managed, registrations, activeConfig.Config.ScaleSets) {
-		return nil
+		return pruneRepositoryWhenEnabled(ctx, activeConfig, managed.Client, repository.URL)
 	}
 	if err = suspendDriftedRepository(ctx, activeConfig, repository.URL, managed); err != nil {
 		return err
@@ -267,7 +267,7 @@ func auditRepositoryRegistrations(
 	repositoryURL string,
 	managed managedRepository,
 ) (map[string]*upstream.RunnerScaleSet, error) {
-	auditClient, supported := managed.Client.(scaleSetRegistrationAuditClient)
+	auditClient, supported := managed.Client.(scaleSetRegistrationReconciliationClient)
 	if !supported {
 		return nil, fmt.Errorf("GitHub client for %q does not support registration audits", repositoryURL)
 	}

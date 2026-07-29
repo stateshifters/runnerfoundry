@@ -57,7 +57,7 @@ func confirmReloadRegistrations(
 		if clientErr != nil {
 			return fmt.Errorf("create GitHub client for %q before reload activation: %w", repository.URL, clientErr)
 		}
-		auditClient, supported := client.(scaleSetRegistrationAuditClient)
+		auditClient, supported := client.(scaleSetRegistrationReconciliationClient)
 		if !supported {
 			return fmt.Errorf("GitHub client for %q does not support registration audits", repository.URL)
 		}

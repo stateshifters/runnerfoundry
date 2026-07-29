@@ -32,8 +32,8 @@ func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFail
 	if len(leader.sessions) != 2 || registry.createCalls["linux"] != 1 || registry.createCalls["windows"] != 1 {
 		t.Fatalf("sessions=%d createCalls=%#v", len(leader.sessions), registry.createCalls)
 	}
-	if registry.listCalls != 2 {
-		t.Fatalf("registration lists=%d, want one per reconciliation", registry.listCalls)
+	if registry.listCalls != 0 {
+		t.Fatalf("registration lists=%d, want 0", registry.listCalls)
 	}
 	leader.stop(context.Background())
 }
@@ -45,7 +45,7 @@ func TestClusterRepositoryAuditRepairsDriftAndRetainsSessionsOnTransientFailure(
 		t.Fatal(err)
 	}
 	oldLinux := leader.sessions[repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}]
-	registry.listErr = errors.New("audit unavailable")
+	registry.getErr = errors.New("audit unavailable")
 	if err := leader.startMissingSessions(context.Background(), desired, repositories); err == nil {
 		t.Fatal("expected degraded audit")
 	}
@@ -53,7 +53,7 @@ func TestClusterRepositoryAuditRepairsDriftAndRetainsSessionsOnTransientFailure(
 		t.Fatal("transient audit failure replaced healthy sessions")
 	}
 
-	registry.listErr = nil
+	registry.getErr = nil
 	delete(registry.registrations, "linux")
 	if err := leader.startMissingSessions(context.Background(), desired, repositories); err != nil {
 		t.Fatal(err)

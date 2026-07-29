@@ -146,8 +146,9 @@ func newRegistryIntegrationFixture(t *testing.T) *registryIntegrationFixture {
 		mux:    mux,
 		server: server,
 		registry: githubScaleSetRegistry{
-			repositoryURL: server.URL + "/meza/repo",
-			httpClient:    server.Client(),
+			repositoryURL:      server.URL + "/meza/repo",
+			installationClient: server.Client(),
+			protocolClient:     server.Client(),
 		},
 	}
 }

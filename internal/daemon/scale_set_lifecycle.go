@@ -106,17 +106,16 @@ func ensureRunnerScaleSet(
 	return runnerScaleSet, nil
 }
 
-type scaleSetRegistrationAuditClient interface {
+type scaleSetRegistrationReconciliationClient interface {
 	runnerGroupClient
 	scaleSetRegistrationClient
-	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]upstream.RunnerScaleSet, error)
 }
 
 func ensureRepositoryScaleSetRegistrations(
 	ctx context.Context,
 	logger *slog.Logger,
 	repository string,
-	client scaleSetRegistrationAuditClient,
+	client scaleSetRegistrationReconciliationClient,
 	configuredScaleSets []config.ScaleSetConfig,
 ) (map[string]*upstream.RunnerScaleSet, error) {
 	registrations := make(map[string]*upstream.RunnerScaleSet, len(configuredScaleSets))
@@ -148,61 +147,50 @@ func reconcileRunnerGroupRegistrations(
 	logger *slog.Logger,
 	repository string,
 	runnerGroupName string,
-	client scaleSetRegistrationAuditClient,
+	client scaleSetRegistrationReconciliationClient,
 	configured []config.ScaleSetConfig,
 ) (map[string]*upstream.RunnerScaleSet, error) {
 	runnerGroup, err := client.GetRunnerGroupByName(ctx, runnerGroupName)
 	if err != nil {
-		return nil, fmt.Errorf("get runner group %q for registration audit: %w", runnerGroupName, err)
+		return nil, fmt.Errorf("get runner group %q for registration reconciliation: %w", runnerGroupName, err)
 	}
-	observed, err := client.ListRunnerScaleSets(ctx, runnerGroup.ID)
-	if err != nil {
-		return nil, fmt.Errorf("list runner scale sets for group %q: %w", runnerGroupName, err)
-	}
-	logAction(ctx, logger, slog.LevelDebug, "repository_registration_audit", "completed",
-		slog.String("repository", repository), slog.String("runnerGroup", runnerGroupName),
-		slog.Int("observedCount", len(observed)), slog.Int("expectedCount", len(configured)))
-	return ensureRunnerGroupRegistrations(ctx, runnerGroupRegistrationAudit{
-		logger: logger, repository: repository, runnerGroupName: runnerGroupName, runnerGroupID: runnerGroup.ID,
-		client: client, configured: configured, observed: observed,
-	})
-}
-
-type runnerGroupRegistrationAudit struct {
-	logger          *slog.Logger
-	repository      string
-	runnerGroupName string
-	runnerGroupID   int
-	client          scaleSetRegistrationAuditClient
-	configured      []config.ScaleSetConfig
-	observed        []upstream.RunnerScaleSet
-}
-
-func ensureRunnerGroupRegistrations(
-	ctx context.Context,
-	audit runnerGroupRegistrationAudit,
-) (map[string]*upstream.RunnerScaleSet, error) {
-	registrations := make(map[string]*upstream.RunnerScaleSet, len(audit.configured))
-	observedByName := make(map[string]*upstream.RunnerScaleSet, len(audit.observed))
-	for index := range audit.observed {
-		observedByName[audit.observed[index].Name] = &audit.observed[index]
-	}
+	registrations := make(map[string]*upstream.RunnerScaleSet, len(configured))
 	var resultErr error
-	for _, scaleSetConfig := range audit.configured {
-		registration := observedByName[scaleSetConfig.Name]
-		if registration == nil {
-			var err error
-			registration, err = createMissingRunnerScaleSetRegistration(
-				ctx, audit.logger, audit.repository, audit.runnerGroupName, audit.runnerGroupID, audit.client, scaleSetConfig,
-			)
-			if err != nil {
-				resultErr = errors.Join(resultErr, err)
-				continue
-			}
+	for _, scaleSetConfig := range configured {
+		registration, registrationErr := reconcileConfiguredRunnerScaleSet(
+			ctx, logger, repository, runnerGroupName, runnerGroup.ID, client, scaleSetConfig,
+		)
+		if registrationErr != nil {
+			resultErr = errors.Join(resultErr, registrationErr)
+			continue
 		}
 		registrations[scaleSetConfig.Name] = registration
 	}
+	logAction(ctx, logger, slog.LevelDebug, "repository_registration_audit", "completed",
+		slog.String("repository", repository), slog.String("runnerGroup", runnerGroupName),
+		slog.Int("confirmedCount", len(registrations)), slog.Int("expectedCount", len(configured)))
 	return registrations, resultErr
+}
+
+func reconcileConfiguredRunnerScaleSet(
+	ctx context.Context,
+	logger *slog.Logger,
+	repository string,
+	runnerGroupName string,
+	runnerGroupID int,
+	client scaleSetRegistrationReconciliationClient,
+	scaleSetConfig config.ScaleSetConfig,
+) (*upstream.RunnerScaleSet, error) {
+	registration, err := client.GetRunnerScaleSet(ctx, runnerGroupID, scaleSetConfig.Name)
+	if err != nil {
+		return nil, fmt.Errorf("get runner scale set %q: %w", scaleSetConfig.Name, err)
+	}
+	if registration != nil {
+		return registration, nil
+	}
+	return createMissingRunnerScaleSetRegistration(
+		ctx, logger, repository, runnerGroupName, runnerGroupID, client, scaleSetConfig,
+	)
 }
 
 func createMissingRunnerScaleSetRegistration(
@@ -211,12 +199,15 @@ func createMissingRunnerScaleSetRegistration(
 	repository string,
 	runnerGroupName string,
 	runnerGroupID int,
-	client scaleSetRegistrationAuditClient,
+	client scaleSetRegistrationReconciliationClient,
 	scaleSetConfig config.ScaleSetConfig,
 ) (*upstream.RunnerScaleSet, error) {
 	attributes := make([]slog.Attr, 0, 4)
-	attributes = append(attributes, slog.String("repository", repository), slog.String("runnerGroup", runnerGroupName),
-		slog.String("scaleSet", scaleSetConfig.Name))
+	attributes = append(attributes,
+		slog.String("repository", repository),
+		slog.String("runnerGroup", runnerGroupName),
+		slog.String("scaleSet", scaleSetConfig.Name),
+	)
 	logAction(ctx, logger, slog.LevelWarn, "runner_scale_set_registration", "missing", attributes...)
 	registration, err := client.CreateRunnerScaleSet(ctx, configuredRunnerScaleSet(runnerGroupID, scaleSetConfig))
 	if err != nil {

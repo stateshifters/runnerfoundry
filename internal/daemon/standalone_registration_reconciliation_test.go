@@ -4,12 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"testing"
-	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -102,8 +98,8 @@ func assertCompletedRegistrationReconciliation(
 		managed.RegistrationStatus != repositoryRegistrationOperational {
 		t.Fatalf("lifecycles=%d started=%#v status=%q", len(managed.Lifecycles), started, managed.RegistrationStatus)
 	}
-	if registry.createCalls["linux"] != 1 || registry.createCalls["windows"] != 2 || registry.listCalls != 2 {
-		t.Fatalf("create calls=%#v grouped audit calls=%d", registry.createCalls, registry.listCalls)
+	if registry.createCalls["linux"] != 1 || registry.createCalls["windows"] != 2 || registry.listCalls != 0 {
+		t.Fatalf("create calls=%#v registration list calls=%d", registry.createCalls, registry.listCalls)
 	}
 }
 
@@ -211,7 +207,7 @@ func (fixture *registrationDriftTestFixture) assertRepaired(t *testing.T, oldLin
 
 func TestApplyDiscoveryRetainsHealthySessionsDuringRegistrationAuditFailure(t *testing.T) {
 	fixture := activeRegistrationAuditFixture(t)
-	fixture.registry.listErr = errors.New("audit timeout")
+	fixture.registry.getErr = errors.New("audit timeout")
 	if err := applyDiscovery(context.Background(), fixture.daemon, &fixture.active, fixture.discovery); err == nil {
 		t.Fatal("expected degraded audit")
 	}
@@ -266,58 +262,6 @@ func TestPruneRepositoryWhenEnabledRunsSupportedClient(t *testing.T) {
 	}
 }
 
-func TestRegistrationHTTPAuditFailuresRetainHealthySessions(t *testing.T) {
-	t.Run("http failure", func(t *testing.T) {
-		assertRegistrationHTTPAuditFailure(t, func(writer http.ResponseWriter, _ *http.Request) {
-			writer.WriteHeader(http.StatusServiceUnavailable)
-		})
-	})
-	t.Run("timeout", func(t *testing.T) {
-		assertRegistrationHTTPAuditFailure(t, func(_ http.ResponseWriter, request *http.Request) {
-			<-request.Context().Done()
-		})
-	})
-}
-
-func assertRegistrationHTTPAuditFailure(t *testing.T, handler http.HandlerFunc) {
-	t.Helper()
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	fixture := activeRegistrationAuditFixture(t)
-	fixture.registry.listRunnerScaleSets = func(ctx context.Context, _ int) ([]upstream.RunnerScaleSet, error) {
-		return listRegistrationsFromHTTP(ctx, server.Client(), server.URL)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	if err := applyDiscovery(ctx, fixture.daemon, &fixture.active, fixture.discovery); err == nil {
-		t.Fatal("expected degraded HTTP audit")
-	}
-	if fixture.started != 1 || fixture.closed != 0 || len(fixture.active.Repositories[fixture.repositoryURL].Lifecycles) != 1 {
-		t.Fatalf("started=%d closed=%d lifecycles=%d", fixture.started, fixture.closed,
-			len(fixture.active.Repositories[fixture.repositoryURL].Lifecycles))
-	}
-}
-
-func listRegistrationsFromHTTP(
-	ctx context.Context,
-	client *http.Client,
-	url string,
-) ([]upstream.RunnerScaleSet, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("create registration audit request: %w", err)
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("perform registration audit request: %w", err)
-	}
-	statusErr := error(nil)
-	if response.StatusCode != http.StatusOK {
-		statusErr = errors.New(response.Status)
-	}
-	return nil, errors.Join(statusErr, response.Body.Close())
-}
-
 type activeRegistrationAuditTestFixture struct {
 	repositoryURL string
 	active        activeConfiguration
@@ -361,15 +305,18 @@ type registrationReconciliationClient struct {
 	fakeScaleSetClient
 	registrations map[string]*upstream.RunnerScaleSet
 	createCalls   map[string]int
+	getCalls      map[string]int
 	listCalls     int
 	failWindows   bool
+	getErr        error
 	listErr       error
 	nextID        int
 }
 
 func newRegistrationReconciliationClient() *registrationReconciliationClient {
 	client := &registrationReconciliationClient{
-		registrations: map[string]*upstream.RunnerScaleSet{}, createCalls: map[string]int{}, failWindows: true, nextID: 1,
+		registrations: map[string]*upstream.RunnerScaleSet{}, createCalls: map[string]int{}, getCalls: map[string]int{},
+		failWindows: true, nextID: 1,
 	}
 	client.getRunnerGroupByName = func(context.Context, string) (*upstream.RunnerGroup, error) {
 		return &upstream.RunnerGroup{ID: 1}, nil
@@ -393,6 +340,10 @@ func (client *registrationReconciliationClient) listRegistrations(context.Contex
 }
 
 func (client *registrationReconciliationClient) getRegistration(_ context.Context, _ int, name string) (*upstream.RunnerScaleSet, error) {
+	client.getCalls[name]++
+	if client.getErr != nil {
+		return nil, client.getErr
+	}
 	return client.registrations[name], nil
 }
 

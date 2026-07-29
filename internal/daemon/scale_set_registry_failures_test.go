@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -53,14 +54,15 @@ func TestGitHubScaleSetRegistryConstructsDefaultHTTPClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected registry, got %v", err)
 	}
-	if registry.repositoryURL != "https://github.com/meza/RunnerFoundry" || registry.httpClient == nil {
+	if registry.repositoryURL != "https://github.com/meza/RunnerFoundry" ||
+		registry.installationClient == nil || registry.protocolClient == nil {
 		t.Fatalf("expected registry defaults, got %#v", registry)
 	}
-	if registry.httpClient == http.DefaultClient {
+	if registry.installationClient == http.DefaultClient || registry.protocolClient == http.DefaultClient {
 		t.Fatal("expected registry to avoid the unbounded default HTTP client")
 	}
-	if registry.httpClient.Timeout == 0 {
-		t.Fatal("expected registry HTTP client timeout")
+	if registry.installationClient.Timeout == 0 || registry.protocolClient.Timeout == 0 {
+		t.Fatal("expected registry HTTP client timeouts")
 	}
 }
 
@@ -72,7 +74,9 @@ func TestGitHubScaleSetRegistryRejectsInvalidPrivateKey(t *testing.T) {
 }
 
 func TestGitHubScaleSetRegistrySurfacesRequestConstructionFailures(t *testing.T) {
-	registry := githubScaleSetRegistry{repositoryURL: "http://[::1/meza/repo", httpClient: http.DefaultClient}
+	registry := githubScaleSetRegistry{
+		repositoryURL: "http://[::1/meza/repo", installationClient: http.DefaultClient, protocolClient: http.DefaultClient,
+	}
 	if _, err := registry.runnerRegistrationToken(context.Background()); err == nil {
 		t.Fatal("expected runner registration token url error")
 	}
@@ -90,7 +94,7 @@ func TestGitHubScaleSetRegistrySurfacesTransportFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := githubScaleSetRegistry{httpClient: &http.Client{Transport: failingRoundTripper{}}}
+	registry := githubScaleSetRegistry{protocolClient: &http.Client{Transport: failingRoundTripper{}}}
 	if _, err := registry.fetchRunnerScaleSets(context.Background(), actionsServiceAdminConnection{URL: serviceURL, Token: "admin"}, 1); err == nil {
 		t.Fatal("expected transport error")
 	}
@@ -102,7 +106,7 @@ func TestGitHubScaleSetRegistrySurfacesResponseCloseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := githubScaleSetRegistry{httpClient: &http.Client{Transport: staticResponseTransport{
+	registry := githubScaleSetRegistry{protocolClient: &http.Client{Transport: staticResponseTransport{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
@@ -114,8 +118,29 @@ func TestGitHubScaleSetRegistrySurfacesResponseCloseFailure(t *testing.T) {
 	}
 }
 
+func TestGitHubScaleSetRegistryStatusErrorsDoNotExposeCredentials(t *testing.T) {
+	const credentials = "RemoteAuth registration-secret Bearer admin-secret"
+	repository := repositoryTargetForTest(t, "https://ghe.example.com/meza/repo")
+	serviceURL, err := parseActionsServiceURL("https://ghe.example.com/actions", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := registryWithStaticResponse(
+		http.StatusUnauthorized, io.NopCloser(strings.NewReader(credentials)),
+	)
+	_, err = registry.fetchRunnerScaleSets(
+		context.Background(), actionsServiceAdminConnection{URL: serviceURL, Token: "admin-secret"}, 1,
+	)
+	if err == nil {
+		t.Fatal("expected status error")
+	}
+	if strings.Contains(err.Error(), "registration-secret") || strings.Contains(err.Error(), "admin-secret") {
+		t.Fatalf("status error exposed credentials: %v", err)
+	}
+}
+
 func TestRunnerRegistrationTokenSurfacesTransportFailure(t *testing.T) {
-	registry := githubScaleSetRegistry{httpClient: &http.Client{Transport: failingRoundTripper{}}}
+	registry := githubScaleSetRegistry{installationClient: &http.Client{Transport: failingRoundTripper{}}}
 	target := repositoryTargetForTest(t, "https://ghe.example.com/meza/repo")
 	if _, err := registry.requestRunnerRegistrationToken(context.Background(), target); err == nil {
 		t.Fatal("expected registration transport failure")
@@ -140,8 +165,8 @@ func TestRunnerRegistrationTokenSurfacesResponseCloseFailure(t *testing.T) {
 
 func TestActionsServiceAdminConnectionSurfacesTransportFailure(t *testing.T) {
 	registry := githubScaleSetRegistry{
-		repositoryURL: "https://ghe.example.com/meza/repo",
-		httpClient:    &http.Client{Transport: failingRoundTripper{}},
+		repositoryURL:  "https://ghe.example.com/meza/repo",
+		protocolClient: &http.Client{Transport: failingRoundTripper{}},
 	}
 	target := repositoryTargetForTest(t, registry.repositoryURL)
 	if _, err := registry.requestActionsServiceAdminConnection(context.Background(), "registration", target); err == nil {
@@ -186,9 +211,10 @@ func TestRunnerScaleSetListSurfacesResponseReadFailure(t *testing.T) {
 }
 
 func registryWithStaticResponse(status int, body io.ReadCloser) githubScaleSetRegistry {
-	return githubScaleSetRegistry{httpClient: &http.Client{Transport: staticResponseTransport{response: &http.Response{
+	client := &http.Client{Transport: staticResponseTransport{response: &http.Response{
 		StatusCode: status, Status: http.StatusText(status), Body: body,
-	}}}}
+	}}}
+	return githubScaleSetRegistry{installationClient: client, protocolClient: client}
 }
 
 type readFailingBody struct{}

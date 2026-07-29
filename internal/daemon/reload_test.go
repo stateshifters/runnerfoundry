@@ -45,7 +45,7 @@ func TestReloadKeepsOldSessionsWhenReplacementRegistrationsCannotBeConfirmed(t *
 		}}, InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 	}
 	registry := successfulRegistrationReconciliationClient()
-	registry.listErr = errors.New("audit unavailable")
+	registry.getErr = errors.New("audit unavailable")
 	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return registry, nil
 	}
@@ -298,7 +298,8 @@ func TestReloadConfigurationReportsReplacementReadyFailure(t *testing.T) {
 
 func successfulReloadDaemon(loadedConfig config.Config) standaloneDaemon {
 	return standaloneDaemon{
-		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
+		loadConfig:      func(string) (config.Config, error) { return loadedConfig, nil },
+		loadCredentials: loadReloadTestCredentials,
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
@@ -312,7 +313,8 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 	loadedConfig.GitHub.DiscoveryInterval = "invalid"
 	activeConfig := activeWithLifecycle(inertLifecycle())
 	daemonUnderTest := standaloneDaemon{
-		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
+		loadConfig:      func(string) (config.Config, error) { return loadedConfig, nil },
+		loadCredentials: loadReloadTestCredentials,
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
@@ -322,4 +324,8 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonUnderTest, activeConfig); err == nil {
 		t.Fatal("expected invalid reloaded interval error")
 	}
+}
+
+func loadReloadTestCredentials(config.GitHubConfig) (config.GitHubAppCredentials, error) {
+	return config.GitHubAppCredentials{}, nil
 }

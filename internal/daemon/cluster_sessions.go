@@ -202,7 +202,7 @@ func (leader *clusterLeader) auditClusterRepositoryRegistrations(
 	if err != nil {
 		return clusterRepositoryRegistrationAudit{}, err
 	}
-	auditClient, supported := client.(scaleSetRegistrationAuditClient)
+	auditClient, supported := client.(scaleSetRegistrationReconciliationClient)
 	if !supported {
 		return clusterRepositoryRegistrationAudit{}, errors.New("GitHub client does not support registration audits")
 	}

@@ -27,8 +27,9 @@ type scaleSetRegistry interface {
 }
 
 type githubScaleSetRegistry struct {
-	repositoryURL string
-	httpClient    *http.Client
+	repositoryURL      string
+	installationClient *http.Client
+	protocolClient     *http.Client
 }
 
 type githubRegistrationToken struct {
@@ -55,13 +56,29 @@ func newGitHubScaleSetRegistry(
 	installationID githubapp.InstallationID,
 	credentials config.GitHubAppCredentials,
 ) (githubScaleSetRegistry, error) {
-	transport, err := ghinstallation.New(http.DefaultTransport, credentials.AppID, int64(installationID), []byte(credentials.PrivateKey))
+	return newGitHubScaleSetRegistryWithTransport(repositoryURL, installationID, credentials, http.DefaultTransport)
+}
+
+func newGitHubScaleSetRegistryWithTransport(
+	repositoryURL string,
+	installationID githubapp.InstallationID,
+	credentials config.GitHubAppCredentials,
+	protocolTransport http.RoundTripper,
+) (githubScaleSetRegistry, error) {
+	installationTransport, err := ghinstallation.New(
+		protocolTransport, credentials.AppID, int64(installationID), []byte(credentials.PrivateKey),
+	)
 	if err != nil {
 		return githubScaleSetRegistry{}, fmt.Errorf("create installation transport: %w", err)
 	}
 	return githubScaleSetRegistry{
 		repositoryURL: repositoryURL,
-		httpClient:    &http.Client{Timeout: githubScaleSetRegistryTimeout, Transport: transport},
+		installationClient: &http.Client{
+			Timeout: githubScaleSetRegistryTimeout, Transport: installationTransport,
+		},
+		protocolClient: &http.Client{
+			Timeout: githubScaleSetRegistryTimeout, Transport: protocolTransport,
+		},
 	}, nil
 }
 
@@ -113,7 +130,7 @@ func (registry githubScaleSetRegistry) requestRunnerRegistrationToken(
 	}).WithContext(ctx)
 	request.Header.Set("Accept", "application/vnd.github+json")
 
-	client := registry.httpClientForOrigin(requestURL)
+	client := registry.httpClientForOrigin(registry.installationClient, requestURL)
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("get runner registration token: issue request: %w", err)
@@ -170,7 +187,7 @@ func (registry githubScaleSetRegistry) executeActionsServiceAdminRequest(
 ) ([]byte, error) {
 	requestURL := apiURLValueFromParsed(repository.URL, "/actions/runner-registration")
 	request := actionsServiceAdminRequest(ctx, requestURL, registry.repositoryURL, registrationToken)
-	client := registry.httpClientForOrigin(requestURL)
+	client := registry.httpClientForOrigin(registry.protocolClient, requestURL)
 	httpResponse, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("get actions service admin connection: issue request: %w", err)
@@ -235,7 +252,7 @@ func (registry githubScaleSetRegistry) fetchRunnerScaleSets(
 ) ([]upstream.RunnerScaleSet, error) {
 	request := runnerScaleSetListRequest(ctx, adminConnection, runnerGroupID)
 
-	client := registry.httpClientForOrigin(adminConnection.URL.parsed)
+	client := registry.httpClientForOrigin(registry.protocolClient, adminConnection.URL.parsed)
 	httpResponse, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("list runner scale sets: issue request: %w", err)
@@ -280,8 +297,8 @@ func runnerScaleSetListRequest(
 	return request
 }
 
-func (registry githubScaleSetRegistry) httpClientForOrigin(origin *url.URL) *http.Client {
-	client := *registry.httpClient
+func (registry githubScaleSetRegistry) httpClientForOrigin(configuredClient *http.Client, origin *url.URL) *http.Client {
+	client := *configuredClient
 	client.CheckRedirect = sameOriginRedirectPolicy(origin)
 	return &client
 }
