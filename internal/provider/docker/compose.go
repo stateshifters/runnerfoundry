@@ -43,7 +43,14 @@ type CommandRunner interface {
 	ListComposeServices(ctx context.Context, config ComposeConfig) (string, error)
 }
 
-type ExecCommandRunner struct{}
+type ExecCommandRunner struct {
+	newCommand     func(context.Context, string, ...string) *exec.Cmd
+	combinedOutput func(*exec.Cmd) ([]byte, error)
+}
+
+func NewExecCommandRunner() ExecCommandRunner {
+	return ExecCommandRunner{newCommand: exec.CommandContext, combinedOutput: (*exec.Cmd).CombinedOutput}
+}
 
 func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error {
 	args := append(composeArgs(config),
@@ -74,9 +81,8 @@ func (runner ExecCommandRunner) ListComposeServices(ctx context.Context, config 
 }
 
 func (runner ExecCommandRunner) runDocker(ctx context.Context, args []string, jitConfig string) (string, error) {
-	execCommand := exec.CommandContext(ctx, "docker")
-	execCommand.Args = append(execCommand.Args, args...)
-	outputBytes, err := execCommand.CombinedOutput()
+	execCommand := runner.newCommand(ctx, "docker", args...)
+	outputBytes, err := runner.combinedOutput(execCommand)
 	if err != nil {
 		diagnostic := strings.TrimSpace(string(outputBytes))
 		if jitConfig != "" {

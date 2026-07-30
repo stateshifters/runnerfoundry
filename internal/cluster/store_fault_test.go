@@ -110,8 +110,12 @@ func assertStoreConnectionFailure(t *testing.T, operation func(*Store) error) {
 }
 
 func TestPostgreSQLConnectorRedactsCredentialResolutionFailure(t *testing.T) {
+	originalResolver := productionConnectionSettingResolver
+	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
+	resolver := testConnectionResolver(nil)
+	productionConnectionSettingResolver = resolver
 	settings := settingsWithProofReference("file:///missing-postgresql-secret")
-	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{"missing-postgresql-secret", "runnerfoundry"})
+	assertPostgreSQLConnectorFailureRedacts(t, settings, nil, []string{"missing-postgresql-secret", "runnerfoundry"})
 }
 
 func TestPostgreSQLConnectorRedactsConnectionFailure(t *testing.T) {
@@ -124,12 +128,27 @@ func TestPostgreSQLConnectorRedactsConnectionFailure(t *testing.T) {
 	query.Set("connect_timeout", "1")
 	connectionURL.RawQuery = query.Encode()
 	settings := postgresconfig.Settings{DSN: connectionURL.String(), Role: "runnerfoundry"}
-	assertPostgreSQLConnectorFailureRedacts(t, settings, []string{values.identity, values.proof, "runnerfoundry", "postgres://"})
+	originalResolver := productionConnectionSettingResolver
+	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
+	productionConnectionSettingResolver = testConnectionResolver(nil)
+	assertPostgreSQLConnectorFailureRedacts(t, settings, func(store *Store) {
+		store.connectConfig = func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error) {
+			return nil, errors.New("connection unavailable")
+		}
+	}, []string{values.identity, values.proof, "runnerfoundry", "postgres://"})
 }
 
-func assertPostgreSQLConnectorFailureRedacts(t *testing.T, settings postgresconfig.Settings, forbiddenValues []string) {
+func assertPostgreSQLConnectorFailureRedacts(
+	t *testing.T,
+	settings postgresconfig.Settings,
+	configure func(*Store),
+	forbiddenValues []string,
+) {
 	t.Helper()
 	store := NewStore(settings)
+	if configure != nil {
+		configure(store)
+	}
 	operations := []func() error{
 		func() error { return store.Migrate(context.Background()) },
 		func() error { _, err := store.MigrationStatus(context.Background()); return err },
@@ -149,6 +168,9 @@ func assertPostgreSQLConnectorFailureRedacts(t *testing.T, settings postgresconf
 }
 
 func TestStoreDefaultConnectorsRejectInvalidSettings(t *testing.T) {
+	originalResolver := productionConnectionSettingResolver
+	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
+	productionConnectionSettingResolver = testConnectionResolver(nil)
 	store := NewStore(postgresconfig.Settings{Password: "env://MISSING_PRIMARY_PASSWORD", Role: "runnerfoundry"})
 	if _, err := store.connectPostgreSQL(context.Background()); err == nil {
 		t.Fatal("expected primary connector resolution failure")

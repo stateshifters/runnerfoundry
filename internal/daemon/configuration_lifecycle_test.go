@@ -6,8 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,12 +50,38 @@ func TestDrainConfigurationReturnsCancellation(t *testing.T) {
 }
 
 func TestLoadConfigRejectsInvalidYAML(t *testing.T) {
-	invalidConfigPath := filepath.Join(t.TempDir(), "invalid.yaml")
-	if err := os.WriteFile(invalidConfigPath, []byte("github: ["), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(invalidConfigPath); err == nil {
+	if _, err := loadConfigBytes([]byte("github: [")); err == nil {
 		t.Fatal("expected invalid config error")
+	}
+}
+
+func TestLoadConfigUsesInjectedReader(t *testing.T) {
+	original := readConfigFile
+	t.Cleanup(func() { readConfigFile = original })
+	readConfigFile = func(string) ([]byte, error) {
+		return []byte(`github:
+  app:
+    app_id: 1
+    private_key_file: app.pem
+scale_sets:
+  - name: linux
+    max_runners: 1
+    docker:
+      compose_file: compose.yaml
+      service: runner
+state:
+  path: state.db
+`), nil
+	}
+	if configured, err := loadConfig("config.yaml"); err != nil || len(configured.ScaleSets) != 1 {
+		t.Fatalf("config = %#v, %v", configured, err)
+	}
+	readConfigFile = func(string) ([]byte, error) { return nil, errors.New("failed") }
+	if _, err := loadConfig("config.yaml"); err == nil {
+		t.Fatal("expected reader failure")
+	}
+	if newLogger("text", "info") == nil {
+		t.Fatal("missing production logger")
 	}
 }
 

@@ -2,16 +2,18 @@ package main
 
 import (
 	"os"
-	"os/signal"
 	"syscall"
 )
 
-func reloadSignalRequests() (<-chan struct{}, func()) {
+func reloadSignalRequests(
+	notifySignals func(chan<- os.Signal, ...os.Signal),
+	stopSignals func(chan<- os.Signal),
+) (<-chan struct{}, func()) {
 	signals := make(chan os.Signal, 1)
 	reloadRequests := make(chan struct{}, 1)
-	signal.Notify(signals, syscall.SIGHUP)
+	notifySignals(signals, syscall.SIGHUP)
 	stop := func() {
-		signal.Stop(signals)
+		stopSignals(signals)
 		close(signals)
 	}
 	go forwardReloadSignals(signals, reloadRequests)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/tern/v2/migrate"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
@@ -144,21 +145,31 @@ type JobCompletion struct {
 }
 
 type Store struct {
-	settings        postgresconfig.Settings
-	connector       func(ctx context.Context) (*databaseConnection, error)
-	directConnector func(ctx context.Context) (leaderConnection, error)
-	migrationFiles  fs.FS
+	settings           postgresconfig.Settings
+	connector          func(ctx context.Context) (*databaseConnection, error)
+	directConnector    func(ctx context.Context) (leaderConnection, error)
+	connectConfig      func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error)
+	migrationFactory   func(context.Context, leaderConnection) (*migrationExecutor, error)
+	newTernMigrator    func(context.Context, *pgx.Conn, string) (*migrate.Migrator, error)
+	connectionAdapter  postgreSQLConnectionAdapter
+	transactionAdapter postgreSQLTransactionAdapter
+	migrationFiles     fs.FS
 }
 
 func NewStore(settings postgresconfig.Settings) *Store {
 	store := &Store{settings: settings}
+	store.connectConfig = pgx.ConnectConfig
+	store.migrationFactory = store.newMigrationExecutor
+	store.newTernMigrator = migrate.NewMigrator
+	store.connectionAdapter = operatingSystemPostgreSQLConnectionAdapter()
+	store.transactionAdapter = operatingSystemPostgreSQLTransactionAdapter()
 	store.connector = store.connectPostgreSQL
 	store.directConnector = func(ctx context.Context) (leaderConnection, error) {
 		connection, err := store.connectDirectPostgreSQL(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return &postgreSQLLeaderConnection{Conn: connection}, nil
+		return newPostgreSQLLeaderConnection(connection, store.connectionAdapter), nil
 	}
 	store.migrationFiles = embeddedMigrations
 	return store
@@ -258,11 +269,35 @@ type databaseRow struct {
 }
 
 type postgreSQLLeaderConnection struct {
-	*pgx.Conn
+	connection *pgx.Conn
+	adapter    postgreSQLConnectionAdapter
 }
 
 func (connection *postgreSQLLeaderConnection) QueryRow(ctx context.Context, sql string, arguments ...any) databaseRow {
-	return databaseRow{scanner: connection.Conn.QueryRow(ctx, sql, arguments...)}
+	return databaseRow{scanner: connection.adapter.queryRow(connection.connection, ctx, sql, arguments...)}
+}
+
+func (connection *postgreSQLLeaderConnection) Close(ctx context.Context) error {
+	return connection.adapter.close(connection.connection, ctx)
+}
+
+func (connection *postgreSQLLeaderConnection) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return connection.adapter.exec(connection.connection, ctx, sql, arguments...)
+}
+
+func (connection *postgreSQLLeaderConnection) IsClosed() bool {
+	return connection.adapter.isClosed(connection.connection)
+}
+
+func (connection *postgreSQLLeaderConnection) Ping(ctx context.Context) error {
+	return connection.adapter.ping(connection.connection, ctx)
+}
+
+func newPostgreSQLLeaderConnection(
+	connection *pgx.Conn,
+	adapter postgreSQLConnectionAdapter,
+) *postgreSQLLeaderConnection {
+	return &postgreSQLLeaderConnection{connection: connection, adapter: adapter}
 }
 
 func (row databaseRow) Scan(destinations ...any) error {
@@ -276,37 +311,79 @@ func newDatabaseRows(iterator rowIterator) *databaseRows {
 	return &databaseRows{iterator: iterator}
 }
 
-func newPostgreSQLTransaction(transaction pgx.Tx) *databaseTransaction {
-	return &databaseTransaction{
-		commit: transaction.Commit,
-		exec:   transaction.Exec,
-		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
-			return databaseRow{scanner: transaction.QueryRow(ctx, sql, arguments...)}
-		},
-		rollback: transaction.Rollback,
+type postgreSQLTransactionAdapter struct {
+	commit   func(pgx.Tx, context.Context) error
+	exec     func(pgx.Tx, context.Context, string, ...any) (pgconn.CommandTag, error)
+	queryRow func(pgx.Tx, context.Context, string, ...any) pgx.Row
+	rollback func(pgx.Tx, context.Context) error
+}
+
+func operatingSystemPostgreSQLTransactionAdapter() postgreSQLTransactionAdapter {
+	return postgreSQLTransactionAdapter{
+		commit:   pgx.Tx.Commit,
+		exec:     pgx.Tx.Exec,
+		queryRow: pgx.Tx.QueryRow,
+		rollback: pgx.Tx.Rollback,
 	}
 }
 
-func newPostgreSQLDatabaseConnection(connection *pgx.Conn) *databaseConnection {
+func newPostgreSQLTransaction(transaction pgx.Tx, adapter postgreSQLTransactionAdapter) *databaseTransaction {
+	return &databaseTransaction{
+		commit: func(ctx context.Context) error { return adapter.commit(transaction, ctx) },
+		exec: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+			return adapter.exec(transaction, ctx, sql, arguments...)
+		},
+		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
+			return databaseRow{scanner: adapter.queryRow(transaction, ctx, sql, arguments...)}
+		},
+		rollback: func(ctx context.Context) error { return adapter.rollback(transaction, ctx) },
+	}
+}
+
+type postgreSQLConnectionAdapter struct {
+	begin    func(*pgx.Conn, context.Context) (pgx.Tx, error)
+	close    func(*pgx.Conn, context.Context) error
+	exec     func(*pgx.Conn, context.Context, string, ...any) (pgconn.CommandTag, error)
+	query    func(*pgx.Conn, context.Context, string, ...any) (pgx.Rows, error)
+	queryRow func(*pgx.Conn, context.Context, string, ...any) pgx.Row
+	isClosed func(*pgx.Conn) bool
+	ping     func(*pgx.Conn, context.Context) error
+}
+
+func operatingSystemPostgreSQLConnectionAdapter() postgreSQLConnectionAdapter {
+	return postgreSQLConnectionAdapter{
+		begin: (*pgx.Conn).Begin, close: (*pgx.Conn).Close, exec: (*pgx.Conn).Exec,
+		query: (*pgx.Conn).Query, queryRow: (*pgx.Conn).QueryRow,
+		isClosed: (*pgx.Conn).IsClosed, ping: (*pgx.Conn).Ping,
+	}
+}
+
+func newPostgreSQLDatabaseConnection(
+	connection *pgx.Conn,
+	connectionAdapter postgreSQLConnectionAdapter,
+	transactionAdapter postgreSQLTransactionAdapter,
+) *databaseConnection {
 	return &databaseConnection{
 		begin: func(ctx context.Context) (*databaseTransaction, error) {
-			transaction, err := connection.Begin(ctx)
+			transaction, err := connectionAdapter.begin(connection, ctx)
 			if err != nil {
 				return nil, fmt.Errorf("begin PostgreSQL transaction: %w", err)
 			}
-			return newPostgreSQLTransaction(transaction), nil
+			return newPostgreSQLTransaction(transaction, transactionAdapter), nil
 		},
-		close: connection.Close,
-		exec:  connection.Exec,
+		close: func(ctx context.Context) error { return connectionAdapter.close(connection, ctx) },
+		exec: func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+			return connectionAdapter.exec(connection, ctx, sql, arguments...)
+		},
 		query: func(ctx context.Context, sql string, arguments ...any) (*databaseRows, error) {
-			rows, err := connection.Query(ctx, sql, arguments...)
+			rows, err := connectionAdapter.query(connection, ctx, sql, arguments...)
 			if err != nil {
 				return nil, fmt.Errorf("query PostgreSQL: %w", err)
 			}
 			return newDatabaseRows(rows), nil
 		},
 		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
-			return databaseRow{scanner: connection.QueryRow(ctx, sql, arguments...)}
+			return databaseRow{scanner: connectionAdapter.queryRow(connection, ctx, sql, arguments...)}
 		},
 	}
 }
@@ -316,11 +393,11 @@ func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection,
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
 	}
-	connection, err := pgx.ConnectConfig(ctx, config)
+	connection, err := store.connectConfig(ctx, config)
 	if err != nil {
 		return nil, errors.New("connect to PostgreSQL")
 	}
-	return newPostgreSQLDatabaseConnection(connection), nil
+	return newPostgreSQLDatabaseConnection(connection, store.connectionAdapter, store.transactionAdapter), nil
 }
 
 func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, error) {
@@ -328,7 +405,7 @@ func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, err
 	if err != nil {
 		return nil, fmt.Errorf("resolve direct PostgreSQL connection: %w", err)
 	}
-	connection, err := pgx.ConnectConfig(ctx, config)
+	connection, err := store.connectConfig(ctx, config)
 	if err != nil {
 		return nil, errors.New("connect to PostgreSQL")
 	}

@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 
-	"github.com/libtnb/logrotate"
 	"github.com/meza/RunnerFoundry/internal/config"
 )
 
@@ -25,23 +23,6 @@ type productionLogDestinationFactory struct {
 	standardError    io.Writer
 	ensureDirectory  func(string, fs.FileMode) error
 	openRotatingFile func(rotatingFileSettings, func(error)) (io.WriteCloser, error)
-}
-
-func newProductionLogDestinationFactory() productionLogDestinationFactory {
-	return productionLogDestinationFactory{
-		standardOutput:  os.Stdout,
-		standardError:   os.Stderr,
-		ensureDirectory: os.MkdirAll,
-		openRotatingFile: func(settings rotatingFileSettings, reportError func(error)) (io.WriteCloser, error) {
-			return logrotate.New(
-				settings.Path,
-				logrotate.WithMaxSize(settings.MaxSizeBytes),
-				logrotate.WithMaxBackups(settings.MaxBackups),
-				logrotate.WithFileMode(settings.FileMode),
-				logrotate.WithErrorHandler(reportError),
-			)
-		},
-	}
 }
 
 func (factory productionLogDestinationFactory) Open(logConfig config.LogConfig) (io.WriteCloser, error) {

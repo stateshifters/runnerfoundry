@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
@@ -50,6 +49,8 @@ type GitHubAppCredentials struct {
 	AppID      int64
 	PrivateKey string
 }
+
+type ReadFile func(string) ([]byte, error)
 
 type LogConfig struct {
 	Format string         `yaml:"format"`
@@ -147,12 +148,15 @@ func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
 
 // Validate applies defaults and rejects unsafe startup state.
 // AppCredentials reads the configured private key file.
-func (githubConfig GitHubConfig) AppCredentials() (GitHubAppCredentials, error) {
-	privateKeyBytes, err := os.ReadFile(githubConfig.App.PrivateKeyFile)
-	if err != nil {
-		return GitHubAppCredentials{}, fmt.Errorf("read github.app.private_key_file: %w", err)
+func (githubConfig GitHubConfig) AppCredentials(readFile ReadFile) (GitHubAppCredentials, error) {
+	privateKey := strings.TrimSpace(githubConfig.App.PrivateKey)
+	if privateKey == "" {
+		privateKeyBytes, err := readFile(githubConfig.App.PrivateKeyFile)
+		if err != nil {
+			return GitHubAppCredentials{}, fmt.Errorf("read github.app.private_key_file: %w", err)
+		}
+		privateKey = strings.TrimSpace(string(privateKeyBytes))
 	}
-	privateKey := strings.TrimSpace(string(privateKeyBytes))
 	if privateKey == "" {
 		return GitHubAppCredentials{}, errors.New("github.app.private_key_file is empty")
 	}

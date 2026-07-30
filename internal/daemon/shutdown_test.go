@@ -7,8 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,13 +160,9 @@ func (worker *recordingRecoveryWorker) StartAssigned(context.Context) error {
 
 func runnableConfig(t *testing.T) config.Config {
 	t.Helper()
-	privateKeyPath := filepath.Join(t.TempDir(), "app.pem")
-	if err := os.WriteFile(privateKeyPath, []byte("private-key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	return config.Config{
 		GitHub: config.GitHubConfig{
-			App:               config.GitHubAppConfig{AppID: 1, PrivateKeyFile: privateKeyPath},
+			App:               config.GitHubAppConfig{AppID: 1, PrivateKey: "private-key"},
 			DiscoveryInterval: "5m",
 		},
 		Log: config.LogConfig{Format: "text"},

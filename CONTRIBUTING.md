@@ -80,14 +80,15 @@ MUST NOT use build tags.
 
 ### Available verification gates
 
-Test execution is disabled in the Makefile and CI until the existing suite complies with the isolation contract. Restore
-test, coverage, race, or smoke gates only after every selected test is hermetic. V1 code MUST maintain 100% Go test coverage
-using hermetic tests.
+V1 code MUST maintain 100% Go test coverage using hermetic tests.
 
 ```sh
 make lint
 make fmt-check
 make vet
+make test
+make coverage
+make race
 ```
 
 - `make lint` runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at

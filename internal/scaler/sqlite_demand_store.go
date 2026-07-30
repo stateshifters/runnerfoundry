@@ -16,18 +16,35 @@ const currentStateSchemaVersion = 4
 
 type SQLiteDemandStore struct {
 	database *sql.DB
-	lock     *flock.Flock
+	lock     stateDatabaseLock
+}
+
+type stateDatabaseLock interface {
+	TryLock() (bool, error)
+	Unlock() error
+}
+
+type sqliteStoreDependencies struct {
+	newLock      func(string) stateDatabaseLock
+	openDatabase func(string) (*sql.DB, error)
+}
+
+var productionSQLiteStoreDependencies = sqliteStoreDependencies{
+	newLock: func(path string) stateDatabaseLock { return flock.New(path) },
+	openDatabase: func(path string) (*sql.DB, error) {
+		return sql.Open("sqlite", path)
+	},
 }
 
 // OpenSQLiteDemandStore opens and exclusively owns the durable demand queue.
 // The caller must close the store to release both the database and its adjacent
 // process lock. A second daemon using the same path is rejected.
 func OpenSQLiteDemandStore(path string) (*SQLiteDemandStore, error) {
-	return createSQLiteDemandStore(path, func(path string) (*sql.DB, error) { return sql.Open("sqlite", path) })
+	return createSQLiteDemandStore(path, productionSQLiteStoreDependencies)
 }
 
-func createSQLiteDemandStore(path string, openDatabase func(path string) (*sql.DB, error)) (*SQLiteDemandStore, error) {
-	stateLock := flock.New(path + ".lock")
+func createSQLiteDemandStore(path string, dependencies sqliteStoreDependencies) (*SQLiteDemandStore, error) {
+	stateLock := dependencies.newLock(path + ".lock")
 	locked, err := stateLock.TryLock()
 	if err != nil {
 		return nil, fmt.Errorf("lock state database: %w", err)
@@ -35,7 +52,7 @@ func createSQLiteDemandStore(path string, openDatabase func(path string) (*sql.D
 	if !locked {
 		return nil, errors.New("state database is already in use")
 	}
-	database, err := openDatabase(path)
+	database, err := dependencies.openDatabase(path)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open state database: %w", err), stateLock.Unlock())
 	}

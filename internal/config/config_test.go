@@ -1,8 +1,7 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +69,12 @@ func TestJobStartDurationRejectsInvalidUnvalidatedValue(t *testing.T) {
 
 func TestLoadedGitHubConfigurationResolvesAppCredentials(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
-	credentials, err := loadedConfig.GitHub.AppCredentials()
+	credentials, err := loadedConfig.GitHub.AppCredentials(func(path string) ([]byte, error) {
+		if path != "app.pem" {
+			return nil, errors.New("unexpected private key path")
+		}
+		return []byte("private-key"), nil
+	})
 	if err != nil {
 		t.Fatalf("resolve app credentials: %v", err)
 	}
@@ -316,12 +320,11 @@ func assertLoadRejectsConfigurations(t *testing.T, configurations map[string]str
 }
 
 func TestAppCredentialsRejectUnreadableOrEmptyPrivateKey(t *testing.T) {
-	emptyKeyPath := writePrivateKey(t, "\n")
-	if _, err := (GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: emptyKeyPath}}).AppCredentials(); err == nil {
+	githubConfig := GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: "app.pem"}}
+	if _, err := githubConfig.AppCredentials(func(string) ([]byte, error) { return []byte("\n"), nil }); err == nil {
 		t.Fatal("expected empty private key error")
 	}
-	missingPath := filepath.Join(t.TempDir(), "missing.pem")
-	if _, err := (GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: missingPath}}).AppCredentials(); err == nil {
+	if _, err := githubConfig.AppCredentials(func(string) ([]byte, error) { return nil, errors.New("unavailable") }); err == nil {
 		t.Fatal("expected unreadable private key error")
 	}
 }
@@ -351,13 +354,9 @@ func TestScaleSetValidationAcceptsCompleteLibvirtProvider(t *testing.T) {
 	}
 }
 
-func writePrivateKey(t *testing.T, contents string) string {
+func writePrivateKey(t *testing.T, _ string) string {
 	t.Helper()
-	privateKeyPath := filepath.Join(t.TempDir(), "app.pem")
-	if err := os.WriteFile(privateKeyPath, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return privateKeyPath
+	return "app.pem"
 }
 
 func validConfig(privateKeyPath string) string {

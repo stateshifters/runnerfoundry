@@ -23,7 +23,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet build notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -58,6 +58,20 @@ lint-fix:
 
 vet:
 	go vet ./...
+
+test:
+	go test ./... -count=1 -timeout=60s
+
+coverage:
+	go test ./... '-coverprofile=coverage.out' -count=1 -timeout=60s
+ifeq ($(OSFAMILY),Windows)
+	@$$total = go tool cover '-func=coverage.out' | Select-Object -Last 1; $$value = [double](($$total -split '\s+')[-1].TrimEnd('%')); if ($$value -lt 100) { Write-Host "Meaningful Go test coverage is $$value%, want 100%"; exit 1 }; Write-Host $$total
+else
+	@total=$$(go tool cover '-func=coverage.out' | awk '/^total:/ {gsub("%", "", $$3); print $$3}'); awk -v coverage="$$total" 'BEGIN { if (coverage < 100) { printf "Meaningful Go test coverage is %s%%, want 100%%\n", coverage; exit 1 } }'; go tool cover '-func=coverage.out' | tail -n 1
+endif
+
+race:
+	go test -race ./... -count=1 -timeout=60s
 
 build: export GOOS := linux
 build: export GOARCH := amd64

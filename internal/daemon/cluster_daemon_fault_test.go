@@ -58,6 +58,7 @@ func TestClusteredStartupRequiresMigratedPostgreSQLState(t *testing.T) {
 
 func TestClusteredStartupRequiresGitHubCredentials(t *testing.T) {
 	assertClusteredStartupFailure(t, func(configured *config.Config, _ *clusteredDaemon, _ *fakeClusterState) {
+		configured.GitHub.App.PrivateKey = ""
 		configured.GitHub.App.PrivateKeyFile = "missing-private-key"
 	})
 }
@@ -728,6 +729,7 @@ func withPostgreSQLDSN(configured config.Config, dsn string) config.Config {
 }
 
 func withPrivateKey(configured config.Config, path string) config.Config {
+	configured.GitHub.App.PrivateKey = ""
 	configured.GitHub.App.PrivateKeyFile = path
 	return configured
 }

@@ -3,8 +3,6 @@ package libvirt
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,13 +10,8 @@ import (
 
 func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{
-		CommandRunner: commandRunner,
-		Config: Config{
-			ConnectionURI:     "qemu:///system",
-			DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`),
-		},
-	}
+	provider := providerWithTemplate(commandRunner, `<domain type="kvm"><name>template</name></domain>`)
+	provider.Config.ConnectionURI = "qemu:///system"
 
 	err := provider.Start(context.Background(), StartRequest{
 		ScaleSetName: "vm-set",
@@ -190,13 +183,8 @@ func TestDestroyTerminalAcceptsAlreadyInactiveDomain(t *testing.T) {
 
 func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{
-		CommandRunner: commandRunner,
-		Config: Config{
-			ConnectionURI:     "qemu:///system",
-			DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`),
-		},
-	}
+	provider := providerWithTemplate(commandRunner, `<domain type="kvm"><name>template</name></domain>`)
+	provider.Config.ConnectionURI = "qemu:///system"
 
 	if err := provider.Validate(context.Background()); err != nil {
 		t.Fatalf("expected validation success, got %v", err)
@@ -208,21 +196,39 @@ func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 }
 
 func TestStartReportsMissingTemplate(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: filepath.Join(t.TempDir(), "missing")}}
+	provider := Provider{
+		CommandRunner: &recordingCommandRunner{},
+		readTemplate:  func(string) ([]byte, error) { return nil, errors.New("missing") },
+	}
 	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
 		t.Fatal("expected missing template error")
 	}
 }
 
+func TestStartRequiresTemplateReader(t *testing.T) {
+	provider := Provider{CommandRunner: &recordingCommandRunner{}}
+	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+		t.Fatal("expected missing template reader error")
+	}
+}
+
+func TestNewProviderProvidesProductionTemplateReader(t *testing.T) {
+	commandRunner := &recordingCommandRunner{}
+	provider := NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"})
+	if provider.CommandRunner != commandRunner || provider.readTemplate == nil || provider.Config.DomainXMLTemplate != "domain.xml" {
+		t.Fatalf("production provider = %#v", provider)
+	}
+}
+
 func TestStartRejectsInvalidTemplate(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain><name>broken</domain>`)}}
+	provider := providerWithTemplate(&recordingCommandRunner{}, `<domain><name>broken</domain>`)
 	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
 		t.Fatal("expected invalid template error")
 	}
 }
 
 func TestStartReportsCreateCommandFailure(t *testing.T) {
-	provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`)}}
+	provider := providerWithTemplate(failingCommandRunner{}, `<domain type="kvm"><name>template</name></domain>`)
 	if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
 		t.Fatal("expected create error")
 	}
@@ -262,14 +268,14 @@ func TestDestroyReportsCommandFailure(t *testing.T) {
 }
 
 func TestValidateRejectsInvalidTemplate(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain><name>broken</domain>`)}}
+	provider := providerWithTemplate(&recordingCommandRunner{}, `<domain><name>broken</domain>`)
 	if err := provider.Validate(context.Background()); err == nil {
 		t.Fatal("expected validation template error")
 	}
 }
 
 func TestValidateReportsConnectionFailure(t *testing.T) {
-	provider := Provider{CommandRunner: failingCommandRunner{}, Config: Config{DomainXMLTemplate: writeTemplate(t, `<domain type="kvm"><name>template</name></domain>`)}}
+	provider := providerWithTemplate(failingCommandRunner{}, `<domain type="kvm"><name>template</name></domain>`)
 	if err := provider.Validate(context.Background()); err == nil {
 		t.Fatal("expected validation connection error")
 	}
@@ -284,13 +290,17 @@ func TestMetadataValueHandlesMissingTags(t *testing.T) {
 	}
 }
 
-func writeTemplate(t *testing.T, contents string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "domain.xml")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
+func providerWithTemplate(commandRunner CommandRunner, contents string) Provider {
+	return Provider{
+		CommandRunner: commandRunner,
+		Config:        Config{DomainXMLTemplate: "domain.xml"},
+		readTemplate: func(path string) ([]byte, error) {
+			if path != "domain.xml" {
+				return nil, errors.New("unexpected template path")
+			}
+			return []byte(contents), nil
+		},
 	}
-	return path
 }
 
 func containsAll(text string, needles []string) bool {

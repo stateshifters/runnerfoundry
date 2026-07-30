@@ -159,7 +159,10 @@ func TestLoadConfigurationDoesNotContactGitHub(t *testing.T) {
 	valid := runnableConfig(t)
 	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}
 	activeConfig, err := loadConfiguration("config", standaloneDaemon{
-		loadConfig:    func(string) (config.Config, error) { return valid, nil },
+		loadConfig: func(string) (config.Config, error) { return valid, nil },
+		loadCredentials: func(config.GitHubConfig) (config.GitHubAppCredentials, error) {
+			return testAppCredentials(t), nil
+		},
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
 		newLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
 	})

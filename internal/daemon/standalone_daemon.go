@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	upstream "github.com/actions/scaleset"
@@ -81,7 +82,7 @@ func newStandaloneDaemon() standaloneDaemon {
 	return standaloneDaemon{
 		loadConfig: loadConfig,
 		loadCredentials: func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
-			return githubConfig.AppCredentials()
+			return githubConfig.AppCredentials(os.ReadFile)
 		},
 		newDiscoverer: func(credentials config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return githubapp.NewDiscoverer(credentials)
@@ -94,13 +95,13 @@ func newStandaloneDaemon() standaloneDaemon {
 			return newLoggingManager(logConfig, newProductionLogDestinationFactory())
 		},
 		openDemandStore: func(path string) (scaler.DemandStore, io.Closer, error) {
-			store, err := scaler.OpenSQLiteDemandStore(path)
+			store, err := openSQLiteDemandStore(path)
 			if err != nil {
 				return nil, nil, fmt.Errorf("open SQLite demand store: %w", err)
 			}
 			return store, store, nil
 		},
-		notifier:                 systemdNotifier{},
+		notifier:                 newSystemdNotifier(),
 		startScaleSet:            startCoordinatedScaleSet,
 		startConfirmedScaleSet:   startConfirmedCoordinatedScaleSet,
 		drainInterval:            time.Second,
@@ -219,7 +220,7 @@ func withStandaloneDefaults(daemon standaloneDaemon) standaloneDaemon {
 	}
 	if daemon.loadCredentials == nil {
 		daemon.loadCredentials = func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
-			return githubConfig.AppCredentials()
+			return githubConfig.AppCredentials(os.ReadFile)
 		}
 	}
 	return daemon

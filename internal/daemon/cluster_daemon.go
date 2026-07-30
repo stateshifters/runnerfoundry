@@ -131,7 +131,7 @@ func newClusteredDaemon() *clusteredDaemon {
 	return &clusteredDaemon{
 		hostname: os.Hostname, newLogger: newLogger, loadConfig: loadConfig,
 		loadCredentials: func(githubConfig config.GitHubConfig) (config.GitHubAppCredentials, error) {
-			return githubConfig.AppCredentials()
+			return githubConfig.AppCredentials(os.ReadFile)
 		},
 		newLogging: func(logConfig config.LogConfig) (*loggingManager, error) {
 			return newLoggingManager(logConfig, newProductionLogDestinationFactory())
@@ -145,7 +145,7 @@ func newClusteredDaemon() *clusteredDaemon {
 		},
 		providerHealthy:           validateProductionScaleSetProvider,
 		buildReconciler:           buildReconciler,
-		notifier:                  systemdNotifier{},
+		notifier:                  newSystemdNotifier(),
 		leadershipRetryDelay:      clusterLeadershipRetryDelay,
 		waitBeforeLeadershipRetry: waitForRetryDelay,
 	}
@@ -287,7 +287,7 @@ func (daemon *clusteredDaemon) credentialsFor(githubConfig config.GitHubConfig) 
 	if daemon.loadCredentials != nil {
 		return daemon.loadCredentials(githubConfig)
 	}
-	credentials, err := githubConfig.AppCredentials()
+	credentials, err := githubConfig.AppCredentials(os.ReadFile)
 	if err != nil {
 		return config.GitHubAppCredentials{}, fmt.Errorf("read configured GitHub App credentials: %w", err)
 	}

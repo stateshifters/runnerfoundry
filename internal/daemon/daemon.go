@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
@@ -20,13 +21,27 @@ type serviceNotifier interface {
 	Reloading(ctx context.Context) error
 }
 
+type daemonRuntime struct {
+	loadConfig    func(string) (config.Config, error)
+	clustered     func(context.Context, Options, *clusteredDaemon, config.Config) error
+	standalone    func(context.Context, Options, standaloneDaemon) error
+	newClustered  func() *clusteredDaemon
+	newStandalone func() standaloneDaemon
+}
+
+var productionDaemonRuntime = daemonRuntime{
+	loadConfig: loadConfig, clustered: runClusteredDaemon, standalone: runDaemon,
+	newClustered: newClusteredDaemon, newStandalone: newStandaloneDaemon,
+}
+
 func Run(ctx context.Context, options Options) error {
-	configured, err := loadConfig(options.ConfigPath)
+	runtime := productionDaemonRuntime
+	configured, err := runtime.loadConfig(options.ConfigPath)
 	if err != nil {
 		return err
 	}
 	if configured.State.Postgres != nil {
-		return runClusteredDaemon(ctx, options, newClusteredDaemon(), configured)
+		return runtime.clustered(ctx, options, runtime.newClustered(), configured)
 	}
-	return runDaemon(ctx, options, newStandaloneDaemon())
+	return runtime.standalone(ctx, options, runtime.newStandalone())
 }

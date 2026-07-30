@@ -9,8 +9,10 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
+var productionConnectionSettingResolver = operatingSystemConnectionSettingResolver()
+
 func primaryConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
-	return primaryConnectionConfigWithResolver(settings, operatingSystemConnectionSettingResolver())
+	return primaryConnectionConfigWithResolver(settings, productionConnectionSettingResolver)
 }
 
 func primaryConnectionConfigWithResolver(
@@ -33,7 +35,7 @@ func primaryConnectionConfigWithResolver(
 }
 
 func directConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
-	return directConnectionConfigWithResolver(settings, operatingSystemConnectionSettingResolver())
+	return directConnectionConfigWithResolver(settings, productionConnectionSettingResolver)
 }
 
 func directConnectionConfigWithResolver(
@@ -86,7 +88,7 @@ func dsnConnectionConfig(configuredDSN string, resolver connectionSettingResolve
 	if err != nil {
 		return nil, err
 	}
-	return parseConnectionConfig(resolvedDSN)
+	return parseConnectionConfig(resolvedDSN, resolver)
 }
 
 func structuredConnectionConfig(
@@ -110,7 +112,7 @@ func structuredConnectionConfig(
 	if len(values) != 0 {
 		connectionString = "postgresql://?" + values.Encode()
 	}
-	return parseConnectionConfig(connectionString)
+	return parseConnectionConfig(connectionString, resolver)
 }
 
 func hasStructuredConnectionValues(settings postgresconfig.Settings) bool {
@@ -145,8 +147,8 @@ func resolveStructuredConnectionSetting(
 	return resolvedValue, nil
 }
 
-func parseConnectionConfig(connectionString string) (*pgx.ConnConfig, error) {
-	config, err := pgx.ParseConfig(connectionString)
+func parseConnectionConfig(connectionString string, resolver connectionSettingResolver) (*pgx.ConnConfig, error) {
+	config, err := resolver.parseConfig(connectionString)
 	if err != nil {
 		return nil, errors.New("parse PostgreSQL connection settings")
 	}

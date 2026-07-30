@@ -3,6 +3,7 @@ package libvirt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,7 +63,14 @@ type ConnectionReader interface {
 	ReadConnectionURI(ctx context.Context, connectionURI string) (string, error)
 }
 
-type ExecCommandRunner struct{}
+type ExecCommandRunner struct {
+	newCommand     func(context.Context, string, ...string) *exec.Cmd
+	combinedOutput func(*exec.Cmd) ([]byte, error)
+}
+
+func NewExecCommandRunner() ExecCommandRunner {
+	return ExecCommandRunner{newCommand: exec.CommandContext, combinedOutput: (*exec.Cmd).CombinedOutput}
+}
 
 func (runner ExecCommandRunner) CreateDomain(ctx context.Context, connectionURI string, domainXML string) error {
 	_, err := runner.runVirsh(ctx, connectionURI, domainXML, "create", "/dev/stdin")
@@ -97,13 +105,12 @@ func (runner ExecCommandRunner) runVirsh(
 	operation string,
 	operands ...string,
 ) (string, error) {
-	execCommand := exec.CommandContext(ctx, "virsh")
-	execCommand.Args = append(execCommand.Args, "-c", connectionURI, operation)
-	execCommand.Args = append(execCommand.Args, operands...)
+	arguments := append([]string{"-c", connectionURI, operation}, operands...)
+	execCommand := runner.newCommand(ctx, "virsh", arguments...)
 	if stdin != "" {
 		execCommand.Stdin = strings.NewReader(stdin)
 	}
-	outputBytes, err := execCommand.CombinedOutput()
+	outputBytes, err := runner.combinedOutput(execCommand)
 	if err != nil {
 		return "", fmt.Errorf("virsh %s failed: %w", operation, err)
 	}
@@ -113,6 +120,20 @@ func (runner ExecCommandRunner) runVirsh(
 type Provider struct {
 	CommandRunner CommandRunner
 	Config        Config
+	readTemplate  func(string) ([]byte, error)
+}
+
+func NewProvider(commandRunner CommandRunner, config Config) Provider {
+	return NewProviderWithTemplateReader(commandRunner, config, os.ReadFile)
+}
+
+// NewProviderWithTemplateReader constructs a provider with an explicit template input boundary.
+func NewProviderWithTemplateReader(
+	commandRunner CommandRunner,
+	config Config,
+	readTemplate func(string) ([]byte, error),
+) Provider {
+	return Provider{CommandRunner: commandRunner, Config: config, readTemplate: readTemplate}
 }
 
 func (provider Provider) Start(ctx context.Context, request StartRequest) error {
@@ -204,7 +225,10 @@ func (provider Provider) Validate(ctx context.Context) error {
 }
 
 func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
-	templateBytes, err := os.ReadFile(provider.Config.DomainXMLTemplate)
+	if provider.readTemplate == nil {
+		return "", errors.New("libvirt XML template reader is required")
+	}
+	templateBytes, err := provider.readTemplate(provider.Config.DomainXMLTemplate)
 	if err != nil {
 		return "", fmt.Errorf("read libvirt XML template: %w", err)
 	}

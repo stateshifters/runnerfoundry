@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/cluster"
@@ -23,42 +23,54 @@ type migrationStore interface {
 
 type migrationStoreFactory func(postgresconfig.Settings) migrationStore
 
-func runPostgreSQLMigration(ctx context.Context, request migrationRequest) (migrationStatus, error) {
-	return executeMigration(ctx, request, func(postgresConfig postgresconfig.Settings) migrationStore {
+type migrationDependencies struct {
+	readConfigFile config.ReadFile
+	newStore       migrationStoreFactory
+	now            func() time.Time
+}
+
+var productionMigrationDependencies = migrationDependencies{
+	readConfigFile: os.ReadFile,
+	newStore: func(postgresConfig postgresconfig.Settings) migrationStore {
 		return cluster.NewStore(postgresConfig)
-	})
+	},
+	now: time.Now,
+}
+
+func runPostgreSQLMigration(ctx context.Context, request migrationRequest) (migrationStatus, error) {
+	return executeMigration(ctx, request, productionMigrationDependencies)
 }
 
 func executeMigration(
 	ctx context.Context,
 	request migrationRequest,
-	newStore migrationStoreFactory,
+	dependencies migrationDependencies,
 ) (migrationStatus, error) {
-	configured, err := loadMigrationConfig(request.configPath)
+	configBytes, err := dependencies.readConfigFile(request.configPath)
+	if err != nil {
+		return migrationStatus{}, fmt.Errorf("read migration config: %w", err)
+	}
+	configured, err := loadMigrationConfig(configBytes)
 	if err != nil {
 		return migrationStatus{}, err
 	}
-	return executeStoreMigration(ctx, newStore(configured), request)
+	return executeStoreMigration(ctx, dependencies.newStore(configured), request, dependencies.now())
 }
 
-func loadMigrationConfig(configPath string) (postgresconfig.Settings, error) {
-	configRoot, err := os.OpenRoot(filepath.Dir(configPath))
+func loadMigrationConfig(configBytes []byte) (postgresconfig.Settings, error) {
+	configured, err := config.LoadPostgreSQLState(bytes.NewReader(configBytes))
 	if err != nil {
-		return postgresconfig.Settings{}, fmt.Errorf("open config directory: %w", err)
-	}
-	configFile, err := configRoot.Open(filepath.Base(configPath))
-	if err != nil {
-		return postgresconfig.Settings{}, errors.Join(fmt.Errorf("open config: %w", err), configRoot.Close())
-	}
-	configured, loadErr := config.LoadPostgreSQLState(configFile)
-	closeErr := errors.Join(configFile.Close(), configRoot.Close())
-	if err = errors.Join(loadErr, closeErr); err != nil {
 		return postgresconfig.Settings{}, fmt.Errorf("load migration config: %w", err)
 	}
 	return configured, nil
 }
 
-func executeStoreMigration(ctx context.Context, store migrationStore, request migrationRequest) (migrationStatus, error) {
+func executeStoreMigration(
+	ctx context.Context,
+	store migrationStore,
+	request migrationRequest,
+	now time.Time,
+) (migrationStatus, error) {
 	switch request.action {
 	case migrationStatusAction:
 		status, err := store.MigrationStatus(ctx)
@@ -68,7 +80,7 @@ func executeStoreMigration(ctx context.Context, store migrationStore, request mi
 			return migrationStatus{}, fmt.Errorf("migrate PostgreSQL up: %w", err)
 		}
 	case migrationDownAction:
-		if err := store.MigrateDown(ctx, request.target, time.Now(), cluster.NodeLifetime); err != nil {
+		if err := store.MigrateDown(ctx, request.target, now, cluster.NodeLifetime); err != nil {
 			return migrationStatus{}, fmt.Errorf("migrate PostgreSQL down: %w", err)
 		}
 	default:

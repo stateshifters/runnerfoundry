@@ -16,7 +16,7 @@ type credentialFileFixture struct {
 func (fixture *credentialFileFixture) read(filePath string) ([]byte, error) {
 	fixture.paths = append(fixture.paths, filePath)
 	if !path.IsAbs(filePath) {
-		return nil, errInvalidCredentialFilePath
+		return nil, errors.New("credential path is not absolute")
 	}
 	if fixture.readErr != nil {
 		return nil, fixture.readErr
@@ -40,9 +40,9 @@ func assertStructuredFileReference(t *testing.T, field structuredConnectionField
 	fixture := &credentialFileFixture{contents: map[string]string{filePath: field.want + "\n"}}
 	settings := Settings{Role: "runnerfoundry"}
 	field.set(&settings, "file://"+filePath)
-	resolved, err := primaryConnectionConfigWithResolver(
-		settings, connectionSettingResolver{readCredentialFile: fixture.read},
-	)
+	resolver := testConnectionResolver(nil)
+	resolver.readCredentialFile = fixture.read
+	resolved, err := primaryConnectionConfigWithResolver(settings, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,9 +59,11 @@ func TestSettingsResolveRoleFileReferenceInMemory(t *testing.T) {
 	fixture := &credentialFileFixture{contents: map[string]string{
 		"/run/secrets/postgres-role": expectedRole + "\n",
 	}}
+	resolver := testConnectionResolver(nil)
+	resolver.readCredentialFile = fixture.read
 	resolved, err := primaryConnectionConfigWithResolver(Settings{
 		DSN: "postgres://login@primary/scaler?role=wrong", Role: "file:///run/secrets/postgres-role",
-	}, connectionSettingResolver{readCredentialFile: fixture.read})
+	}, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +75,8 @@ func TestSettingsResolveRoleFileReferenceInMemory(t *testing.T) {
 func TestSettingsReadFilesAtPointOfUse(t *testing.T) {
 	const filePath = "/run/secrets/postgres-password"
 	fixture := &credentialFileFixture{contents: map[string]string{filePath: "first"}}
-	resolver := connectionSettingResolver{readCredentialFile: fixture.read}
+	resolver := testConnectionResolver(nil)
+	resolver.readCredentialFile = fixture.read
 	settings := Settings{Password: "file://" + filePath, Role: "runnerfoundry"}
 	first, firstErr := primaryConnectionConfigWithResolver(settings, resolver)
 	if firstErr != nil {
@@ -95,9 +98,10 @@ func TestSettingsResolveDSNFileReferenceInMemory(t *testing.T) {
 	fixture := &credentialFileFixture{contents: map[string]string{
 		"/run/secrets/postgres-dsn": dsn + "\n",
 	}}
+	resolver := testConnectionResolver(nil)
+	resolver.readCredentialFile = fixture.read
 	resolved, err := primaryConnectionConfigWithResolver(
-		Settings{DSN: "file:///run/secrets/postgres-dsn", Role: "runnerfoundry"},
-		connectionSettingResolver{readCredentialFile: fixture.read},
+		Settings{DSN: "file:///run/secrets/postgres-dsn", Role: "runnerfoundry"}, resolver,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -141,9 +145,10 @@ func TestSettingsRejectEmptyCredentialFileWithoutDisclosureInMemory(t *testing.T
 
 func assertCredentialFileFailureRedacted(t *testing.T, fixture *credentialFileFixture) {
 	t.Helper()
+	resolver := testConnectionResolver(nil)
+	resolver.readCredentialFile = fixture.read
 	_, err := primaryConnectionConfigWithResolver(
-		settingsWithProofReference("file:///run/secrets/postgres-password"),
-		connectionSettingResolver{readCredentialFile: fixture.read},
+		settingsWithProofReference("file:///run/secrets/postgres-password"), resolver,
 	)
 	if err == nil {
 		t.Fatal("expected file resolution failure")

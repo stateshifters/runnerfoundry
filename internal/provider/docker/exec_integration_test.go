@@ -1,99 +1,86 @@
-//go:build integration
-
 package docker
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
+	"errors"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
 
-func TestMain(testSuite *testing.M) {
-	if strings.EqualFold(filepath.Base(os.Args[0]), "docker") || strings.EqualFold(filepath.Base(os.Args[0]), "docker.exe") {
-		runDockerShim()
-		return
+func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
+	recording := &recordingDockerExecution{output: []byte("runner\n")}
+	runner := recording.runner()
+
+	output, err := runner.ListComposeServices(context.Background(), ComposeConfig{ComposeFile: "compose.yml"})
+	if err != nil || strings.TrimSpace(output) != "runner" {
+		t.Fatalf("list compose services: output=%q error=%v", output, err)
 	}
-	os.Exit(testSuite.Run())
+	assertDockerArguments(t, recording.arguments, "compose", "-f", "compose.yml", "config", "--services")
+
+	if _, err = runner.ListComposeRunners(context.Background(), "linux"); err != nil {
+		t.Fatal(err)
+	}
+	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json", "--filter", "label=runnerfoundry.scale-set=linux")
+
+	if err = runner.RemoveComposeRunner(context.Background(), "runner-id"); err != nil {
+		t.Fatal(err)
+	}
+	assertDockerArguments(t, recording.arguments, "rm", "--force", "runner-id")
 }
 
-func TestExecCommandRunnerInvokesDockerFromPath(t *testing.T) {
-	shimDirectory := t.TempDir()
-	writeDockerShim(t, shimDirectory)
-	t.Setenv("PATH", shimDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	output, err := (ExecCommandRunner{}).ListComposeServices(context.Background(), ComposeConfig{
-		ComposeFile: "compose.yml",
-	})
-	if err != nil {
-		t.Fatalf("run docker shim: %v", err)
+func TestExecCommandRunnerBuildsStartCommandAndRedactsFailure(t *testing.T) {
+	recording := &recordingDockerExecution{
+		output: []byte("docker diagnostic: opaque-jit-value"),
+		err:    errors.New("failed"),
 	}
-	if strings.TrimSpace(output) != "docker compose -f compose.yml config --services" {
-		t.Fatalf("docker output = %q, want compose service command", output)
-	}
-}
-
-func TestExecCommandRunnerRedactsJITConfigFromDockerFailure(t *testing.T) {
-	shimDirectory := t.TempDir()
-	writeDockerShim(t, shimDirectory)
-	t.Setenv("PATH", shimDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	err := (ExecCommandRunner{}).StartComposeRunner(context.Background(), ComposeConfig{Service: "runner"}, StartRequest{
+	err := recording.runner().StartComposeRunner(context.Background(), ComposeConfig{Service: "runner"}, StartRequest{
 		ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: "opaque-jit-value",
 	})
-	if err == nil {
-		t.Fatal("expected docker failure")
+	if err == nil || strings.Contains(err.Error(), "opaque-jit-value") || !strings.Contains(err.Error(), "docker diagnostic: [REDACTED]") {
+		t.Fatalf("docker failure = %v", err)
 	}
-	if strings.Contains(err.Error(), "opaque-jit-value") {
-		t.Fatalf("docker failure disclosed JIT config: %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "docker diagnostic: [REDACTED]") {
-		t.Fatalf("docker failure = %q, want redacted diagnostic", err.Error())
+	assertDockerArguments(t, recording.arguments,
+		"compose", "-f", "", "run", "--detach", "--rm", "--name", "linux-1",
+		"--label", "runnerfoundry.scale-set=linux", "--label", "runnerfoundry.runner=linux-1",
+		"--env", "ACTIONS_RUNNER_INPUT_JITCONFIG=opaque-jit-value", "runner",
+	)
+}
+
+func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
+	recording := &recordingDockerExecution{err: errors.New("missing")}
+	if _, err := recording.runner().ListComposeRunners(context.Background(), "linux"); err == nil || strings.Contains(err.Error(), ": missing:") {
+		t.Fatalf("docker failure = %v", err)
 	}
 }
 
-func TestExecCommandRunnerReportsMissingDocker(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	if _, err := (ExecCommandRunner{}).ListComposeRunners(context.Background(), "linux"); err == nil {
-		t.Fatal("expected missing docker failure")
+func TestNewExecCommandRunnerProvidesProductionDependencies(t *testing.T) {
+	runner := NewExecCommandRunner()
+	if runner.newCommand == nil || runner.combinedOutput == nil {
+		t.Fatal("production command dependencies are incomplete")
 	}
 }
 
-func TestExecCommandRunnerRemovesDockerContainer(t *testing.T) {
-	shimDirectory := t.TempDir()
-	writeDockerShim(t, shimDirectory)
-	t.Setenv("PATH", shimDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := (ExecCommandRunner{}).RemoveComposeRunner(context.Background(), "runner-id"); err != nil {
-		t.Fatalf("remove docker container: %v", err)
+type recordingDockerExecution struct {
+	arguments []string
+	output    []byte
+	err       error
+}
+
+func (recording *recordingDockerExecution) runner() ExecCommandRunner {
+	return ExecCommandRunner{
+		newCommand: func(_ context.Context, name string, arguments ...string) *exec.Cmd {
+			recording.arguments = append([]string{name}, arguments...)
+			return &exec.Cmd{}
+		},
+		combinedOutput: func(*exec.Cmd) ([]byte, error) { return recording.output, recording.err },
 	}
 }
 
-func writeDockerShim(t *testing.T, directory string) {
+func assertDockerArguments(t *testing.T, actual []string, expected ...string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		contents := "@echo %* | findstr opaque-jit-value >nul && (echo docker diagnostic: opaque-jit-value 1>&2 & exit /b 1)\r\n@echo docker %*\r\n"
-		if err := os.WriteFile(filepath.Join(directory, "docker.cmd"), []byte(contents), 0o600); err != nil {
-			t.Fatalf("write docker command shim: %v", err)
-		}
-		return
+	if !slices.Equal(actual, append([]string{"docker"}, expected...)) {
+		t.Fatalf("docker arguments = %#v, want %#v", actual, append([]string{"docker"}, expected...))
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("locate docker test executable: %v", err)
-	}
-	if err := os.Link(executable, filepath.Join(directory, "docker")); err != nil {
-		t.Fatalf("install docker test executable: %v", err)
-	}
-}
-
-func runDockerShim() {
-	arguments := strings.Join(os.Args[1:], " ")
-	if strings.Contains(arguments, "opaque-jit-value") {
-		_, _ = fmt.Fprintln(os.Stderr, "docker diagnostic: opaque-jit-value")
-		os.Exit(1)
-	}
-	_, _ = fmt.Printf("docker %s\n", arguments)
 }

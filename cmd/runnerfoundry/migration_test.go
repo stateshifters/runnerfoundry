@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,12 +11,8 @@ import (
 )
 
 func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	configText := "github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\nscale_sets: invalid\n"
-	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	configured, err := loadMigrationConfig(configPath)
+	configured, err := loadMigrationConfig([]byte(configText))
 	if err != nil {
 		t.Fatalf("load migration config: %v", err)
 	}
@@ -27,32 +21,30 @@ func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadMigrationConfigReportsFileFailures(t *testing.T) {
-	missingDirectory := filepath.Join(t.TempDir(), "missing", "config.yaml")
-	if _, err := loadMigrationConfig(missingDirectory); err == nil {
-		t.Fatal("expected missing config directory error")
-	}
-	if _, err := loadMigrationConfig("missing-config.yaml"); err == nil {
-		t.Fatal("expected missing config error")
-	}
-	if _, err := loadMigrationConfig(t.TempDir()); err == nil {
-		t.Fatal("expected config directory read error")
+func TestLoadMigrationConfigReportsInvalidContent(t *testing.T) {
+	if _, err := loadMigrationConfig([]byte("state: [")); err == nil {
+		t.Fatal("expected invalid config error")
 	}
 }
 
 func TestExecuteMigrationUsesOnlyPostgreSQLConfiguration(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
 	status, err := executeMigration(t.Context(), migrationRequest{
-		action: migrationStatusAction, configPath: configPath,
-	}, func(postgresConfig postgresconfig.Settings) migrationStore {
-		if postgresConfig.Role != "runnerfoundry" {
-			t.Fatalf("PostgreSQL config = %#v", postgresConfig)
-		}
-		return store
+		action: migrationStatusAction, configPath: "config.yaml",
+	}, migrationDependencies{
+		readConfigFile: func(path string) ([]byte, error) {
+			if path != "config.yaml" {
+				t.Fatalf("config path = %q", path)
+			}
+			return []byte("github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\n"), nil
+		},
+		newStore: func(postgresConfig postgresconfig.Settings) migrationStore {
+			if postgresConfig.Role != "runnerfoundry" {
+				t.Fatalf("PostgreSQL config = %#v", postgresConfig)
+			}
+			return store
+		},
+		now: func() time.Time { return time.Unix(1, 0) },
 	})
 	if err != nil || status.Current != 1 {
 		t.Fatalf("migration status = %#v, %v", status, err)
@@ -60,12 +52,43 @@ func TestExecuteMigrationUsesOnlyPostgreSQLConfiguration(t *testing.T) {
 }
 
 func TestExecuteMigrationReportsInvalidConfiguration(t *testing.T) {
-	store := &fakeMigrationStore{}
 	_, err := executeMigration(t.Context(), migrationRequest{
-		action: migrationStatusAction, configPath: filepath.Join(t.TempDir(), "missing.yaml"),
-	}, func(postgresconfig.Settings) migrationStore { return store })
+		action: migrationStatusAction, configPath: "missing.yaml",
+	}, migrationDependencies{readConfigFile: func(string) ([]byte, error) { return nil, errors.New("missing") }})
 	if err == nil {
 		t.Fatal("expected invalid migration config")
+	}
+}
+
+func TestExecuteMigrationReportsInvalidConfigurationContent(t *testing.T) {
+	_, err := executeMigration(t.Context(), migrationRequest{configPath: "config.yaml"}, migrationDependencies{
+		readConfigFile: func(string) ([]byte, error) { return []byte("state: ["), nil },
+	})
+	if err == nil {
+		t.Fatal("expected invalid migration config content")
+	}
+}
+
+func TestRunPostgreSQLMigrationUsesConfiguredDependencies(t *testing.T) {
+	originalDependencies := productionMigrationDependencies
+	t.Cleanup(func() { productionMigrationDependencies = originalDependencies })
+	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
+	productionMigrationDependencies = migrationDependencies{
+		readConfigFile: func(string) ([]byte, error) {
+			return []byte("state:\n  postgres:\n    role: runnerfoundry\n"), nil
+		},
+		newStore: func(postgresconfig.Settings) migrationStore { return store },
+		now:      func() time.Time { return time.Unix(1, 0) },
+	}
+	status, err := runPostgreSQLMigration(t.Context(), migrationRequest{action: migrationStatusAction})
+	if err != nil || status.Current != 1 {
+		t.Fatalf("migration status = %#v, %v", status, err)
+	}
+}
+
+func TestProductionMigrationStoreFactoryConstructsWithoutConnecting(t *testing.T) {
+	if store := productionMigrationDependencies.newStore(postgresconfig.Settings{Role: "runnerfoundry"}); store == nil {
+		t.Fatal("expected migration store")
 	}
 }
 
@@ -76,7 +99,7 @@ func TestExecuteStoreMigrationDispatchesTypedActions(t *testing.T) {
 		{action: migrationUpAction},
 		{action: migrationDownAction, target: 0},
 	} {
-		status, err := executeStoreMigration(t.Context(), store, request)
+		status, err := executeStoreMigration(t.Context(), store, request, time.Unix(1, 0))
 		if err != nil || status.Current != 1 {
 			t.Fatalf("execute %q = %#v, %v", request.action, status, err)
 		}
@@ -99,7 +122,7 @@ func TestExecuteStoreMigrationReportsFailures(t *testing.T) {
 		"down status": {&fakeMigrationStore{statusErr: failure}, migrationRequest{action: migrationDownAction}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := executeStoreMigration(t.Context(), scenario.store, scenario.request); err == nil {
+			if _, err := executeStoreMigration(t.Context(), scenario.store, scenario.request, time.Unix(1, 0)); err == nil {
 				t.Fatal("expected migration failure")
 			}
 		})
@@ -107,7 +130,7 @@ func TestExecuteStoreMigrationReportsFailures(t *testing.T) {
 }
 
 func TestExecuteStoreMigrationRejectsUnsupportedAction(t *testing.T) {
-	if _, err := executeStoreMigration(t.Context(), nil, migrationRequest{action: "unsupported"}); err == nil {
+	if _, err := executeStoreMigration(t.Context(), nil, migrationRequest{action: "unsupported"}, time.Unix(1, 0)); err == nil {
 		t.Fatal("expected unsupported migration action")
 	}
 }

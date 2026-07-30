@@ -193,6 +193,73 @@ func TestRunnerScaleSetListSurfacesResponseReadFailure(t *testing.T) {
 	}
 }
 
+func TestRegistryWorkflowPropagatesEachInMemoryBoundaryFailure(t *testing.T) {
+	malformed := githubScaleSetRegistry{repositoryURL: "invalid", installationClient: http.DefaultClient}
+	if _, err := malformed.ListRunnerScaleSets(context.Background(), 1); err == nil {
+		t.Fatal("expected registration failure")
+	}
+	transportFailure := githubScaleSetRegistry{
+		repositoryURL:      "https://ghe.example.com/meza/repo",
+		installationClient: &http.Client{Transport: failingRoundTripper{}},
+	}
+	if _, err := transportFailure.runnerRegistrationToken(context.Background()); err == nil {
+		t.Fatal("expected registration request failure")
+	}
+	registrationClient := registryWithStaticResponse(http.StatusCreated,
+		io.NopCloser(strings.NewReader(`{"token":"registration"}`))).installationClient
+	registry := githubScaleSetRegistry{
+		repositoryURL: "https://ghe.example.com/meza/repo", installationClient: registrationClient,
+		protocolClient: &http.Client{Transport: failingRoundTripper{}},
+	}
+	if _, err := registry.ListRunnerScaleSets(context.Background(), 1); err == nil {
+		t.Fatal("expected admin connection failure")
+	}
+}
+
+func TestRegistryRejectsMalformedAndIncompleteInMemoryResponses(t *testing.T) {
+	target := repositoryTargetForTest(t, "https://ghe.example.com/meza/repo")
+	for _, body := range []string{"invalid", `{}`} {
+		registry := registryWithStaticResponse(http.StatusCreated, io.NopCloser(strings.NewReader(body)))
+		registry.repositoryURL = target.URL.String()
+		if _, err := registry.runnerRegistrationToken(context.Background()); err == nil {
+			t.Fatalf("registration body %q was accepted", body)
+		}
+	}
+	registry := registryWithStaticResponse(http.StatusUnauthorized, io.NopCloser(strings.NewReader(`{}`)))
+	if _, err := registry.requestRunnerRegistrationToken(context.Background(), target); err == nil {
+		t.Fatal("expected registration status failure")
+	}
+	registry = githubScaleSetRegistry{repositoryURL: target.URL.String(), protocolClient: &http.Client{Transport: failingRoundTripper{}}}
+	if _, err := registry.actionsServiceAdminConnection(context.Background(), "registration"); err == nil {
+		t.Fatal("expected admin request failure")
+	}
+}
+
+func TestRegistryRejectsInvalidAdminAndScaleSetPayloadsInMemory(t *testing.T) {
+	target := repositoryTargetForTest(t, "https://ghe.example.com/meza/repo")
+	registry := registryWithStaticResponse(http.StatusOK, io.NopCloser(strings.NewReader("invalid")))
+	if _, err := registry.requestActionsServiceAdminConnection(context.Background(), "registration", target); err == nil {
+		t.Fatal("expected admin payload failure")
+	}
+	response := &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized"}
+	if _, err := validateActionsServiceAdminResponse(response, nil, nil, nil); err == nil {
+		t.Fatal("expected admin status failure")
+	}
+	if _, err := validatedActionsServiceAdminConnection(actionsServiceAdminConnectionResponse{}, target); err == nil {
+		t.Fatal("expected incomplete admin connection failure")
+	}
+	serviceURL, err := parseActionsServiceURL("https://ghe.example.com/actions", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry = registryWithStaticResponse(http.StatusOK, io.NopCloser(strings.NewReader("invalid")))
+	if _, err = registry.fetchRunnerScaleSets(context.Background(), actionsServiceAdminConnection{
+		URL: serviceURL, Token: "admin",
+	}, 1); err == nil {
+		t.Fatal("expected scale-set payload failure")
+	}
+}
+
 func registryWithStaticResponse(status int, body io.ReadCloser) githubScaleSetRegistry {
 	client := &http.Client{Transport: staticResponseTransport{response: &http.Response{
 		StatusCode: status, Status: http.StatusText(status), Body: body,

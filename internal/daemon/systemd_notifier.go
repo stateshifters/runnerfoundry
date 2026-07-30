@@ -7,7 +7,13 @@ import (
 	"github.com/coreos/go-systemd/v22/daemon"
 )
 
-type systemdNotifier struct{}
+type systemdNotifier struct {
+	notify func(bool, string) (bool, error)
+}
+
+func newSystemdNotifier() systemdNotifier {
+	return systemdNotifier{notify: daemon.SdNotify}
+}
 
 type clusterServiceStatus string
 
@@ -19,23 +25,23 @@ const (
 )
 
 func (notifier systemdNotifier) Ready(ctx context.Context) error {
-	return notifySystemd(ctx, daemon.SdNotifyReady)
+	return notifySystemd(ctx, daemon.SdNotifyReady, notifier.notify)
 }
 
 func (notifier systemdNotifier) Reloading(ctx context.Context) error {
 	state := daemon.SdNotifyReloading + "\n" + daemon.SdNotifyMonotonicUsec()
-	return notifySystemd(ctx, state)
+	return notifySystemd(ctx, state, notifier.notify)
 }
 
 func (notifier systemdNotifier) Status(ctx context.Context, status clusterServiceStatus) error {
-	return notifySystemd(ctx, "STATUS="+string(status))
+	return notifySystemd(ctx, "STATUS="+string(status), notifier.notify)
 }
 
-func notifySystemd(ctx context.Context, state string) error {
+func notifySystemd(ctx context.Context, state string, notify func(bool, string) (bool, error)) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("notify context: %w", err)
 	}
-	_, err := daemon.SdNotify(false, state)
+	_, err := notify(false, state)
 	if err != nil {
 		return fmt.Errorf("notify systemd: %w", err)
 	}

@@ -2,12 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
 func TestSystemdNotifierIgnoresMissingNotifySocket(t *testing.T) {
-	t.Setenv("NOTIFY_SOCKET", "")
-	notifier := systemdNotifier{}
+	notifier := systemdNotifier{notify: func(bool, string) (bool, error) { return false, nil }}
 	if err := notifier.Ready(context.Background()); err != nil {
 		t.Fatalf("expected ready notification without socket to be ignored, got %v", err)
 	}
@@ -22,7 +22,7 @@ func TestSystemdNotifierIgnoresMissingNotifySocket(t *testing.T) {
 func TestSystemdNotifierSurfacesCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := notifySystemd(ctx, "READY=1"); err == nil {
+	if err := notifySystemd(ctx, "READY=1", func(bool, string) (bool, error) { return false, nil }); err == nil {
 		t.Fatal("expected canceled context error")
 	}
 }
@@ -35,8 +35,16 @@ func TestNoopNotifierSupportsReloading(t *testing.T) {
 }
 
 func TestSystemdNotifierSurfacesNotifySocketFailure(t *testing.T) {
-	t.Setenv("NOTIFY_SOCKET", "/path/that/does/not/exist/runnerfoundry.sock")
-	if err := notifySystemd(context.Background(), "READY=1"); err == nil {
+	failure := errors.New("failed")
+	if err := notifySystemd(context.Background(), "READY=1", func(bool, string) (bool, error) {
+		return false, failure
+	}); err == nil {
 		t.Fatal("expected notify socket error")
+	}
+}
+
+func TestProductionSystemdNotifierProvidesNotificationBoundary(t *testing.T) {
+	if newSystemdNotifier().notify == nil {
+		t.Fatal("missing systemd notification boundary")
 	}
 }

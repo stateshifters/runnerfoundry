@@ -2,45 +2,30 @@ package daemon
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 )
+
+var readConfigFile = os.ReadFile
 
 func loadConfig(configPath string) (config.Config, error) {
 	configBytes, err := readConfigFile(configPath)
 	if err != nil {
 		return config.Config{}, err
 	}
+	return loadConfigBytes(configBytes)
+}
+
+func loadConfigBytes(configBytes []byte) (config.Config, error) {
 	loadedConfig, err := config.Load(bytes.NewReader(configBytes))
 	if err != nil {
 		return config.Config{}, fmt.Errorf("load config: %w", err)
 	}
 	return loadedConfig, nil
-}
-
-func readConfigFile(configPath string) ([]byte, error) {
-	configRoot, err := os.OpenRoot(filepath.Dir(configPath))
-	if err != nil {
-		return nil, fmt.Errorf("open config directory: %w", err)
-	}
-	configFile, err := configRoot.Open(filepath.Base(configPath))
-	if err != nil {
-		rootCloseErr := configRoot.Close()
-		return nil, errors.Join(fmt.Errorf("open config: %w", err), rootCloseErr)
-	}
-	configBytes, err := io.ReadAll(configFile)
-	fileCloseErr := configFile.Close()
-	rootCloseErr := configRoot.Close()
-	if combinedErr := errors.Join(err, fileCloseErr, rootCloseErr); combinedErr != nil {
-		return nil, fmt.Errorf("read config: %w", combinedErr)
-	}
-	return configBytes, nil
 }
 
 func newLogger(format string, level string) *slog.Logger {

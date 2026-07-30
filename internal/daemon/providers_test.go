@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -32,10 +31,10 @@ func TestValidateScaleSetProviderReportsHealth(t *testing.T) {
 	}, providerCommands{DockerCommandRunner: dockerRunnerStub{err: errors.New("failed")}}); err == nil {
 		t.Fatal("expected docker health failure")
 	}
-	template := writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`)
 	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
-		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: template},
-	}, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}}); err != nil {
+		Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"},
+	}, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}},
+		ReadLibvirtTemplate: validLibvirtTemplate}); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateScaleSetProvider(ctx, config.ScaleSetConfig{
@@ -78,9 +77,10 @@ func TestBuildLibvirtReconcilerValidatesProvider(t *testing.T) {
 		MaxRunners: 1,
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI:     "qemu:///system",
-			DomainXMLTemplate: writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`),
+			DomainXMLTemplate: "domain.xml",
 		},
-	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}}})
+	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{outputs: []string{"qemu:///system"}},
+		ReadLibvirtTemplate: validLibvirtTemplate})
 	if err != nil {
 		t.Fatalf("expected libvirt reconciler, got %v", err)
 	}
@@ -94,12 +94,16 @@ func TestBuildLibvirtReconcilerSurfacesValidationFailure(t *testing.T) {
 		Name: "linux-vm",
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI:     "qemu:///system",
-			DomainXMLTemplate: filepath.Join(t.TempDir(), "missing.xml"),
+			DomainXMLTemplate: "missing.xml",
 		},
 	}, fakeScaleSetJITClient{}, 5, providerCommands{LibvirtCommandRunner: &libvirtRunnerStub{}})
 	if err == nil || !strings.Contains(err.Error(), "validate libvirt provider") {
 		t.Fatalf("expected libvirt validation error, got %v", err)
 	}
+}
+
+func validLibvirtTemplate(string) ([]byte, error) {
+	return []byte(`<domain type="kvm"><name>template</name></domain>`), nil
 }
 
 func TestBuildReconcilerRejectsScaleSetWithoutProvider(t *testing.T) {
@@ -207,10 +211,11 @@ func TestLibvirtProviderAdapterConvertsProviderBehavior(t *testing.T) {
 		"",
 		"",
 	}}
-	adapter := libvirtProviderAdapter{Provider: libvirtprovider.Provider{
-		CommandRunner: commandRunner,
-		Config:        libvirtprovider.Config{ConnectionURI: "qemu:///system", DomainXMLTemplate: writeFile(t, "domain.xml", `<domain type="kvm"><name>template</name></domain>`)},
-	}}
+	adapter := libvirtProviderAdapter{Provider: libvirtprovider.NewProviderWithTemplateReader(
+		commandRunner,
+		libvirtprovider.Config{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"},
+		validLibvirtTemplate,
+	)}
 	instances, err := adapter.List(context.Background(), "linux-vm")
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)

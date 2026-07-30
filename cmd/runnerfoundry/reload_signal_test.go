@@ -25,3 +25,29 @@ func TestForwardReloadSignalsCoalescesRequests(t *testing.T) {
 	default:
 	}
 }
+
+func TestReloadSignalRequestsRegistersAndStopsWithoutOperatingSystemSignals(t *testing.T) {
+	var registered chan<- os.Signal
+	stopped := false
+	reloadRequests, stop := reloadSignalRequests(
+		func(signals chan<- os.Signal, requested ...os.Signal) {
+			registered = signals
+			if len(requested) != 1 || requested[0] != syscall.SIGHUP {
+				t.Fatalf("requested signals = %#v", requested)
+			}
+		},
+		func(signals chan<- os.Signal) {
+			stopped = signals == registered
+		},
+	)
+	registered <- syscall.SIGHUP
+	select {
+	case <-reloadRequests:
+	case <-t.Context().Done():
+		t.Fatal("reload signal was not forwarded")
+	}
+	stop()
+	if !stopped {
+		t.Fatal("signal registration was not stopped")
+	}
+}

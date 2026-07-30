@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
@@ -23,12 +25,14 @@ func buildReconciler(
 type providerCommands struct {
 	DockerCommandRunner  dockerprovider.CommandRunner
 	LibvirtCommandRunner libvirtprovider.CommandRunner
+	ReadLibvirtTemplate  func(string) ([]byte, error)
 }
 
 func productionProviderCommands() providerCommands {
 	return providerCommands{
-		DockerCommandRunner:  dockerprovider.ExecCommandRunner{},
-		LibvirtCommandRunner: libvirtprovider.ExecCommandRunner{},
+		DockerCommandRunner:  dockerprovider.NewExecCommandRunner(),
+		LibvirtCommandRunner: libvirtprovider.NewExecCommandRunner(),
+		ReadLibvirtTemplate:  os.ReadFile,
 	}
 }
 
@@ -48,7 +52,8 @@ func buildReconcilerWithCommands(
 		return buildDockerReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.DockerCommandRunner)
 	}
 	if scaleSetConfig.Libvirt != nil {
-		return buildLibvirtReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID, providers.LibvirtCommandRunner)
+		return buildLibvirtReconciler(ctx, repositoryURL, scaleSetConfig, client, scaleSetID,
+			providers.LibvirtCommandRunner, libvirtTemplateReader(providers))
 	}
 	return scaler.Reconciler{}, fmt.Errorf("scale set %q has no provider", scaleSetConfig.Name)
 }
@@ -68,13 +73,14 @@ func validateScaleSetProvider(ctx context.Context, scaleSetConfig config.ScaleSe
 		return nil
 	}
 	if scaleSetConfig.Libvirt != nil {
-		provider := libvirtprovider.Provider{
-			CommandRunner: providers.LibvirtCommandRunner,
-			Config: libvirtprovider.Config{
+		provider := libvirtprovider.NewProviderWithTemplateReader(
+			providers.LibvirtCommandRunner,
+			libvirtprovider.Config{
 				ConnectionURI:     scaleSetConfig.Libvirt.ConnectionURI,
 				DomainXMLTemplate: scaleSetConfig.Libvirt.DomainXMLTemplate,
 			},
-		}
+			libvirtTemplateReader(providers),
+		)
 		if err := provider.Validate(ctx); err != nil {
 			return fmt.Errorf("validate libvirt provider: %w", err)
 		}
@@ -110,17 +116,26 @@ func buildLibvirtReconciler(
 	client scaleSetJITClient,
 	scaleSetID int,
 	commandRunner libvirtprovider.CommandRunner,
+	readTemplate func(string) ([]byte, error),
 ) (scaler.Reconciler, error) {
 	provider := libvirtProviderAdapter{
-		Provider: libvirtprovider.Provider{
-			CommandRunner: commandRunner,
-			Config: libvirtprovider.Config{
+		Provider: libvirtprovider.NewProviderWithTemplateReader(
+			commandRunner,
+			libvirtprovider.Config{
 				ConnectionURI:     scaleSetConfig.Libvirt.ConnectionURI,
 				DomainXMLTemplate: scaleSetConfig.Libvirt.DomainXMLTemplate,
 			},
-		},
+			readTemplate,
+		),
 	}
 	return validatedReconciler(ctx, repositoryURL, scaleSetConfig, provider, provider.Provider.Validate, "libvirt", client, scaleSetID)
+}
+
+func libvirtTemplateReader(providers providerCommands) func(string) ([]byte, error) {
+	if providers.ReadLibvirtTemplate != nil {
+		return providers.ReadLibvirtTemplate
+	}
+	return func(string) ([]byte, error) { return nil, errors.New("libvirt template reader is not configured") }
 }
 
 func newReconciler(

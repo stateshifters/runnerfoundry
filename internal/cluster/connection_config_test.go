@@ -1,12 +1,15 @@
 package cluster
 
 import (
+	"errors"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
@@ -58,7 +61,6 @@ func TestSettingsResolveStructuredEnvironmentReferences(t *testing.T) {
 	for _, field := range structuredConnectionFields() {
 		t.Run(field.name, func(t *testing.T) {
 			environmentName := "SCALER_TEST_" + strings.ToUpper(field.name)
-			t.Setenv(environmentName, field.want)
 			assertStructuredConnectionField(t, field, "env://"+environmentName)
 		})
 	}
@@ -79,7 +81,11 @@ func assertStructuredConnectionField(t *testing.T, field structuredConnectionFie
 	t.Helper()
 	settings := Settings{Role: "runnerfoundry"}
 	field.set(&settings, configuredValue)
-	resolved, err := primaryConnectionConfig(settings)
+	environment := map[string]string{}
+	if strings.HasPrefix(configuredValue, "env://") {
+		environment[strings.TrimPrefix(configuredValue, "env://")] = field.want
+	}
+	resolved, err := primaryConnectionConfigWithResolver(settings, testConnectionResolver(environment))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,14 +97,16 @@ func assertStructuredConnectionField(t *testing.T, field structuredConnectionFie
 func TestSettingsResolveEveryDSNSource(t *testing.T) {
 	values := newConnectionFixtureValues()
 	dsn := values.dsn("database.internal", "6432", "runnerfoundry")
-	t.Setenv("SCALER_TEST_DSN", dsn)
 	tests := map[string]string{
 		"literal":     dsn,
 		"environment": "env://SCALER_TEST_DSN",
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
-			resolved, err := primaryConnectionConfig(Settings{DSN: source, Role: "runnerfoundry"})
+			resolved, err := primaryConnectionConfigWithResolver(
+				Settings{DSN: source, Role: "runnerfoundry"},
+				testConnectionResolver(map[string]string{"SCALER_TEST_DSN": dsn}),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,14 +118,13 @@ func TestSettingsResolveEveryDSNSource(t *testing.T) {
 }
 
 func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
-	t.Setenv("SCALER_TEST_ROLE", "runnerfoundry")
 	for sourceName, roleSource := range map[string]string{
 		"literal": "runnerfoundry", "environment": "env://SCALER_TEST_ROLE",
 	} {
 		t.Run(sourceName, func(t *testing.T) {
-			resolved, err := primaryConnectionConfig(Settings{
+			resolved, err := primaryConnectionConfigWithResolver(Settings{
 				DSN: "postgres://login@primary/scaler?role=wrong", Role: roleSource,
-			})
+			}, testConnectionResolver(map[string]string{"SCALER_TEST_ROLE": "runnerfoundry"}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,7 +140,7 @@ func TestSettingsBuildDirectConnection(t *testing.T) {
 		Host: "pool", Port: "6432", Name: "scaler", User: "login", Password: "secret", Role: "runnerfoundry",
 		Direct: &Endpoint{Host: "database", Port: "5432"},
 	}
-	resolved, err := directConnectionConfig(settings)
+	resolved, err := directConnectionConfigWithResolver(settings, testConnectionResolver(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +175,7 @@ func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			resolved, err := directConnectionConfig(test.settings)
+			resolved, err := directConnectionConfigWithResolver(test.settings, testConnectionResolver(nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -181,10 +188,10 @@ func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 
 func TestSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) {
 	const directDSN = "postgres://direct-user@direct:6432/direct"
-	if _, err := directConnectionConfig(Settings{
+	if _, err := directConnectionConfigWithResolver(Settings{
 		Host: "primary", Role: "runnerfoundry",
 		Direct: &Endpoint{DSN: directDSN, Host: "direct"},
-	}); err == nil {
+	}, testConnectionResolver(nil)); err == nil {
 		t.Fatal("expected direct DSN and structured settings conflict")
 	}
 }
@@ -197,7 +204,7 @@ func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := directConnectionConfig(settings); err == nil {
+			if _, err := directConnectionConfigWithResolver(settings, testConnectionResolver(nil)); err == nil {
 				t.Fatal("expected direct connection settings error")
 			}
 		})
@@ -205,12 +212,17 @@ func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T
 }
 
 func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
-	t.Setenv("PGHOST", "environment-host")
-	t.Setenv("PGPORT", "6543")
-	t.Setenv("PGDATABASE", "environment-name")
-	t.Setenv("PGUSER", "environment-user")
-	t.Setenv("PGPASSWORD", "environment-password")
-	resolved, err := primaryConnectionConfig(Settings{Role: "runnerfoundry"})
+	resolver := testConnectionResolver(nil)
+	resolver.parseConfig = func(connectionString string) (*pgx.ConnConfig, error) {
+		if connectionString != "" {
+			return nil, errors.New("unexpected connection string")
+		}
+		return &pgx.ConnConfig{Config: pgconn.Config{
+			Host: "environment-host", Port: 6543, Database: "environment-name",
+			User: "environment-user", Password: "environment-password", RuntimeParams: map[string]string{},
+		}}, nil
+	}
+	resolved, err := primaryConnectionConfigWithResolver(Settings{Role: "runnerfoundry"}, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +232,6 @@ func TestSettingsUseStandardPostgreSQLEnvironmentDefaults(t *testing.T) {
 }
 
 func TestSettingsRejectInvalidEnvironmentReferencesWithoutDisclosure(t *testing.T) {
-	t.Setenv("SCALER_EMPTY_SECRET", "")
 	tests := map[string]Settings{
 		"missing role environment": {Host: "database", Role: "env://SCALER_MISSING_ROLE"},
 		"missing environment":      settingsWithProofReference("env://SCALER_MISSING_SECRET"),
@@ -263,7 +274,7 @@ func TestSettingsRejectMalformedDSNWithoutDisclosure(t *testing.T) {
 
 func assertConnectionSettingsRejectedWithoutDisclosure(t *testing.T, settings Settings) {
 	t.Helper()
-	_, err := primaryConnectionConfig(settings)
+	_, err := primaryConnectionConfigWithResolver(settings, testConnectionResolver(map[string]string{"SCALER_EMPTY_SECRET": ""}))
 	if err == nil {
 		t.Fatal("expected connection settings to fail")
 	}
@@ -272,4 +283,84 @@ func assertConnectionSettingsRejectedWithoutDisclosure(t *testing.T, settings Se
 			t.Fatalf("error exposed PostgreSQL configuration: %q", err)
 		}
 	}
+}
+
+func testConnectionResolver(environment map[string]string) connectionSettingResolver {
+	return connectionSettingResolver{
+		readCredentialFile: func(string) ([]byte, error) { return nil, errors.New("missing credential file") },
+		localizeCredentialPath: func(filePath string) (string, error) {
+			if !path.IsAbs(filePath) {
+				return "", errInvalidCredentialFilePath
+			}
+			return filePath, nil
+		},
+		lookupEnvironment: func(name string) (string, bool) {
+			value, exists := environment[name]
+			return value, exists
+		},
+		parseConfig: parseDeterministicConnectionConfig,
+	}
+}
+
+func parseDeterministicConnectionConfig(connectionString string) (*pgx.ConnConfig, error) {
+	if connectionString == "" {
+		return emptyTestConnectionConfig(), nil
+	}
+	parsed, err := url.Parse(connectionString)
+	if err != nil {
+		return nil, errors.New("invalid connection string")
+	}
+	return deterministicConnectionConfigFromURL(parsed)
+}
+
+func deterministicConnectionConfigFromURL(parsed *url.URL) (*pgx.ConnConfig, error) {
+	config := emptyTestConnectionConfig()
+	config.Host = parsed.Hostname()
+	config.Database = strings.TrimPrefix(parsed.Path, "/")
+	if parsed.User != nil {
+		config.User = parsed.User.Username()
+		config.Password, _ = parsed.User.Password()
+	}
+	port, err := deterministicConnectionPort(parsed.Port())
+	if err != nil {
+		return nil, err
+	}
+	config.Port = port
+	applyDeterministicConnectionQuery(config, parsed.Query())
+	queryPort, err := deterministicConnectionPort(parsed.Query().Get("port"))
+	if err != nil {
+		return nil, err
+	}
+	if queryPort != 0 {
+		config.Port = queryPort
+	}
+	return config, nil
+}
+
+func emptyTestConnectionConfig() *pgx.ConnConfig {
+	return &pgx.ConnConfig{Config: pgconn.Config{RuntimeParams: map[string]string{}}}
+}
+
+func applyDeterministicConnectionQuery(config *pgx.ConnConfig, values url.Values) {
+	for key, destination := range map[string]*string{
+		"host": &config.Host, "dbname": &config.Database, "user": &config.User, "password": &config.Password,
+	} {
+		if value := values.Get(key); value != "" {
+			*destination = value
+		}
+	}
+	if role := values.Get("role"); role != "" {
+		config.RuntimeParams["role"] = role
+	}
+}
+
+func deterministicConnectionPort(value string) (uint16, error) {
+	if value == "" {
+		return 0, nil
+	}
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		return 0, errors.New("invalid connection port")
+	}
+	return uint16(port), nil
 }

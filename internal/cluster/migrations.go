@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/tern/v2/migrate"
 )
@@ -35,7 +34,7 @@ type MigrationStatus struct {
 // Migrate serializes startup migration, applies only known forward migrations,
 // and accepts a newer schema only when its compatibility floor includes this binary.
 func (store *Store) Migrate(ctx context.Context) (resultErr error) {
-	connection, err := store.connectDirectPostgreSQL(ctx)
+	connection, err := store.directConnector(ctx)
 	if err != nil {
 		return err
 	}
@@ -46,15 +45,15 @@ func (store *Store) Migrate(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return safePostgreSQLError("initialize PostgreSQL migrations", err)
 	}
-	current, err := migrator.GetCurrentVersion(ctx)
+	current, err := migrator.currentVersion(ctx)
 	if err != nil {
 		return safePostgreSQLError("read PostgreSQL migration version", err)
 	}
-	target := migrationTarget(migrator)
+	target := migrator.target
 	if current > target {
 		return validateCompatibility(ctx, connection, target)
 	}
-	if err = migrator.MigrateTo(ctx, target); err != nil {
+	if err = migrator.migrateTo(ctx, target); err != nil {
 		return safePostgreSQLError("apply PostgreSQL migrations", err)
 	}
 	return validateCompatibility(ctx, connection, target)
@@ -62,7 +61,7 @@ func (store *Store) Migrate(ctx context.Context) (resultErr error) {
 
 // MigrationStatus reports the database version without creating migration metadata or domain objects.
 func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus, resultErr error) {
-	connection, err := store.connectDirectPostgreSQL(ctx)
+	connection, err := store.directConnector(ctx)
 	if err != nil {
 		return MigrationStatus{}, err
 	}
@@ -81,7 +80,7 @@ func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus
 	if !versionTableExists {
 		return status, nil
 	}
-	if status.Current, err = inspectMigrationVersion(ctx, connection); err != nil {
+	if status.Current, err = store.inspectMigrationVersion(ctx, connection); err != nil {
 		return MigrationStatus{}, err
 	}
 	if status.Current == 0 {
@@ -93,12 +92,12 @@ func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus
 	return status, nil
 }
 
-func inspectMigrationVersion(ctx context.Context, connection *pgx.Conn) (int32, error) {
-	migrator, err := migrate.NewMigrator(ctx, connection, migrationVersionTable)
+func (store *Store) inspectMigrationVersion(ctx context.Context, connection leaderConnection) (int32, error) {
+	migrator, err := store.migrationFactory(ctx, connection)
 	if err != nil {
 		return 0, safePostgreSQLError("initialize PostgreSQL migration metadata", err)
 	}
-	current, err := migrator.GetCurrentVersion(ctx)
+	current, err := migrator.currentVersion(ctx)
 	if err != nil {
 		return 0, safePostgreSQLError("read PostgreSQL migration version", err)
 	}
@@ -113,7 +112,7 @@ func (store *Store) MigrateDown(
 	now time.Time,
 	liveFor time.Duration,
 ) (resultErr error) {
-	connection, err := store.connectDirectPostgreSQL(ctx)
+	connection, err := store.directConnector(ctx)
 	if err != nil {
 		return err
 	}
@@ -124,7 +123,7 @@ func (store *Store) MigrateDown(
 	if err != nil {
 		return safePostgreSQLError("initialize PostgreSQL migrations", err)
 	}
-	current, err := migrator.GetCurrentVersion(ctx)
+	current, err := migrator.currentVersion(ctx)
 	if err != nil {
 		return safePostgreSQLError("read PostgreSQL migration version", err)
 	}
@@ -134,7 +133,7 @@ func (store *Store) MigrateDown(
 	if err = store.ensureRollbackAllowed(ctx, connection, now.Add(-liveFor)); err != nil {
 		return err
 	}
-	if err = migrator.MigrateTo(ctx, target); err != nil {
+	if err = migrator.migrateTo(ctx, target); err != nil {
 		return safePostgreSQLError("roll back PostgreSQL migrations", err)
 	}
 	return nil
@@ -147,7 +146,7 @@ func validateRollbackTarget(target int32, current int32) error {
 	return nil
 }
 
-func (store *Store) ensureRollbackAllowed(ctx context.Context, connection *pgx.Conn, liveCutoff time.Time) error {
+func (store *Store) ensureRollbackAllowed(ctx context.Context, connection leaderConnection, liveCutoff time.Time) error {
 	var leaderAvailable bool
 	if err := connection.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderAdvisoryLockKey).Scan(&leaderAvailable); err != nil {
 		return errors.New("check PostgreSQL leader lease")
@@ -172,22 +171,30 @@ func migrationTarget(migrator *migrate.Migrator) int32 {
 	return migrator.Migrations[len(migrator.Migrations)-1].Sequence
 }
 
-func (store *Store) lockedMigrator(ctx context.Context, connection *pgx.Conn) (*migrate.Migrator, error) {
+func (store *Store) lockedMigrator(ctx context.Context, connection leaderConnection) (*migrationExecutor, error) {
 	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryLockKey); err != nil {
 		return nil, fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
 	}
-	return store.newMigrator(ctx, connection)
+	return store.migrationFactory(ctx, connection)
 }
 
-func (store *Store) newMigrator(ctx context.Context, connection *pgx.Conn) (*migrate.Migrator, error) {
-	migrator, err := migrate.NewMigrator(ctx, connection, migrationVersionTable)
+func (store *Store) newMigrationExecutor(ctx context.Context, connection leaderConnection) (*migrationExecutor, error) {
+	postgresConnection, valid := connection.(*postgreSQLLeaderConnection)
+	if !valid {
+		return nil, errors.New("PostgreSQL migration connection is required")
+	}
+	migrator, err := store.newTernMigrator(ctx, postgresConnection.connection, migrationVersionTable)
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL migrator: %w", err)
 	}
 	if err = store.loadMigrations(migrator); err != nil {
 		return nil, err
 	}
-	return migrator, nil
+	return &migrationExecutor{
+		currentVersion: migrator.GetCurrentVersion,
+		migrateTo:      migrator.MigrateTo,
+		target:         migrationTarget(migrator),
+	}, nil
 }
 
 func (store *Store) migrationCatalog() (*migrate.Migrator, error) {
@@ -218,7 +225,7 @@ func validateReversibleMigrations(migrator *migrate.Migrator) error {
 	return nil
 }
 
-func validateCompatibility(ctx context.Context, connection *pgx.Conn, binaryTarget int32) error {
+func validateCompatibility(ctx context.Context, connection leaderConnection, binaryTarget int32) error {
 	var compatibilityFloor int32
 	if err := connection.QueryRow(ctx, `SELECT oldest_binary_schema_generation FROM scaler_schema_compatibility WHERE singleton`).Scan(&compatibilityFloor); err != nil {
 		return errors.New("read PostgreSQL schema compatibility")
@@ -227,6 +234,12 @@ func validateCompatibility(ctx context.Context, connection *pgx.Conn, binaryTarg
 		return errors.New("PostgreSQL schema is incompatible with this binary")
 	}
 	return nil
+}
+
+type migrationExecutor struct {
+	currentVersion func(context.Context) (int32, error)
+	migrateTo      func(context.Context, int32) error
+	target         int32
 }
 
 type postgreSQLCloser interface {

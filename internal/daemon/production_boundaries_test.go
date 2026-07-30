@@ -32,6 +32,9 @@ func TestClusteredSessionRejectsAnInvalidRepositoryURL(t *testing.T) {
 	configured := clusteredConfig(t)
 	setValidGitHubCredentials(t, &configured)
 	daemon := newClusteredDaemon()
+	daemon.loadCredentials = func(config.GitHubConfig) (config.GitHubAppCredentials, error) {
+		return testAppCredentials(t), nil
+	}
 	if err := daemon.connectGitHub(configured); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +54,8 @@ func setValidGitHubCredentials(t *testing.T, configured *config.Config) {
 	t.Helper()
 	credentials := testAppCredentials(t)
 	configured.GitHub.App.AppID = credentials.AppID
-	configured.GitHub.App.PrivateKey = ""
-	configured.GitHub.App.PrivateKeyFile = writeFile(t, "github-app.pem", credentials.PrivateKey)
+	configured.GitHub.App.PrivateKey = credentials.PrivateKey
+	configured.GitHub.App.PrivateKeyFile = ""
 }
 
 func TestProductionLeadershipConnectionsReportCredentialResolutionFailure(t *testing.T) {
