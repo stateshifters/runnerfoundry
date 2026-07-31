@@ -47,6 +47,7 @@ type clusteredRunnerLifecycleState interface {
 }
 
 func (daemon *clusteredDaemon) executePendingRunnerReaps(ctx context.Context) bool {
+	daemon.ensureRunnerReapRetries()
 	lifecycleStore, supported := daemon.assignments.(clusteredRunnerLifecycleState)
 	if !supported {
 		return daemon.executePendingLibvirtReaps(ctx)
@@ -71,6 +72,7 @@ func (daemon *clusteredDaemon) executePendingRunnerReaps(ctx context.Context) bo
 		daemon.logger.Error("load pending runner reaps failed", slog.String("error", err.Error()))
 		return false
 	}
+	daemon.runnerReapRetries.prune(pending)
 	for _, runner := range pending {
 		daemon.executePendingRunnerReap(ctx, configuration, lifecycleStore, runner)
 	}
@@ -125,20 +127,70 @@ func (daemon *clusteredDaemon) reapPendingRunnerLifecycle(
 	reconciler scaler.Reconciler,
 	runner scaler.RunnerLifecycle,
 ) {
-	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
-	absent, err := reconciler.ReapRunnerLifecycle(reapCtx, runner)
-	cancelReap()
+	daemon.ensureRunnerReapRetries()
+	if !daemon.runnerReapRetries.ready(runner) {
+		return
+	}
+	absent, err := reapRunnerLifecycleWithTimeout(ctx, reconciler, runner)
+	if daemon.deferBusyRunnerReap(ctx, runner, err) {
+		return
+	}
 	if err != nil {
-		daemon.logger.Error("pending runner reap failed",
-			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+		daemon.runnerReapRetries.clear(runner)
+		logActionFailure(ctx, daemon.logger, "runner_reap", err, runnerLogAttributes(runner)...)
 		return
 	}
 	if !absent {
+		daemon.runnerReapRetries.clear(runner)
 		return
 	}
-	if err = lifecycleStore.ConfirmRunnerReaped(ctx, runner); err != nil {
-		daemon.logger.Error("confirm pending runner absence failed",
-			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
+	daemon.confirmPendingRunnerReap(ctx, lifecycleStore, runner)
+}
+
+func reapRunnerLifecycleWithTimeout(
+	ctx context.Context,
+	reconciler scaler.Reconciler,
+	runner scaler.RunnerLifecycle,
+) (bool, error) {
+	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
+	defer cancelReap()
+	absent, err := reconciler.ReapRunnerLifecycle(reapCtx, runner)
+	if err != nil {
+		return false, fmt.Errorf("reap runner lifecycle: %w", err)
+	}
+	return absent, nil
+}
+
+func (daemon *clusteredDaemon) deferBusyRunnerReap(
+	ctx context.Context,
+	runner scaler.RunnerLifecycle,
+	err error,
+) bool {
+	if !errors.Is(err, scaler.ErrRunnerStillBusy) {
+		return false
+	}
+	retryAfter := daemon.runnerReapRetries.deferRunner(runner)
+	logAction(ctx, daemon.logger, slog.LevelDebug, "runner_reap", "deferred",
+		append(runnerLogAttributes(runner), slog.Duration("retryAfter", retryAfter))...)
+	return true
+}
+
+func (daemon *clusteredDaemon) confirmPendingRunnerReap(
+	ctx context.Context,
+	lifecycleStore clusteredRunnerLifecycleState,
+	runner scaler.RunnerLifecycle,
+) {
+	if err := lifecycleStore.ConfirmRunnerReaped(ctx, runner); err != nil {
+		logActionFailure(ctx, daemon.logger, "runner_reap_confirm", err, runnerLogAttributes(runner)...)
+		return
+	}
+	daemon.runnerReapRetries.clear(runner)
+	logAction(ctx, daemon.logger, slog.LevelInfo, "runner_reap", "completed", runnerLogAttributes(runner)...)
+}
+
+func (daemon *clusteredDaemon) ensureRunnerReapRetries() {
+	if daemon.runnerReapRetries == nil {
+		daemon.runnerReapRetries = newRunnerReapRetryTracker(time.Now)
 	}
 }
 

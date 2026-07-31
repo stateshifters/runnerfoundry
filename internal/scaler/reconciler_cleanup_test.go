@@ -51,6 +51,22 @@ func TestReapRunnerLifecycleRetainsIncompleteCleanup(t *testing.T) {
 	}
 }
 
+func TestReapRunnerLifecycleDefersBusyGitHubRegistration(t *testing.T) {
+	registry := &lifecycleRegistry{
+		runners:   map[string]JITRunner{"runner": {ID: 1, Name: "runner"}},
+		removeErr: ErrRunnerStillBusy,
+	}
+	reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{
+		Name: "set", Provider: &lifecycleProvider{}, JITConfig: registry,
+	}}).ReapRunnerLifecycle(context.Background(), RunnerLifecycle{RunnerName: "runner", GitHubRunnerID: 1})
+	if reaped || !errors.Is(err, ErrRunnerStillBusy) {
+		t.Fatalf("reaped=%t err=%v", reaped, err)
+	}
+	if _, found := registry.runners["runner"]; !found {
+		t.Fatal("expected busy registration to remain")
+	}
+}
+
 func assertReapRunnerLifecycleCase(t *testing.T, test reapRunnerLifecycleCase) {
 	t.Helper()
 	reaped, err := (Reconciler{ScaleSet: ScaleSetRuntime{Name: "set", Provider: test.provider, JITConfig: test.registry}}).

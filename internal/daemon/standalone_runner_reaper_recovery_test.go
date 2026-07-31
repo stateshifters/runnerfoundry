@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,132 @@ import (
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
+
+func TestStandaloneRunnerReaperDefersBusyRegistrationWithoutError(t *testing.T) {
+	fixture := newStandaloneBusyReapFixture(t)
+	reapPendingRunners(context.Background(), fixture.lifecycleConfig)
+	reapPendingRunners(context.Background(), fixture.lifecycleConfig)
+	fixture.assertDeferred(t)
+}
+
+type standaloneBusyReapFixture struct {
+	lifecycleConfig coordinatedLifecycleConfig
+	coordinator     *scaler.Coordinator
+	registry        *busyRunnerRegistry
+	logs            *bytes.Buffer
+}
+
+func newStandaloneBusyReapFixture(t *testing.T) standaloneBusyReapFixture {
+	t.Helper()
+	ctx := context.Background()
+	store := scaler.NewMemoryDemandStore()
+	runner := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo", RunnerName: "linux-1",
+		GitHubRunnerID: 7, Phase: scaler.RunnerReapPending}
+	if err := store.RegisterRunner(ctx, runner); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
+	registry := &busyRunnerRegistry{runner: scaler.JITRunner{ID: 7, Name: "linux-1"}}
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: registry,
+	}}
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	retries := newRunnerReapRetryTracker(func() time.Time {
+		return time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	})
+	lifecycleConfig := coordinatedLifecycleConfig{Logger: logger, RepositoryURL: "repo",
+		ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
+		Coordinator:    coordinator, Reconciler: reconciler, RunnerReapRetries: retries}
+	return standaloneBusyReapFixture{
+		lifecycleConfig: lifecycleConfig, coordinator: coordinator, registry: registry, logs: logs,
+	}
+}
+
+func (fixture standaloneBusyReapFixture) assertDeferred(t *testing.T) {
+	t.Helper()
+	if fixture.registry.removeCalls != 1 {
+		t.Fatalf("remove calls=%d", fixture.registry.removeCalls)
+	}
+	pending, err := fixture.coordinator.PendingRunnerReaps(context.Background(), "repo")
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	if output := fixture.logs.String(); !strings.Contains(output, "action=runner_reap phase=deferred") || strings.Contains(output, "level=ERROR") {
+		t.Fatalf("unexpected logs: %s", output)
+	}
+}
+
+func TestBusyProviderAbsentRunnerDoesNotBlockUnrelatedRepositoryScheduling(t *testing.T) {
+	fixture := newUnrelatedRepositorySchedulingFixture(t)
+	if err := fixture.coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.assertScheduled(t)
+}
+
+type unrelatedRepositorySchedulingFixture struct {
+	coordinator  *scaler.Coordinator
+	provider     *incidentLifecycleProvider
+	busyRegistry *busyRunnerRegistry
+}
+
+func newUnrelatedRepositorySchedulingFixture(t *testing.T) unrelatedRepositorySchedulingFixture {
+	t.Helper()
+	ctx := context.Background()
+	store := scaler.NewMemoryDemandStore()
+	busyLifecycle := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo-a", RunnerName: "linux-1",
+		GitHubRunnerID: 7, Phase: scaler.RunnerReapPending}
+	if err := store.RegisterRunner(ctx, busyLifecycle); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := scaler.NewDurableCoordinator("linux", 2, store)
+	provider := &incidentLifecycleProvider{}
+	busyRegistry := &busyRunnerRegistry{runner: scaler.JITRunner{ID: 7, Name: "linux-1"}}
+	replacementRegistry := newIncidentJITRegistry()
+	busyReconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", LifecycleScaleSet: "linux", Repository: "repo-a", MaxRunners: 2,
+		Provider: provider, JITConfig: busyRegistry, Lifecycle: store,
+	}}
+	replacementReconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", LifecycleScaleSet: "linux", Repository: "repo-b", MaxRunners: 2,
+		Provider: provider, JITConfig: replacementRegistry, Lifecycle: store,
+	}}
+	coordinator.AddRepository("repo-a", coordinatedRepositoryWorker{Reconciler: busyReconciler})
+	coordinator.AddRepository("repo-b", coordinatedRepositoryWorker{Reconciler: replacementReconciler})
+	coordinator.ObserveAssigned("repo-b", 1)
+	return unrelatedRepositorySchedulingFixture{
+		coordinator: coordinator, provider: provider, busyRegistry: busyRegistry,
+	}
+}
+
+func (fixture unrelatedRepositorySchedulingFixture) assertScheduled(t *testing.T) {
+	t.Helper()
+	if len(fixture.provider.started) != 1 || fixture.provider.started[0].RunnerName != "linux-2" {
+		t.Fatalf("started=%#v", fixture.provider.started)
+	}
+	if fixture.busyRegistry.removeCalls != 0 {
+		t.Fatalf("busy runner removal calls=%d", fixture.busyRegistry.removeCalls)
+	}
+}
+
+type busyRunnerRegistry struct {
+	runner      scaler.JITRunner
+	removeCalls int
+}
+
+func (registry *busyRunnerRegistry) Generate(context.Context, string) (scaler.JITRunnerConfig, error) {
+	return scaler.JITRunnerConfig{}, errors.New("unexpected generate")
+}
+
+func (registry *busyRunnerRegistry) Remove(context.Context, scaler.JITRunner) error {
+	registry.removeCalls++
+	return scaler.ErrRunnerStillBusy
+}
+
+func (registry *busyRunnerRegistry) Find(context.Context, string) (scaler.JITRunner, bool, error) {
+	return registry.runner, true, nil
+}
 
 func TestCanceledAssignedRunnerIsReapedBeforeReplacementConsumesCapacity(t *testing.T) {
 	fixture := incidentLifecycleFixture(t, 1)

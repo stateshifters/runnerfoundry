@@ -42,7 +42,7 @@ func (generator scalesetJITGenerator) replaceStaleRunnerAndGenerate(
 	if staleRunner == nil {
 		return scaler.JITRunnerConfig{}, fmt.Errorf("find stale runner after jit conflict for %q: %w", runnerName, generateErr)
 	}
-	removeErr := generator.Client.RemoveRunner(ctx, int64(staleRunner.ID))
+	removeErr := generator.removeRunner(ctx, scaler.JITRunner{ID: int64(staleRunner.ID), Name: staleRunner.Name})
 	if removeErr != nil {
 		return scaler.JITRunnerConfig{}, fmt.Errorf("remove stale runner %q: %w", runnerName, removeErr)
 	}
@@ -59,10 +59,17 @@ func (generator scalesetJITGenerator) replaceStaleRunnerAndGenerate(
 }
 
 func (generator scalesetJITGenerator) Remove(ctx context.Context, runner scaler.JITRunner) error {
+	return generator.removeRunner(ctx, runner)
+}
+
+func (generator scalesetJITGenerator) removeRunner(ctx context.Context, runner scaler.JITRunner) error {
 	if runner.ID == 0 {
 		return nil
 	}
 	if err := generator.Client.RemoveRunner(ctx, runner.ID); err != nil {
+		if errors.Is(err, upstream.JobStillRunningError) {
+			return fmt.Errorf("%w: remove jit runner %q: %w", scaler.ErrRunnerStillBusy, runner.Name, err)
+		}
 		return fmt.Errorf("remove jit runner %q: %w", runner.Name, err)
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,66 @@ func TestAssignmentExecutionPhasesRetainStructuredLogValues(t *testing.T) {
 	if assignmentExecutionPhaseRepair != "repair" {
 		t.Fatalf("repair phase = %q, want repair", assignmentExecutionPhaseRepair)
 	}
+}
+
+func TestClusteredRunnerReaperDefersBusyRegistrationWithoutError(t *testing.T) {
+	runner := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo", RunnerName: "linux-1",
+		GitHubRunnerID: 7, Phase: scaler.RunnerReapPending}
+	registry := &busyRunnerRegistry{runner: scaler.JITRunner{ID: 7, Name: "linux-1"}}
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: registry,
+	}}
+	logs := &bytes.Buffer{}
+	state := newLifecycleClusterState(&fakeClusterState{})
+	now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	daemon := clusteredDaemon{
+		logger:            slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		runnerReapRetries: newRunnerReapRetryTracker(func() time.Time { return now }),
+	}
+
+	daemon.reapPendingRunnerLifecycle(context.Background(), state, reconciler, runner)
+	daemon.reapPendingRunnerLifecycle(context.Background(), state, reconciler, runner)
+
+	if registry.removeCalls != 1 || len(state.confirmed) != 0 {
+		t.Fatalf("remove calls=%d confirmed=%#v", registry.removeCalls, state.confirmed)
+	}
+	if output := logs.String(); !strings.Contains(output, "action=runner_reap phase=deferred") || strings.Contains(output, "level=ERROR") {
+		t.Fatalf("unexpected logs: %s", output)
+	}
+}
+
+func TestClusteredRunnerReaperReportsUnexpectedFailure(t *testing.T) {
+	runner := scaler.RunnerLifecycle{ScaleSet: "linux", Repository: "repo", RunnerName: "linux-1",
+		GitHubRunnerID: 7, Phase: scaler.RunnerReapPending}
+	registry := &lifecycleRegistryFailure{runner: scaler.JITRunner{ID: 7, Name: "linux-1"}}
+	reconciler := scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
+		Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: registry,
+	}}
+	logs := &bytes.Buffer{}
+	daemon := clusteredDaemon{logger: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+
+	daemon.reapPendingRunnerLifecycle(context.Background(), newLifecycleClusterState(&fakeClusterState{}), reconciler, runner)
+
+	if output := logs.String(); !strings.Contains(output, "action=runner_reap phase=failed") ||
+		!strings.Contains(output, "level=ERROR") || strings.Contains(output, "phase=deferred") {
+		t.Fatalf("unexpected logs: %s", output)
+	}
+}
+
+type lifecycleRegistryFailure struct {
+	runner scaler.JITRunner
+}
+
+func (*lifecycleRegistryFailure) Generate(context.Context, string) (scaler.JITRunnerConfig, error) {
+	return scaler.JITRunnerConfig{}, errors.New("unexpected generate")
+}
+
+func (*lifecycleRegistryFailure) Remove(context.Context, scaler.JITRunner) error {
+	return errors.New("github unavailable")
+}
+
+func (registry *lifecycleRegistryFailure) Find(context.Context, string) (scaler.JITRunner, bool, error) {
+	return registry.runner, true, nil
 }
 
 func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
