@@ -17,7 +17,7 @@ type scaleSetLifecycle struct {
 	RunnerScaleSetID int
 	StopPolling      func()
 	CloseSession     func(ctx context.Context) error
-	Drain            func(ctx context.Context) (int, error)
+	Running          func(ctx context.Context) (int, error)
 	DestroyActive    func(ctx context.Context) error
 	Shutdown         func(ctx context.Context) error
 }

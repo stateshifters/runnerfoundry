@@ -101,14 +101,6 @@ func cleanupLifecycle(ctx context.Context, target lifecycleCleanup, mode shutdow
 	return fmt.Errorf("shutdown %q %q: %w", target.repositoryURL, target.scaleSetName, err)
 }
 
-func stopPolling(ctx context.Context, activeConfig activeConfiguration) {
-	for repositoryURL, repository := range activeConfig.Repositories {
-		for scaleSetName, lifecycle := range repository.Lifecycles {
-			stopLifecyclePolling(ctx, activeConfig.Logger, repositoryURL, scaleSetName, lifecycle)
-		}
-	}
-}
-
 func stopLifecyclePolling(ctx context.Context, logger *slog.Logger, repositoryURL string, scaleSetName string, lifecycle scaleSetLifecycle) {
 	logAction(ctx, logger, slog.LevelDebug, "polling_stop", "started",
 		slog.String("repository", repositoryURL),

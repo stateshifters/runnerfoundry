@@ -187,7 +187,7 @@ C4Component
         Component(poller, "Message poller and handler", "internal/scaleset and internal/daemon", "Persists message effects and invokes scheduling before acknowledgement")
         Component(coordinator, "Per-scale-set coordinator", "internal/scaler", "Shares capacity across repositories and admits FIFO demand")
         Component(worker, "Repository worker", "internal/daemon", "Acquires one repository request and delegates runner operations")
-        Component(reconciler, "Runner reconciler", "internal/scaler", "Recovers, starts, drains, and cleans provider-visible runners")
+        Component(reconciler, "Runner reconciler", "internal/scaler", "Recovers, starts, inspects, and cleans provider-visible runners")
     }
 
     Rel(discovery, session, "Creates and removes for every repository and scale set")
@@ -264,11 +264,13 @@ Each scale set applies `job_start_timeout`, defaulting to `10m`, to the persiste
 
 Pending Docker and libvirt reaps are attempted before new provisioning and then once per second. Cleanup destroys only the exact owned provider instance, removes its exact GitHub registration, and retains `reap_pending` plus its capacity charge until both absences are confirmed. Confirmed cleanup immediately reschedules retained demand.
 
-A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. It discovers replacement repositories and confirms their complete registration sets before stopping the old generation. The daemon then stops pollers, waits for active runners to drain, closes old message sessions without deleting registrations, removes demand for scale sets absent from the replacement, creates replacement coordinators and sessions over the same store, and schedules retained demand. Optional pruning runs only after replacement activation succeeds. Demand belonging to removed repositories or scale sets is intentionally deleted. Durable provider lifecycle records remain until the owning configuration and host access return and confirm absence.
+A reload first loads and validates the complete replacement configuration and App credentials. The SQLite path must be unchanged. It discovers replacement repositories and confirms their complete registration sets before stopping the old generation. For a retained scale-set name with a changed Docker or libvirt definition, the coordinator waits for any in-flight scheduling pass and then suspends provisioning. Pollers continue persisting demand while the old provider is inspected. The change proceeds only when inspection reports no running instances. Rejection releases the provisioning fence and schedules retained demand through the still-operational old generation.
+
+After preflight succeeds, the daemon stops old pollers, closes old message sessions without deleting registrations, creates replacement coordinators and sessions over the same store, and schedules retained demand. It does not wait for provider runners to exit. Busy runners and durable lifecycle obligations survive the session-generation handover. Session-close and stale-demand cleanup failures are reported but cannot roll the process back to a generation whose pollers have already stopped. Optional pruning runs only after replacement activation succeeds. Demand belonging to removed repositories or scale sets is intentionally deleted. Durable provider lifecycle records remain until the owning configuration and host access return and confirm absence.
 
 Normal process shutdown stops polling and closes message sessions and scale sets with bounded, concurrent cleanup. It does not destroy active runners. Repository access removal is immediate and does destroy active runners because the repository is no longer within the App's authority.
 
-Reload drain inspection runs once per second and has no separate drain deadline. It continues until no active runners remain or the process context is canceled. Cancellation makes the reload fail rather than replacing configuration while runners are still active. Individual session cleanup during shutdown or reload has a 30-second context.
+Provisioning-fence acquisition and provider inspection for a changed scale-set definition share a 30-second context. Individual session cleanup also has a 30-second context. The daemon returns systemd to ready only after a rejected preflight or the replacement reconciliation attempt finishes. A preflight failure leaves the old generation active; a post-handover cleanup failure leaves the replacement generation active and visible as incomplete cleanup in structured logs.
 
 ### Standalone deployment
 
