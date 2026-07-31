@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -82,6 +83,24 @@ func TestJITGeneratorSurfacesStaleRunnerRemovalFailure(t *testing.T) {
 	generator := scalesetJITGenerator{Client: client}
 	if _, err := generator.Generate(context.Background(), "linux-1"); err == nil {
 		t.Fatal("expected remove error")
+	}
+}
+
+func TestJITGeneratorClassifiesBusyStaleRunnerRemoval(t *testing.T) {
+	client := fakeScaleSetJITClient{
+		generateJitRunnerConfig: func(context.Context, *upstream.RunnerScaleSetJitRunnerSetting, int) (*upstream.RunnerScaleSetJitRunnerConfig, error) {
+			return nil, upstream.RunnerExistsError
+		},
+		getRunnerByName: func(context.Context, string) (*upstream.RunnerReference, error) {
+			return &upstream.RunnerReference{ID: 99, Name: "linux-1"}, nil
+		},
+		removeRunner: func(context.Context, int64) error {
+			return fmt.Errorf("github response: %w", upstream.JobStillRunningError)
+		},
+	}
+	generator := scalesetJITGenerator{Client: client}
+	if _, err := generator.Generate(context.Background(), "linux-1"); !errors.Is(err, scaler.ErrRunnerStillBusy) {
+		t.Fatalf("expected busy runner classification, got %v", err)
 	}
 }
 
@@ -205,6 +224,17 @@ func TestJITGeneratorSurfacesRemoveFailure(t *testing.T) {
 	generator := scalesetJITGenerator{Client: client}
 	if err := generator.Remove(context.Background(), scaler.JITRunner{ID: 99, Name: "linux-1"}); err == nil {
 		t.Fatal("expected remove error")
+	}
+}
+
+func TestJITGeneratorClassifiesBusyRunnerRemoval(t *testing.T) {
+	client := fakeScaleSetJITClient{removeRunner: func(context.Context, int64) error {
+		return fmt.Errorf("github response: %w", upstream.JobStillRunningError)
+	}}
+	generator := scalesetJITGenerator{Client: client}
+	err := generator.Remove(context.Background(), scaler.JITRunner{ID: 99, Name: "linux-1"})
+	if !errors.Is(err, scaler.ErrRunnerStillBusy) {
+		t.Fatalf("expected busy runner classification, got %v", err)
 	}
 }
 

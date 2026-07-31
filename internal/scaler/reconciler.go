@@ -111,6 +111,9 @@ func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerNam
 		usedRunnerNames[runnerName] = true
 		return reconciler.startRunner(ctx, runnerName, requestID)
 	}
+	if err = reconciler.reserveLifecycleRunnerNames(ctx, usedRunnerNames); err != nil {
+		return err
+	}
 	return reconciler.startMissingRunners(ctx, runningCount, runningCount+1, usedRunnerNames)
 }
 
@@ -176,10 +179,30 @@ func (reconciler Reconciler) Reconcile(ctx context.Context, assignedJobs int) (i
 	if err != nil {
 		return 0, err
 	}
+	if err = reconciler.reserveLifecycleRunnerNames(ctx, usedRunnerNames); err != nil {
+		return 0, err
+	}
 	if err := reconciler.startMissingRunners(ctx, runningCount, desiredCount, usedRunnerNames); err != nil {
 		return 0, err
 	}
 	return desiredCount, nil
+}
+
+func (reconciler Reconciler) reserveLifecycleRunnerNames(ctx context.Context, usedRunnerNames map[string]bool) error {
+	inventory, supported := reconciler.ScaleSet.Lifecycle.(RunnerLifecycleInventory)
+	if !supported {
+		return nil
+	}
+	lifecycles, err := inventory.RunnerLifecycles(ctx, reconciler.lifecycleScaleSet(), "")
+	if err != nil {
+		return fmt.Errorf("load reserved runner names: %w", err)
+	}
+	for _, runner := range lifecycles {
+		if runner.RunnerName != "" {
+			usedRunnerNames[runner.RunnerName] = true
+		}
+	}
+	return nil
 }
 
 func (reconciler Reconciler) Drain(ctx context.Context) (int, error) {

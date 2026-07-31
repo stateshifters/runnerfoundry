@@ -63,6 +63,7 @@ type clusteredDaemon struct {
 	workers                   sync.WaitGroup
 	leadershipRetryDelay      time.Duration
 	waitBeforeLeadershipRetry func(context.Context, time.Duration) bool
+	runnerReapRetries         *runnerReapRetryTracker
 	configurationMutex        sync.RWMutex
 }
 
@@ -148,6 +149,7 @@ func newClusteredDaemon() *clusteredDaemon {
 		notifier:                  newSystemdNotifier(),
 		leadershipRetryDelay:      clusterLeadershipRetryDelay,
 		waitBeforeLeadershipRetry: waitForRetryDelay,
+		runnerReapRetries:         newRunnerReapRetryTracker(time.Now),
 	}
 }
 

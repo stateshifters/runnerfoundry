@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -117,22 +118,27 @@ func runPreparedCoordinatedScaleSet(ctx context.Context, prepared preparedCoordi
 		Logger: prepared.logger, Client: prepared.client, RepositoryURL: prepared.repositoryURL,
 		ScaleSetConfig: prepared.scaleSetConfig, Coordinator: prepared.coordinator, RunnerScaleSet: prepared.runnerScaleSet,
 		MessageClient: prepared.messageClient, Reconciler: reconciler, RetryDelay: prepared.operations.PollRetryDelay,
+		RunnerReapRetries: newRunnerReapRetryTracker(time.Now),
 	}), nil
 }
 
 type coordinatedLifecycleConfig struct {
-	Logger         *slog.Logger
-	Client         scaleSetDeletionClient
-	RepositoryURL  string
-	ScaleSetConfig config.ScaleSetConfig
-	Coordinator    *scaler.Coordinator
-	RunnerScaleSet *upstream.RunnerScaleSet
-	MessageClient  scaleSetMessageClient
-	Reconciler     scaler.Reconciler
-	RetryDelay     time.Duration
+	Logger            *slog.Logger
+	Client            scaleSetDeletionClient
+	RepositoryURL     string
+	ScaleSetConfig    config.ScaleSetConfig
+	Coordinator       *scaler.Coordinator
+	RunnerScaleSet    *upstream.RunnerScaleSet
+	MessageClient     scaleSetMessageClient
+	Reconciler        scaler.Reconciler
+	RetryDelay        time.Duration
+	RunnerReapRetries *runnerReapRetryTracker
 }
 
 func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) scaleSetLifecycle {
+	if lifecycleConfig.RunnerReapRetries == nil {
+		lifecycleConfig.RunnerReapRetries = newRunnerReapRetryTracker(time.Now)
+	}
 	provider := scaler.RunnerProviderDocker
 	if lifecycleConfig.ScaleSetConfig.Libvirt != nil {
 		provider = scaler.RunnerProviderLibvirt
@@ -228,50 +234,85 @@ func runRunnerReaper(ctx context.Context, lifecycleConfig coordinatedLifecycleCo
 }
 
 func reapPendingRunners(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) {
-	now := time.Now().UTC()
+	if lifecycleConfig.RunnerReapRetries == nil {
+		lifecycleConfig.RunnerReapRetries = newRunnerReapRetryTracker(time.Now)
+	}
+	if !requestExpiredRunnerReaps(ctx, lifecycleConfig) {
+		return
+	}
+	pending, loaded := loadPendingRunnerReaps(ctx, lifecycleConfig)
+	if !loaded {
+		return
+	}
+	lifecycleConfig.RunnerReapRetries.prune(pending)
+	for _, runner := range pending {
+		if !lifecycleConfig.RunnerReapRetries.ready(runner) {
+			continue
+		}
+		reapPendingRunner(ctx, lifecycleConfig, runner)
+	}
+}
+
+func requestExpiredRunnerReaps(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) bool {
 	timeout, err := lifecycleConfig.ScaleSetConfig.JobStartDuration()
 	if err != nil {
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_timeout_parse", err,
 			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
-		return
+		return false
 	}
-	expired, err := lifecycleConfig.Coordinator.RequestExpiredRunnerReaps(ctx, lifecycleConfig.RepositoryURL, timeout, now)
+	expired, err := lifecycleConfig.Coordinator.RequestExpiredRunnerReaps(
+		ctx, lifecycleConfig.RepositoryURL, timeout, time.Now().UTC(),
+	)
 	if err != nil {
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_timeout_reconcile", err,
 			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
-		return
+		return false
 	}
 	if expired > 0 {
 		logAction(ctx, lifecycleConfig.Logger, slog.LevelWarn, "runner_timeout", "cleanup_requested",
 			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name),
 			slog.Int("runners", expired), slog.Duration("jobStartTimeout", timeout))
 	}
+	return true
+}
+
+func loadPendingRunnerReaps(
+	ctx context.Context,
+	lifecycleConfig coordinatedLifecycleConfig,
+) ([]scaler.RunnerLifecycle, bool) {
 	pending, err := lifecycleConfig.Coordinator.PendingRunnerReaps(ctx, lifecycleConfig.RepositoryURL)
 	if err != nil {
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_reap_load", err,
 			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
-		return
+		return nil, false
 	}
-	for _, runner := range pending {
-		reapPendingRunner(ctx, lifecycleConfig, runner)
-	}
+	return pending, true
 }
 
 func reapPendingRunner(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig, runner scaler.RunnerLifecycle) {
 	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
 	reaped, err := lifecycleConfig.Reconciler.ReapRunnerLifecycle(reapCtx, runner)
 	cancelReap()
+	if errors.Is(err, scaler.ErrRunnerStillBusy) {
+		retryAfter := lifecycleConfig.RunnerReapRetries.deferRunner(runner)
+		logAction(ctx, lifecycleConfig.Logger, slog.LevelDebug, "runner_reap", "deferred",
+			append(runnerLogAttributes(runner), slog.Duration("retryAfter", retryAfter))...)
+		return
+	}
 	if err != nil {
+		lifecycleConfig.RunnerReapRetries.clear(runner)
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_reap", err, runnerLogAttributes(runner)...)
 		return
 	}
 	if !reaped {
+		lifecycleConfig.RunnerReapRetries.clear(runner)
 		return
 	}
 	if err = lifecycleConfig.Coordinator.ConfirmRunnerReaped(ctx, runner); err != nil {
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_reap_confirm", err, runnerLogAttributes(runner)...)
 		return
 	}
+	lifecycleConfig.RunnerReapRetries.clear(runner)
 	logAction(ctx, lifecycleConfig.Logger, slog.LevelInfo, "runner_reap", "completed", runnerLogAttributes(runner)...)
 	if err = lifecycleConfig.Coordinator.Schedule(ctx); err != nil {
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_replacement", err,

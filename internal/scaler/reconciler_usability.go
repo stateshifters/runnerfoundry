@@ -6,6 +6,8 @@ import (
 	"fmt"
 )
 
+var ErrRunnerStillBusy = errors.New("runner still busy")
+
 func (reconciler Reconciler) ReapRunner(ctx context.Context, runnerName string) (bool, error) {
 	terminalDestroyer, supported := reconciler.ScaleSet.Provider.(terminalRunnerDestroyer)
 	if !supported {
