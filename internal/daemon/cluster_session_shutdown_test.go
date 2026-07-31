@@ -132,7 +132,7 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 	logs := &bytes.Buffer{}
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
-	daemon.nodeID = "spock"
+	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 	leader := newClusterLeader(&daemon, &fakeClusterLease{})
 	session := stoppedSession(
@@ -146,14 +146,14 @@ func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 	}
 
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"close leader message session failed","hostname":"spock","error":"close message session: close failed"}`)
+		`{"level":"ERROR","msg":"close leader message session failed","hostname":"runner-host-1","error":"close message session: close failed"}`)
 }
 
 func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.nodeID = "spock"
+	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 	lease := &fakeClusterLease{closeErr: errors.New("failed")}
 	leader := newClusterLeader(&daemon, lease)
@@ -165,13 +165,13 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 		t.Fatalf("sessions=%v scheduled=%v leaseClosed=%t", leader.sessions, leader.scheduler.sessions, lease.closed)
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close leader lease failed","hostname":"spock","error":"failed"}`)
+		`{"level":"WARN","msg":"close leader lease failed","hostname":"runner-host-1","error":"failed"}`)
 }
 
 func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	logs := &bytes.Buffer{}
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
-	daemon.nodeID = "spock"
+	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 	leader := newClusterLeader(&daemon, &fakeClusterLease{closeErr: errors.New("lease failed")})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
@@ -184,9 +184,9 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	leader.stop(context.Background())
 
 	assertClusterLogSnapshot(t, logs,
-		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"spock\",\"error\":\"close message session: session failed\"}\n"+
-			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"spock\",\"error\":\"close message session: session failed\"}\n"+
-			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"spock\",\"error\":\"lease failed\"}")
+		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
+			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
+			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"lease failed\"}")
 }
 
 func TestSuccessfulReconciliationResultReturnsTrue(t *testing.T) {
@@ -198,13 +198,13 @@ func TestSuccessfulReconciliationResultReturnsTrue(t *testing.T) {
 
 func TestFailedReconciliationResultLogsAndReturnsFalse(t *testing.T) {
 	logs := &bytes.Buffer{}
-	daemon := &clusteredDaemon{nodeID: "spock", logger: newClusterLogSnapshotLogger(logs)}
+	daemon := &clusteredDaemon{nodeID: "runner-host-1", logger: newClusterLogSnapshotLogger(logs)}
 	leader := newClusterLeader(daemon, &fakeClusterLease{})
 	if leader.reportReconciliationResult(errors.New("shutdown failed")) {
 		t.Fatal("failed reconciliation result returned true")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"stop outdated leader sessions failed","hostname":"spock","error":"shutdown failed"}`)
+		`{"level":"ERROR","msg":"stop outdated leader sessions failed","hostname":"runner-host-1","error":"shutdown failed"}`)
 }
 
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {

@@ -52,7 +52,7 @@ Operational diagnostics will identify non-secret nodes, scale sets, repositories
 
 ## Consequences
 
-Spock contributing 10 runners and Serenity contributing 2 runners to the same compatible scale set yields 12 effective runners while preserving limits of 10 and 2 at assignment time. Hosts can also contribute unrelated scale sets, and the leader need not have a provider for every scale set it manages. PostgreSQL transactions serialize FIFO assignment and advisory locking limits active management to one leader.
+runner-host-1 contributing 10 runners and runner-host-2 contributing 2 runners to the same compatible scale set yields 12 effective runners while preserving limits of 10 and 2 at assignment time. Hosts can also contribute unrelated scale sets, and the leader need not have a provider for every scale set it manages. PostgreSQL transactions serialize FIFO assignment and advisory locking limits active management to one leader.
 
 Clustered deployments now depend on a highly available PostgreSQL service and database connectivity. Temporary node loss reduces capacity and may cause an acquired request whose runner never started to be retried after the node expires; stable request-derived runner names continue to provide provider-side recovery identity. Github acquisition, provider startup, and PostgreSQL still cannot form one atomic transaction, so recovery favors retaining or retrying demand over claiming exactly-once execution.
 

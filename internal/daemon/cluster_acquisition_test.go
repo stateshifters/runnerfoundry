@@ -13,7 +13,7 @@ import (
 func TestClusterMessageHandlerPersistsDemandBeforeScheduling(t *testing.T) {
 	now := time.Now()
 	state := &fakeClusterState{assignments: []*cluster.Assignment{{
-		ID: 8, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 9,
+		ID: 8, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 9,
 	}}}
 	messageClient := &fakeMessageClient{}
 	session := &repositoryScaleSetSession{
@@ -42,7 +42,7 @@ func TestClusterMessageHandlerPersistsDemandBeforeScheduling(t *testing.T) {
 func TestAcquisitionConfirmationRetryDoesNotAcquireTwice(t *testing.T) {
 	state := &fakeClusterState{
 		assignments: []*cluster.Assignment{{
-			ID: 8, NodeID: "spock", State: cluster.AssignmentReserved,
+			ID: 8, NodeID: "runner-host-1", State: cluster.AssignmentReserved,
 			ScaleSet: "linux", Repository: "repo", RequestID: 9,
 		}},
 		confirmFailuresRemaining: 1,
@@ -69,7 +69,7 @@ func TestAcquisitionConfirmationRetryDoesNotAcquireTwice(t *testing.T) {
 func TestPendingAcquisitionRecoveryReacquiresOnlyMatchingScaleSet(t *testing.T) {
 	state := &fakeClusterState{pendingAssignments: []cluster.Assignment{
 		{ID: 1, ScaleSet: "other", State: cluster.AssignmentAcquiring},
-		{ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 9, State: cluster.AssignmentAcquiring},
+		{ID: 2, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 9, State: cluster.AssignmentAcquiring},
 	}}
 	messageClient := &fakeMessageClient{}
 	session := &repositoryScaleSetSession{
@@ -90,7 +90,7 @@ func TestPendingAcquisitionRecoveryReacquiresOnlyMatchingScaleSet(t *testing.T) 
 
 func TestPendingAcquisitionWithoutSessionIsCompleted(t *testing.T) {
 	state := &fakeClusterState{pendingAssignments: []cluster.Assignment{{
-		ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", State: cluster.AssignmentAcquiring,
+		ID: 2, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", State: cluster.AssignmentAcquiring,
 	}}}
 	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
 	if err := scheduler.schedule(context.Background(), "linux"); err != nil {
@@ -113,7 +113,7 @@ func TestPendingAcquisitionLoadFailureIsReturned(t *testing.T) {
 func TestPendingAcquisitionReleaseFailureIsReturned(t *testing.T) {
 	failure := errors.New("failed")
 	state := &fakeClusterState{pendingAssignments: []cluster.Assignment{{
-		ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", State: cluster.AssignmentAcquiring,
+		ID: 2, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", State: cluster.AssignmentAcquiring,
 	}}, releaseErr: failure}
 	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
 	if err := scheduler.schedule(context.Background(), "linux"); !errors.Is(err, failure) {

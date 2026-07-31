@@ -56,7 +56,7 @@ func TestClusterLibvirtLifecycleReportsConnectionFailures(t *testing.T) {
 	if err := store.CompleteJob(context.Background(), JobCompletion{}); err == nil {
 		t.Fatal("expected completion failure")
 	}
-	if _, err := store.PendingLibvirtReaps(context.Background(), "spock"); err == nil {
+	if _, err := store.PendingLibvirtReaps(context.Background(), "runner-host-1"); err == nil {
 		t.Fatal("expected pending failure")
 	}
 	if err := store.ConfirmLibvirtReaped(context.Background(), testClusterLibvirtRunner()); err == nil {
@@ -72,7 +72,7 @@ func TestPendingLibvirtReapsReportsDatabaseFailures(t *testing.T) {
 	}
 	for index, connection := range connections {
 		t.Run(string(rune('a'+index)), func(t *testing.T) {
-			if _, err := storeWithConnection(connection).PendingLibvirtReaps(context.Background(), "spock"); err == nil {
+			if _, err := storeWithConnection(connection).PendingLibvirtReaps(context.Background(), "runner-host-1"); err == nil {
 				t.Fatal("expected failure")
 			}
 		})
@@ -89,7 +89,7 @@ func TestConfirmLibvirtReapedReportsDatabaseFailures(t *testing.T) {
 }
 
 func testClusterLibvirtRunner() LibvirtRunnerLifecycle {
-	return LibvirtRunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
+	return LibvirtRunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
 }
 
 func scanBoolean(t *testing.T, value bool) func(...any) {

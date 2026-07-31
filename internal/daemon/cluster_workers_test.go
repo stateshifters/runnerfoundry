@@ -157,18 +157,18 @@ func TestAssignedRunnerStartFailureIsReturnedWhenRunnerRemainsAbsent(t *testing.
 
 func TestAssignmentRecoveryStopsAfterLoadOrRepairFailure(t *testing.T) {
 	state := &fakeClusterState{startingErr: errors.New("database unavailable")}
-	daemon := clusteredDaemon{nodeID: "spock", logger: slog.Default(), assignments: state}
+	daemon := clusteredDaemon{nodeID: "runner-host-1", logger: slog.Default(), assignments: state}
 	daemon.executeAssignments(context.Background())
 	if len(state.claimedNodeIDs) != 0 {
 		t.Fatalf("claims after recovery load failure = %v", state.claimedNodeIDs)
 	}
 
 	state = &fakeClusterState{startingAssignments: []cluster.Assignment{{
-		ID: 1, NodeID: "spock", ScaleSet: "linux", Repository: "repo",
+		ID: 1, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo",
 	}}}
 	daemonFixture := clusteredDaemonForTest(state)
 	daemon = clusteredDaemon{
-		nodeID: "spock", config: clusteredConfig(t), credentials: testAppCredentials(t),
+		nodeID: "runner-host-1", config: clusteredConfig(t), credentials: testAppCredentials(t),
 		logger: slog.Default(), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
 		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
 		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, assignments: state,
@@ -208,7 +208,7 @@ func clusteredConfig(t *testing.T) config.Config {
 
 func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 	return &clusteredDaemon{
-		hostname:      func() (string, error) { return "spock", nil },
+		hostname:      func() (string, error) { return "runner-host-1", nil },
 		newLogger:     func(string, string) *slog.Logger { return slog.Default() },
 		loadConfig:    loadConfig,
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return staticDiscoverer{}, nil },

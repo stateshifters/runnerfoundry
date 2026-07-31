@@ -11,7 +11,7 @@ import (
 )
 
 func testRunnerLifecycle() scaler.RunnerLifecycle {
-	return scaler.RunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
+	return scaler.RunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
 		RunnerName: "linux-42", RequestID: 42, AssignmentID: 7, CreatedAt: time.Now().UTC(), Phase: scaler.RunnerReapPending}
 }
 
@@ -30,7 +30,7 @@ func TestClusterRunnerLifecycleReportsConnectionFailures(t *testing.T) {
 			return err
 		},
 		func() error { _, err := store.PendingRunnerReaps(ctx, "linux", "repo"); return err },
-		func() error { _, err := store.PendingNodeRunnerReaps(ctx, "spock"); return err },
+		func() error { _, err := store.PendingNodeRunnerReaps(ctx, "runner-host-1"); return err },
 		func() error { _, err := store.RunnerLifecycles(ctx, "linux", "repo"); return err },
 		func() error { return store.ConfirmRunnerReaped(ctx, runner) },
 	}
@@ -116,7 +116,7 @@ func TestClusterRunnerLifecycleQueriesReportFailures(t *testing.T) {
 			return err
 		},
 		func(store *Store) error {
-			_, err := store.PendingNodeRunnerReaps(context.Background(), "spock")
+			_, err := store.PendingNodeRunnerReaps(context.Background(), "runner-host-1")
 			return err
 		},
 		func(store *Store) error {

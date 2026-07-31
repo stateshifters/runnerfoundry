@@ -181,7 +181,7 @@ func TestLoadAcceptsPostgreSQLClusterStateSources(t *testing.T) {
 func TestLoadRejectsConfiguredPostgreSQLNodeID(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n",
-		"state:\n  postgres:\n    node_id: spock\n", 1)
+		"state:\n  postgres:\n    node_id: runner-host-1\n", 1)
 
 	_, err := Load(strings.NewReader(configText))
 	if err == nil || !strings.Contains(err.Error(), "field node_id not found") {

@@ -34,7 +34,7 @@ func TestRunClusteredDaemonPublishesStartupAndShutdown(t *testing.T) {
 	if !state.publications[0].healthy || state.publications[1].healthy {
 		t.Fatalf("startup and shutdown health was not published: %#v", state.publications)
 	}
-	if state.publications[0].nodeID != "spock" || state.publications[1].nodeID != "spock" {
+	if state.publications[0].nodeID != "runner-host-1" || state.publications[1].nodeID != "runner-host-1" {
 		t.Fatalf("operating-system hostname was not used as node identity: %#v", state.publications)
 	}
 	contribution := state.publications[0].contributions[0]
@@ -234,13 +234,13 @@ func TestCanceledLeadershipDeliveryClosesLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	lease := &fakeClusterLease{closeErr: errors.New("close failed")}
-	daemon := clusteredDaemon{nodeID: "spock", logger: newClusterLogSnapshotLogger(logs)}
+	daemon := clusteredDaemon{nodeID: "runner-host-1", logger: newClusterLogSnapshotLogger(logs)}
 	daemon.deliverLeadership(ctx, make(chan leadershipResult), lease)
 	if !lease.closed {
 		t.Fatal("canceled delivery did not close lease")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close canceled leader lease failed","hostname":"spock","error":"close failed"}`)
+		`{"level":"WARN","msg":"close canceled leader lease failed","hostname":"runner-host-1","error":"close failed"}`)
 }
 
 func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
@@ -251,7 +251,7 @@ func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
 	results := make(chan leadershipResult, 1)
 	results <- leadershipResult{lease: lease}
 	daemon := clusteredDaemon{
-		nodeID: "spock", logger: newClusterLogSnapshotLogger(logs), leadershipResults: results,
+		nodeID: "runner-host-1", logger: newClusterLogSnapshotLogger(logs), leadershipResults: results,
 		stopContender: func() {}, contenderDone: done,
 	}
 	daemon.stopLeadershipContender(context.Background())
@@ -259,7 +259,7 @@ func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
 		t.Fatal("unclaimed lease was not closed")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close unclaimed leader lease failed","hostname":"spock","error":"close failed"}`)
+		`{"level":"WARN","msg":"close unclaimed leader lease failed","hostname":"runner-host-1","error":"close failed"}`)
 	daemon.stopLeadershipContender(context.Background())
 }
 
@@ -355,14 +355,14 @@ func TestLeadershipContenderFailureLogsNodeIdentity(t *testing.T) {
 		return nil, errors.New("temporary failure")
 	}}
 	daemon := clusteredDaemon{
-		nodeID: "spock", waitForLeader: fakeWaitForLeader(state),
+		nodeID: "runner-host-1", waitForLeader: fakeWaitForLeader(state),
 		logger: newClusterLogSnapshotLogger(cancelingWriter{cancel: cancel, writer: logs}),
 	}
 
 	daemon.contendForLeadership(ctx, make(chan leadershipResult, 1), make(chan struct{}))
 
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"leader contender failed","hostname":"spock","error":"temporary failure"}`)
+		`{"level":"ERROR","msg":"leader contender failed","hostname":"runner-host-1","error":"temporary failure"}`)
 }
 
 type cancelingWriter struct {

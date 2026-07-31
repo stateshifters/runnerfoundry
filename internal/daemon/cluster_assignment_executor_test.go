@@ -181,7 +181,7 @@ func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
 	state := &fakeClusterState{}
 	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
-		nodeID: "spock",
+		nodeID: "runner-host-1",
 		config: configured, logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 		loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
@@ -197,7 +197,7 @@ func TestClusteredDaemonPublishesProviderHealth(t *testing.T) {
 	if err := daemon.publish(context.Background(), cluster.NodeHealthy); err != nil {
 		t.Fatal(err)
 	}
-	if len(state.publications) != 1 || state.publications[0].nodeID != "spock" ||
+	if len(state.publications) != 1 || state.publications[0].nodeID != "runner-host-1" ||
 		!state.publications[0].contributions[0].Healthy || state.publications[0].contributions[1].Healthy {
 		t.Fatalf("provider health was not reflected in contributions: %#v", state.publications)
 	}
@@ -213,7 +213,7 @@ func TestClusteredExecutorUsesOnlyLocalScaleSets(t *testing.T) {
 		t.Fatalf("local assignment was not executed: started=%#v provider=%#v", state.started, provider.started)
 	}
 	for _, nodeID := range state.claimedNodeIDs {
-		if nodeID != "spock" {
+		if nodeID != "runner-host-1" {
 			t.Fatalf("assignment was claimed for node %q", nodeID)
 		}
 	}
@@ -229,7 +229,7 @@ func TestClusteredExecutorRegistersLibvirtRunnerBeforeStart(t *testing.T) {
 		t.Fatalf("started=%#v registered=%#v", provider.started, state.registeredLibvirtRunners)
 	}
 	registered := state.registeredLibvirtRunners[0]
-	if registered.NodeID != "spock" || registered.RequestID != 2 || registered.RunnerName != provider.started[0].RunnerName {
+	if registered.NodeID != "runner-host-1" || registered.RequestID != 2 || registered.RunnerName != provider.started[0].RunnerName {
 		t.Fatalf("registered lifecycle = %#v; start = %#v", registered, provider.started[0])
 	}
 }

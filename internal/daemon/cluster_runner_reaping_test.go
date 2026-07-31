@@ -14,7 +14,7 @@ import (
 
 func TestClusteredExecutorProcessesProviderIndependentReaps(t *testing.T) {
 	configured := clusteredConfig(t)
-	runner := scaler.RunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+	runner := scaler.RunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
 		RunnerName: "linux-2", InstallationID: 3, GitHubScaleSetID: 4, Phase: scaler.RunnerReapPending}
 	base := &fakeClusterState{}
 	state := newLifecycleClusterState(base)
@@ -23,7 +23,7 @@ func TestClusteredExecutorProcessesProviderIndependentReaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	daemon := clusteredDaemonForTest(base)
-	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
 	daemon.credentials = testAppCredentials(t)
 	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &incidentLifecycleProvider{}, JITConfig: newIncidentJITRegistry()}}, nil
@@ -74,7 +74,7 @@ var clusteredRunnerReapBoundaryCases = []struct {
 }
 
 func TestClusteredExecutorRetainsProviderIndependentReapsAtBoundaries(t *testing.T) {
-	runner := scaler.RunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
+	runner := scaler.RunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderDocker,
 		RunnerName: "linux-2", InstallationID: 3, GitHubScaleSetID: 4, Phase: scaler.RunnerReapPending}
 	for _, test := range clusteredRunnerReapBoundaryCases {
 		t.Run(test.name, func(t *testing.T) {
@@ -85,7 +85,7 @@ func TestClusteredExecutorRetainsProviderIndependentReapsAtBoundaries(t *testing
 				t.Fatal(err)
 			}
 			daemon := clusteredDaemonForTest(base)
-			daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", clusteredConfig(t), slog.Default(), state
+			daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", clusteredConfig(t), slog.Default(), state
 			daemon.credentials = testAppCredentials(t)
 			test.configure(daemon, state)
 			if got := daemon.executePendingRunnerReaps(context.Background()); got != test.want {
@@ -100,13 +100,13 @@ func TestClusteredExecutorRetainsReapUntilSecondInspectionConfirmsAbsence(t *tes
 	configured.ScaleSets[0].Docker = nil
 	configured.ScaleSets[0].Libvirt = &config.LibvirtConfig{ConnectionURI: "test", DomainXMLTemplate: "test"}
 	runner := cluster.LibvirtRunnerLifecycle{
-		NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2",
+		NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2",
 	}
 	state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
 	instance := scaler.RunnerInstance{ID: "domain", RunnerName: runner.RunnerName, State: scaler.RunnerStateRunning}
 	provider := &clusterReapingProvider{lists: [][]scaler.RunnerInstance{{instance}, {instance}, nil}}
 	daemon := clusteredDaemonForTest(state)
-	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
 	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
 		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: provider}}, nil
 	}
@@ -124,11 +124,11 @@ func TestClusteredExecutorRetainsReapUntilSecondInspectionConfirmsAbsence(t *tes
 func TestClusteredExecutorRetainsReapWhenLocalLibvirtConfigurationIsMissing(t *testing.T) {
 	configured := clusteredConfig(t)
 	runner := cluster.LibvirtRunnerLifecycle{
-		NodeID: "spock", ScaleSet: "missing", Repository: "repo", RequestID: 2, RunnerName: "missing-2",
+		NodeID: "runner-host-1", ScaleSet: "missing", Repository: "repo", RequestID: 2, RunnerName: "missing-2",
 	}
 	state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
 	daemon := clusteredDaemonForTest(state)
-	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
 
 	daemon.executeAssignments(context.Background())
 	if len(state.confirmedLibvirtReaps) != 0 {
@@ -179,13 +179,13 @@ func runClusterReapBoundaryFailure(
 ) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
-		runner := cluster.LibvirtRunnerLifecycle{NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2"}
+		runner := cluster.LibvirtRunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2"}
 		state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
 		daemon := clusteredDaemonForTest(state)
 		configured := clusteredConfig(t)
 		configured.ScaleSets[0].Docker = nil
 		configured.ScaleSets[0].Libvirt = &config.LibvirtConfig{}
-		daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "spock", configured, slog.Default(), state
+		daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
 		configure(daemon, state)
 		daemon.executeAssignments(context.Background())
 	})
@@ -210,8 +210,8 @@ func clusteredAssignmentExecutorFixture(t *testing.T) (*clusteredDaemon, *fakeCl
 	t.Helper()
 	configured := clusteredConfig(t)
 	state := &fakeClusterState{readyAssignments: []*cluster.Assignment{
-		{ID: 1, NodeID: "spock", ScaleSet: "remote-only", Repository: "repo", RequestID: 1},
-		{ID: 2, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2, InstallationID: 3, GitHubScaleSetID: 4},
+		{ID: 1, NodeID: "runner-host-1", ScaleSet: "remote-only", Repository: "repo", RequestID: 1},
+		{ID: 2, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2, InstallationID: 3, GitHubScaleSetID: 4},
 	}}
 	provider := &fakeScalerProvider{trackStarted: true}
 	daemonUnderTest := clusteredDaemonForTest(state)
@@ -222,7 +222,7 @@ func clusteredAssignmentExecutorFixture(t *testing.T) (*clusteredDaemon, *fakeCl
 			Name: "linux", MaxRunners: 10, Provider: provider, JITConfig: fakeJITConfigGenerator{},
 		}}, nil
 	}
-	daemonUnderTest.nodeID = "spock"
+	daemonUnderTest.nodeID = "runner-host-1"
 	daemonUnderTest.config = configured
 	daemonUnderTest.credentials = testAppCredentials(t)
 	daemonUnderTest.logger = slog.Default()

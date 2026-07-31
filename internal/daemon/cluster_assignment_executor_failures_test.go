@@ -30,7 +30,7 @@ func TestAssignmentExecutorStopsAfterClaimFailure(t *testing.T) {
 func TestAssignmentExecutorLeavesRemovedScaleSetFailureInStarting(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{
-		readyAssignments: []*cluster.Assignment{{ID: 1, NodeID: "spock", ScaleSet: "removed"}},
+		readyAssignments: []*cluster.Assignment{{ID: 1, NodeID: "runner-host-1", ScaleSet: "removed"}},
 		releaseErr:       errors.New("failed"),
 	}
 	daemon := activeClusteredDaemon(t, state)
@@ -109,7 +109,7 @@ func TestAssignmentExecutorReportsRunningTransitionFailure(t *testing.T) {
 
 func localAssignment() *cluster.Assignment {
 	return &cluster.Assignment{
-		ID: 1, NodeID: "spock", ScaleSet: "linux", Repository: "repo", RequestID: 2,
+		ID: 1, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2,
 		InstallationID: 3, GitHubScaleSetID: 4,
 	}
 }

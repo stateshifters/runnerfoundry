@@ -266,7 +266,7 @@ func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
 	state := &fakeClusterState{publishErr: errors.New("heartbeat failed")}
 	daemonFixture := clusteredDaemonForTest(state)
 	daemon := clusteredDaemon{
-		nodeID: "spock", config: clusteredConfig(t), discoverer: staticDiscoverer{},
+		nodeID: "runner-host-1", config: clusteredConfig(t), discoverer: staticDiscoverer{},
 		logger: newClusterLogSnapshotLogger(logs), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
 		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
 		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
@@ -274,14 +274,14 @@ func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
 	}
 	daemon.heartbeat(context.Background())
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"cluster heartbeat failed","hostname":"spock","error":"publish clustered node contributions: heartbeat failed"}`)
+		`{"level":"ERROR","msg":"cluster heartbeat failed","hostname":"runner-host-1","error":"publish clustered node contributions: heartbeat failed"}`)
 }
 
 func TestClusterLeadershipFailureRemainsRetryable(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{tryLeaderErr: errors.New("election failed")}
 	daemon := clusteredDaemon{
-		nodeID:    "spock",
+		nodeID:    "runner-host-1",
 		logger:    newClusterLogSnapshotLogger(logs),
 		tryLeader: fakeTryLeader(state),
 	}
@@ -290,19 +290,19 @@ func TestClusterLeadershipFailureRemainsRetryable(t *testing.T) {
 		t.Fatalf("expected retryable election failure, leader=%#v", daemon.leader)
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"leader election failed","hostname":"spock","error":"election failed"}`)
+		`{"level":"ERROR","msg":"leader election failed","hostname":"runner-host-1","error":"election failed"}`)
 }
 
 func TestClusterStatusNotificationFailureLogsNodeIdentity(t *testing.T) {
 	logs := &bytes.Buffer{}
 	daemon := clusteredDaemon{
-		nodeID: "spock", logger: newClusterLogSnapshotLogger(logs), notifier: failingStatusNotifier{},
+		nodeID: "runner-host-1", logger: newClusterLogSnapshotLogger(logs), notifier: failingStatusNotifier{},
 	}
 
 	daemon.notifyStatus(context.Background(), clusterServiceStatusLeaderDegraded)
 
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"notify clustered service status failed","hostname":"spock","error":"status unavailable"}`)
+		`{"level":"WARN","msg":"notify clustered service status failed","hostname":"runner-host-1","error":"status unavailable"}`)
 }
 
 func TestClusterHeartbeatPreservesLiveLeaderLease(t *testing.T) {
@@ -323,7 +323,7 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
 	daemon := clusteredDaemon{
-		nodeID: "spock", config: clusteredConfig(t), logger: newClusterLogSnapshotLogger(logs),
+		nodeID: "runner-host-1", config: clusteredConfig(t), logger: newClusterLogSnapshotLogger(logs),
 		nodes: state, providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
 		waitForLeader: fakeWaitForLeader(state),
 	}
@@ -339,7 +339,7 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 		t.Fatalf("leader=%#v leaseClosed=%t", daemon.currentLeader(), lease.closed)
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"leader_election","action":"leader_election","phase":"lost","hostname":"spock"}`)
+		`{"level":"WARN","msg":"leader_election","action":"leader_election","phase":"lost","hostname":"runner-host-1"}`)
 }
 
 func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {
@@ -434,7 +434,7 @@ func newClusterReloadFixture(t *testing.T, fixture clusterReloadFixtureConfig) (
 func TestLeaderReconciliationReportsDiscoveryFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
-	daemon.nodeID = "spock"
+	daemon.nodeID = "runner-host-1"
 	daemon.discoverer = staticDiscoverer{err: errors.New("failed")}
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 
@@ -442,21 +442,21 @@ func TestLeaderReconciliationReportsDiscoveryFailure(t *testing.T) {
 		t.Fatal("expected reconciliation failure")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"leader repository discovery failed","hostname":"spock","error":"failed"}`)
+		`{"level":"ERROR","msg":"leader repository discovery failed","hostname":"runner-host-1","error":"failed"}`)
 }
 
 func TestLeaderReconciliationReportsCapacityAggregationFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{statusesErr: errors.New("failed")}
 	daemon := activeClusteredDaemon(t, state)
-	daemon.nodeID = "spock"
+	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 
 	if newClusterLeader(&daemon, &fakeClusterLease{}).reconcile(context.Background()) {
 		t.Fatal("expected reconciliation failure")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"leader scale-set aggregation failed","hostname":"spock","error":"failed"}`)
+		`{"level":"ERROR","msg":"leader scale-set aggregation failed","hostname":"runner-host-1","error":"failed"}`)
 }
 
 func TestLeaderLeavesFailedRepositorySessionAbsent(t *testing.T) {
