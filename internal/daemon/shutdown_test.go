@@ -120,7 +120,7 @@ func inertLifecycle() scaleSetLifecycle {
 	return scaleSetLifecycle{
 		StopPolling:   func() {},
 		CloseSession:  func(context.Context) error { return nil },
-		Drain:         func(context.Context) (int, error) { return 0, nil },
+		Running:       func(context.Context) (int, error) { return 0, nil },
 		DestroyActive: func(context.Context) error { return nil },
 		Shutdown:      func(context.Context) error { return nil },
 	}
@@ -177,8 +177,8 @@ func activeWithLifecycle(lifecycle scaleSetLifecycle) activeConfiguration {
 	if lifecycle.StopPolling == nil {
 		lifecycle.StopPolling = func() {}
 	}
-	if lifecycle.Drain == nil {
-		lifecycle.Drain = func(context.Context) (int, error) { return 0, nil }
+	if lifecycle.Running == nil {
+		lifecycle.Running = func(context.Context) (int, error) { return 0, nil }
 	}
 	if lifecycle.Shutdown == nil {
 		lifecycle.Shutdown = func(context.Context) error { return nil }

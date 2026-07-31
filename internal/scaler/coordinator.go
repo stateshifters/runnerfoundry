@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,12 +55,14 @@ type DemandStore interface {
 }
 
 type Coordinator struct {
-	maxRunners int
-	scaleSet   string
-	store      DemandStore
-	workers    map[string]RepositoryWorker
-	assigned   map[string]int
-	mutex      sync.Mutex
+	maxRunners            int
+	scaleSet              string
+	store                 DemandStore
+	workers               map[string]RepositoryWorker
+	assigned              map[string]int
+	provisioningGate      chan struct{}
+	provisioningSuspended atomic.Bool
+	mutex                 sync.Mutex
 }
 
 type AssignedReconciliation struct {
@@ -73,13 +76,16 @@ func NewCoordinator(maxRunners int) *Coordinator {
 }
 
 func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *Coordinator {
-	return &Coordinator{
-		maxRunners: maxRunners,
-		scaleSet:   scaleSet,
-		store:      store,
-		workers:    map[string]RepositoryWorker{},
-		assigned:   map[string]int{},
+	coordinator := &Coordinator{
+		maxRunners:       maxRunners,
+		scaleSet:         scaleSet,
+		store:            store,
+		workers:          map[string]RepositoryWorker{},
+		assigned:         map[string]int{},
+		provisioningGate: make(chan struct{}, 1),
 	}
+	coordinator.provisioningGate <- struct{}{}
+	return coordinator
 }
 
 func (coordinator *Coordinator) AddRepository(repository string, worker RepositoryWorker) {
@@ -127,8 +133,57 @@ func (coordinator *Coordinator) ObserveAssigned(repository string, assignedJobs 
 func (coordinator *Coordinator) Schedule(ctx context.Context) error {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
-	_, err := coordinator.reconcileCapacity(ctx)
+	_, _, err := coordinator.reconcileProvisioning(ctx)
 	return err
+}
+
+// SuspendProvisioning waits for the current scheduling pass and prevents later
+// passes from starting runners. Demand observation remains available.
+func (coordinator *Coordinator) SuspendProvisioning(ctx context.Context) error {
+	if err := coordinator.acquireProvisioning(ctx); err != nil {
+		return err
+	}
+	defer coordinator.releaseProvisioning()
+	coordinator.provisioningSuspended.Store(true)
+	return nil
+}
+
+// ResumeProvisioning re-enables runner starts without waiting on coordinator
+// work. Retained demand is handled by the next scheduling pass.
+func (coordinator *Coordinator) ResumeProvisioning() {
+	coordinator.provisioningSuspended.Store(false)
+}
+
+func (coordinator *Coordinator) reconcileProvisioning(
+	ctx context.Context,
+) (map[string]AssignedReconciliation, bool, error) {
+	if err := coordinator.acquireProvisioning(ctx); err != nil {
+		return nil, false, err
+	}
+	defer coordinator.releaseProvisioning()
+	if coordinator.provisioningSuspended.Load() {
+		return nil, false, nil
+	}
+	reconciliations, err := coordinator.reconcileCapacity(ctx)
+	return reconciliations, true, err
+}
+
+func (coordinator *Coordinator) acquireProvisioning(ctx context.Context) error {
+	select {
+	case <-coordinator.provisioningGate:
+		return nil
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for provisioning boundary: %w", ctx.Err())
+	case <-coordinator.provisioningGate:
+		return nil
+	}
+}
+
+func (coordinator *Coordinator) releaseProvisioning() {
+	coordinator.provisioningGate <- struct{}{}
 }
 
 func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[string]AssignedReconciliation, error) {
@@ -258,9 +313,12 @@ func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repositor
 			return AssignedReconciliation{}, fmt.Errorf("request excess waiting runner cleanup: %w", err)
 		}
 	}
-	reconciliations, err := coordinator.reconcileCapacity(ctx)
-	if err != nil {
-		return AssignedReconciliation{}, err
+	reconciliations, provisioningEnabled, err := coordinator.reconcileProvisioning(ctx)
+	if !provisioningEnabled || err != nil {
+		if err != nil {
+			return AssignedReconciliation{}, err
+		}
+		return AssignedReconciliation{AssignedJobs: assignedJobs}, nil
 	}
 	return reconciliations[repository], nil
 }

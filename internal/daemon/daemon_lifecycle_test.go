@@ -1,12 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
@@ -97,7 +97,7 @@ func TestRunDaemonAppliesReloadRequest(t *testing.T) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  notifier, drainInterval: time.Millisecond,
+		notifier:  notifier,
 	}
 	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonUnderTest); err != nil {
 		t.Fatalf("expected reload and shutdown, got %v", err)
@@ -107,19 +107,94 @@ func TestRunDaemonAppliesReloadRequest(t *testing.T) {
 	}
 }
 
-func TestRunDaemonSurfacesReloadFailure(t *testing.T) {
+func TestRunDaemonRetainsActiveConfigurationAfterReloadFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	loadedConfig := runnableConfig(t)
-	reloads := make(chan struct{}, 1)
+	logs := &bytes.Buffer{}
+	reloads := make(chan struct{}, 2)
 	reloads <- struct{}{}
+	reloads <- struct{}{}
+	notifier := &reloadFailureRetainingNotifier{cancel: cancel}
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
 		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
+		newLogger: func(string, string) *slog.Logger { return newLoggerForWriter(logs, "json", "debug") },
+		notifier:  notifier,
+	}
+	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonUnderTest); err != nil {
+		t.Fatalf("expected failed reload to retain active daemon, got %v", err)
+	}
+	if notifier.readyCalls != 3 || notifier.reloadCalls != 2 {
+		t.Fatalf("expected completed reload notification, got %#v", notifier)
+	}
+	assertStructuredAction(t, logs.Bytes(), "reload", "preflight_rejected")
+}
+
+func TestRunDaemonCompletesReplacementBeforeReadyNotification(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	loadedConfig := runnableConfig(t)
+	reloads := make(chan struct{}, 1)
+	reloads <- struct{}{}
+	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{
+		InstallationFailures: map[githubapp.InstallationID]error{},
+	}, afterDiscover: func(int) {}}
+	notifier := &replacementReadyNotifier{cancel: cancel, discoverer: discoverer}
+	daemonUnderTest := standaloneDaemon{
+		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
+		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+			return discoverer, nil
+		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  failingNotifier{reloadErr: errors.New("reload failed")},
+		notifier:  notifier,
 	}
-	if err := runDaemon(context.Background(), Options{ReloadRequests: reloads}, daemonUnderTest); err == nil {
-		t.Fatal("expected reload failure")
+
+	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonUnderTest); err != nil {
+		t.Fatalf("expected ready notification failure to preserve replacement, got %v", err)
 	}
+	if notifier.discoveryCallsAtReloadReady != 3 {
+		t.Fatalf("ready sent after %d discovery calls, want 3", notifier.discoveryCallsAtReloadReady)
+	}
+}
+
+type replacementReadyNotifier struct {
+	cancel                      context.CancelFunc
+	discoverer                  *recordingDiscoverer
+	readyCalls                  int
+	discoveryCallsAtReloadReady int
+}
+
+func (notifier *replacementReadyNotifier) Ready(context.Context) error {
+	notifier.readyCalls++
+	if notifier.readyCalls != 2 {
+		return nil
+	}
+	notifier.discoveryCallsAtReloadReady = notifier.discoverer.calls
+	notifier.cancel()
+	return errors.New("ready failed")
+}
+
+func (*replacementReadyNotifier) Reloading(context.Context) error { return nil }
+
+type reloadFailureRetainingNotifier struct {
+	cancel      context.CancelFunc
+	readyCalls  int
+	reloadCalls int
+}
+
+func (notifier *reloadFailureRetainingNotifier) Ready(context.Context) error {
+	notifier.readyCalls++
+	if notifier.readyCalls == 3 {
+		notifier.cancel()
+	}
+	return nil
+}
+
+func (notifier *reloadFailureRetainingNotifier) Reloading(context.Context) error {
+	notifier.reloadCalls++
+	if notifier.reloadCalls == 1 {
+		return errors.New("reload failed")
+	}
+	return nil
 }

@@ -101,7 +101,7 @@ func TestRunScaleSetStartsPollerForExistingScaleSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected scale set success, got %v", err)
 	}
-	if scaleSet.StopPolling == nil || scaleSet.Drain == nil || scaleSet.Shutdown == nil {
+	if scaleSet.StopPolling == nil || scaleSet.Running == nil || scaleSet.Shutdown == nil {
 		t.Fatalf("expected complete scale set lifecycle, got %#v", scaleSet)
 	}
 	waitForPoll(t, fixture.messageClient)

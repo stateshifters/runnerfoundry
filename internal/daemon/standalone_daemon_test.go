@@ -74,7 +74,7 @@ func (fixture *standaloneLifecycleObservation) startScaleSet(
 ) (scaleSetLifecycle, error) {
 	return scaleSetLifecycle{
 		StopPolling:   func() { fixture.pollingStopped = true },
-		Drain:         func(context.Context) (int, error) { return 0, nil },
+		Running:       func(context.Context) (int, error) { return 0, nil },
 		DestroyActive: func(context.Context) error { return nil },
 		Shutdown:      func(context.Context) error { fixture.shutdown = true; return nil },
 	}, nil

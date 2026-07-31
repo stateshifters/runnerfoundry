@@ -41,7 +41,6 @@ type standaloneDaemon struct {
 		coordinator *scaler.Coordinator,
 		registration *upstream.RunnerScaleSet,
 	) (scaleSetLifecycle, error)
-	drainInterval            time.Duration
 	reconciliationRetryDelay time.Duration
 }
 
@@ -75,6 +74,7 @@ type activeConfiguration struct {
 	PreparedLogging       *preparedLogging
 	DemandStore           scaler.DemandStore
 	StateCloser           io.Closer
+	DiscoveryInterval     time.Duration
 	ReconciliationPending bool
 }
 
@@ -104,7 +104,6 @@ func newStandaloneDaemon() standaloneDaemon {
 		notifier:                 newSystemdNotifier(),
 		startScaleSet:            startCoordinatedScaleSet,
 		startConfirmedScaleSet:   startConfirmedCoordinatedScaleSet,
-		drainInterval:            time.Second,
 		reconciliationRetryDelay: pollRetryDelay,
 	}
 }
@@ -161,12 +160,42 @@ func runActiveConfiguration(
 				ctx, options.ConfigPath, daemon, activeConfig,
 			)
 			if reloadErr != nil {
-				return reloadErr
+				continueAfterRejectedReload(
+					ctx, daemon, &activeConfig, discoveryTimer, discoveryInterval, reloadErr,
+				)
+				continue
 			}
 			activeConfig = reloadedConfig
 			discoveryInterval = reloadedInterval
 			discoveryTimer.Reset(nextReconciliationDelay(activeConfig, discoveryInterval, daemon.reconciliationRetryDelay))
+			notifyReloadCompleted(ctx, daemon, activeConfig.Logger)
 		}
+	}
+}
+
+func continueAfterRejectedReload(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	discoveryTimer *time.Timer,
+	discoveryInterval time.Duration,
+	reloadErr error,
+) {
+	logAction(ctx, activeConfig.Logger, slog.LevelWarn, "reload", "preflight_rejected",
+		slog.String("error", reloadErr.Error()),
+	)
+	activeConfig.ReconciliationPending = true
+	discoveryTimer.Reset(nextReconciliationDelay(
+		*activeConfig, discoveryInterval, daemon.reconciliationRetryDelay,
+	))
+	notifyReloadCompleted(ctx, daemon, activeConfig.Logger)
+}
+
+func notifyReloadCompleted(ctx context.Context, daemon standaloneDaemon, logger *slog.Logger) {
+	if err := daemon.notifier.Ready(ctx); err != nil {
+		logAction(ctx, logger, slog.LevelWarn, "reload", "notification_failed",
+			slog.String("error", err.Error()),
+		)
 	}
 }
 
@@ -193,22 +222,15 @@ func reloadAndReadInterval(
 	if err != nil {
 		return activeConfiguration{}, 0, err
 	}
-	discoveryInterval, err := reloadedConfig.Config.GitHub.DiscoveryDuration()
-	if err != nil {
-		return activeConfiguration{}, 0, fmt.Errorf("load reloaded discovery interval: %w", err)
-	}
 	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "replacement_reconciliation_started")
 	reconcileDiscovery(ctx, daemon, &reloadedConfig)
 	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "completed")
-	return reloadedConfig, discoveryInterval, nil
+	return reloadedConfig, reloadedConfig.DiscoveryInterval, nil
 }
 
 func withStandaloneDefaults(daemon standaloneDaemon) standaloneDaemon {
 	if daemon.notifier == nil {
 		daemon.notifier = noopNotifier{}
-	}
-	if daemon.drainInterval == 0 {
-		daemon.drainInterval = time.Second
 	}
 	if daemon.reconciliationRetryDelay == 0 {
 		daemon.reconciliationRetryDelay = pollRetryDelay

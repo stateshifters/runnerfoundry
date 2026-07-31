@@ -7,14 +7,13 @@ import (
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
+func TestReloadConfigurationHandsOverOldAndStartsReplacement(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	activeConfig := testActiveConfiguration()
 	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": inertLifecycle()}}
@@ -28,6 +27,251 @@ func TestReloadConfigurationDrainsOldAndStartsReplacement(t *testing.T) {
 	}
 }
 
+func TestReloadConfigurationDoesNotWaitForExistingRunner(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	observation := &reloadHandoverObservation{}
+	activeConfig := activeRunnerReloadConfiguration(t, loadedConfig, observation)
+	daemonUnderTest := replacementStartingReloadDaemon(loadedConfig, observation)
+
+	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonUnderTest, activeConfig); err != nil {
+		t.Fatalf("expected active runner to survive reload, got %v", err)
+	}
+	if !observation.stopped || !observation.closed || observation.destroyed || !observation.replacementStarted {
+		t.Fatalf("unexpected handover observation: %#v", observation)
+	}
+}
+
+type reloadHandoverObservation struct {
+	stopped            bool
+	closed             bool
+	destroyed          bool
+	replacementStarted bool
+}
+
+func activeRunnerReloadConfiguration(
+	t *testing.T,
+	loadedConfig config.Config,
+	observation *reloadHandoverObservation,
+) activeConfiguration {
+	t.Helper()
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling: func() { observation.stopped = true },
+		CloseSession: func(context.Context) error {
+			observation.closed = true
+			return nil
+		},
+		Running: func(context.Context) (int, error) {
+			t.Fatal("ordinary reload must not inspect active runners")
+			return 0, nil
+		},
+		DestroyActive: func(context.Context) error {
+			observation.destroyed = true
+			return nil
+		},
+	})
+	activeConfig.Config = loadedConfig
+	activeConfig.DemandStore = scaler.NewMemoryDemandStore()
+	return activeConfig
+}
+
+func replacementStartingReloadDaemon(
+	loadedConfig config.Config,
+	observation *reloadHandoverObservation,
+) standaloneDaemon {
+	daemonUnderTest := successfulReloadDaemon(loadedConfig)
+	daemonUnderTest.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
+		return staticDiscoverer{result: githubapp.DiscoveryResult{
+			Repositories:         []githubapp.Repository{{InstallationID: 1, URL: "https://github.com/acme/repo"}},
+			InstallationFailures: map[githubapp.InstallationID]error{},
+		}}, nil
+	}
+	daemonUnderTest.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+		return successfulRegistrationReconciliationClient(), nil
+	}
+	daemonUnderTest.startScaleSet = func(
+		_ context.Context,
+		_ *slog.Logger,
+		_ scaleSetClient,
+		repositoryURL string,
+		_ config.ScaleSetConfig,
+		coordinator *scaler.Coordinator,
+	) (scaleSetLifecycle, error) {
+		observation.replacementStarted = true
+		coordinator.AddRepository(repositoryURL, &recordingRecoveryWorker{})
+		return inertLifecycle(), nil
+	}
+	return daemonUnderTest
+}
+
+func TestReloadConfigurationRejectsActiveProviderChange(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Docker.Service = "replacement"
+	stopped := false
+	closed := false
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling: func() { stopped = true },
+		CloseSession: func(context.Context) error {
+			closed = true
+			return nil
+		},
+		Running: func(context.Context) (int, error) { return 1, nil },
+	})
+	activeConfig.Config = runnableConfig(t)
+
+	if _, err := reloadConfiguration(
+		context.Background(), "config", successfulReloadDaemon(loadedConfig), activeConfig,
+	); err == nil {
+		t.Fatal("expected active provider change rejection")
+	}
+	if stopped || closed {
+		t.Fatalf("old generation changed before provider validation: stopped=%t closed=%t", stopped, closed)
+	}
+}
+
+func TestReloadConfigurationAllowsIdleProviderChange(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Docker.Service = "replacement"
+	inspected := false
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		CloseSession: func(context.Context) error { return nil },
+		Running: func(context.Context) (int, error) {
+			inspected = true
+			return 0, nil
+		},
+	})
+	activeConfig.Config = runnableConfig(t)
+
+	if _, err := reloadConfiguration(
+		context.Background(), "config", successfulReloadDaemon(loadedConfig), activeConfig,
+	); err != nil {
+		t.Fatalf("expected idle provider change success, got %v", err)
+	}
+	if !inspected {
+		t.Fatal("expected old provider inspection")
+	}
+}
+
+func TestReloadConfigurationRejectsProviderChangeWhenInspectionFails(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Docker.Service = "replacement"
+	stopped := false
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling: func() { stopped = true },
+		Running: func(context.Context) (int, error) {
+			return 0, errors.New("provider unavailable")
+		},
+	})
+	activeConfig.Config = runnableConfig(t)
+
+	if _, err := reloadConfiguration(
+		context.Background(), "config", successfulReloadDaemon(loadedConfig), activeConfig,
+	); err == nil {
+		t.Fatal("expected provider inspection failure")
+	}
+	if stopped {
+		t.Fatal("old generation stopped after provider inspection failure")
+	}
+}
+
+func TestReloadConfigurationRejectsProviderChangeWithoutActiveCoordinator(t *testing.T) {
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Docker.Service = "replacement"
+	stopped := false
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling: func() { stopped = true },
+		Running:     func(context.Context) (int, error) { return 0, nil },
+	})
+	activeConfig.Config = runnableConfig(t)
+	delete(activeConfig.Coordinators, "linux")
+
+	if _, err := reloadConfiguration(
+		context.Background(), "config", successfulReloadDaemon(loadedConfig), activeConfig,
+	); err == nil {
+		t.Fatal("expected unavailable coordinator rejection")
+	}
+	if stopped {
+		t.Fatal("old generation stopped after unavailable coordinator rejection")
+	}
+}
+
+func TestReloadProviderChangeFencesOldProvisioningAfterInspection(t *testing.T) {
+	fixture := newProviderChangeRaceFixture(t)
+	if _, err := reloadConfiguration(
+		context.Background(), "config", fixture.daemon, fixture.activeConfig,
+	); err != nil {
+		t.Fatalf("expected idle provider change success, got %v", err)
+	}
+	if fixture.scheduleErr != nil {
+		t.Fatalf("schedule during handover: %v", fixture.scheduleErr)
+	}
+	if len(fixture.worker.started) != 0 {
+		t.Fatalf("old provider started runners after inspection: %#v", fixture.worker.started)
+	}
+}
+
+type providerChangeRaceFixture struct {
+	activeConfig activeConfiguration
+	daemon       standaloneDaemon
+	worker       *recordingRecoveryWorker
+	scheduleErr  error
+}
+
+func newProviderChangeRaceFixture(t *testing.T) *providerChangeRaceFixture {
+	t.Helper()
+	loadedConfig := runnableConfig(t)
+	loadedConfig.ScaleSets[0].Docker.Service = "replacement"
+	coordinator := scaler.NewCoordinator(1)
+	worker := &recordingRecoveryWorker{}
+	coordinator.AddRepository("repo", worker)
+	if err := coordinator.Apply(context.Background(), []scaler.JobDemand{{
+		Repository: "repo", RequestID: 42,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &providerChangeRaceFixture{worker: worker}
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		Running: func(context.Context) (int, error) { return 0, nil },
+		StopPolling: func() {
+			fixture.scheduleErr = coordinator.Schedule(context.Background())
+		},
+		CloseSession: func(context.Context) error { return nil },
+	})
+	activeConfig.Config = runnableConfig(t)
+	activeConfig.Coordinators["linux"] = coordinator
+	fixture.activeConfig = activeConfig
+	fixture.daemon = successfulReloadDaemon(loadedConfig)
+	return fixture
+}
+
+func TestValidateReloadProviderChangesIgnoresUnchangedLibvirtProvider(t *testing.T) {
+	provider := &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "runner.xml"}
+	activeConfig := testActiveConfiguration()
+	activeConfig.Config.ScaleSets = []config.ScaleSetConfig{{Name: "linux", Libvirt: provider}}
+	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
+		Running: func(context.Context) (int, error) {
+			t.Fatal("unchanged provider must not be inspected")
+			return 0, nil
+		},
+	}}}
+	reloadedConfig := activeConfig.Config
+
+	if _, err := validateReloadProviderChanges(context.Background(), activeConfig, reloadedConfig); err != nil {
+		t.Fatalf("expected unchanged libvirt provider to pass validation, got %v", err)
+	}
+}
+
+func TestValidateReloadProviderChangesIgnoresRepositoryWithoutChangedScaleSet(t *testing.T) {
+	activeConfig := testActiveConfiguration()
+	activeConfig.Config = runnableConfig(t)
+	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{}}
+	reloadedConfig := runnableConfig(t)
+	reloadedConfig.ScaleSets[0].Docker.Service = "replacement"
+
+	if _, err := validateReloadProviderChanges(context.Background(), activeConfig, reloadedConfig); err != nil {
+		t.Fatalf("expected repository without changed scale set to pass validation, got %v", err)
+	}
+}
+
 func TestReloadKeepsOldSessionsWhenReplacementRegistrationsCannotBeConfirmed(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	stopped := false
@@ -35,7 +279,7 @@ func TestReloadKeepsOldSessionsWhenReplacementRegistrationsCannotBeConfirmed(t *
 	activeConfig.Config.State.Path = loadedConfig.State.Path
 	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
 		StopPolling: func() { stopped = true },
-		Drain:       func(context.Context) (int, error) { return 0, nil },
+		Running:     func(context.Context) (int, error) { return 0, nil },
 		Shutdown:    func(context.Context) error { return nil },
 	}}}
 	daemonUnderTest := successfulReloadDaemon(loadedConfig)
@@ -138,9 +382,8 @@ func TestReloadLogsEveryLifecycleStage(t *testing.T) {
 	for _, phase := range []string{
 		"requested",
 		"replacement_validated",
+		"handover_started",
 		"polling_stopped",
-		"drain_started",
-		"drain_completed",
 		"old_configuration_stopped",
 		"state_reconciled",
 		"replacement_reconciliation_started",
@@ -148,7 +391,7 @@ func TestReloadLogsEveryLifecycleStage(t *testing.T) {
 	} {
 		assertStructuredAction(t, fixture.logs.Bytes(), "reload", phase)
 	}
-	for _, action := range []string{"polling_stop", "runner_drain", "scale_set_shutdown", "state_cleanup"} {
+	for _, action := range []string{"polling_stop", "scale_set_shutdown", "state_cleanup"} {
 		assertStructuredAction(t, fixture.logs.Bytes(), action, "started")
 		assertStructuredAction(t, fixture.logs.Bytes(), action, "completed")
 	}
@@ -218,7 +461,7 @@ func TestReloadPurgesRemovedScaleSetDemand(t *testing.T) {
 	}
 }
 
-func TestReloadReportsRemovedScaleSetDemandPurgeFailure(t *testing.T) {
+func TestReloadContinuesAfterRemovedScaleSetDemandPurgeFailure(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	loadedConfig.ScaleSets[0].Name = "replacement"
 	store := &recordingAppDemandStore{removeScaleSetErr: errors.New("remove failed")}
@@ -227,8 +470,8 @@ func TestReloadReportsRemovedScaleSetDemandPurgeFailure(t *testing.T) {
 	active.Config.State.Path = loadedConfig.State.Path
 	if _, err := reloadConfiguration(
 		context.Background(), "config", successfulReloadDaemon(loadedConfig), active,
-	); err == nil {
-		t.Fatal("expected scale set purge failure")
+	); err != nil {
+		t.Fatalf("expected replacement after scale set purge failure, got %v", err)
 	}
 }
 
@@ -255,44 +498,31 @@ func (store *recordingAppDemandStore) Delete(context.Context, string, string, in
 	return nil
 }
 
-func TestReloadConfigurationReportsDrainFailure(t *testing.T) {
+func TestReloadConfigurationContinuesAfterOldSessionCloseFailure(t *testing.T) {
 	loadedConfig := runnableConfig(t)
-	daemonUnderTest := successfulReloadDaemon(loadedConfig)
-	active := activeWithLifecycle(scaleSetLifecycle{Drain: func(context.Context) (int, error) {
-		return 0, errors.New("drain failed")
-	}})
-	if _, err := reloadConfiguration(context.Background(), "config", daemonUnderTest, active); err == nil {
-		t.Fatal("expected drain failure")
-	}
-}
-
-func TestReloadConfigurationReportsShutdownFailure(t *testing.T) {
-	loadedConfig := runnableConfig(t)
+	logs := &bytes.Buffer{}
+	logger := newLoggerForWriter(logs, "json", "debug")
 	active := activeWithLifecycle(scaleSetLifecycle{
-		Drain: func(context.Context) (int, error) { return 0, nil }, StopPolling: func() {},
+		Running: func(context.Context) (int, error) { return 0, nil }, StopPolling: func() {},
 		CloseSession: func(context.Context) error { return errors.New("shutdown failed") },
 	})
-	if _, err := reloadConfiguration(context.Background(), "config", successfulReloadDaemon(loadedConfig), active); err == nil {
-		t.Fatal("expected shutdown failure")
+	active.Config = loadedConfig
+	active.Logger = logger
+	daemonUnderTest := successfulReloadDaemon(loadedConfig)
+	daemonUnderTest.newLogger = func(string, string) *slog.Logger { return logger }
+	if _, err := reloadConfiguration(context.Background(), "config", daemonUnderTest, active); err != nil {
+		t.Fatalf("expected replacement after old session close failure, got %v", err)
 	}
+	assertStructuredAction(t, logs.Bytes(), "reload", "cleanup_incomplete")
 }
 
 func TestReloadConfigurationReportsReplacementLoadFailure(t *testing.T) {
 	daemonUnderTest := standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return config.Config{}, errors.New("replacement failed") },
-		notifier:   noopNotifier{}, drainInterval: time.Millisecond,
+		notifier:   noopNotifier{},
 	}
 	if _, err := reloadConfiguration(context.Background(), "config", daemonUnderTest, activeWithLifecycle(inertLifecycle())); err == nil {
 		t.Fatal("expected replacement load failure")
-	}
-}
-
-func TestReloadConfigurationReportsReplacementReadyFailure(t *testing.T) {
-	loadedConfig := runnableConfig(t)
-	daemonUnderTest := successfulReloadDaemon(loadedConfig)
-	daemonUnderTest.notifier = failingNotifier{readyErr: errors.New("ready failed")}
-	if _, err := reloadConfiguration(context.Background(), "config", daemonUnderTest, activeWithLifecycle(inertLifecycle())); err == nil {
-		t.Fatal("expected replacement readiness failure")
 	}
 }
 
@@ -304,14 +534,19 @@ func successfulReloadDaemon(loadedConfig config.Config) standaloneDaemon {
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  noopNotifier{}, drainInterval: time.Millisecond,
+		notifier:  noopNotifier{},
 	}
 }
 
 func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	loadedConfig.GitHub.DiscoveryInterval = "invalid"
-	activeConfig := activeWithLifecycle(inertLifecycle())
+	stopped := false
+	activeConfig := activeWithLifecycle(scaleSetLifecycle{
+		StopPolling:  func() { stopped = true },
+		CloseSession: func(context.Context) error { return nil },
+		Running:      func(context.Context) (int, error) { return 0, nil },
+	})
 	daemonUnderTest := standaloneDaemon{
 		loadConfig:      func(string) (config.Config, error) { return loadedConfig, nil },
 		loadCredentials: loadReloadTestCredentials,
@@ -319,10 +554,13 @@ func TestReloadAndReadIntervalRejectsUnvalidatedReplacementInterval(t *testing.T
 			return staticDiscoverer{result: githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}}}, nil
 		},
 		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  noopNotifier{}, drainInterval: time.Millisecond,
+		notifier:  noopNotifier{},
 	}
 	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonUnderTest, activeConfig); err == nil {
 		t.Fatal("expected invalid reloaded interval error")
+	}
+	if stopped {
+		t.Fatal("old generation stopped before replacement interval validation")
 	}
 }
 

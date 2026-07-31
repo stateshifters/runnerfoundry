@@ -8,46 +8,10 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
 )
-
-func TestDrainConfigurationWaitsForActiveRunnerAndSurfacesFailures(t *testing.T) {
-	drainCalls := 0
-	activeConfig := testActiveConfiguration()
-	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		Drain: func(context.Context) (int, error) {
-			drainCalls++
-			if drainCalls == 1 {
-				return 1, nil
-			}
-			return 0, nil
-		},
-	}}}
-	if err := drainConfiguration(context.Background(), activeConfig, time.Millisecond); err != nil || drainCalls != 2 {
-		t.Fatalf("expected drain retry, calls=%d error=%v", drainCalls, err)
-	}
-	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		Drain: func(context.Context) (int, error) { return 0, errors.New("drain failed") },
-	}}}
-	if err := drainConfiguration(context.Background(), activeConfig, time.Millisecond); err == nil {
-		t.Fatal("expected drain failure")
-	}
-}
-
-func TestDrainConfigurationReturnsCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	activeConfig := testActiveConfiguration()
-	activeConfig.Repositories["repo"] = managedRepository{Lifecycles: map[string]scaleSetLifecycle{"linux": {
-		Drain: func(context.Context) (int, error) { return 1, nil },
-	}}}
-	if err := drainConfiguration(ctx, activeConfig, time.Hour); err == nil {
-		t.Fatal("expected canceled drain")
-	}
-}
 
 func TestLoadConfigRejectsInvalidYAML(t *testing.T) {
 	if _, err := loadConfigBytes([]byte("github: [")); err == nil {

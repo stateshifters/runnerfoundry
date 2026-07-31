@@ -339,7 +339,7 @@ func coordinatedScaleSetLifecycle(
 				lifecycleConfig.MessageClient,
 			)
 		},
-		Drain:         lifecycleConfig.Reconciler.Drain,
+		Running:       lifecycleConfig.Reconciler.Running,
 		DestroyActive: lifecycleConfig.Reconciler.DestroyActive,
 		Shutdown: func(ctx context.Context) error {
 			return shutdownScaleSet(
