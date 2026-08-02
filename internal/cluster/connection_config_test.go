@@ -128,8 +128,8 @@ func TestSettingsResolveRoleForEveryConnection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resolved.RuntimeParams["role"] != "runnerfoundry" {
-				t.Fatalf("resolved role = %q", resolved.RuntimeParams["role"])
+			if _, present := resolved.RuntimeParams["role"]; present {
+				t.Fatalf("unexpected startup role = %q", resolved.RuntimeParams["role"])
 			}
 		})
 	}
@@ -147,8 +147,8 @@ func TestSettingsBuildDirectConnection(t *testing.T) {
 	if resolved.Host != "database" || resolved.Port != 5432 || resolved.Database != "scaler" || resolved.User != "login" || resolved.Password != "secret" {
 		t.Fatalf("direct structured settings = %#v", resolved)
 	}
-	if resolved.RuntimeParams["role"] != "runnerfoundry" {
-		t.Fatalf("direct role = %q", resolved.RuntimeParams["role"])
+	if _, present := resolved.RuntimeParams["role"]; present {
+		t.Fatalf("unexpected direct startup role = %q", resolved.RuntimeParams["role"])
 	}
 }
 
@@ -348,9 +348,6 @@ func applyDeterministicConnectionQuery(config *pgx.ConnConfig, values url.Values
 		if value := values.Get(key); value != "" {
 			*destination = value
 		}
-	}
-	if role := values.Get("role"); role != "" {
-		config.RuntimeParams["role"] = role
 	}
 }
 

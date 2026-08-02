@@ -22,15 +22,14 @@ func primaryConnectionConfigWithResolver(
 	if settings.Role == "" {
 		return nil, errors.New("PostgreSQL role is required")
 	}
-	resolvedRole, err := resolver.resolve(settings.Role)
-	if err != nil {
+	if _, err := resolver.resolve(settings.Role); err != nil {
 		return nil, err
 	}
 	config, err := connectionConfigWithoutRole(settings, resolver)
 	if err != nil {
 		return nil, err
 	}
-	config.RuntimeParams["role"] = resolvedRole
+	delete(config.RuntimeParams, "role")
 	return config, nil
 }
 
@@ -152,5 +151,6 @@ func parseConnectionConfig(connectionString string, resolver connectionSettingRe
 	if err != nil {
 		return nil, errors.New("parse PostgreSQL connection settings")
 	}
+	delete(config.RuntimeParams, "role")
 	return config, nil
 }

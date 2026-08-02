@@ -67,8 +67,8 @@ func TestSettingsResolveRoleFileReferenceInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.RuntimeParams["role"] != expectedRole {
-		t.Fatalf("resolved role = %q", resolved.RuntimeParams["role"])
+	if _, present := resolved.RuntimeParams["role"]; present {
+		t.Fatalf("unexpected startup role = %q", resolved.RuntimeParams["role"])
 	}
 }
 
