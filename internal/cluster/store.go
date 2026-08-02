@@ -379,9 +379,24 @@ func newPostgreSQLDatabaseConnection(
 	transactionAdapter postgreSQLTransactionAdapter,
 	role string,
 ) *databaseConnection {
-	quotedRole := quotePostgreSQLIdentifier(role)
-	localRoleStatement := "SET LOCAL ROLE " + quotedRole
-	beginWithRole := func(ctx context.Context) (*databaseTransaction, error) {
+	beginWithRole := newRoleScopedTransactionStarter(connection, connectionAdapter, transactionAdapter, role)
+	return &databaseConnection{
+		begin:    beginWithRole,
+		close:    func(ctx context.Context) error { return connectionAdapter.close(connection, ctx) },
+		exec:     roleScopedStatementExecutor(beginWithRole),
+		query:    roleScopedRowsQuery(beginWithRole),
+		queryRow: roleScopedRowQuery(beginWithRole),
+	}
+}
+
+func newRoleScopedTransactionStarter(
+	connection *pgx.Conn,
+	connectionAdapter postgreSQLConnectionAdapter,
+	transactionAdapter postgreSQLTransactionAdapter,
+	role string,
+) func(context.Context) (*databaseTransaction, error) {
+	localRoleStatement := "SET LOCAL ROLE " + quotePostgreSQLIdentifier(role)
+	return func(ctx context.Context) (*databaseTransaction, error) {
 		transaction, err := connectionAdapter.begin(connection, ctx)
 		if err != nil {
 			return nil, fmt.Errorf("begin PostgreSQL transaction: %w", err)
@@ -392,51 +407,64 @@ func newPostgreSQLDatabaseConnection(
 		}
 		return newPostgreSQLTransaction(transaction, transactionAdapter), nil
 	}
-	return &databaseConnection{
-		begin: beginWithRole,
-		close: func(ctx context.Context) error { return connectionAdapter.close(connection, ctx) },
-		exec: func(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, resultErr error) {
-			transaction, err := beginWithRole(ctx)
-			if err != nil {
-				return pgconn.CommandTag{}, err
-			}
-			transactionOpen := true
-			defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-			commandTag, err = transaction.Exec(ctx, sql, arguments...)
-			if err != nil {
-				return pgconn.CommandTag{}, err
-			}
-			transactionOpen = false
-			if err = transaction.Commit(ctx); err != nil {
-				return pgconn.CommandTag{}, fmt.Errorf("commit PostgreSQL statement: %w", err)
-			}
-			return commandTag, nil
-		},
-		query: func(ctx context.Context, sql string, arguments ...any) (*databaseRows, error) {
-			transaction, err := beginWithRole(ctx)
-			if err != nil {
-				return nil, err
-			}
-			rows, err := transaction.Query(ctx, sql, arguments...)
-			if err != nil {
-				_ = rollbackTransaction(ctx, transaction)
-				return nil, err
-			}
-			return newTransactionalRows(rows, transaction, context.WithoutCancel(ctx)), nil
-		},
-		queryRow: func(ctx context.Context, sql string, arguments ...any) databaseRow {
-			transaction, err := beginWithRole(ctx)
-			if err != nil {
-				return databaseRow{scanner: failedRowScanner{error: err}}
-			}
-			return databaseRow{
-				scanner: &transactionalRowScanner{
-					row:         transaction.QueryRow(ctx, sql, arguments...),
-					transaction: transaction,
-					context:     context.WithoutCancel(ctx),
-				},
-			}
-		},
+}
+
+func roleScopedStatementExecutor(
+	beginWithRole func(context.Context) (*databaseTransaction, error),
+) func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return func(ctx context.Context, sql string, arguments ...any) (commandTag pgconn.CommandTag, resultErr error) {
+		transaction, err := beginWithRole(ctx)
+		if err != nil {
+			return pgconn.CommandTag{}, err
+		}
+		transactionOpen := true
+		defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
+		commandTag, err = transaction.Exec(ctx, sql, arguments...)
+		if err != nil {
+			return pgconn.CommandTag{}, err
+		}
+		transactionOpen = false
+		if err = transaction.Commit(ctx); err != nil {
+			return pgconn.CommandTag{}, fmt.Errorf("commit PostgreSQL statement: %w", err)
+		}
+		return commandTag, nil
+	}
+}
+
+func roleScopedRowsQuery(
+	beginWithRole func(context.Context) (*databaseTransaction, error),
+) func(context.Context, string, ...any) (*databaseRows, error) {
+	return func(ctx context.Context, sql string, arguments ...any) (*databaseRows, error) {
+		transaction, err := beginWithRole(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := transaction.Query(ctx, sql, arguments...)
+		if err != nil {
+			return nil, rollbackTransactionalRowsQuery(ctx, transaction, err)
+		}
+		return newTransactionalRows(context.WithoutCancel(ctx), rows, transaction), nil
+	}
+}
+
+func rollbackTransactionalRowsQuery(ctx context.Context, transaction *databaseTransaction, queryError error) error {
+	return errors.Join(queryError, rollbackTransaction(ctx, transaction))
+}
+
+func roleScopedRowQuery(
+	beginWithRole func(context.Context) (*databaseTransaction, error),
+) func(context.Context, string, ...any) databaseRow {
+	return func(ctx context.Context, sql string, arguments ...any) databaseRow {
+		transaction, err := beginWithRole(ctx)
+		if err != nil {
+			return databaseRow{scanner: failedRowScanner{error: err}}
+		}
+		return databaseRow{
+			scanner: &transactionalRowScanner{
+				row:      transaction.QueryRow(ctx, sql, arguments...),
+				finalize: transactionalFinalizer(context.WithoutCancel(ctx), transaction),
+			},
+		}
 	}
 }
 
@@ -470,10 +498,20 @@ func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, err
 		return nil, errors.New("connect to PostgreSQL")
 	}
 	if _, err = store.connectionAdapter.exec(connection, ctx, "SET ROLE "+quotePostgreSQLIdentifier(role)); err != nil {
-		_ = store.connectionAdapter.close(connection, context.WithoutCancel(ctx))
+		discardPostgreSQLConnectionCloseError(ctx, store.connectionAdapter, connection)
 		return nil, errors.New("assume PostgreSQL role")
 	}
 	return connection, nil
+}
+
+func discardPostgreSQLConnectionCloseError(
+	ctx context.Context,
+	connectionAdapter postgreSQLConnectionAdapter,
+	connection *pgx.Conn,
+) {
+	if closeErr := connectionAdapter.close(connection, context.WithoutCancel(ctx)); closeErr != nil {
+		return
+	}
 }
 
 func resolvedConnectionRole(settings postgresconfig.Settings, resolver connectionSettingResolver) (string, error) {
@@ -496,10 +534,9 @@ func (scanner failedRowScanner) Scan(...any) error {
 }
 
 type transactionalRowScanner struct {
-	row         pgx.Row
-	transaction *databaseTransaction
-	context     context.Context
-	finished    bool
+	row      pgx.Row
+	finalize func(error) error
+	finished bool
 }
 
 func (scanner *transactionalRowScanner) Scan(destinations ...any) error {
@@ -507,17 +544,12 @@ func (scanner *transactionalRowScanner) Scan(destinations ...any) error {
 		return errors.New("scan PostgreSQL row: row already consumed")
 	}
 	scanner.finished = true
-	err := scanner.row.Scan(destinations...)
-	if err != nil {
-		return errors.Join(err, rollbackTransaction(scanner.context, scanner.transaction))
-	}
-	return errors.Join(nil, scanner.transaction.Commit(scanner.context))
+	return scanner.finalize(scanner.row.Scan(destinations...))
 }
 
 type transactionalRowIterator struct {
 	rows           *databaseRows
-	transaction    *databaseTransaction
-	context        context.Context
+	finalize       func(error) error
 	finished       bool
 	failed         bool
 	finalizeResult error
@@ -525,17 +557,18 @@ type transactionalRowIterator struct {
 
 func (iterator *transactionalRowIterator) Close() {
 	iterator.rows.Close()
-	iterator.finish(iterator.rows.Err())
+	iterator.recordCompletion(iterator.rows.Err())
 }
 
 func (iterator *transactionalRowIterator) Err() error {
-	return iterator.finish(iterator.rows.Err())
+	iterator.recordCompletion(iterator.rows.Err())
+	return iterator.finalizeResult
 }
 
 func (iterator *transactionalRowIterator) Next() bool {
 	hasNext := iterator.rows.Next()
 	if !hasNext {
-		iterator.finish(iterator.rows.Err())
+		iterator.recordCompletion(iterator.rows.Err())
 	}
 	return hasNext
 }
@@ -543,10 +576,14 @@ func (iterator *transactionalRowIterator) Next() bool {
 func (iterator *transactionalRowIterator) Scan(destinations ...any) error {
 	if err := iterator.rows.Scan(destinations...); err != nil {
 		iterator.failed = true
-		iterator.finish(err)
+		iterator.recordCompletion(err)
 		return err
 	}
 	return nil
+}
+
+func (iterator *transactionalRowIterator) recordCompletion(resultErr error) {
+	iterator.finalizeResult = iterator.finish(resultErr)
 }
 
 func (iterator *transactionalRowIterator) finish(resultErr error) error {
@@ -555,19 +592,25 @@ func (iterator *transactionalRowIterator) finish(resultErr error) error {
 	}
 	iterator.finished = true
 	if resultErr != nil || iterator.failed {
-		iterator.finalizeResult = errors.Join(resultErr, rollbackTransaction(iterator.context, iterator.transaction))
-		return iterator.finalizeResult
+		return iterator.finalize(resultErr)
 	}
-	iterator.finalizeResult = errors.Join(resultErr, iterator.transaction.Commit(iterator.context))
-	return iterator.finalizeResult
+	return iterator.finalize(resultErr)
 }
 
-func newTransactionalRows(rows *databaseRows, transaction *databaseTransaction, ctx context.Context) *databaseRows {
+func newTransactionalRows(ctx context.Context, rows *databaseRows, transaction *databaseTransaction) *databaseRows {
 	return &databaseRows{
 		iterator: &transactionalRowIterator{
-			rows:        rows,
-			transaction: transaction,
-			context:     ctx,
+			rows:     rows,
+			finalize: transactionalFinalizer(ctx, transaction),
 		},
+	}
+}
+
+func transactionalFinalizer(ctx context.Context, transaction *databaseTransaction) func(error) error {
+	return func(resultErr error) error {
+		if resultErr != nil {
+			return errors.Join(resultErr, rollbackTransaction(ctx, transaction))
+		}
+		return errors.Join(nil, transaction.Commit(ctx))
 	}
 }
