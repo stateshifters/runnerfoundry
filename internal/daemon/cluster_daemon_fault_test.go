@@ -540,7 +540,7 @@ func TestSchedulerRetriesOnlyAcquisitionConfirmation(t *testing.T) {
 	}
 }
 
-func TestClusterMessageRequiresStatisticsAndPositiveRequestIdentity(t *testing.T) {
+func TestClusterMessageRequiresStatisticsAndPositiveNonterminalRequestIdentity(t *testing.T) {
 	state := &fakeClusterState{}
 	handler := clusterMessageHandlerForTest(state)
 	tests := map[string]*upstream.RunnerScaleSetMessage{
@@ -548,8 +548,6 @@ func TestClusterMessageRequiresStatisticsAndPositiveRequestIdentity(t *testing.T
 		"available identity": clusterMessage(&upstream.JobAvailable{}),
 		"nil started":        {Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{nil}},
 		"empty started":      {Statistics: &upstream.RunnerScaleSetStatistic{}, JobStartedMessages: []*upstream.JobStarted{{}}},
-		"nil completed":      {Statistics: &upstream.RunnerScaleSetStatistic{}, JobCompletedMessages: []*upstream.JobCompleted{nil}},
-		"empty completed":    {Statistics: &upstream.RunnerScaleSetStatistic{}, JobCompletedMessages: []*upstream.JobCompleted{{}}},
 	}
 	for name, message := range tests {
 		t.Run(name, func(t *testing.T) {

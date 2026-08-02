@@ -279,6 +279,7 @@ type fakeClusterState struct {
 	statuses                 []cluster.ScaleSetStatus
 	demand                   []cluster.Demand
 	removedDemand            []removedClusterDemand
+	completedJobs            []cluster.JobCompletion
 	registeredLibvirtRunners []cluster.LibvirtRunnerLifecycle
 	pendingLibvirtReaps      []cluster.LibvirtRunnerLifecycle
 	pendingLibvirtReapsErr   error
@@ -432,9 +433,12 @@ func (state *fakeClusterState) CompleteDemand(_ context.Context, scaleSet string
 }
 
 func (state *fakeClusterState) CompleteJob(_ context.Context, completion cluster.JobCompletion) error {
-	state.removedDemand = append(state.removedDemand, removedClusterDemand{
-		scaleSet: completion.ScaleSet, repository: completion.Repository, requestID: completion.RequestID,
-	})
+	state.completedJobs = append(state.completedJobs, completion)
+	if completion.RequestID > 0 {
+		state.removedDemand = append(state.removedDemand, removedClusterDemand{
+			scaleSet: completion.ScaleSet, repository: completion.Repository, requestID: completion.RequestID,
+		})
+	}
 	return state.removeErr
 }
 

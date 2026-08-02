@@ -153,7 +153,7 @@ Each active session records its confirmed GitHub scale-set ID. Discovery-cadence
 
 Every poller receives at most one message at a time. A message must include GitHub statistics. The handler validates and persists its effects, performs the applicable scheduling work, and returns success. Only then does the poller delete the GitHub message and advance its last-message ID.
 
-If validation, persistence, acquisition, scheduling, provider inspection, or provider startup fails, the message remains unacknowledged. GitHub may redeliver it. Demand keys and state transitions are therefore idempotent at the database boundary.
+If validation, persistence, acquisition, scheduling, provider inspection, or provider startup fails, the message remains unacknowledged. GitHub may redeliver it. Demand keys and state transitions are therefore idempotent at the database boundary. A terminal `JobCompleted` message without a positive request ID is a permanent exception: clustered mode reconciles lifecycle cleanup by its stable runner name when available, warns, and acknowledges the message without changing assignment or demand state. A failure during that reconciliation remains retryable.
 
 Pollers issue the next receive immediately after a successful empty or handled response. A failed poll waits five seconds before retrying, and the third consecutive failure adds a sustained-degradation log entry. Cancellation interrupts both an active poll and its retry wait.
 

@@ -350,8 +350,10 @@ func (leader *clusterLeader) startConfirmedSession(
 
 func (leader *clusterLeader) startSessionPoller(ctx context.Context, session *repositoryScaleSetSession) <-chan struct{} {
 	poller := scalesetpoller.Poller{
-		Client:      session.messageClient,
-		Handler:     clusterMessageHandler{store: leader.daemon.assignments, scheduler: leader.scheduler, session: session},
+		Client: session.messageClient,
+		Handler: clusterMessageHandler{
+			store: leader.daemon.assignments, scheduler: leader.scheduler, session: session, logger: leader.daemon.logger,
+		},
 		MaxCapacity: session.capacity,
 	}
 	done := make(chan struct{})

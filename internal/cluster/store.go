@@ -143,6 +143,7 @@ type JobCompletion struct {
 	ScaleSet   string
 	Repository string
 	RequestID  int64
+	RunnerName string
 }
 
 type Store struct {

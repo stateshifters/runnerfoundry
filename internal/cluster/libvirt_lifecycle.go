@@ -83,23 +83,38 @@ func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	if _, err = transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
-		SET phase = 'reap_pending', reap_reason = 'job_completed', updated_at = clock_timestamp()
-		WHERE scale_set = $1 AND repository = $2 AND request_id = $3`,
-		completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
-		return fmt.Errorf("request clustered runner reap: %w", err)
-	}
-	if _, err = transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-		WHERE scale_set = $1 AND repository = $2 AND request_id = $3`,
-		completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
-		return fmt.Errorf("request clustered libvirt runner reap: %w", err)
-	}
-	if err = completeDemandInTransaction(ctx, transaction, completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
+	if err = completeJobInTransaction(ctx, transaction, completion); err != nil {
 		return err
 	}
 	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit clustered job completion: %w", err)
+	}
+	return nil
+}
+
+func completeJobInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	completion JobCompletion,
+) error {
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
+		SET phase = 'reap_pending', reap_reason = 'job_completed', updated_at = clock_timestamp()
+		WHERE scale_set = $1 AND repository = $2
+		  AND (($3 > 0 AND request_id = $3) OR ($3 <= 0 AND $4 <> '' AND runner_name = $4))`,
+		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
+		return fmt.Errorf("request clustered runner reap: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
+		WHERE scale_set = $1 AND repository = $2
+		  AND (($3 > 0 AND request_id = $3) OR ($3 <= 0 AND $4 <> '' AND runner_name = $4))`,
+		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
+		return fmt.Errorf("request clustered libvirt runner reap: %w", err)
+	}
+	if completion.RequestID > 0 {
+		if err := completeDemandInTransaction(ctx, transaction, completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

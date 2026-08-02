@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	upstream "github.com/actions/scaleset"
@@ -16,6 +17,7 @@ type clusterMessageHandler struct {
 	store     clusterDemandState
 	scheduler *clusterScheduler
 	session   *repositoryScaleSetSession
+	logger    *slog.Logger
 }
 
 func (handler clusterMessageHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
@@ -69,15 +71,59 @@ func (handler clusterMessageHandler) removeStarted(ctx context.Context, messages
 
 func (handler clusterMessageHandler) removeCompleted(ctx context.Context, messages []*upstream.JobCompleted) error {
 	for _, completed := range messages {
-		if completed == nil || completed.RunnerRequestID <= 0 {
-			return errors.New("job completed message requires a positive runner request ID")
-		}
-		if err := handler.store.CompleteJob(ctx, cluster.JobCompletion{
-			ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
-			RequestID: completed.RunnerRequestID,
-		}); err != nil {
-			return fmt.Errorf("complete clustered job: %w", err)
+		if err := handler.handleCompleted(ctx, completed); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (handler clusterMessageHandler) handleCompleted(ctx context.Context, completed *upstream.JobCompleted) error {
+	if completed == nil {
+		handler.warnInvalidCompletion(ctx, nil)
+		return nil
+	}
+	if completed.RunnerRequestID > 0 {
+		return handler.completeJob(ctx, completed)
+	}
+	return handler.reconcileInvalidCompletion(ctx, completed)
+}
+
+func (handler clusterMessageHandler) reconcileInvalidCompletion(ctx context.Context, completed *upstream.JobCompleted) error {
+	if completed.RunnerName != "" {
+		if err := handler.completeJob(ctx, completed); err != nil {
+			return err
+		}
+	}
+	handler.warnInvalidCompletion(ctx, completed)
+	return nil
+}
+
+func (handler clusterMessageHandler) completeJob(ctx context.Context, completed *upstream.JobCompleted) error {
+	if err := handler.store.CompleteJob(ctx, cluster.JobCompletion{
+		ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
+		RequestID: completed.RunnerRequestID, RunnerName: completed.RunnerName,
+	}); err != nil {
+		return fmt.Errorf("complete clustered job: %w", err)
+	}
+	return nil
+}
+
+func (handler clusterMessageHandler) warnInvalidCompletion(ctx context.Context, completed *upstream.JobCompleted) {
+	var requestID int64
+	var runnerName string
+	var runnerID int
+	if completed != nil {
+		requestID = completed.RunnerRequestID
+		runnerName = completed.RunnerName
+		runnerID = completed.RunnerID
+	}
+	logAction(ctx, handler.logger, slog.LevelWarn, "cluster_job_completion_invalid", "dropped",
+		slog.String("repository", handler.session.key.repository),
+		slog.String("scaleSet", handler.session.key.scaleSet),
+		slog.String("messageType", string(upstream.MessageTypeJobCompleted)),
+		slog.Int64("requestID", requestID),
+		slog.String("runner", runnerName),
+		slog.Int("runnerID", runnerID),
+	)
 }
