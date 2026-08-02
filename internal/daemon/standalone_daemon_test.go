@@ -171,7 +171,7 @@ func TestLoadConfigurationDoesNotContactGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected local preflight success, got %v", err)
 	}
-	if discoverer.calls != 0 || len(activeConfig.Repositories) != 0 {
-		t.Fatalf("expected no GitHub work before readiness, calls=%d repositories=%#v", discoverer.calls, activeConfig.Repositories)
+	if discoverer.CallCount() != 0 || len(activeConfig.Repositories) != 0 {
+		t.Fatalf("expected no GitHub work before readiness, calls=%d repositories=%#v", discoverer.CallCount(), activeConfig.Repositories)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -31,8 +32,8 @@ func TestRunDaemonReconcilesPeriodicDiscovery(t *testing.T) {
 	if err := runDaemon(ctx, Options{}, daemonUnderTest); err != nil {
 		t.Fatalf("expected periodic reconciliation shutdown, got %v", err)
 	}
-	if discoverer.calls < 2 {
-		t.Fatalf("expected repeated discovery, got %d calls", discoverer.calls)
+	if discoverer.CallCount() < 2 {
+		t.Fatalf("expected repeated discovery, got %d calls", discoverer.CallCount())
 	}
 }
 
@@ -133,36 +134,69 @@ func TestRunDaemonRetainsActiveConfigurationAfterReloadFailure(t *testing.T) {
 }
 
 func TestRunDaemonDoesNotWaitForReplacementDiscoveryBeforeReadyNotification(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	loadedConfig := runnableConfig(t)
-	reloads := make(chan struct{}, 1)
-	reloads <- struct{}{}
-	discoverer := &recordingDiscoverer{result: githubapp.DiscoveryResult{
-		InstallationFailures: map[githubapp.InstallationID]error{},
-	}, afterDiscover: func(int) {}}
-	notifier := &replacementReadyNotifier{cancel: cancel, discoverer: discoverer}
-	daemonUnderTest := standaloneDaemon{
-		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
-		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return discoverer, nil
-		},
-		newLogger: func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:  notifier,
-	}
+	ctx, fixture := newReplacementDiscoveryReadinessFixture(t)
 
-	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonUnderTest); err != nil {
+	if err := runDaemon(ctx, Options{ReloadRequests: fixture.reloads}, fixture.daemon); err != nil {
 		t.Fatalf("expected ready notification failure to preserve replacement, got %v", err)
 	}
-	if notifier.discoveryCallsAtReloadReady != 2 {
-		t.Fatalf("ready waited for replacement discovery: calls=%d, want 2", notifier.discoveryCallsAtReloadReady)
+	if fixture.notifier.replacementDiscoveryCompletedAtReloadReady {
+		t.Fatal("reload readiness waited for replacement discovery to complete")
+	}
+}
+
+type replacementDiscoveryReadinessFixture struct {
+	reloads  chan struct{}
+	daemon   standaloneDaemon
+	notifier *replacementReadyNotifier
+}
+
+func newReplacementDiscoveryReadinessFixture(t *testing.T) (context.Context, replacementDiscoveryReadinessFixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	reloads := make(chan struct{}, 1)
+	reloads <- struct{}{}
+	discoverer, notifier := newBlockedReplacementDiscovery(cancel)
+	loadedConfig := runnableConfig(t)
+	return ctx, replacementDiscoveryReadinessFixture{
+		reloads: reloads, notifier: notifier,
+		daemon: standaloneDaemon{
+			loadConfig:    func(string) (config.Config, error) { return loadedConfig, nil },
+			newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) { return discoverer, nil },
+			newLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+			notifier:      notifier,
+		},
+	}
+}
+
+func newBlockedReplacementDiscovery(cancel context.CancelFunc) (*recordingDiscoverer, *replacementReadyNotifier) {
+	replacementDiscoveryMayComplete := make(chan struct{})
+	var replacementDiscoveryCompleted atomic.Bool
+	discoverer := &recordingDiscoverer{
+		result:        githubapp.DiscoveryResult{InstallationFailures: map[githubapp.InstallationID]error{}},
+		afterDiscover: blockThirdDiscovery(replacementDiscoveryMayComplete, &replacementDiscoveryCompleted),
+	}
+	notifier := &replacementReadyNotifier{
+		cancel: cancel, replacementDiscoveryMayComplete: replacementDiscoveryMayComplete,
+		replacementDiscoveryCompleted: &replacementDiscoveryCompleted,
+	}
+	return discoverer, notifier
+}
+
+func blockThirdDiscovery(mayComplete <-chan struct{}, completed *atomic.Bool) func(int) {
+	return func(call int) {
+		if call == 3 {
+			<-mayComplete
+			completed.Store(true)
+		}
 	}
 }
 
 type replacementReadyNotifier struct {
-	cancel                      context.CancelFunc
-	discoverer                  *recordingDiscoverer
-	readyCalls                  int
-	discoveryCallsAtReloadReady int
+	cancel                                     context.CancelFunc
+	replacementDiscoveryMayComplete            chan struct{}
+	replacementDiscoveryCompleted              *atomic.Bool
+	readyCalls                                 int
+	replacementDiscoveryCompletedAtReloadReady bool
 }
 
 func (notifier *replacementReadyNotifier) Ready(context.Context) error {
@@ -170,7 +204,8 @@ func (notifier *replacementReadyNotifier) Ready(context.Context) error {
 	if notifier.readyCalls != 2 {
 		return nil
 	}
-	notifier.discoveryCallsAtReloadReady = notifier.discoverer.calls
+	notifier.replacementDiscoveryCompletedAtReloadReady = notifier.replacementDiscoveryCompleted.Load()
+	close(notifier.replacementDiscoveryMayComplete)
 	notifier.cancel()
 	return errors.New("ready failed")
 }

@@ -118,25 +118,54 @@ func TestClusteredLeaderRemainsOperationalWithRepositoryRepairPending(t *testing
 }
 
 type clusteredLeaderStatusTestFixture struct {
-	config           config.Config
-	daemon           *clusteredDaemon
-	notifier         *clusterStatusSnapshotNotifier
-	successfulClient *fakeScaleSetClient
-	activeSessions   []repositoryScaleSetSessionKey
+	config                   config.Config
+	daemon                   *clusteredDaemon
+	notifier                 *clusterStatusSnapshotNotifier
+	successfulClient         *fakeScaleSetClient
+	repositoryWorkMayProceed chan struct{}
+	activeSessions           []repositoryScaleSetSessionKey
 }
 
 func clusteredLeaderStatusFixture(t *testing.T) (context.Context, *clusteredLeaderStatusTestFixture) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	fixture := newClusteredLeaderStatusTestFixture(t)
+	fixture.configureDaemon(cancel)
+	return ctx, fixture
+}
+
+func newClusteredLeaderStatusTestFixture(t *testing.T) *clusteredLeaderStatusTestFixture {
+	t.Helper()
 	state := &fakeClusterState{
 		leases:   []cluster.Lease{&fakeClusterLease{alive: true}},
 		statuses: []cluster.ScaleSetStatus{{Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true}},
 	}
-	fixture := &clusteredLeaderStatusTestFixture{config: clusteredConfig(t), daemon: clusteredDaemonForTest(state)}
-	fixture.successfulClient = fakeExistingScaleSetClient(
-		&upstream.RunnerGroup{ID: 1}, &upstream.RunnerScaleSet{ID: 2, Name: "linux"},
+	fixture := &clusteredLeaderStatusTestFixture{
+		config: clusteredConfig(t), daemon: clusteredDaemonForTest(state),
+		repositoryWorkMayProceed: make(chan struct{}, 1),
+	}
+	fixture.successfulClient = fixture.newOperationallyBlockedClient()
+	return fixture
+}
+
+func (fixture *clusteredLeaderStatusTestFixture) newOperationallyBlockedClient() *fakeScaleSetClient {
+	runnerGroup := &upstream.RunnerGroup{ID: 1}
+	client := fakeExistingScaleSetClient(
+		runnerGroup, &upstream.RunnerScaleSet{ID: 2, Name: "linux"},
 		scaleSetMessageClient{Client: &blockingMessageClient{entered: make(chan struct{}), exited: make(chan struct{})}},
 	)
+	client.getRunnerGroupByName = func(ctx context.Context, _ string) (*upstream.RunnerGroup, error) {
+		select {
+		case <-fixture.repositoryWorkMayProceed:
+			return runnerGroup, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return client
+}
+
+func (fixture *clusteredLeaderStatusTestFixture) configureDaemon(cancel context.CancelFunc) {
 	fixture.notifier = &clusterStatusSnapshotNotifier{cancel: cancel, onStatus: fixture.captureActiveSessions}
 	fixture.daemon.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
 		return fixture.discovery(), nil
@@ -149,7 +178,6 @@ func clusteredLeaderStatusFixture(t *testing.T) (context.Context, *clusteredLead
 		return fixture.clientForRepository(repositoryURL)
 	}
 	fixture.daemon.notifier = fixture.notifier
-	return ctx, fixture
 }
 
 func (*clusteredLeaderStatusTestFixture) discovery() staticDiscoverer {
@@ -175,6 +203,10 @@ func (fixture *clusteredLeaderStatusTestFixture) captureActiveSessions(status cl
 	defer leader.sessionsMutex.Unlock()
 	for key := range leader.sessions {
 		fixture.activeSessions = append(fixture.activeSessions, key)
+	}
+	select {
+	case fixture.repositoryWorkMayProceed <- struct{}{}:
+	default:
 	}
 }
 

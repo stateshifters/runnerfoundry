@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -248,8 +249,15 @@ func (notifier failingNotifier) Reloading(context.Context) error { return notifi
 
 type recordingDiscoverer struct {
 	result        githubapp.DiscoveryResult
+	mutex         sync.Mutex
 	calls         int
 	afterDiscover func(call int)
+}
+
+func (discoverer *recordingDiscoverer) CallCount() int {
+	discoverer.mutex.Lock()
+	defer discoverer.mutex.Unlock()
+	return discoverer.calls
 }
 
 type reloadCancellingNotifier struct {
@@ -316,7 +324,14 @@ func (nonPruningScaleSetClient) GetRunnerByName(context.Context, string) (*upstr
 func (nonPruningScaleSetClient) RemoveRunner(context.Context, int64) error { return nil }
 
 func (discoverer *recordingDiscoverer) Discover(context.Context) (githubapp.DiscoveryResult, error) {
+	discoverer.mutex.Lock()
 	discoverer.calls++
-	discoverer.afterDiscover(discoverer.calls)
-	return discoverer.result, nil
+	call := discoverer.calls
+	result := discoverer.result
+	afterDiscover := discoverer.afterDiscover
+	discoverer.mutex.Unlock()
+	if afterDiscover != nil {
+		afterDiscover(call)
+	}
+	return result, nil
 }
