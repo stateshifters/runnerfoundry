@@ -9,7 +9,7 @@ import (
 
 func TestMigrateAppliesKnownMigrationsAndValidatesCompatibility(t *testing.T) {
 	connection := &fakeDatabaseConnection{rowResults: []fakeRow{int32Row(t, 1)}}
-	executor := &migrationExecutor{currentVersion: currentMigrationVersion(1), target: 3}
+	executor := &migrationExecutor{currentVersion: currentMigrationVersion(1), target: 4}
 	var migratedTo int32
 	executor.migrateTo = func(_ context.Context, target int32) error {
 		migratedTo = target
@@ -19,7 +19,7 @@ func TestMigrateAppliesKnownMigrationsAndValidatesCompatibility(t *testing.T) {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if migratedTo != 3 || !connection.closed {
+	if migratedTo != 4 || !connection.closed {
 		t.Fatalf("migration target=%d connectionClosed=%t", migratedTo, connection.closed)
 	}
 }
@@ -27,12 +27,12 @@ func TestMigrateAppliesKnownMigrationsAndValidatesCompatibility(t *testing.T) {
 func TestMigrateAcceptsCompatibleNewerSchemaWithoutApplyingMigrations(t *testing.T) {
 	connection := &fakeDatabaseConnection{rowResults: []fakeRow{int32Row(t, 2)}}
 	executor := &migrationExecutor{
-		currentVersion: currentMigrationVersion(4),
+		currentVersion: currentMigrationVersion(5),
 		migrateTo: func(context.Context, int32) error {
 			t.Fatal("newer compatible schema was migrated")
 			return nil
 		},
-		target: 3,
+		target: 4,
 	}
 	if err := storeWithMigrationExecutor(connection, executor, nil).Migrate(context.Background()); err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestMigrateReportsApplicationAndCompatibilityFailures(t *testing.T) {
 			executor:   successfulMigrationExecutor(1),
 		},
 		"incompatible": {
-			connection: &fakeDatabaseConnection{rowResults: []fakeRow{int32Row(t, 4)}},
+			connection: &fakeDatabaseConnection{rowResults: []fakeRow{int32Row(t, 5)}},
 			executor:   successfulMigrationExecutor(1),
 		},
 	}
@@ -128,7 +128,7 @@ func TestMigrationStatusReportsEmptyZeroAndCurrentSchemas(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 3 {
+			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 4 {
 				t.Fatalf("migration status = %#v", status)
 			}
 		})
@@ -261,7 +261,7 @@ func TestNewMigrationExecutorRequiresPostgreSQLConnectionAndLoadsCatalog(t *test
 		t.Fatal("expected concrete PostgreSQL migration connection requirement")
 	}
 	executor, err := store.newMigrationExecutor(context.Background(), &postgreSQLLeaderConnection{})
-	if err != nil || executor.target != 3 {
+	if err != nil || executor.target != 4 {
 		t.Fatalf("migration executor = %#v, %v", executor, err)
 	}
 }
@@ -282,7 +282,7 @@ func successfulMigrationExecutor(current int32) *migrationExecutor {
 	return &migrationExecutor{
 		currentVersion: currentMigrationVersion(current),
 		migrateTo:      func(context.Context, int32) error { return nil },
-		target:         3,
+		target:         4,
 	}
 }
 

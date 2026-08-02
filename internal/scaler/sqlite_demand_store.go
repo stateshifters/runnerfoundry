@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 4
+const currentStateSchemaVersion = 5
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -77,6 +77,7 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		store.removeLegacyZeroIdentityDemand,
 		store.addLibvirtRunnerLifecycle,
 		store.addRunnerLifecycle,
+		store.addRepositoryState,
 	}
 	for ; version < currentStateSchemaVersion; version++ {
 		if err = migrations[version](ctx); err != nil {
@@ -84,6 +85,53 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+var repositoryStateMigrationSteps = []sqliteMigrationStep{
+	{operation: "create repository control table", statement: `CREATE TABLE repository_controls (
+		app_id INTEGER PRIMARY KEY CHECK(app_id > 0),
+		discovery_generation INTEGER NOT NULL DEFAULT 0 CHECK(discovery_generation >= 0),
+		last_successful_discovery INTEGER NOT NULL DEFAULT 0,
+		controller_epoch INTEGER NOT NULL DEFAULT 0 CHECK(controller_epoch >= 0),
+		initialized INTEGER NOT NULL DEFAULT 0 CHECK(initialized IN (0, 1))
+	)`},
+	{operation: "create installation state table", statement: `CREATE TABLE repository_installations (
+		app_id INTEGER NOT NULL REFERENCES repository_controls(app_id) ON DELETE CASCADE,
+		installation_id INTEGER NOT NULL CHECK(installation_id > 0),
+		last_seen_generation INTEGER NOT NULL CHECK(last_seen_generation > 0),
+		PRIMARY KEY(app_id, installation_id)
+	)`},
+	{operation: "create repository state table", statement: `CREATE TABLE repositories (
+		app_id INTEGER NOT NULL,
+		repository_url TEXT NOT NULL CHECK(trim(repository_url) <> ''),
+		installation_id INTEGER NOT NULL,
+		last_seen_generation INTEGER NOT NULL CHECK(last_seen_generation > 0),
+		PRIMARY KEY(app_id, repository_url),
+		FOREIGN KEY(app_id, installation_id) REFERENCES repository_installations(app_id, installation_id) ON DELETE CASCADE
+	)`},
+	{operation: "index repositories by installation generation", statement: `CREATE INDEX repositories_by_installation_generation
+		ON repositories(app_id, installation_id, last_seen_generation)`},
+	{operation: "create registration state table", statement: `CREATE TABLE repository_registrations (
+		app_id INTEGER NOT NULL,
+		repository_url TEXT NOT NULL,
+		scale_set_name TEXT NOT NULL CHECK(trim(scale_set_name) <> ''),
+		runner_group TEXT NOT NULL CHECK(trim(runner_group) <> ''),
+		github_scale_set_id INTEGER NOT NULL CHECK(github_scale_set_id > 0),
+		PRIMARY KEY(app_id, repository_url, scale_set_name),
+		FOREIGN KEY(app_id, repository_url) REFERENCES repositories(app_id, repository_url) ON DELETE CASCADE
+	)`},
+	{operation: "record repository state migration", statement: "PRAGMA user_version = 5"},
+}
+
+func (store *SQLiteDemandStore) addRepositoryState(ctx context.Context) error {
+	return store.runMigration(ctx, "repository state migration", func(transaction *sql.Tx) error {
+		for _, step := range repositoryStateMigrationSteps {
+			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
+				return fmt.Errorf("%s: %w", step.operation, err)
+			}
+		}
+		return nil
+	})
 }
 
 type sqliteMigrationStep struct {

@@ -16,6 +16,7 @@ type Repository struct {
 }
 
 type DiscoveryResult struct {
+	Installations        []InstallationID
 	Repositories         []Repository
 	InstallationFailures map[InstallationID]error
 }
@@ -34,7 +35,10 @@ func (discoverer Discoverer) Discover(ctx context.Context) (DiscoveryResult, err
 	if err != nil {
 		return DiscoveryResult{}, err
 	}
-	result := DiscoveryResult{InstallationFailures: map[InstallationID]error{}}
+	result := DiscoveryResult{
+		Installations:        append([]InstallationID(nil), installationIDs...),
+		InstallationFailures: map[InstallationID]error{},
+	}
 	for _, installationID := range installationIDs {
 		repositories, repositoryErr := discoverer.repositories(ctx, installationID)
 		if repositoryErr != nil {

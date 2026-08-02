@@ -25,6 +25,9 @@ func TestDiscoverReturnsRepositoriesAcrossInstallationsAndIsolatesFailures(t *te
 	if len(result.Repositories) != 3 {
 		t.Fatalf("expected three repositories, got %#v", result.Repositories)
 	}
+	if len(result.Installations) != 3 || result.Installations[0] != 11 || result.Installations[1] != 22 || result.Installations[2] != 33 {
+		t.Fatalf("expected every discovered installation, got %#v", result.Installations)
+	}
 	if result.Repositories[1].InstallationID != 11 || result.Repositories[1].URL != "https://github.com/acme/two" {
 		t.Fatalf("unexpected paginated repository %#v", result.Repositories[1])
 	}

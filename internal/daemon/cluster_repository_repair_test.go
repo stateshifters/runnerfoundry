@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,51 @@ func TestRepositoryRepairTimeoutDoesNotPoisonLaterRepository(t *testing.T) {
 	leader.stop(context.Background())
 }
 
+func TestBlockedRepositoryDoesNotDelayLaterRepositoryActivation(t *testing.T) {
+	leader, daemon := repositoryRepairTestLeader(t, []githubapp.Repository{
+		{InstallationID: 1, URL: "https://github.com/acme/a-blocked"},
+		{InstallationID: 2, URL: "https://github.com/acme/b-working"},
+	})
+	blockedEntered := make(chan struct{})
+	releaseBlocked := make(chan struct{})
+	closeSignalOnCleanup(t, releaseBlocked)
+	workingEntered := make(chan struct{})
+	daemon.newGitHubClient = blockedAndWorkingClientFactory(blockedEntered, releaseBlocked, workingEntered)
+	reconciled := make(chan bool, 1)
+	go func() { reconciled <- leader.reconcile(context.Background()) }()
+	awaitCompletionSignal(t, blockedEntered)
+	awaitCompletionSignal(t, workingEntered)
+	close(releaseBlocked)
+	if !awaitBoolSignal(t, reconciled) {
+		t.Fatal("repository reconciliation did not remain operational")
+	}
+}
+
+func blockedAndWorkingClientFactory(
+	blockedEntered chan<- struct{},
+	releaseBlocked <-chan struct{},
+	workingEntered chan<- struct{},
+) func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
+	blockedClient := successfulRepositoryRepairClient()
+	blockedClient.getRunnerGroupByName = func(context.Context, string) (*upstream.RunnerGroup, error) {
+		close(blockedEntered)
+		<-releaseBlocked
+		return &upstream.RunnerGroup{ID: 1}, nil
+	}
+	workingClient := successfulRepositoryRepairClient()
+	return func(
+		repository string,
+		_ githubapp.InstallationID,
+		_ config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		if repository == "https://github.com/acme/a-blocked" {
+			return blockedClient, nil
+		}
+		close(workingEntered)
+		return workingClient, nil
+	}
+}
+
 func TestRepositoryRepairRetriesOnlyPendingRepository(t *testing.T) {
 	leader, daemon := repositoryRepairTestLeader(t, []githubapp.Repository{
 		{InstallationID: 1, URL: "https://github.com/acme/a-failing"},
@@ -44,15 +91,45 @@ func TestRepositoryRepairRetriesOnlyPendingRepository(t *testing.T) {
 	if !leader.reconcile(context.Background()) {
 		t.Fatal("repository failure degraded global reconciliation")
 	}
+	awaitInitialRepositoryFailure(t, leader, clientFactory)
 	now = now.Add(5 * time.Second)
 	leader.repairPendingRepositories(context.Background())
-	if clientFactory.calls["https://github.com/acme/a-failing"] != 2 || clientFactory.calls["https://github.com/acme/b-working"] != 1 {
-		t.Fatalf("repository calls = %#v, want only the failed repository retried", clientFactory.calls)
-	}
-	if len(leader.pendingRepositoryRepairs) != 0 {
-		t.Fatalf("pending repairs = %d, want repaired repository removed", len(leader.pendingRepositoryRepairs))
-	}
+	assertTargetedRepositoryRetry(t, leader, clientFactory)
 	leader.stop(context.Background())
+}
+
+func awaitInitialRepositoryFailure(
+	t *testing.T,
+	leader *clusterLeader,
+	clientFactory *transientRepositoryClientFactory,
+) {
+	t.Helper()
+	awaitRepositoryRepairCondition(t, func() bool {
+		calls := clientFactory.callSnapshot()
+		leader.repairMutex.Lock()
+		_, pending := leader.pendingRepositoryRepairs["https://github.com/acme/a-failing"]
+		leader.repairMutex.Unlock()
+		return calls["https://github.com/acme/a-failing"] == 1 &&
+			calls["https://github.com/acme/b-working"] == 1 && pending
+	})
+}
+
+func assertTargetedRepositoryRetry(
+	t *testing.T,
+	leader *clusterLeader,
+	clientFactory *transientRepositoryClientFactory,
+) {
+	t.Helper()
+	calls := clientFactory.callSnapshot()
+	if calls["https://github.com/acme/a-failing"] != 2 || calls["https://github.com/acme/b-working"] != 1 {
+		t.Fatalf("repository calls = %#v, want only the failed repository retried", calls)
+	}
+	leader.repairMutex.Lock()
+	pendingRepairs := len(leader.pendingRepositoryRepairs)
+	leader.repairMutex.Unlock()
+	if pendingRepairs != 0 {
+		t.Fatalf("pending repairs = %d, want repaired repository removed", pendingRepairs)
+	}
 }
 
 func TestRepositoryRepairUsesBoundedBackoff(t *testing.T) {
@@ -61,19 +138,20 @@ func TestRepositoryRepairUsesBoundedBackoff(t *testing.T) {
 	}})
 	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
 	leader.now = func() time.Time { return now }
-	attempts := 0
+	var attempts atomic.Int32
 	daemon.newGitHubClient = func(
 		string,
 		githubapp.InstallationID,
 		config.GitHubAppCredentials,
 	) (scaleSetClient, error) {
-		attempts++
+		attempts.Add(1)
 		return nil, errors.New("unavailable")
 	}
 
 	if !leader.reconcile(context.Background()) {
 		t.Fatal("repository failure degraded global reconciliation")
 	}
+	awaitRepositoryRepairCount(t, leader)
 	for _, delay := range []time.Duration{
 		5 * time.Second, 10 * time.Second, 20 * time.Second,
 		40 * time.Second, 60 * time.Second, 60 * time.Second,
@@ -87,28 +165,29 @@ func TestRepositoryRepairIsDiscardedWhenRepositoryIsRemoved(t *testing.T) {
 	leader, daemon := repositoryRepairTestLeader(t, []githubapp.Repository{{
 		InstallationID: 1, URL: "https://github.com/acme/removed",
 	}})
-	attempts := 0
+	var attempts atomic.Int32
 	daemon.newGitHubClient = func(
 		string,
 		githubapp.InstallationID,
 		config.GitHubAppCredentials,
 	) (scaleSetClient, error) {
-		attempts++
+		attempts.Add(1)
 		return nil, errors.New("unavailable")
 	}
-	if !leader.reconcile(context.Background()) || len(leader.pendingRepositoryRepairs) != 1 {
+	if !leader.reconcile(context.Background()) {
 		t.Fatal("failed repository was not retained for repair")
 	}
+	awaitRepositoryRepairCount(t, leader)
 	daemon.discoverer = staticDiscoverer{}
 	if !leader.reconcile(context.Background()) {
 		t.Fatal("repository removal degraded global reconciliation")
 	}
-	if len(leader.pendingRepositoryRepairs) != 0 {
+	if repositoryRepairCount(leader) != 0 {
 		t.Fatal("removed repository retained obsolete repair work")
 	}
 	leader.repairPendingRepositories(context.Background())
-	if attempts != 1 {
-		t.Fatalf("repair attempts after removal = %d, want no retry", attempts)
+	if attempts.Load() != 1 {
+		t.Fatalf("repair attempts after removal = %d, want no retry", attempts.Load())
 	}
 	leader.stop(context.Background())
 }
@@ -120,14 +199,15 @@ func TestRepositoryRepairIsDiscardedWhenScaleSetIsWithdrawn(t *testing.T) {
 	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("unavailable")
 	}
-	if !leader.reconcile(context.Background()) || len(leader.pendingRepositoryRepairs) != 1 {
+	if !leader.reconcile(context.Background()) {
 		t.Fatal("failed repository was not retained for repair")
 	}
+	awaitRepositoryRepairCount(t, leader)
 	repositoryRepairState(t, daemon).statuses = nil
 	if !leader.reconcile(context.Background()) {
 		t.Fatal("scale-set withdrawal degraded global reconciliation")
 	}
-	if len(leader.pendingRepositoryRepairs) != 0 {
+	if repositoryRepairCount(leader) != 0 {
 		t.Fatal("withdrawn scale set retained obsolete repository repair")
 	}
 	leader.stop(context.Background())
@@ -146,9 +226,10 @@ func TestLeadershipLossCancelsRepositoryRepair(t *testing.T) {
 	if !leader.reconcile(context.Background()) {
 		t.Fatal("repository failure degraded global reconciliation")
 	}
+	awaitRepositoryRepairCount(t, leader)
 	now = now.Add(5 * time.Second)
 	runRepairUntilLeadershipStops(leader, clientFactory.entered)
-	if len(leader.pendingRepositoryRepairs) != 0 {
+	if repositoryRepairCount(leader) != 0 {
 		t.Fatal("leadership loss retained repository repair work")
 	}
 }
@@ -233,7 +314,7 @@ func repositoryRepairTestLeader(
 	daemon := activeClusteredDaemon(t, state)
 	daemon.logger = slog.Default()
 	daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: repositories}}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
 	daemon.leader = leader
 	return leader, &daemon
 }
@@ -278,15 +359,19 @@ func timeoutIsolationClientFactory() func(
 func assertTimeoutIsolation(t *testing.T, leader *clusterLeader) {
 	t.Helper()
 	workingKey := repositoryScaleSetSessionKey{repository: "https://github.com/acme/b-working", scaleSet: "linux"}
-	if leader.sessions[workingKey] == nil {
-		t.Fatal("later repository did not activate after an earlier repository timeout")
-	}
-	if _, pending := leader.pendingRepositoryRepairs["https://github.com/acme/a-timeout"]; !pending {
-		t.Fatal("timed-out repository was not retained for repair")
-	}
+	awaitRepositoryRepairCondition(t, func() bool {
+		leader.sessionsMutex.Lock()
+		working := leader.sessions[workingKey] != nil
+		leader.sessionsMutex.Unlock()
+		leader.repairMutex.Lock()
+		_, pending := leader.pendingRepositoryRepairs["https://github.com/acme/a-timeout"]
+		leader.repairMutex.Unlock()
+		return working && pending
+	})
 }
 
 type transientRepositoryClientFactory struct {
+	mutex             sync.Mutex
 	calls             map[string]int
 	failingRepository string
 }
@@ -296,6 +381,8 @@ func (factory *transientRepositoryClientFactory) client(
 	_ githubapp.InstallationID,
 	_ config.GitHubAppCredentials,
 ) (*fakeScaleSetClient, error) {
+	factory.mutex.Lock()
+	defer factory.mutex.Unlock()
 	factory.calls[repository]++
 	if repository == factory.failingRepository && factory.calls[repository] == 1 {
 		return nil, errors.New("temporarily unavailable")
@@ -303,24 +390,56 @@ func (factory *transientRepositoryClientFactory) client(
 	return successfulRepositoryRepairClient(), nil
 }
 
+func (factory *transientRepositoryClientFactory) callSnapshot() map[string]int {
+	factory.mutex.Lock()
+	defer factory.mutex.Unlock()
+	return map[string]int{
+		"https://github.com/acme/a-failing": factory.calls["https://github.com/acme/a-failing"],
+		"https://github.com/acme/b-working": factory.calls["https://github.com/acme/b-working"],
+	}
+}
+
+func awaitRepositoryRepairCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for repository repair state")
+}
+
+func repositoryRepairCount(leader *clusterLeader) int {
+	leader.repairMutex.Lock()
+	defer leader.repairMutex.Unlock()
+	return len(leader.pendingRepositoryRepairs)
+}
+
+func awaitRepositoryRepairCount(t *testing.T, leader *clusterLeader) {
+	t.Helper()
+	awaitRepositoryRepairCondition(t, func() bool { return repositoryRepairCount(leader) == 1 })
+}
+
 func assertRepositoryRepairDelay(
 	t *testing.T,
 	leader *clusterLeader,
 	now *time.Time,
-	attempts *int,
+	attempts *atomic.Int32,
 	delay time.Duration,
 ) {
 	t.Helper()
-	attemptsBeforeDelay := *attempts
+	attemptsBeforeDelay := attempts.Load()
 	*now = now.Add(delay - time.Nanosecond)
 	leader.repairPendingRepositories(context.Background())
-	if *attempts != attemptsBeforeDelay {
-		t.Fatalf("attempts before delay %s = %d, want %d", delay, *attempts, attemptsBeforeDelay)
+	if attempts.Load() != attemptsBeforeDelay {
+		t.Fatalf("attempts before delay %s = %d, want %d", delay, attempts.Load(), attemptsBeforeDelay)
 	}
 	*now = now.Add(time.Nanosecond)
 	leader.repairPendingRepositories(context.Background())
-	if *attempts != attemptsBeforeDelay+1 {
-		t.Fatalf("attempts after delay %s = %d, want %d", delay, *attempts, attemptsBeforeDelay+1)
+	if attempts.Load() != attemptsBeforeDelay+1 {
+		t.Fatalf("attempts after delay %s = %d, want %d", delay, attempts.Load(), attemptsBeforeDelay+1)
 	}
 }
 

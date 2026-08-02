@@ -40,7 +40,7 @@ func TestClusteredSessionRejectsAnInvalidRepositoryURL(t *testing.T) {
 	}
 	daemon.config = configured
 	daemon.logger = slog.Default()
-	leader := newClusterLeader(daemon, &fakeClusterLease{alive: true})
+	leader := newClusterLeader(context.Background(), daemon, &fakeClusterLease{alive: true})
 
 	_, err := leader.startSession(context.Background(), githubapp.Repository{
 		URL: "not a repository URL", InstallationID: 1,

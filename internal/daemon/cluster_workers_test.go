@@ -26,7 +26,7 @@ func TestReconciliationRequestsCoalesce(t *testing.T) {
 		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
 		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier, nodes: state, assignments: state,
 	}
-	daemon.leader = newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	daemon.leader = newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	requests := make(chan struct{}, 1)
 	state.onScaleSets = func() {
@@ -70,7 +70,7 @@ func TestStoppedLeaderRejectsNewReconciliation(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
 	daemon.discoverer = &recordingDiscoverer{afterDiscover: func(int) { discoveryCalls++ }}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
 	leader.stop(context.Background())
 	if leader.reconcile(context.Background()) {
 		t.Fatal("stopped leader reported successful reconciliation")
@@ -98,8 +98,10 @@ func TestRepositorySessionFailureIsActivelyRepaired(t *testing.T) {
 	fixture := repositorySessionRetryFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	requests := make(chan struct{}, 1)
-	fixture.daemon.workers.Add(1)
+	fixture.daemon.repositoryRepairRequests = make(chan struct{}, 1)
+	fixture.daemon.workers.Add(2)
 	go fixture.daemon.runReconciliationLoop(ctx, requests)
+	go fixture.daemon.runRepositoryRepairLoop(ctx)
 	requestReconciliation(requests)
 
 	select {
@@ -112,12 +114,31 @@ func TestRepositorySessionFailureIsActivelyRepaired(t *testing.T) {
 		fixture.daemon.waitForWorkers()
 		t.Fatal("failed repository was not actively retried")
 	}
+	awaitClusterSessionCount(t, fixture.leader, 1)
 	cancel()
 	fixture.daemon.waitForWorkers()
-	if len(fixture.leader.sessions) != 1 {
-		t.Fatalf("active sessions = %d, want repaired repository session", len(fixture.leader.sessions))
-	}
 	fixture.leader.stop(context.Background())
+}
+
+func awaitClusterSessionCount(t *testing.T, leader *clusterLeader, expected int) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		leader.sessionsMutex.Lock()
+		actual := len(leader.sessions)
+		leader.sessionsMutex.Unlock()
+		if actual == expected {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("active sessions = %d, want %d", actual, expected)
+		case <-ticker.C:
+		}
+	}
 }
 
 type repositorySessionRetryTestFixture struct {
@@ -154,7 +175,7 @@ func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixt
 	}
 	fixture.notifier = &clusterStatusSnapshotNotifier{}
 	fixture.daemon.notifier = fixture.notifier
-	fixture.leader = newClusterLeader(fixture.daemon, &fakeClusterLease{alive: true})
+	fixture.leader = newClusterLeader(context.Background(), fixture.daemon, &fakeClusterLease{alive: true})
 	fixture.leader.repositoryRepairDelays = []time.Duration{time.Millisecond}
 	fixture.daemon.leader = fixture.leader
 	return fixture
@@ -220,12 +241,12 @@ func TestAssignmentRecoveryStopsAfterLoadOrRepairFailure(t *testing.T) {
 }
 
 func TestStaleLeadershipAndStatusFailureDoNotChangeDaemonState(t *testing.T) {
-	current := newClusterLeader(&clusteredDaemon{}, &fakeClusterLease{alive: true})
+	current := newClusterLeader(context.Background(), &clusteredDaemon{}, &fakeClusterLease{alive: true})
 	daemon := clusteredDaemon{
 		leader: current, logger: slog.Default(),
 		notifier: failingStatusNotifier{},
 	}
-	if daemon.clearLeadership(newClusterLeader(&daemon, &fakeClusterLease{alive: true})) {
+	if daemon.clearLeadership(newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})) {
 		t.Fatal("stale leader cleared current leadership")
 	}
 	daemon.notifyStatus(context.Background(), clusterServiceStatusLeaderDegraded)
@@ -254,7 +275,8 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		},
 		openStore: func(postgresconfig.Settings) (clusterStoreConnection, error) {
 			return clusterStoreConnection{
-				state: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+				state: state, repositoryState: &fakeRepositoryStateStore{},
+				tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}, nil
 		},
 		providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },

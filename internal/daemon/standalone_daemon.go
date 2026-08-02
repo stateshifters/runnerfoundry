@@ -7,13 +7,21 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/repositorystate"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
+
+type standaloneState interface {
+	scaler.DemandStore
+	repositorystate.Store
+	io.Closer
+}
 
 type standaloneDaemon struct {
 	loadConfig      func(configPath string) (config.Config, error)
@@ -22,7 +30,7 @@ type standaloneDaemon struct {
 	newGitHubClient func(repositoryURL string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error)
 	newLogger       func(format string, level string) *slog.Logger
 	newLogging      func(config.LogConfig) (*loggingManager, error)
-	openDemandStore func(path string) (scaler.DemandStore, io.Closer, error)
+	openState       func(path string) (standaloneState, error)
 	notifier        serviceNotifier
 	startScaleSet   func(
 		ctx context.Context,
@@ -64,18 +72,23 @@ const (
 )
 
 type activeConfiguration struct {
-	Config                config.Config
-	Credentials           config.GitHubAppCredentials
-	Discoverer            repositoryDiscoverer
-	Coordinators          map[string]*scaler.Coordinator
-	Repositories          map[string]managedRepository
-	Logger                *slog.Logger
-	Logging               *loggingManager
-	PreparedLogging       *preparedLogging
-	DemandStore           scaler.DemandStore
-	StateCloser           io.Closer
-	DiscoveryInterval     time.Duration
-	ReconciliationPending bool
+	Config                 config.Config
+	Credentials            config.GitHubAppCredentials
+	Discoverer             repositoryDiscoverer
+	Coordinators           map[string]*scaler.Coordinator
+	Repositories           map[string]managedRepository
+	Logger                 *slog.Logger
+	Logging                *loggingManager
+	PreparedLogging        *preparedLogging
+	DemandStore            scaler.DemandStore
+	RepositoryState        repositorystate.Store
+	RepositorySnapshot     repositorystate.Snapshot
+	ConfirmedDiscovery     *githubapp.DiscoveryResult
+	ConfirmedRegistrations []repositorystate.Registration
+	RepositoryMutex        *sync.Mutex
+	StateCloser            io.Closer
+	DiscoveryInterval      time.Duration
+	ReconciliationPending  bool
 }
 
 func newStandaloneDaemon() standaloneDaemon {
@@ -94,12 +107,12 @@ func newStandaloneDaemon() standaloneDaemon {
 		newLogging: func(logConfig config.LogConfig) (*loggingManager, error) {
 			return newLoggingManager(logConfig, newProductionLogDestinationFactory())
 		},
-		openDemandStore: func(path string) (scaler.DemandStore, io.Closer, error) {
+		openState: func(path string) (standaloneState, error) {
 			store, err := openSQLiteDemandStore(path)
 			if err != nil {
-				return nil, nil, fmt.Errorf("open SQLite demand store: %w", err)
+				return nil, fmt.Errorf("open SQLite demand store: %w", err)
 			}
-			return store, store, nil
+			return store, nil
 		},
 		notifier:                 newSystemdNotifier(),
 		startScaleSet:            startCoordinatedScaleSet,
@@ -110,32 +123,48 @@ func newStandaloneDaemon() standaloneDaemon {
 
 func runDaemon(ctx context.Context, options Options, daemon standaloneDaemon) (runErr error) {
 	daemon = withStandaloneDefaults(daemon)
-	activeConfig, err := loadConfiguration(options.ConfigPath, daemon)
+	activeConfig, discoveryInterval, err := prepareStandaloneRuntime(ctx, options.ConfigPath, daemon)
 	if err != nil {
 		return err
 	}
-	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "configuration", "loaded",
-		slog.String("configPath", options.ConfigPath),
-		slog.Int("scaleSetCount", len(activeConfig.Config.ScaleSets)),
-		slog.String("logFormat", activeConfig.Config.Log.Format),
-		slog.String("logLevel", activeConfig.Config.Log.Level),
-	)
 	defer func() {
 		runErr = errors.Join(runErr, activeConfig.StateCloser.Close())
 		if activeConfig.Logging != nil {
 			runErr = errors.Join(runErr, activeConfig.Logging.Close())
 		}
 	}()
-	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
+	control, err := startStandaloneControl(ctx, daemon, &activeConfig, standaloneControlOptions{})
 	if err != nil {
-		return fmt.Errorf("load discovery interval: %w", err)
+		return fmt.Errorf("start standalone repository control: %w", err)
 	}
 	if notifyErr := daemon.notifier.Ready(ctx); notifyErr != nil {
+		control.Stop()
 		return fmt.Errorf("notify ready: %w", notifyErr)
 	}
 	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "daemon", "ready")
-	reconcileDiscovery(ctx, daemon, &activeConfig)
-	return runActiveConfiguration(ctx, options, daemon, activeConfig, discoveryInterval)
+	return runActiveConfigurationWithControl(ctx, options, daemon, &activeConfig, discoveryInterval, control)
+}
+
+func prepareStandaloneRuntime(
+	ctx context.Context,
+	configPath string,
+	daemon standaloneDaemon,
+) (activeConfiguration, time.Duration, error) {
+	activeConfig, err := loadConfiguration(configPath, daemon)
+	if err != nil {
+		return activeConfiguration{}, 0, err
+	}
+	logAction(ctx, activeConfig.Logger, slog.LevelInfo, "configuration", "loaded",
+		slog.String("configPath", configPath),
+		slog.Int("scaleSetCount", len(activeConfig.Config.ScaleSets)),
+		slog.String("logFormat", activeConfig.Config.Log.Format),
+		slog.String("logLevel", activeConfig.Config.Log.Level),
+	)
+	discoveryInterval, err := activeConfig.Config.GitHub.DiscoveryDuration()
+	if err != nil {
+		return activeConfiguration{}, 0, fmt.Errorf("load discovery interval: %w", err)
+	}
+	return activeConfig, discoveryInterval, nil
 }
 
 func runActiveConfiguration(
@@ -143,34 +172,137 @@ func runActiveConfiguration(
 	options Options,
 	daemon standaloneDaemon,
 	activeConfig activeConfiguration,
-	discoveryInterval time.Duration,
 ) error {
-	discoveryTimer := time.NewTimer(nextReconciliationDelay(activeConfig, discoveryInterval, daemon.reconciliationRetryDelay))
+	if activeConfig.RepositoryState == nil {
+		state := newMemoryStandaloneState()
+		activeConfig.RepositoryState = state
+	}
+	control, err := startStandaloneControl(ctx, daemon, &activeConfig, standaloneControlOptions{})
+	if err != nil {
+		return err
+	}
+	return runActiveConfigurationWithControl(ctx, options, daemon, &activeConfig, time.Hour, control)
+}
+
+func runActiveConfigurationWithControl(
+	ctx context.Context,
+	options Options,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	discoveryInterval time.Duration,
+	control *standaloneControl,
+) error {
+	control.RequestDiscovery(ctx)
+	discoveryTimer := time.NewTimer(discoveryInterval)
 	defer discoveryTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			shutdownActiveConfiguration(ctx, activeConfig)
+			control.Stop()
+			shutdownActiveConfiguration(ctx, *activeConfig)
 			return nil
 		case <-discoveryTimer.C:
-			reconcileDiscovery(ctx, daemon, &activeConfig)
-			discoveryTimer.Reset(nextReconciliationDelay(activeConfig, discoveryInterval, daemon.reconciliationRetryDelay))
+			control.RequestDiscovery(ctx)
+			discoveryTimer.Reset(discoveryInterval)
 		case <-options.ReloadRequests:
-			reloadedConfig, reloadedInterval, reloadErr := reloadAndReadInterval(
-				ctx, options.ConfigPath, daemon, activeConfig,
+			outcome, err := reloadStandaloneControl(
+				ctx, options, daemon, activeConfig, discoveryTimer, discoveryInterval, control,
 			)
-			if reloadErr != nil {
-				continueAfterRejectedReload(
-					ctx, daemon, &activeConfig, discoveryTimer, discoveryInterval, reloadErr,
-				)
-				continue
+			if err != nil {
+				return err
 			}
-			activeConfig = reloadedConfig
-			discoveryInterval = reloadedInterval
-			discoveryTimer.Reset(nextReconciliationDelay(activeConfig, discoveryInterval, daemon.reconciliationRetryDelay))
-			notifyReloadCompleted(ctx, daemon, activeConfig.Logger)
+			if outcome.stop {
+				shutdownActiveConfiguration(ctx, *activeConfig)
+				return nil
+			}
+			control = outcome.control
+			discoveryInterval = outcome.discoveryInterval
 		}
 	}
+}
+
+type standaloneReloadOutcome struct {
+	control           *standaloneControl
+	discoveryInterval time.Duration
+	stop              bool
+}
+
+func reloadStandaloneControl(
+	ctx context.Context,
+	options Options,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	discoveryTimer *time.Timer,
+	discoveryInterval time.Duration,
+	control *standaloneControl,
+) (standaloneReloadOutcome, error) {
+	control.Stop()
+	reloadedConfig, reloadedInterval, reloadErr := reloadAndReadInterval(
+		ctx, options.ConfigPath, daemon, *activeConfig,
+	)
+	if reloadErr != nil {
+		return resumeAfterRejectedReload(
+			ctx, daemon, activeConfig, discoveryTimer, discoveryInterval, reloadErr,
+		)
+	}
+	return activateReloadedStandaloneControl(
+		ctx, daemon, activeConfig, discoveryTimer, reloadedConfig, reloadedInterval,
+	)
+}
+
+func resumeAfterRejectedReload(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	discoveryTimer *time.Timer,
+	discoveryInterval time.Duration,
+	reloadFailure error,
+) (standaloneReloadOutcome, error) {
+	reloadFailure = errors.Join(reloadFailure, scheduleRetainedDemandAfterRejectedReload(ctx, activeConfig))
+	if standaloneShutdownRequested(ctx) {
+		continueAfterRejectedReload(ctx, daemon, activeConfig, discoveryTimer, discoveryInterval, reloadFailure)
+		return standaloneReloadOutcome{discoveryInterval: discoveryInterval, stop: true}, nil
+	}
+	control, err := startStandaloneControl(ctx, daemon, activeConfig, standaloneControlOptions{})
+	if err != nil {
+		return standaloneReloadOutcome{}, fmt.Errorf(
+			"resume standalone repository control after rejected reload: %w", err,
+		)
+	}
+	continueAfterRejectedReload(ctx, daemon, activeConfig, discoveryTimer, discoveryInterval, reloadFailure)
+	return standaloneReloadOutcome{control: control, discoveryInterval: discoveryInterval}, nil
+}
+
+func standaloneShutdownRequested(ctx context.Context) bool {
+	return ctx.Err() != nil
+}
+
+func scheduleRetainedDemandAfterRejectedReload(ctx context.Context, activeConfig *activeConfiguration) error {
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), standaloneGitHubAttemptTimeout)
+	defer cancelRecovery()
+	if err := schedulePersistedDemand(recoveryCtx, activeConfig); err != nil {
+		return fmt.Errorf("schedule retained demand after rejected reload: %w", err)
+	}
+	return nil
+}
+
+func activateReloadedStandaloneControl(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	activeConfig *activeConfiguration,
+	discoveryTimer *time.Timer,
+	reloadedConfig activeConfiguration,
+	reloadedInterval time.Duration,
+) (standaloneReloadOutcome, error) {
+	*activeConfig = reloadedConfig
+	control, err := startStandaloneControl(ctx, daemon, activeConfig, standaloneControlOptions{})
+	if err != nil {
+		return standaloneReloadOutcome{}, fmt.Errorf("start reloaded standalone repository control: %w", err)
+	}
+	control.RequestDiscovery(ctx)
+	discoveryTimer.Reset(reloadedInterval)
+	notifyReloadCompleted(ctx, daemon, activeConfig.Logger)
+	return standaloneReloadOutcome{control: control, discoveryInterval: reloadedInterval}, nil
 }
 
 func continueAfterRejectedReload(
@@ -223,7 +355,6 @@ func reloadAndReadInterval(
 		return activeConfiguration{}, 0, err
 	}
 	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "replacement_reconciliation_started")
-	reconcileDiscovery(ctx, daemon, &reloadedConfig)
 	logAction(ctx, reloadedConfig.Logger, slog.LevelInfo, "reload", "completed")
 	return reloadedConfig, reloadedConfig.DiscoveryInterval, nil
 }
@@ -235,9 +366,9 @@ func withStandaloneDefaults(daemon standaloneDaemon) standaloneDaemon {
 	if daemon.reconciliationRetryDelay == 0 {
 		daemon.reconciliationRetryDelay = pollRetryDelay
 	}
-	if daemon.openDemandStore == nil {
-		daemon.openDemandStore = func(string) (scaler.DemandStore, io.Closer, error) {
-			return scaler.NewMemoryDemandStore(), noOpCloser{}, nil
+	if daemon.openState == nil {
+		daemon.openState = func(string) (standaloneState, error) {
+			return newMemoryStandaloneState(), nil
 		}
 	}
 	if daemon.loadCredentials == nil {
@@ -247,10 +378,6 @@ func withStandaloneDefaults(daemon standaloneDaemon) standaloneDaemon {
 	}
 	return daemon
 }
-
-type noOpCloser struct{}
-
-func (noOpCloser) Close() error { return nil }
 
 func loadConfiguration(configPath string, daemon standaloneDaemon) (activeConfiguration, error) {
 	daemon = withStandaloneDefaults(daemon)
@@ -290,20 +417,22 @@ func buildActiveConfiguration(
 	if err != nil {
 		return activeConfiguration{}, fmt.Errorf("create repository discoverer: %w", err)
 	}
-	demandStore, stateCloser, err := daemon.openDemandStore(loadedConfig.State.Path)
+	state, err := daemon.openState(loadedConfig.State.Path)
 	if err != nil {
 		return activeConfiguration{}, fmt.Errorf("open durable state: %w", err)
 	}
 	activeConfig := activeConfiguration{
-		Config:       loadedConfig,
-		Credentials:  credentials,
-		Discoverer:   discoverer,
-		Coordinators: coordinators(loadedConfig.ScaleSets, demandStore),
-		Repositories: map[string]managedRepository{},
-		Logger:       logger,
-		Logging:      logging,
-		DemandStore:  demandStore,
-		StateCloser:  stateCloser,
+		Config:          loadedConfig,
+		Credentials:     credentials,
+		Discoverer:      discoverer,
+		Coordinators:    coordinators(loadedConfig.ScaleSets, state),
+		Repositories:    map[string]managedRepository{},
+		Logger:          logger,
+		Logging:         logging,
+		DemandStore:     state,
+		RepositoryState: state,
+		RepositoryMutex: &sync.Mutex{},
+		StateCloser:     state,
 	}
 	return activeConfig, nil
 }

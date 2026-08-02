@@ -4,7 +4,7 @@ Date: 2026-07-27
 
 ## Status
 
-Accepted
+Superseded by [7. Persist repository control independently from message sessions](0007-persist-repository-control-independently-from-message-sessions.md)
 
 Amends [2. Use GitHub App installations and shared runner capacity](0002-use-github-app-installations-and-shared-runner-capacity.md)
 

@@ -121,13 +121,13 @@ func TestOperatingSystemAdaptersDelegateToInjectedBoundaries(t *testing.T) {
 		return &scaler.SQLiteDemandStore{}, nil
 	}
 	daemon := newStandaloneDaemon()
-	store, closer, err := daemon.openDemandStore("state.db")
-	if err != nil || store == nil || closer == nil {
-		t.Fatalf("store = %#v, closer = %#v, %v", store, closer, err)
+	store, err := daemon.openState("state.db")
+	if err != nil || store == nil {
+		t.Fatalf("store = %#v, %v", store, err)
 	}
 	failure := errors.New("failed")
 	openSQLiteDemandStore = func(string) (*scaler.SQLiteDemandStore, error) { return nil, failure }
-	if _, _, err = daemon.openDemandStore("state.db"); err == nil {
+	if _, err = daemon.openState("state.db"); err == nil {
 		t.Fatal("expected SQLite open failure")
 	}
 }

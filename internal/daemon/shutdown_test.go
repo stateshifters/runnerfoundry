@@ -71,7 +71,7 @@ func TestTerminationReportsCleanupFailuresAsWarnings(t *testing.T) {
 	activeConfig.Logger = slog.New(slog.NewTextHandler(logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := runActiveConfiguration(ctx, Options{}, standaloneDaemon{}, activeConfig, time.Hour); err != nil {
+	if err := runActiveConfiguration(ctx, Options{}, standaloneDaemon{}, activeConfig); err != nil {
 		t.Fatalf("expected termination cleanup failure not to fail the process, got %v", err)
 	}
 	if !strings.Contains(logs.String(), "shutdown cleanup incomplete") || !strings.Contains(logs.String(), "close failed") {
@@ -179,6 +179,12 @@ func activeWithLifecycle(lifecycle scaleSetLifecycle) activeConfiguration {
 	}
 	if lifecycle.Running == nil {
 		lifecycle.Running = func(context.Context) (int, error) { return 0, nil }
+	}
+	if lifecycle.CloseSession == nil {
+		lifecycle.CloseSession = func(context.Context) error { return nil }
+	}
+	if lifecycle.DestroyActive == nil {
+		lifecycle.DestroyActive = func(context.Context) error { return nil }
 	}
 	if lifecycle.Shutdown == nil {
 		lifecycle.Shutdown = func(context.Context) error { return nil }

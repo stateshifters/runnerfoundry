@@ -59,7 +59,7 @@ func TestSQLiteStoreReportsInMemoryLockAndOpenFailures(t *testing.T) {
 func TestSQLiteStoreRunsEveryMigrationInMemory(t *testing.T) {
 	fixture := mockDemandStore(t)
 	expectSchemaVersion(fixture.mock, 0)
-	for _, statementCount := range []int{2, 2, 2, len(runnerLifecycleMigrationSteps)} {
+	for _, statementCount := range []int{2, 2, 2, len(runnerLifecycleMigrationSteps), len(repositoryStateMigrationSteps)} {
 		fixture.mock.ExpectBegin()
 		for range statementCount {
 			fixture.mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))

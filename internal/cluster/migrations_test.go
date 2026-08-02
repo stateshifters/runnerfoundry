@@ -43,8 +43,28 @@ func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target := migrationTarget(catalog); target != 3 {
-		t.Fatalf("migration target = %d, want 3", target)
+	if target := migrationTarget(catalog); target != 4 {
+		t.Fatalf("migration target = %d, want 4", target)
+	}
+}
+
+func TestRepositoryStateMigrationIsReversibleAndRelational(t *testing.T) {
+	migrationSQL, err := fs.ReadFile(embeddedMigrations, "migrations/004_persist_repository_state.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"CREATE TABLE scaler_repository_controls",
+		"CREATE TABLE scaler_installations",
+		"CREATE TABLE scaler_repositories",
+		"CREATE TABLE scaler_registrations",
+		"FOREIGN KEY (app_id, repository_url)",
+		"---- create above / drop below ----",
+		"DROP TABLE scaler_repository_controls",
+	} {
+		if !strings.Contains(string(migrationSQL), required) {
+			t.Fatalf("repository-state migration missing %q", required)
+		}
 	}
 }
 

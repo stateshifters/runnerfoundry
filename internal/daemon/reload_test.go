@@ -27,7 +27,7 @@ func TestReloadConfigurationHandsOverOldAndStartsReplacement(t *testing.T) {
 	}
 }
 
-func TestReloadConfigurationDoesNotWaitForExistingRunner(t *testing.T) {
+func TestReloadConfigurationLeavesReplacementStartupToStandaloneControl(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	observation := &reloadHandoverObservation{}
 	activeConfig := activeRunnerReloadConfiguration(t, loadedConfig, observation)
@@ -36,7 +36,7 @@ func TestReloadConfigurationDoesNotWaitForExistingRunner(t *testing.T) {
 	if _, _, err := reloadAndReadInterval(context.Background(), "config", daemonUnderTest, activeConfig); err != nil {
 		t.Fatalf("expected active runner to survive reload, got %v", err)
 	}
-	if !observation.stopped || !observation.closed || observation.destroyed || !observation.replacementStarted {
+	if !observation.stopped || !observation.closed || observation.destroyed || observation.replacementStarted {
 		t.Fatalf("unexpected handover observation: %#v", observation)
 	}
 }
@@ -429,7 +429,7 @@ func TestLoadConfigurationReportsSQLiteOpenFailure(t *testing.T) {
 	loadedConfig := runnableConfig(t)
 	baseRuntime := successfulReloadDaemon(loadedConfig)
 	openFailureRuntime := baseRuntime
-	openFailureRuntime.openDemandStore = func(string) (scaler.DemandStore, io.Closer, error) { return nil, nil, errors.New("open failed") }
+	openFailureRuntime.openState = func(string) (standaloneState, error) { return nil, errors.New("open failed") }
 	if _, err := loadConfiguration("config", openFailureRuntime); err == nil {
 		t.Fatal("expected durable state open failure")
 	}

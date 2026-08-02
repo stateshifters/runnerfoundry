@@ -13,28 +13,48 @@ import (
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/repositorystate"
 	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
 type clusterLeader struct {
-	daemon                   *clusteredDaemon
-	lease                    cluster.Lease
-	scheduler                *clusterScheduler
-	sessions                 map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
-	operationMutex           sync.Mutex
-	cancelMutex              sync.Mutex
-	cancelOperation          context.CancelFunc
-	stopped                  bool
-	githubOperationTimeout   time.Duration
-	repositoryRepairDelays   []time.Duration
-	now                      func() time.Time
-	pendingRepositoryRepairs map[string]repositoryRepair
+	daemon                    *clusteredDaemon
+	lease                     cluster.Lease
+	scheduler                 *clusterScheduler
+	sessions                  map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
+	sessionsMutex             sync.Mutex
+	operationMutex            sync.Mutex
+	repairMutex               sync.Mutex
+	cancelMutex               sync.Mutex
+	cancelOperation           context.CancelFunc
+	stopped                   bool
+	githubOperationTimeout    time.Duration
+	repositoryRepairDelays    []time.Duration
+	now                       func() time.Time
+	pendingRepositoryRepairs  map[string]repositoryRepair
+	repositoryWorkers         *repositoryWorkerPool
+	repositoryWorkerDone      <-chan struct{}
+	stopRepositoryWorkers     context.CancelFunc
+	repositorySnapshot        repositorystate.Snapshot
+	repositoryControlStarted  bool
+	repositoryAppID           int64
+	repositoryControllerEpoch int64
+	registrationMutex         sync.Mutex
+	confirmedRegistrations    map[repositoryScaleSetSessionKey]repositorystate.Registration
+	desiredMutex              sync.Mutex
+	desiredRepositories       map[string][]cluster.ScaleSetStatus
+	desiredStateKnown         bool
+	background                sync.WaitGroup
+	discoveryMutex            sync.Mutex
+	discoveryRunning          bool
 }
 
 type repositoryScaleSetSessionKey struct {
 	repository string
 	scaleSet   string
 }
+
+var errRepositoryWorkObsolete = errors.New("repository reconciliation is obsolete")
 
 type repositoryScaleSetSession struct {
 	key            repositoryScaleSetSessionKey
@@ -47,15 +67,28 @@ type repositoryScaleSetSession struct {
 	pollerDone     <-chan struct{}
 }
 
-func newClusterLeader(daemon *clusteredDaemon, lease cluster.Lease) *clusterLeader {
+type repositorySessionRemoval struct {
+	key     repositoryScaleSetSessionKey
+	session *repositoryScaleSetSession
+	removal scaleSetSessionRemoval
+}
+
+func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluster.Lease) *clusterLeader {
 	scheduler := &clusterScheduler{store: daemon.assignments, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
-	return &clusterLeader{
+	workerCtx, stopRepositoryWorkers := context.WithCancel(ctx)
+	leader := &clusterLeader{
 		daemon: daemon, lease: lease, scheduler: scheduler,
 		sessions:               map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
 		githubOperationTimeout: clusterGitHubTimeout,
 		repositoryRepairDelays: repositoryRepairRetryDelays[:], now: time.Now,
 		pendingRepositoryRepairs: make(map[string]repositoryRepair),
+		stopRepositoryWorkers:    stopRepositoryWorkers,
+		repositoryWorkerDone:     workerCtx.Done(),
+		desiredRepositories:      map[string][]cluster.ScaleSetStatus{},
+		confirmedRegistrations:   map[repositoryScaleSetSessionKey]repositorystate.Registration{},
 	}
+	leader.repositoryWorkers = newRepositoryWorkerPool(workerCtx, leader.githubOperationTimeout)
+	return leader
 }
 
 func (leader *clusterLeader) reconcile(ctx context.Context) bool {
@@ -68,11 +101,15 @@ func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	}
 	defer leader.clearOperationCancellation()
 	defer cancelReconcile()
+	if leader.daemon.repositoryState != nil {
+		return leader.reconcileDurableRepositories(reconcileCtx, ctx)
+	}
 	discovery, statuses, loaded := leader.loadReconciliationState(reconcileCtx)
 	if !loaded {
 		return false
 	}
 	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
+	leader.publishDesiredRepositories(repositories, desired)
 	leader.stopUndesiredSessions(reconcileCtx, desired, statuses)
 	leader.retainDesiredRepositoryRepairs(repositories, desired)
 	repositoryErr := leader.startMissingSessions(reconcileCtx, desired, repositories)
@@ -137,7 +174,17 @@ func (leader *clusterLeader) stopOutdatedSessions(
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 	statuses []cluster.ScaleSetStatus,
 ) error {
-	var resultErr error
+	removals := leader.detachOutdatedSessions(desired, statuses)
+	return leader.cleanDetachedSessions(ctx, removals)
+}
+
+func (leader *clusterLeader) detachOutdatedSessions(
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+	statuses []cluster.ScaleSetStatus,
+) []repositorySessionRemoval {
+	leader.sessionsMutex.Lock()
+	defer leader.sessionsMutex.Unlock()
+	removals := make([]repositorySessionRemoval, 0)
 	for key, session := range leader.sessions {
 		_, wanted := desired[key]
 		if wanted {
@@ -148,11 +195,26 @@ func (leader *clusterLeader) stopOutdatedSessions(
 		if !scaleSetStillDeclared {
 			removal = removeGitHubScaleSet
 		}
-		cleanupCtx, cancelCleanup := context.WithTimeout(ctx, leader.githubOperationTimeout)
-		resultErr = errors.Join(resultErr, leader.stopSession(cleanupCtx, session, removal))
-		cancelCleanup()
 		delete(leader.sessions, key)
 		leader.scheduler.remove(key)
+		removals = append(removals, repositorySessionRemoval{key: key, session: session, removal: removal})
+	}
+	return removals
+}
+
+func (leader *clusterLeader) cleanDetachedSessions(
+	ctx context.Context,
+	removals []repositorySessionRemoval,
+) error {
+	var resultErr error
+	for _, removed := range removals {
+		cleanupCtx, cancelCleanup := context.WithTimeout(ctx, leader.githubOperationTimeout)
+		stopErr := leader.stopSession(cleanupCtx, removed.session, removed.removal)
+		resultErr = errors.Join(resultErr, stopErr)
+		if stopErr == nil && removed.removal == removeGitHubScaleSet {
+			resultErr = errors.Join(resultErr, leader.deletePersistedRegistration(cleanupCtx, removed.key))
+		}
+		cancelCleanup()
 	}
 	return resultErr
 }
@@ -162,31 +224,78 @@ func (leader *clusterLeader) startMissingSessions(
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 	repositories map[string]githubapp.Repository,
 ) error {
-	var resultErr error
+	results, submitted := leader.enqueueMissingSessions(desired, repositories)
+	return leader.awaitMissingSessions(ctx, desired, results, submitted)
+}
+
+type repositorySessionResult struct {
+	repository githubapp.Repository
+	err        error
+}
+
+func (leader *clusterLeader) enqueueMissingSessions(
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+	repositories map[string]githubapp.Repository,
+) (<-chan repositorySessionResult, int) {
 	repositoryURLs := make([]string, 0, len(repositories))
 	for repositoryURL := range repositories {
 		repositoryURLs = append(repositoryURLs, repositoryURL)
 	}
 	sort.Strings(repositoryURLs)
+	results := make(chan repositorySessionResult, len(repositoryURLs))
+	submitted := 0
 	for _, repositoryURL := range repositoryURLs {
 		repository := repositories[repositoryURL]
 		statuses := desiredRepositoryStatuses(repositoryURL, desired)
 		if len(statuses) == 0 {
 			continue
 		}
-		if err := leader.reconcileDesiredRepository(ctx, repository, statuses); err != nil {
-			if ctx.Err() != nil {
-				return errors.Join(resultErr, err)
-			}
-			leader.daemon.logger.Error("leader repository session group failed",
-				slog.String("repository", repositoryURL), slog.String("error", err.Error()))
-			leader.recordRepositoryRepair(ctx, repository, statuses, err)
-			resultErr = errors.Join(resultErr, err)
-			continue
+		submitted++
+		leader.repositoryWorkers.enqueue(repositoryURL, repositoryWorkRoutine, func(attemptCtx context.Context) error {
+			return leader.reconcileDesiredRepository(attemptCtx, repository, statuses)
+		}, func(err error) {
+			results <- repositorySessionResult{repository: repository, err: err}
+		})
+	}
+	return results, submitted
+}
+
+func (leader *clusterLeader) awaitMissingSessions(
+	ctx context.Context,
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+	results <-chan repositorySessionResult,
+	submitted int,
+) error {
+	var resultErr error
+	for completed := 0; completed < submitted; completed++ {
+		var result repositorySessionResult
+		select {
+		case <-ctx.Done():
+			return errors.Join(resultErr, ctx.Err())
+		case result = <-results:
 		}
-		leader.completeRepositoryRepair(ctx, repositoryURL)
+		resultErr = errors.Join(resultErr, leader.handleMissingSessionResult(ctx, desired, result))
 	}
 	return resultErr
+}
+
+func (leader *clusterLeader) handleMissingSessionResult(
+	ctx context.Context,
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+	result repositorySessionResult,
+) error {
+	if result.err == nil {
+		leader.completeRepositoryRepair(ctx, result.repository.URL)
+		return nil
+	}
+	if ctx.Err() != nil {
+		return result.err
+	}
+	statuses := desiredRepositoryStatuses(result.repository.URL, desired)
+	leader.daemon.logger.Error("leader repository session group failed",
+		slog.String("repository", result.repository.URL), slog.String("error", result.err.Error()))
+	leader.recordRepositoryRepair(ctx, result.repository, statuses, result.err)
+	return result.err
 }
 
 func desiredRepositoryStatuses(
@@ -222,7 +331,9 @@ func (leader *clusterLeader) reconcileRepositorySessions(
 	if err != nil {
 		return err
 	}
-	leader.activateRepositorySessionGeneration(started)
+	if !leader.activateRepositorySessionGeneration(repository.URL, statuses, started) {
+		return errors.Join(errRepositoryWorkObsolete, leader.closePartialSessionGeneration(ctx, started))
+	}
 	return nil
 }
 
@@ -250,7 +361,8 @@ func (leader *clusterLeader) auditClusterRepositoryRegistrations(
 	registrations, err := ensureRepositoryScaleSetRegistrations(
 		ctx, leader.daemon.logger, repository.URL, client, configured,
 	)
-	return clusterRepositoryRegistrationAudit{client: client, registrations: registrations}, err
+	persistenceErr := leader.persistConfirmedRegistrations(ctx, repository.URL, statuses, registrations)
+	return clusterRepositoryRegistrationAudit{client: client, registrations: registrations}, errors.Join(err, persistenceErr)
 }
 
 func (leader *clusterLeader) startRepositorySessionGeneration(
@@ -288,11 +400,35 @@ func (leader *clusterLeader) closePartialSessionGeneration(
 	return resultErr
 }
 
-func (leader *clusterLeader) activateRepositorySessionGeneration(started []*repositoryScaleSetSession) {
+func (leader *clusterLeader) activateRepositorySessionGeneration(
+	repository string,
+	statuses []cluster.ScaleSetStatus,
+	started []*repositoryScaleSetSession,
+) bool {
+	leader.desiredMutex.Lock()
+	defer leader.desiredMutex.Unlock()
+	if leader.desiredStateKnown && !sameScaleSetStatuses(leader.desiredRepositories[repository], statuses) {
+		return false
+	}
+	leader.sessionsMutex.Lock()
+	defer leader.sessionsMutex.Unlock()
 	for _, session := range started {
 		leader.sessions[session.key] = session
 		leader.scheduler.add(session)
 	}
+	return true
+}
+
+func sameScaleSetStatuses(left []cluster.ScaleSetStatus, right []cluster.ScaleSetStatus) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (leader *clusterLeader) repositorySessionsMatch(
@@ -300,6 +436,8 @@ func (leader *clusterLeader) repositorySessionsMatch(
 	statuses []cluster.ScaleSetStatus,
 	registrations map[string]*upstream.RunnerScaleSet,
 ) bool {
+	leader.sessionsMutex.Lock()
+	defer leader.sessionsMutex.Unlock()
 	for _, status := range statuses {
 		session := leader.sessions[repositoryScaleSetSessionKey{repository: repository, scaleSet: status.Name}]
 		registration := registrations[status.Name]
@@ -312,14 +450,19 @@ func (leader *clusterLeader) repositorySessionsMatch(
 }
 
 func (leader *clusterLeader) suspendRepositorySessions(ctx context.Context, repository string) error {
-	var resultErr error
+	leader.sessionsMutex.Lock()
+	removed := make([]*repositoryScaleSetSession, 0)
 	for key, session := range leader.sessions {
-		if key.repository != repository {
-			continue
+		if key.repository == repository {
+			removed = append(removed, session)
+			delete(leader.sessions, key)
+			leader.scheduler.remove(key)
 		}
+	}
+	leader.sessionsMutex.Unlock()
+	var resultErr error
+	for _, session := range removed {
 		resultErr = errors.Join(resultErr, leader.stopSession(ctx, session, retainGitHubScaleSet))
-		delete(leader.sessions, key)
-		leader.scheduler.remove(key)
 	}
 	return resultErr
 }
@@ -432,16 +575,24 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 
 func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.cancelActiveOperation()
+	leader.stopRepositoryWorkers()
+	leader.background.Wait()
+	leader.repositoryWorkers.wait()
 	leader.operationMutex.Lock()
 	defer leader.operationMutex.Unlock()
-	for _, session := range leader.sessions {
+	leader.sessionsMutex.Lock()
+	sessions := leader.sessions
+	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
+	leader.sessionsMutex.Unlock()
+	for _, session := range sessions {
 		if err := leader.stopSession(ctx, session, retainGitHubScaleSet); err != nil {
 			leader.daemon.logger.Error("stop leader session failed",
 				slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
 		}
 	}
-	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
+	leader.repairMutex.Lock()
 	leader.pendingRepositoryRepairs = map[string]repositoryRepair{}
+	leader.repairMutex.Unlock()
 	leader.scheduler.clear()
 	if err := leader.lease.Close(ctx); err != nil {
 		leader.daemon.logger.Warn("close leader lease failed",

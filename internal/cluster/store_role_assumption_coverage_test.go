@@ -181,6 +181,27 @@ func TestTransactionalRowsCloseFinalizesCommitFailure(t *testing.T) {
 	}
 }
 
+func TestTransactionalRowsSuccessfulScanCommits(t *testing.T) {
+	commits := 0
+	rows := newTransactionalRows(
+		context.Background(),
+		&databaseRows{iterator: &scriptedRowIterator{next: []bool{true, false}}},
+		&databaseTransaction{
+			commit:   func(context.Context) error { commits++; return nil },
+			rollback: func(context.Context) error { return nil },
+		},
+	)
+	if !rows.Next() {
+		t.Fatal("expected row")
+	}
+	if err := rows.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if rows.Next() || rows.Err() != nil || commits != 1 {
+		t.Fatalf("successful rows: commits=%d error=%v", commits, rows.Err())
+	}
+}
+
 func TestConnectPostgreSQLRequiresRole(t *testing.T) {
 	originalResolver := productionConnectionSettingResolver
 	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
@@ -189,6 +210,17 @@ func TestConnectPostgreSQLRequiresRole(t *testing.T) {
 	store := NewStore(Settings{})
 	if _, err := store.connectPostgreSQL(context.Background()); err == nil {
 		t.Fatal("expected missing role failure for primary connector")
+	}
+}
+
+func TestConnectDirectPostgreSQLRequiresRole(t *testing.T) {
+	originalResolver := productionConnectionSettingResolver
+	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
+	productionConnectionSettingResolver = testConnectionResolver(nil)
+
+	store := NewStore(Settings{})
+	if _, err := store.connectDirectPostgreSQL(context.Background()); err == nil {
+		t.Fatal("expected missing role failure for direct connector")
 	}
 }
 

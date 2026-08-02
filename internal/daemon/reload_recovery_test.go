@@ -15,7 +15,7 @@ func TestRejectedProviderChangeSchedulesDemandObservedDuringSuspension(t *testin
 	ctx, cancel := context.WithCancel(context.Background())
 	fixture := newRejectedReloadRecoveryFixture(t, cancel)
 	if err := runActiveConfiguration(
-		ctx, fixture.options, fixture.daemon, fixture.activeConfig, time.Hour,
+		ctx, fixture.options, fixture.daemon, fixture.activeConfig,
 	); err != nil {
 		t.Fatalf("run active configuration: %v", err)
 	}

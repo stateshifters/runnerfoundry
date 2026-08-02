@@ -132,7 +132,7 @@ func TestRunDaemonRetainsActiveConfigurationAfterReloadFailure(t *testing.T) {
 	assertStructuredAction(t, logs.Bytes(), "reload", "preflight_rejected")
 }
 
-func TestRunDaemonCompletesReplacementBeforeReadyNotification(t *testing.T) {
+func TestRunDaemonDoesNotWaitForReplacementDiscoveryBeforeReadyNotification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	loadedConfig := runnableConfig(t)
 	reloads := make(chan struct{}, 1)
@@ -153,8 +153,8 @@ func TestRunDaemonCompletesReplacementBeforeReadyNotification(t *testing.T) {
 	if err := runDaemon(ctx, Options{ReloadRequests: reloads}, daemonUnderTest); err != nil {
 		t.Fatalf("expected ready notification failure to preserve replacement, got %v", err)
 	}
-	if notifier.discoveryCallsAtReloadReady != 3 {
-		t.Fatalf("ready sent after %d discovery calls, want 3", notifier.discoveryCallsAtReloadReady)
+	if notifier.discoveryCallsAtReloadReady != 2 {
+		t.Fatalf("ready waited for replacement discovery: calls=%d, want 2", notifier.discoveryCallsAtReloadReady)
 	}
 }
 

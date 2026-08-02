@@ -8,7 +8,7 @@
 
 RunnerFoundry turns infrastructure into one elastic pool of self-hosted ephemeral CI runners across repositories and hosts. It coordinates runner demand and capacity so operators can run CI runners as a shared service instead of maintaining disconnected setups. Today, RunnerFoundry supports GitHub Actions, including shared capacity for personal-account repositories, and provisions runners through Docker Compose or libvirt.
 
-RunnerFoundry operates in standalone mode with SQLite or clustered mode with PostgreSQL. A standalone service provides the shortest path to a shared runner pool. A cluster combines compatible capacity from multiple hosts and retains demand and assignments through leader failover.
+RunnerFoundry operates in standalone mode with SQLite or clustered mode with PostgreSQL. Both modes retain repository authority, confirmed scale-set registrations, and demand in their state backend. A standalone service provides the shortest path to a shared runner pool. A cluster combines compatible capacity from multiple hosts and retains repository control, demand, and assignments through leader failover.
 
 > Project status: Active development. Releases are pre-1.0, and the project does not publish a supported-version policy. GitHub Actions is the only supported forge integration.
 
@@ -132,7 +132,7 @@ sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
-RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. It then discovers App installations and repositories, confirms every configured runner scale set in each selected repository, and begins polling only after that repository's complete session group is ready.
+RunnerFoundry validates the configuration, credentials, SQLite state, and Docker Compose service before reporting ready. Repository control then reconnects sessions from any durable catalog while fresh discovery runs independently. Each repository begins polling only after every configured runner scale set is confirmed and its complete session group is ready.
 
 ### 6. Send a workflow to the pool
 
@@ -227,7 +227,7 @@ flowchart LR
 
 ### Standalone mode
 
-Use standalone mode when one RunnerFoundry process and one infrastructure host provide enough capacity. SQLite retains identifiable queued demand, FIFO order, and restart state. Put `state.path` on durable local storage if a replacement service must resume queued work. Stop the service before copying, backing up, or moving the database.
+Use standalone mode when one RunnerFoundry process and one infrastructure host provide enough capacity. SQLite retains the last conclusive repository catalog, confirmed scale-set registrations, identifiable queued demand, FIFO order, and runner lifecycle state. Put `state.path` on durable local storage so a replacement service can reconnect repository sessions and resume queued work. Stop the service before copying, backing up, or moving the database.
 
 Standalone mode is the simplest operating shape, but it has no control-plane failover. Only one process may open a given SQLite database.
 
@@ -235,7 +235,7 @@ Standalone mode is the simplest operating shape, but it has no control-plane fai
 
 Use clustered mode when capacity spans multiple hosts or the control plane needs leader failover. Every node publishes local capacity to PostgreSQL and contends for leadership. One active leader owns GitHub-facing discovery and scale-set sessions. Every live host can execute assignments directed to its operating-system hostname.
 
-PostgreSQL retains global demand, host contributions, and assignment state. A replacement leader reconstructs GitHub-facing sessions from current discovery and database declarations. PostgreSQL availability is required for shared scheduling and leadership.
+PostgreSQL retains the last conclusive repository catalog, confirmed scale-set registrations, global demand, host contributions, and assignment state. A replacement leader can reconnect GitHub-facing sessions from that catalog while fresh discovery runs independently. PostgreSQL availability is required for shared scheduling and leadership.
 
 ### Docker Compose or libvirt
 
@@ -391,7 +391,7 @@ RunnerFoundry parses the template, replaces the domain name, adds ownership meta
 
 `prune` is optional and defaults to `false`.
 
-Set `prune: true` only when RunnerFoundry owns every runner scale set in the discovered repositories and runner groups. Pruning deletes GitHub runner scale sets that are absent from the current configuration. Leave it disabled when another controller or a human-managed scale set shares those repositories.
+Set `prune: true` only when RunnerFoundry owns every runner scale set in the discovered repositories and runner groups. Pruning deletes GitHub runner scale sets that are absent from the current configuration, but only within repository authority established by a conclusive discovery result. A failed installation listing retains that installation's durable repositories and registrations instead of triggering broad pruning. Leave pruning disabled when another controller or a human-managed scale set shares those repositories.
 
 ## Deploy clustered mode
 
@@ -547,14 +547,14 @@ Together they advertise capacity of six. Neither host receives more assignments 
 
 ### 4. Start and verify the cluster
 
-Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock.
+Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations.
 
 ```sh
 sudo systemctl enable --now runnerfoundry
 sudo systemctl status runnerfoundry
 ```
 
-One node reports `leader reconciling`, then `leader operational` after it discovers the desired repositories and reads the clustered scale-set declarations. Other nodes report `standby`. Repository registration or session failures remain isolated repair work and retry with bounded backoff while the leader stays operational. A discovery or clustered-state aggregation failure reports `leader degraded` and is retried on the discovery interval.
+One node reports `leader reconciling`, then `leader operational` after it establishes repository authority and reads the clustered scale-set declarations. Other nodes report `standby`. An initialized durable catalog is sufficient to establish repository authority when fresh discovery fails; the leader logs that catalog as stale and remains operational. Repository registration or session failures remain isolated repair work and retry with bounded backoff. A discovery failure before the first durable catalog exists, a repository-state publication failure, or a clustered-state aggregation failure reports `leader degraded`.
 
 ### PostgreSQL migration commands
 
@@ -677,8 +677,8 @@ Readiness does not prove that GitHub discovery or scale-set reconciliation succe
 
 - `standby`: another node holds leadership;
 - `leader reconciling`: the leader is rebuilding GitHub-facing sessions;
-- `leader operational`: repository authority and clustered scale-set declarations are available; individual repository repairs may still be pending;
-- `leader degraded`: discovery or clustered-state aggregation failed, so the leader cannot establish the desired GitHub-facing state.
+- `leader operational`: durable or freshly discovered repository authority and clustered scale-set declarations are available; discovery may be stale and individual repository repairs may still be pending;
+- `leader degraded`: the leader has no usable repository authority, cannot publish repository state, or cannot aggregate clustered scale-set declarations.
 
 Inspect both service status and logs:
 
@@ -697,7 +697,7 @@ sudo systemctl reload runnerfoundry
 
 Reload validates the complete replacement configuration and credentials before applying them.
 
-In standalone mode, RunnerFoundry confirms the replacement registration set before beginning the session handover. It stops the old pollers, closes their GitHub message sessions without deleting registrations, and immediately activates the complete replacement session group without waiting for provider runners to exit. Existing containers or virtual machines continue until their jobs finish. A reload that changes the Docker or libvirt definition of a retained scale-set name briefly suspends provisioning for that scale set while polling continues to retain demand. The reload is rejected if the scale set has provider-visible runners or its current provider cannot be inspected; rejection resumes provisioning through the old session generation. Failures while closing an old session or deleting stale demand are reported, but do not prevent replacement activation after the handover has begun.
+In standalone mode, RunnerFoundry confirms the replacement registration set before beginning the session handover. It stops the old pollers and closes their GitHub message sessions without deleting registrations. The replacement controller persists the confirmed catalog and rebuilds process-local sessions independently without waiting for provider runners to exit or delaying reload completion. Existing containers or virtual machines continue until their jobs finish. A reload that changes the Docker or libvirt definition of a retained scale-set name briefly suspends provisioning for that scale set while polling continues to retain demand. The reload is rejected if the scale set has provider-visible runners or its current provider cannot be inspected; rejection resumes provisioning through the old durable catalog and registration set. Failures while closing an old session or deleting stale demand are reported, but do not roll repository control back after the handover has begun.
 
 Demand for repositories or scale sets removed from the replacement configuration is deleted. Durable Docker and libvirt cleanup records remain until provider and GitHub absence are confirmed, including when their scale-set configuration is temporarily removed. A changed `job_start_timeout` is evaluated against each waiting runner's persisted start time after reload. Optional pruning runs only after replacement activation succeeds.
 
@@ -709,7 +709,7 @@ To drain one clustered host, remove its scale-set contributions from that host's
 
 RunnerFoundry commits identifiable GitHub demand to SQLite or PostgreSQL before acknowledging the message that delivered it. Duplicate delivery updates the existing demand instead of creating another queue entry.
 
-On standalone restart, RunnerFoundry reopens SQLite, rebuilds repository sessions from discovery, and schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
+On standalone restart, RunnerFoundry reopens SQLite and increments a controller epoch that fences late writes from the previous controller. It reconnects process-local message sessions from durable repository and registration records while fresh discovery runs independently, then schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
 
 Standalone runner cleanup is checked once per second and before new provisioning. If GitHub reports that a runner still has a job running, RunnerFoundry retains the durable cleanup record and retries that runner after 5, 10, 20, 40, and then at most 60 seconds. The retained lifecycle continues to consume capacity and reserve its runner name across repositories until provider and GitHub absence are confirmed. Other repositories can use remaining capacity without attempting to replace the busy registration. The owning host must regain the matching scale-set configuration and provider access, and GitHub must become reachable, before RunnerFoundry can release the retained capacity and name.
 
@@ -723,7 +723,7 @@ When a host heartbeat expires, its active assignments complete while their deman
 
 ### Repository access changes
 
-Removing a repository from the GitHub App installation immediately drops queued demand, destroys active local runners, closes message sessions, and attempts to unregister affected scale sets. This can interrupt active jobs. Drain or schedule the access change accordingly.
+When a successful discovery confirms that a repository or installation is no longer exposed to the GitHub App, RunnerFoundry updates durable authority and schedules scoped removal of queued demand, active local runners, message sessions, and managed scale sets. A failed installation repository listing retains that installation's previous authority and does not trigger broad cleanup. A confirmed access change can interrupt active jobs, so drain or schedule it accordingly.
 
 On a normal standalone shutdown, active jobs remain running while message sessions close and scale sets unregister. On clustered shutdown, active jobs remain running, sessions close, and the node publishes itself unhealthy. A clustered leader does not delete the shared scale sets when it stops.
 
@@ -753,7 +753,7 @@ Read the first validation error from `journalctl`. Common causes are unknown YAM
 
 Readiness covers local preflight, not GitHub reconciliation. Check the operational status and structured `repository_registration_audit`, `runner_scale_set_registration`, and `repository_registration_drift` actions. Verify the GitHub App's repository Administration write permission, App installation scope, selected repositories, private-key file, and discovery interval. RunnerFoundry retains successful registrations when another scale set fails, retries only the missing definitions, and activates no sessions until the repository set is complete.
 
-If a scale set was deleted or replaced externally, the next discovery-cadence audit suspends that repository's admission, recreates the missing registration, and replaces its complete session group. An audit timeout leaves an already healthy generation active and reports degraded reconciliation. Do not manually delete provider instances or lifecycle rows to repair registration drift.
+If a scale set was deleted or replaced externally, the next discovery-cadence audit suspends that repository's admission, recreates the missing registration, and replaces its complete session group. An audit timeout leaves an already healthy generation active and schedules bounded repository repair without degrading established leader authority. Do not manually delete provider instances or lifecycle rows to repair registration drift.
 
 ### Jobs remain queued
 
@@ -800,9 +800,9 @@ A leader lease, live node heartbeat, or Docker cleanup obligation that the older
 
 ### Repository repairs remain pending
 
-Inspect structured `repository_repair` events for the affected repository and attempt number. Correct App access, GitHub permissions, scale-set conflicts, or network access. RunnerFoundry retries only pending repositories after 5, 10, 20, 40, and then 60 seconds until the complete configured registration and session group is active. A pending repository repair does not change an otherwise healthy leader from `leader operational`.
+Inspect structured `repository_repair` events for the affected repository and attempt number. Correct App access, GitHub permissions, scale-set conflicts, or network access. Four repository workers execute reconnect and repair work; routine reconciliation uses at most three so urgent recovery retains one worker. Each GitHub attempt is limited to 30 seconds. RunnerFoundry retries only pending repositories after 5, 10, 20, 40, and then 60 seconds until the complete configured registration and session group is active. A pending repository repair does not change an otherwise healthy leader from `leader operational`.
 
-If the service reports `leader degraded`, inspect repository discovery and clustered scale-set aggregation errors instead. Those failures prevent the leader from establishing desired state and retry on the discovery interval.
+If the service reports `leader degraded`, inspect initial repository discovery, repository-state publication, and clustered scale-set aggregation errors. Those failures prevent the leader from establishing desired state and retry on the discovery interval. Once a durable catalog exists, a later discovery failure is logged as stale discovery while the leader remains operational.
 
 ## Migrating from personal access token authentication
 

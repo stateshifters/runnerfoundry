@@ -431,6 +431,19 @@ func removeRepositoryImmediately(
 	repositoryURL string,
 	repository managedRepository,
 ) (resultErr error) {
+	if err := cleanupRepositoryImmediately(ctx, activeConfig, repositoryURL, repository); err != nil {
+		return err
+	}
+	delete(activeConfig.Repositories, repositoryURL)
+	return nil
+}
+
+func cleanupRepositoryImmediately(
+	ctx context.Context,
+	activeConfig *activeConfiguration,
+	repositoryURL string,
+	repository managedRepository,
+) (resultErr error) {
 	logAction(ctx, activeConfig.Logger, slog.LevelDebug, "repository_remove", "started",
 		slog.String("repository", repositoryURL),
 		slog.Int64("installationID", int64(repository.InstallationID)),
@@ -451,7 +464,6 @@ func removeRepositoryImmediately(
 			return err
 		}
 	}
-	delete(activeConfig.Repositories, repositoryURL)
 	return nil
 }
 

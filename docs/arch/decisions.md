@@ -6,3 +6,4 @@
 - [4. Coordinate multi-host scaling in PostgreSQL](0004-coordinate-multi-host-scaling-in-postgresql.md)
 - [5. Own runner lifecycle with a bounded waiting lease](0005-own-runner-lifecycle-with-a-bounded-waiting-lease.md)
 - [6. Continuously reconcile repository scale-set registration](0006-continuously-reconcile-repository-scale-set-registration.md)
+- [7. Persist repository control independently from message sessions](0007-persist-repository-control-independently-from-message-sessions.md)

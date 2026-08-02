@@ -26,7 +26,7 @@ func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 			scaleSetMessageClient{Client: messageClient},
 		), nil
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
 	operationCtx, cancelOperation := context.WithCancel(context.Background())
 	session, err := leader.startSession(operationCtx, githubapp.Repository{URL: "repo", InstallationID: 1}, cluster.ScaleSetStatus{
 		Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
@@ -49,7 +49,7 @@ func TestLeadershipLossCancelsBlockedReconciliation(t *testing.T) {
 	discoveryStarted := make(chan struct{})
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
 	daemon.discoverer = blockingDiscoverer{started: discoveryStarted}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{alive: true})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
 	reconciliationDone := make(chan struct{})
 	go func() {
 		leader.reconcile(context.Background())
@@ -66,7 +66,7 @@ func TestLeaderDoesNotRestartExistingRepositorySession(t *testing.T) {
 	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("must not be called")
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := &repositoryScaleSetSession{key: key}
 	leader.sessions[key] = session
@@ -84,7 +84,7 @@ func TestLeaderDoesNotRestartExistingRepositorySession(t *testing.T) {
 func TestLeaderRetainsCapacitySessionUntilRepositoryGroupCanBeReconciled(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	deletedScaleSetIDs := []int{}
 	githubClient := fakeScaleSetDeletionClient{deleteRunnerScaleSet: func(_ context.Context, runnerScaleSetID int) error {
@@ -112,7 +112,7 @@ func TestLeaderSessionShutdownAttemptsMessageCloseAndScaleSetRemoval(t *testing.
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
 	daemon.logger = newLoggerForWriter(logs, "json", "debug")
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	session := stoppedSession(
 		key,
@@ -134,7 +134,7 @@ func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
 	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	session := stoppedSession(
 		repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"},
 		fakeScaleSetDeletionClient{},
@@ -156,7 +156,7 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 	lease := &fakeClusterLease{closeErr: errors.New("failed")}
-	leader := newClusterLeader(&daemon, lease)
+	leader := newClusterLeader(context.Background(), &daemon, lease)
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	leader.sessions[key] = stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{})
 	leader.scheduler.sessions[key] = leader.sessions[key]
@@ -173,7 +173,7 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	daemon := activeClusteredDaemon(t, &fakeClusterState{})
 	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
-	leader := newClusterLeader(&daemon, &fakeClusterLease{closeErr: errors.New("lease failed")})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{closeErr: errors.New("lease failed")})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	leader.sessions[key] = stoppedSession(
 		key,

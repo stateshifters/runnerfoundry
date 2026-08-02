@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -113,9 +112,8 @@ func TestClusteredLeaderRemainsOperationalWithRepositoryRepairPending(t *testing
 	if actual := strings.Join(fixture.notifier.statuses, "\n"); actual != expected {
 		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
 	}
-	expectedActive := []repositoryScaleSetSessionKey{{repository: "https://github.com/acme/working", scaleSet: "linux"}}
-	if !slices.Equal(fixture.activeSessions, expectedActive) {
-		t.Fatalf("active repository sessions = %#v, want %#v", fixture.activeSessions, expectedActive)
+	if len(fixture.activeSessions) != 0 {
+		t.Fatalf("sessions active before the independent repository workers completed = %#v", fixture.activeSessions)
 	}
 }
 
@@ -172,7 +170,10 @@ func (fixture *clusteredLeaderStatusTestFixture) captureActiveSessions(status cl
 	if status != clusterServiceStatusLeaderOperational {
 		return
 	}
-	for key := range fixture.daemon.currentLeader().sessions {
+	leader := fixture.daemon.currentLeader()
+	leader.sessionsMutex.Lock()
+	defer leader.sessionsMutex.Unlock()
+	for key := range leader.sessions {
 		fixture.activeSessions = append(fixture.activeSessions, key)
 	}
 }

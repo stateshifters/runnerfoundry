@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/repositorystate"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -62,22 +64,50 @@ func confirmReloadRegistrations(
 		return err
 	}
 	for _, repository := range discovery.Repositories {
-		client, clientErr := daemon.newGitHubClient(repository.URL, repository.InstallationID, reloaded.Credentials)
-		if clientErr != nil {
-			return fmt.Errorf("create GitHub client for %q before reload activation: %w", repository.URL, clientErr)
-		}
-		if _, auditErr := ensureRepositoryScaleSetRegistrations(
-			ctx, reloaded.Logger, repository.URL, client, reloaded.Config.ScaleSets,
-		); auditErr != nil {
-			return fmt.Errorf("confirm reload registrations for %q: %w", repository.URL, auditErr)
-		}
-		reloaded.Repositories[repository.URL] = managedRepository{
-			InstallationID: repository.InstallationID,
-			Client:         client,
-			Lifecycles:     map[string]scaleSetLifecycle{},
+		if err := confirmReloadRepository(ctx, daemon, reloaded, repository); err != nil {
+			return err
 		}
 	}
+	reloaded.ConfirmedDiscovery = &discovery
 	return nil
+}
+
+func confirmReloadRepository(
+	ctx context.Context,
+	daemon standaloneDaemon,
+	reloaded *activeConfiguration,
+	repository githubapp.Repository,
+) error {
+	client, err := daemon.newGitHubClient(repository.URL, repository.InstallationID, reloaded.Credentials)
+	if err != nil {
+		return fmt.Errorf("create GitHub client for %q before reload activation: %w", repository.URL, err)
+	}
+	registrations, err := ensureRepositoryScaleSetRegistrations(
+		ctx, reloaded.Logger, repository.URL, client, reloaded.Config.ScaleSets,
+	)
+	if err != nil {
+		return fmt.Errorf("confirm reload registrations for %q: %w", repository.URL, err)
+	}
+	appendReloadRegistrations(reloaded, repository.URL, registrations)
+	reloaded.Repositories[repository.URL] = managedRepository{
+		InstallationID: repository.InstallationID, Client: client, Lifecycles: map[string]scaleSetLifecycle{},
+	}
+	return nil
+}
+
+func appendReloadRegistrations(
+	reloaded *activeConfiguration,
+	repositoryURL string,
+	registrations map[string]*upstream.RunnerScaleSet,
+) {
+	for _, scaleSetConfig := range reloaded.Config.ScaleSets {
+		registration := registrations[scaleSetConfig.Name]
+		reloaded.ConfirmedRegistrations = append(reloaded.ConfirmedRegistrations, repositorystate.Registration{
+			AppID: reloaded.Credentials.AppID, RepositoryURL: repositoryURL,
+			ScaleSetName: scaleSetConfig.Name, RunnerGroup: scaleSetConfig.RunnerGroup,
+			GitHubScaleSetID: registration.ID,
+		})
+	}
 }
 
 func loadReloadedConfiguration(
@@ -275,11 +305,11 @@ func handoverActiveConfiguration(
 
 func standaloneForReload(daemon standaloneDaemon, activeConfig activeConfiguration) standaloneDaemon {
 	reloadedDaemon := daemon
-	reloadedDaemon.openDemandStore = func(path string) (scaler.DemandStore, io.Closer, error) {
+	reloadedDaemon.openState = func(path string) (standaloneState, error) {
 		if path != activeConfig.Config.State.Path {
-			return nil, nil, errors.New("state.path cannot change during reload; restart the daemon")
+			return nil, errors.New("state.path cannot change during reload; restart the daemon")
 		}
-		return activeConfig.DemandStore, noOpCloser{}, nil
+		return standaloneStateReference{DemandStore: activeConfig.DemandStore, Store: activeConfig.RepositoryState}, nil
 	}
 	return reloadedDaemon
 }

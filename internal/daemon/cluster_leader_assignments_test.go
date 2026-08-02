@@ -110,7 +110,7 @@ func conflictingScaleSetLeaderFixture(t *testing.T) (leader *clusterLeader, logs
 	daemon.assignments = state
 	daemon.tryLeader = fakeTryLeader(state)
 	daemon.waitForLeader = fakeWaitForLeader(state)
-	return newClusterLeader(daemon, &fakeClusterLease{alive: true}), logs, state
+	return newClusterLeader(context.Background(), daemon, &fakeClusterLease{alive: true}), logs, state
 }
 
 func TestClusterLeaderDeletesScaleSetAfterFinalExplicitWithdrawal(t *testing.T) {

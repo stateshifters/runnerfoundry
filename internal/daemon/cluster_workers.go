@@ -10,10 +10,12 @@ import (
 
 func (daemon *clusteredDaemon) startClusterWorkers(ctx context.Context, events clusterEvents) chan<- struct{} {
 	reconciliationRequests := make(chan struct{}, 1)
-	daemon.workers.Add(4)
+	daemon.repositoryRepairRequests = make(chan struct{}, 1)
+	daemon.workers.Add(5)
 	go daemon.runHeartbeatLoop(ctx, events.heartbeat)
 	go daemon.runExecutorLoop(ctx, events.executor)
 	go daemon.runReconciliationLoop(ctx, reconciliationRequests)
+	go daemon.runRepositoryRepairLoop(ctx)
 	go daemon.runPeriodicReconciliationLoop(ctx, reconciliationRequests)
 	return reconciliationRequests
 }
@@ -63,20 +65,31 @@ func (daemon *clusteredDaemon) runExecutorLoop(ctx context.Context, ticks <-chan
 
 func (daemon *clusteredDaemon) runReconciliationLoop(ctx context.Context, requests <-chan struct{}) {
 	defer daemon.workers.Done()
-	repairTimer := time.NewTimer(time.Hour)
-	repairTimer.Stop()
-	defer repairTimer.Stop()
-	var repairReady <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-requests:
 			daemon.reconcileLeader(ctx)
+		}
+	}
+}
+
+func (daemon *clusteredDaemon) runRepositoryRepairLoop(ctx context.Context) {
+	defer daemon.workers.Done()
+	repairTimer := time.NewTimer(time.Hour)
+	repairTimer.Stop()
+	defer repairTimer.Stop()
+	for {
+		repairReady := daemon.resetRepositoryRepairTimer(repairTimer)
+		select {
+		case <-ctx.Done():
+			return
+		case <-daemon.repositoryRepairRequests:
+			continue
 		case <-repairReady:
 			daemon.repairLeaderRepositories(ctx)
 		}
-		repairReady = daemon.resetRepositoryRepairTimer(repairTimer)
 	}
 }
 

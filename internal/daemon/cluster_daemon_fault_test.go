@@ -50,6 +50,11 @@ func TestClusteredStartupRequiresMigratedPostgreSQLState(t *testing.T) {
 		"upward migration": func(_ *config.Config, _ *clusteredDaemon, state *fakeClusterState) {
 			state.migrateErr = failure
 		},
+		"repository state": func(_ *config.Config, daemon *clusteredDaemon, state *fakeClusterState) {
+			daemon.openStore = func(postgresconfig.Settings) (clusterStoreConnection, error) {
+				return clusterStoreConnection{state: state}, nil
+			}
+		},
 	}
 	for name, configure := range tests {
 		t.Run(name, func(t *testing.T) { assertClusteredStartupFailure(t, configure) })
@@ -312,7 +317,7 @@ func TestClusterHeartbeatPreservesLiveLeaderLease(t *testing.T) {
 		providerHealthy: func(context.Context, config.ScaleSetConfig) error { return nil },
 	}
 	lease := &fakeClusterLease{alive: true}
-	daemon.leader = newClusterLeader(&daemon, lease)
+	daemon.leader = newClusterLeader(context.Background(), &daemon, lease)
 	daemon.heartbeat(context.Background())
 	if lease.closed {
 		t.Fatal("live leader lease was replaced")
@@ -328,7 +333,7 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 		waitForLeader: fakeWaitForLeader(state),
 	}
 	lease := &fakeClusterLease{alive: false}
-	daemon.leader = newClusterLeader(&daemon, lease)
+	daemon.leader = newClusterLeader(context.Background(), &daemon, lease)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -438,7 +443,7 @@ func TestLeaderReconciliationReportsDiscoveryFailure(t *testing.T) {
 	daemon.discoverer = staticDiscoverer{err: errors.New("failed")}
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 
-	if newClusterLeader(&daemon, &fakeClusterLease{}).reconcile(context.Background()) {
+	if newClusterLeader(context.Background(), &daemon, &fakeClusterLease{}).reconcile(context.Background()) {
 		t.Fatal("expected reconciliation failure")
 	}
 	assertClusterLogSnapshot(t, logs,
@@ -452,7 +457,7 @@ func TestLeaderReconciliationReportsCapacityAggregationFailure(t *testing.T) {
 	daemon.nodeID = "runner-host-1"
 	daemon.logger = newClusterLogSnapshotLogger(logs)
 
-	if newClusterLeader(&daemon, &fakeClusterLease{}).reconcile(context.Background()) {
+	if newClusterLeader(context.Background(), &daemon, &fakeClusterLease{}).reconcile(context.Background()) {
 		t.Fatal("expected reconciliation failure")
 	}
 	assertClusterLogSnapshot(t, logs,
@@ -465,7 +470,7 @@ func TestLeaderLeavesFailedRepositorySessionAbsent(t *testing.T) {
 	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return nil, errors.New("failed")
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	err := leader.startMissingSessions(context.Background(), map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
 		key: {Name: "linux", RunnerGroup: "Default", Compatible: true, EffectiveCapacity: 1},
@@ -622,7 +627,7 @@ func TestAssignmentStartReportsPostStartInspectionFailure(t *testing.T) {
 func TestLeaderKeepsSessionWhenCapacityIsUnchanged(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := activeClusteredDaemon(t, state)
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	session := &repositoryScaleSetSession{
 		key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, capacity: 1,
 	}
@@ -672,7 +677,7 @@ func TestRepositoryScaleSetSessionFailureIsReturned(t *testing.T) {
 		buildReconciler: daemonUnderTest.buildReconciler, notifier: daemonUnderTest.notifier,
 		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
-	leader := newClusterLeader(&daemon, &fakeClusterLease{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
 	if _, err := leader.startSession(context.Background(), githubapp.Repository{URL: "repo"}, cluster.ScaleSetStatus{
 		Name: "linux", RunnerGroup: "Default", Compatible: true,
 	}); err == nil {

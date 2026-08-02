@@ -5,6 +5,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -295,6 +297,34 @@ func TestSQLiteDemandStoreReportsGenericLifecycleMigrationStepFailures(t *testin
 		t.Run(fmt.Sprintf("step-%d", failedIndex), func(t *testing.T) {
 			assertGenericLifecycleMigrationStepFailure(t, failedIndex)
 		})
+	}
+}
+
+func TestSQLiteDemandStoreReportsRepositoryStateMigrationStepFailures(t *testing.T) {
+	for failedIndex := range repositoryStateMigrationSteps {
+		t.Run(fmt.Sprintf("step-%d", failedIndex), func(t *testing.T) {
+			assertRepositoryStateMigrationStepFailure(t, failedIndex)
+		})
+	}
+}
+
+func assertRepositoryStateMigrationStepFailure(t *testing.T, failedIndex int) {
+	t.Helper()
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 4)
+	fixture.mock.ExpectBegin()
+	for index, step := range repositoryStateMigrationSteps {
+		expectation := fixture.mock.ExpectExec(regexp.QuoteMeta(step.statement))
+		if index == failedIndex {
+			expectation.WillReturnError(errors.New("failed"))
+			break
+		}
+		expectation.WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	fixture.mock.ExpectRollback()
+	err := fixture.store.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), repositoryStateMigrationSteps[failedIndex].operation) {
+		t.Fatalf("repository-state migration error = %v", err)
 	}
 }
 

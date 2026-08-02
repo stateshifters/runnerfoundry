@@ -33,6 +33,7 @@ func TestRunDaemonDiscoversStartsAndShutsDownRepositories(t *testing.T) {
 
 type standaloneLifecycleObservation struct {
 	daemon         standaloneDaemon
+	cancel         context.CancelFunc
 	pollingStopped bool
 	shutdown       bool
 }
@@ -40,7 +41,7 @@ type standaloneLifecycleObservation struct {
 func standaloneLifecycleFixture(t *testing.T) (context.Context, *standaloneLifecycleObservation) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	fixture := &standaloneLifecycleObservation{}
+	fixture := &standaloneLifecycleObservation{cancel: cancel}
 	loadedConfig := runnableConfig(t)
 	fixture.daemon = standaloneDaemon{
 		loadConfig: func(string) (config.Config, error) { return loadedConfig, nil },
@@ -51,7 +52,7 @@ func standaloneLifecycleFixture(t *testing.T) (context.Context, *standaloneLifec
 			return successfulRegistrationReconciliationClient(), nil
 		},
 		newLogger:     func(string, string) *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
-		notifier:      cancellingNotifier{cancel: cancel},
+		notifier:      noopNotifier{},
 		startScaleSet: fixture.startScaleSet,
 	}
 	return ctx, fixture
@@ -72,6 +73,7 @@ func (fixture *standaloneLifecycleObservation) startScaleSet(
 	config.ScaleSetConfig,
 	*scaler.Coordinator,
 ) (scaleSetLifecycle, error) {
+	fixture.cancel()
 	return scaleSetLifecycle{
 		StopPolling:   func() { fixture.pollingStopped = true },
 		Running:       func(context.Context) (int, error) { return 0, nil },

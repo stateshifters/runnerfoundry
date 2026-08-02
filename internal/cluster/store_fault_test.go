@@ -632,7 +632,9 @@ type fakeDatabaseConnection struct {
 	execErrors  []error
 	execTag     pgconn.CommandTag
 	queryErr    error
+	queryErrors []error
 	rowsResult  rowIterator
+	rowsResults []rowIterator
 	rowResults  []fakeRow
 	closeErr    error
 	pingErr     error
@@ -669,8 +671,17 @@ func (connection *fakeDatabaseConnection) IsClosed() bool { return connection.cl
 func (connection *fakeDatabaseConnection) Ping(context.Context) error { return connection.pingErr }
 
 func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any) (*databaseRows, error) {
-	if connection.queryErr != nil {
-		return nil, connection.queryErr
+	queryErr := connection.queryErr
+	if len(connection.queryErrors) > 0 {
+		queryErr = nextScriptedError(&connection.queryErrors)
+	}
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	if len(connection.rowsResults) > 0 {
+		rows := connection.rowsResults[0]
+		connection.rowsResults = connection.rowsResults[1:]
+		return newDatabaseRows(rows), nil
 	}
 	if connection.rowsResult == nil {
 		connection.rowsResult = &fakeDatabaseRows{}
@@ -680,58 +691,6 @@ func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any)
 
 func (connection *fakeDatabaseConnection) QueryRow(context.Context, string, ...any) databaseRow {
 	return databaseRow{scanner: nextScriptedRow(&connection.rowResults)}
-}
-
-type fakeDatabaseTransaction struct {
-	execErrors    []error
-	execTags      []pgconn.CommandTag
-	executions    []fakeDatabaseExecution
-	rowResults    []fakeRow
-	commitErr     error
-	rollbackErr   error
-	rollbackCalls int
-}
-
-func (transaction *fakeDatabaseTransaction) databaseTransaction() *databaseTransaction {
-	return &databaseTransaction{
-		commit:   transaction.Commit,
-		exec:     transaction.Exec,
-		queryRow: transaction.QueryRow,
-		rollback: transaction.Rollback,
-	}
-}
-
-func (transaction *fakeDatabaseTransaction) Commit(context.Context) error {
-	return transaction.commitErr
-}
-
-func (transaction *fakeDatabaseTransaction) Exec(_ context.Context, statement string, arguments ...any) (pgconn.CommandTag, error) {
-	transaction.executions = append(transaction.executions, fakeDatabaseExecution{
-		statement: statement, arguments: append([]any(nil), arguments...),
-	})
-	if err := nextScriptedError(&transaction.execErrors); err != nil {
-		return pgconn.CommandTag{}, err
-	}
-	if len(transaction.execTags) > 0 {
-		tag := transaction.execTags[0]
-		transaction.execTags = transaction.execTags[1:]
-		return tag, nil
-	}
-	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-type fakeDatabaseExecution struct {
-	statement string
-	arguments []any
-}
-
-func (transaction *fakeDatabaseTransaction) QueryRow(context.Context, string, ...any) databaseRow {
-	return databaseRow{scanner: nextScriptedRow(&transaction.rowResults)}
-}
-
-func (transaction *fakeDatabaseTransaction) Rollback(context.Context) error {
-	transaction.rollbackCalls++
-	return transaction.rollbackErr
 }
 
 type fakeRow struct {

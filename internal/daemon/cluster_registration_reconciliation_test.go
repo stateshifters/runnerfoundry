@@ -184,7 +184,7 @@ func clusterRegistrationFixture(t *testing.T) clusterRegistrationTestFixture {
 		},
 	}
 	return clusterRegistrationTestFixture{
-		leader: newClusterLeader(daemon, &fakeClusterLease{}), registry: registry, desired: desired,
+		leader: newClusterLeader(context.Background(), daemon, &fakeClusterLease{}), registry: registry, desired: desired,
 		repositories: map[string]githubapp.Repository{"repo": {URL: "repo", InstallationID: 1}},
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/repositorystate"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -53,6 +54,7 @@ type clusteredDaemon struct {
 	notifier                  serviceNotifier
 	nodes                     clusterNodeState
 	assignments               clusterAssignmentState
+	repositoryState           repositorystate.Store
 	tryLeader                 func(context.Context) (leadershipResult, error)
 	waitForLeader             func(context.Context) (leadershipResult, error)
 	leader                    *clusterLeader
@@ -64,6 +66,7 @@ type clusteredDaemon struct {
 	leadershipRetryDelay      time.Duration
 	waitBeforeLeadershipRetry func(context.Context, time.Duration) bool
 	runnerReapRetries         *runnerReapRetryTracker
+	repositoryRepairRequests  chan struct{}
 	configurationMutex        sync.RWMutex
 }
 
@@ -121,9 +124,10 @@ type clusterState interface {
 }
 
 type clusterStoreConnection struct {
-	state         clusterState
-	tryLeader     func(context.Context) (leadershipResult, error)
-	waitForLeader func(context.Context) (leadershipResult, error)
+	state           clusterState
+	repositoryState repositorystate.Store
+	tryLeader       func(context.Context) (leadershipResult, error)
+	waitForLeader   func(context.Context) (leadershipResult, error)
 }
 
 type clusterStateOpener func(postgresconfig.Settings) (clusterStoreConnection, error)
@@ -156,9 +160,10 @@ func newClusteredDaemon() *clusteredDaemon {
 func openClusterStore(state postgresconfig.Settings) (clusterStoreConnection, error) {
 	store := cluster.NewStore(state)
 	return clusterStoreConnection{
-		state:         store,
-		tryLeader:     func(ctx context.Context) (leadershipResult, error) { return tryClusterLeadership(ctx, store) },
-		waitForLeader: func(ctx context.Context) (leadershipResult, error) { return waitForClusterLeadership(ctx, store) },
+		state:           store,
+		repositoryState: store,
+		tryLeader:       func(ctx context.Context) (leadershipResult, error) { return tryClusterLeadership(ctx, store) },
+		waitForLeader:   func(ctx context.Context) (leadershipResult, error) { return waitForClusterLeadership(ctx, store) },
 	}, nil
 }
 
@@ -266,6 +271,10 @@ func (daemon *clusteredDaemon) connectState(ctx context.Context, configured conf
 	}
 	daemon.nodes = connection.state
 	daemon.assignments = connection.state
+	if connection.repositoryState == nil {
+		return errors.New("PostgreSQL repository state is required")
+	}
+	daemon.repositoryState = connection.repositoryState
 	daemon.tryLeader = connection.tryLeader
 	daemon.waitForLeader = connection.waitForLeader
 	return nil
