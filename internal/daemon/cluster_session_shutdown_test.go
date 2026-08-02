@@ -189,24 +189,6 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"lease failed\"}")
 }
 
-func TestSuccessfulReconciliationResultReturnsTrue(t *testing.T) {
-	leader := newClusterLeader(&clusteredDaemon{logger: slog.Default()}, &fakeClusterLease{})
-	if !leader.reportReconciliationResult(nil) {
-		t.Fatal("successful reconciliation result returned false")
-	}
-}
-
-func TestFailedReconciliationResultLogsAndReturnsFalse(t *testing.T) {
-	logs := &bytes.Buffer{}
-	daemon := &clusteredDaemon{nodeID: "runner-host-1", logger: newClusterLogSnapshotLogger(logs)}
-	leader := newClusterLeader(daemon, &fakeClusterLease{})
-	if leader.reportReconciliationResult(errors.New("shutdown failed")) {
-		t.Fatal("failed reconciliation result returned true")
-	}
-	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"stop outdated leader sessions failed","hostname":"runner-host-1","error":"shutdown failed"}`)
-}
-
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{publishErr: errors.New("failed")}

@@ -63,13 +63,41 @@ func (daemon *clusteredDaemon) runExecutorLoop(ctx context.Context, ticks <-chan
 
 func (daemon *clusteredDaemon) runReconciliationLoop(ctx context.Context, requests <-chan struct{}) {
 	defer daemon.workers.Done()
+	repairTimer := time.NewTimer(time.Hour)
+	repairTimer.Stop()
+	defer repairTimer.Stop()
+	var repairReady <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-requests:
 			daemon.reconcileLeader(ctx)
+		case <-repairReady:
+			daemon.repairLeaderRepositories(ctx)
 		}
+		repairReady = daemon.resetRepositoryRepairTimer(repairTimer)
+	}
+}
+
+func (daemon *clusteredDaemon) resetRepositoryRepairTimer(timer *time.Timer) <-chan time.Time {
+	timer.Stop()
+	leader := daemon.currentLeader()
+	if leader == nil {
+		return nil
+	}
+	delay, pending := leader.nextRepositoryRepairDelay()
+	if !pending {
+		return nil
+	}
+	timer.Reset(delay)
+	return timer.C
+}
+
+func (daemon *clusteredDaemon) repairLeaderRepositories(ctx context.Context) {
+	leader := daemon.currentLeader()
+	if leader != nil {
+		leader.repairPendingRepositories(ctx)
 	}
 }
 

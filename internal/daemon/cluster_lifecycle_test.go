@@ -103,13 +103,13 @@ func (fixture *clusteredLifecycleTestFixture) providerHealth(context.Context, co
 	return errors.New("provider unavailable")
 }
 
-func TestClusteredLeaderStatusReflectsRepositorySessionStartFailure(t *testing.T) {
+func TestClusteredLeaderRemainsOperationalWithRepositoryRepairPending(t *testing.T) {
 	ctx, fixture := clusteredLeaderStatusFixture(t)
 	if err := runClusteredDaemon(ctx, Options{}, fixture.daemon, fixture.config); err != nil {
 		t.Fatal(err)
 	}
 
-	expected := "STATUS=leader reconciling\nSTATUS=leader degraded"
+	expected := "STATUS=leader reconciling\nSTATUS=leader operational"
 	if actual := strings.Join(fixture.notifier.statuses, "\n"); actual != expected {
 		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
 	}
@@ -169,7 +169,7 @@ func (fixture *clusteredLeaderStatusTestFixture) clientForRepository(repositoryU
 }
 
 func (fixture *clusteredLeaderStatusTestFixture) captureActiveSessions(status clusterServiceStatus) {
-	if status != clusterServiceStatusLeaderDegraded {
+	if status != clusterServiceStatusLeaderOperational {
 		return
 	}
 	for key := range fixture.daemon.currentLeader().sessions {

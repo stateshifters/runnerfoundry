@@ -318,9 +318,11 @@ Live, healthy contributors sharing a name must agree on the runner group. Compat
 
 Leadership is a session-scoped PostgreSQL advisory lock held on a dedicated direct connection. Closing or losing that connection releases the lock. Standby nodes block on the same lock instead of polling for leadership. The heartbeat loop checks the current lease; after loss, the old leader stops its sessions without deleting GitHub scale sets and returns to contention.
 
-When leadership is acquired, the leader reconciles GitHub sessions. It discovers repositories, reads the current aggregate scale-set statuses from PostgreSQL, audits each repository's complete registration set, and creates one atomic session group per repository. The session's advertised maximum is the current effective cluster capacity. Reconciliation runs after leadership acquisition, after a successful local configuration reload, and periodically at `github.discovery_interval`. Heartbeats continue publishing state independently of session reconciliation, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
+When leadership is acquired, the leader discovers repositories and reads the current aggregate scale-set statuses from PostgreSQL. Success establishes the desired GitHub-facing state and makes the leader operational. It then audits each repository's complete registration set and creates one atomic session group per repository. The session's advertised maximum is the current effective cluster capacity. Full reconciliation runs after leadership acquisition, after a successful local configuration reload, and periodically at `github.discovery_interval`. Heartbeats continue publishing state independently, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
 
-An incompatible scale set receives no session. When effective capacity or a confirmed registration ID changes, reconciliation replaces the repository's complete session generation. A transient registration audit failure preserves the healthy generation and reports `leader degraded`. When the last declaration is explicitly withdrawn, the leader stops the session and deletes the GitHub scale set. Leadership loss retains the GitHub scale set so a successor can attach a replacement session.
+Repository registration and session failures are isolated from leader health. Each failed repository becomes in-memory repair work for the current leadership term. Only pending repositories retry, after 5, 10, 20, 40, and then 60 seconds, until their complete configured session group activates. A fresh discovery discards obsolete repair work, and leadership loss cancels the active attempt and clears the queue; a successor reconstructs repair needs from its own audit. Each repository attempt has an independent 30-second GitHub timeout, so one slow repository cannot cancel later repositories in the same full pass.
+
+An incompatible scale set receives no session. When effective capacity or a confirmed registration ID changes, reconciliation replaces the repository's complete session generation. A transient registration audit failure preserves the healthy generation and enters repository repair. When the last declaration is explicitly withdrawn, the leader stops the session and deletes the GitHub scale set. Leadership loss retains the GitHub scale set so a successor can attach a replacement session.
 
 As long as incompatible live declarations remain, the aggregate capacity is zero, the leader logs the conflict during reconciliation, and no message session is created for that scale set. Stale or unhealthy conflicting declarations do not have this effect because compatibility considers only live, healthy contributors.
 
@@ -366,9 +368,9 @@ Three long-running worker loops isolate failure domains:
 
 - The heartbeat loop publishes health and checks leader-lease liveness.
 - The assignment executor loop repairs or claims host-local work once per second.
-- The reconciliation loop serializes leader session reconciliation requests.
+- The reconciliation loop serializes full leader reconciliation and repository repair attempts. Its repair timer wakes only for the earliest pending repository retry.
 
-Provider starts occur outside the heartbeat path and may take up to five minutes. Coordination database calls use five-second bounds, GitHub reconciliation and acquisition use 30-second bounds, and provider inspection uses a 30-second bound. A failed leadership wait retries after two seconds. After GitHub confirms acquisition, the leader retries the database confirmation every two seconds until it succeeds or its context ends. Failed or ambiguous `starting` assignments are revisited by the one-second executor loop. These boundaries prevent a slow provider or GitHub request from consuming the node-health failover window.
+Provider starts occur outside the heartbeat path and may take up to five minutes. Coordination database calls use five-second bounds, each repository GitHub reconciliation attempt and job acquisition uses a 30-second bound, and provider inspection uses a 30-second bound. A failed leadership wait retries after two seconds. After GitHub confirms acquisition, the leader retries the database confirmation every two seconds until it succeeds or its context ends. Failed or ambiguous `starting` assignments are revisited by the one-second executor loop. These boundaries prevent a slow provider, repository, or GitHub request from consuming unrelated recovery work or the node-health failover window.
 
 ### Global FIFO and contributor selection
 
@@ -704,9 +706,9 @@ Standalone readiness means configuration, credentials, local state, and initial 
 Clustered nodes report a separate systemd status:
 
 - `standby` while another node owns leadership.
-- `leader reconciling` while rebuilding GitHub-facing sessions.
-- `leader operational` after successful reconciliation.
-- `leader degraded` after a reconciliation failure.
+- `leader reconciling` while discovering repositories and reading clustered scale-set declarations.
+- `leader operational` after desired state is established, including while individual repository repairs are pending.
+- `leader degraded` when discovery or clustered scale-set aggregation cannot establish desired state.
 
 Structured logs describe lifecycle actions and include non-secret repository, scale-set, node, request, assignment, and operation identifiers. Debug logging adds individual discovery, polling, scheduling, recovery, migration, reload, provider, and cleanup actions.
 

@@ -17,14 +17,18 @@ import (
 )
 
 type clusterLeader struct {
-	daemon          *clusteredDaemon
-	lease           cluster.Lease
-	scheduler       *clusterScheduler
-	sessions        map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
-	operationMutex  sync.Mutex
-	cancelMutex     sync.Mutex
-	cancelOperation context.CancelFunc
-	stopped         bool
+	daemon                   *clusteredDaemon
+	lease                    cluster.Lease
+	scheduler                *clusterScheduler
+	sessions                 map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
+	operationMutex           sync.Mutex
+	cancelMutex              sync.Mutex
+	cancelOperation          context.CancelFunc
+	stopped                  bool
+	githubOperationTimeout   time.Duration
+	repositoryRepairDelays   []time.Duration
+	now                      func() time.Time
+	pendingRepositoryRepairs map[string]repositoryRepair
 }
 
 type repositoryScaleSetSessionKey struct {
@@ -45,47 +49,68 @@ type repositoryScaleSetSession struct {
 
 func newClusterLeader(daemon *clusteredDaemon, lease cluster.Lease) *clusterLeader {
 	scheduler := &clusterScheduler{store: daemon.assignments, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
-	return &clusterLeader{daemon: daemon, lease: lease, scheduler: scheduler, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
+	return &clusterLeader{
+		daemon: daemon, lease: lease, scheduler: scheduler,
+		sessions:               map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
+		githubOperationTimeout: clusterGitHubTimeout,
+		repositoryRepairDelays: repositoryRepairRetryDelays[:], now: time.Now,
+		pendingRepositoryRepairs: make(map[string]repositoryRepair),
+	}
 }
 
 func (leader *clusterLeader) reconcile(ctx context.Context) bool {
 	leader.operationMutex.Lock()
 	defer leader.operationMutex.Unlock()
-	reconcileCtx, cancelReconcile := context.WithTimeout(ctx, clusterGitHubTimeout)
+	reconcileCtx, cancelReconcile := context.WithCancel(ctx)
 	if !leader.setOperationCancellation(cancelReconcile) {
 		cancelReconcile()
 		return false
 	}
 	defer leader.clearOperationCancellation()
 	defer cancelReconcile()
+	discovery, statuses, loaded := leader.loadReconciliationState(reconcileCtx)
+	if !loaded {
+		return false
+	}
+	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
+	leader.stopUndesiredSessions(reconcileCtx, desired, statuses)
+	leader.retainDesiredRepositoryRepairs(repositories, desired)
+	repositoryErr := leader.startMissingSessions(reconcileCtx, desired, repositories)
+	return repositoryErr == nil || reconcileCtx.Err() == nil
+}
+
+func (leader *clusterLeader) loadReconciliationState(
+	ctx context.Context,
+) (githubapp.DiscoveryResult, []cluster.ScaleSetStatus, bool) {
 	configuration := leader.daemon.configurationSnapshot()
-	discovery, err := configuration.discoverer.Discover(reconcileCtx)
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, leader.githubOperationTimeout)
+	discovery, err := configuration.discoverer.Discover(discoveryCtx)
+	cancelDiscovery()
 	if err != nil {
 		leader.daemon.logger.Error("leader repository discovery failed",
 			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
-		return false
+		return githubapp.DiscoveryResult{}, nil, false
 	}
-	statusCtx, cancelStatus := context.WithTimeout(reconcileCtx, clusterCoordinationTimeout)
+	statusCtx, cancelStatus := context.WithTimeout(ctx, clusterCoordinationTimeout)
 	statuses, err := leader.daemon.nodes.ScaleSets(statusCtx, time.Now(), clusterNodeLifetime)
 	cancelStatus()
 	if err != nil {
 		leader.daemon.logger.Error("leader scale-set aggregation failed",
 			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
-		return false
+		return githubapp.DiscoveryResult{}, nil, false
 	}
-	desired, repositories := leader.desiredSessions(discovery.Repositories, statuses)
-	stopErr := leader.stopOutdatedSessions(reconcileCtx, desired, statuses)
-	startErr := leader.startMissingSessions(reconcileCtx, desired, repositories)
-	return leader.reportReconciliationResult(stopErr) && startErr == nil
+	return discovery, statuses, true
 }
 
-func (leader *clusterLeader) reportReconciliationResult(err error) bool {
-	if err == nil {
-		return true
+func (leader *clusterLeader) stopUndesiredSessions(
+	ctx context.Context,
+	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
+	statuses []cluster.ScaleSetStatus,
+) {
+	if stopErr := leader.stopOutdatedSessions(ctx, desired, statuses); stopErr != nil {
+		leader.daemon.logger.Error("stop outdated leader sessions failed",
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", stopErr.Error()))
 	}
-	leader.daemon.logger.Error("stop outdated leader sessions failed",
-		slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
-	return false
 }
 
 func (leader *clusterLeader) desiredSessions(
@@ -123,7 +148,9 @@ func (leader *clusterLeader) stopOutdatedSessions(
 		if !scaleSetStillDeclared {
 			removal = removeGitHubScaleSet
 		}
-		resultErr = errors.Join(resultErr, leader.stopSession(ctx, session, removal))
+		cleanupCtx, cancelCleanup := context.WithTimeout(ctx, leader.githubOperationTimeout)
+		resultErr = errors.Join(resultErr, leader.stopSession(cleanupCtx, session, removal))
+		cancelCleanup()
 		delete(leader.sessions, key)
 		leader.scheduler.remove(key)
 	}
@@ -136,16 +163,28 @@ func (leader *clusterLeader) startMissingSessions(
 	repositories map[string]githubapp.Repository,
 ) error {
 	var resultErr error
-	for repositoryURL, repository := range repositories {
+	repositoryURLs := make([]string, 0, len(repositories))
+	for repositoryURL := range repositories {
+		repositoryURLs = append(repositoryURLs, repositoryURL)
+	}
+	sort.Strings(repositoryURLs)
+	for _, repositoryURL := range repositoryURLs {
+		repository := repositories[repositoryURL]
 		statuses := desiredRepositoryStatuses(repositoryURL, desired)
 		if len(statuses) == 0 {
 			continue
 		}
-		if err := leader.reconcileRepositorySessions(ctx, repository, statuses); err != nil {
+		if err := leader.reconcileDesiredRepository(ctx, repository, statuses); err != nil {
+			if ctx.Err() != nil {
+				return errors.Join(resultErr, err)
+			}
 			leader.daemon.logger.Error("leader repository session group failed",
 				slog.String("repository", repositoryURL), slog.String("error", err.Error()))
+			leader.recordRepositoryRepair(ctx, repository, statuses, err)
 			resultErr = errors.Join(resultErr, err)
+			continue
 		}
+		leader.completeRepositoryRepair(ctx, repositoryURL)
 	}
 	return resultErr
 }
@@ -243,7 +282,7 @@ func (leader *clusterLeader) closePartialSessionGeneration(
 	var resultErr error
 	for _, partial := range started {
 		resultErr = errors.Join(
-			resultErr, leader.stopSession(context.WithoutCancel(ctx), partial, retainGitHubScaleSet),
+			resultErr, leader.stopSession(ctx, partial, retainGitHubScaleSet),
 		)
 	}
 	return resultErr
@@ -402,6 +441,7 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 		}
 	}
 	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
+	leader.pendingRepositoryRepairs = map[string]repositoryRepair{}
 	leader.scheduler.clear()
 	if err := leader.lease.Close(ctx); err != nil {
 		leader.daemon.logger.Warn("close leader lease failed",

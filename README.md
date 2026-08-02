@@ -554,7 +554,7 @@ sudo systemctl enable --now runnerfoundry
 sudo systemctl status runnerfoundry
 ```
 
-One node reports `leader reconciling`, then `leader operational` after it creates the required GitHub-facing sessions. Other nodes report `standby`. A failed reconciliation reports `leader degraded` and is retried on the discovery interval.
+One node reports `leader reconciling`, then `leader operational` after it discovers the desired repositories and reads the clustered scale-set declarations. Other nodes report `standby`. Repository registration or session failures remain isolated repair work and retry with bounded backoff while the leader stays operational. A discovery or clustered-state aggregation failure reports `leader degraded` and is retried on the discovery interval.
 
 ### PostgreSQL migration commands
 
@@ -677,8 +677,8 @@ Readiness does not prove that GitHub discovery or scale-set reconciliation succe
 
 - `standby`: another node holds leadership;
 - `leader reconciling`: the leader is rebuilding GitHub-facing sessions;
-- `leader operational`: reconciliation succeeded;
-- `leader degraded`: one or more desired sessions failed and will be retried.
+- `leader operational`: repository authority and clustered scale-set declarations are available; individual repository repairs may still be pending;
+- `leader degraded`: discovery or clustered-state aggregation failed, so the leader cannot establish the desired GitHub-facing state.
 
 Inspect both service status and logs:
 
@@ -798,9 +798,11 @@ Confirm that the login identity can connect, belongs to the stable role, and can
 
 A leader lease, live node heartbeat, or Docker cleanup obligation that the older schema cannot represent still exists. Stop all nodes, wait at least 30 seconds, run `migrate status`, and inspect `runner_reap` failures. Retry with the currently deployed executable only after durable cleanup completes.
 
-### A cluster leader remains degraded
+### Repository repairs remain pending
 
-Inspect repository-specific reconciliation errors. A failed repository does not prevent local readiness. Correct App access, GitHub permissions, scale-set conflicts, or network access, then wait for the discovery interval or reload the service.
+Inspect structured `repository_repair` events for the affected repository and attempt number. Correct App access, GitHub permissions, scale-set conflicts, or network access. RunnerFoundry retries only pending repositories after 5, 10, 20, 40, and then 60 seconds until the complete configured registration and session group is active. A pending repository repair does not change an otherwise healthy leader from `leader operational`.
+
+If the service reports `leader degraded`, inspect repository discovery and clustered scale-set aggregation errors instead. Those failures prevent the leader from establishing desired state and retry on the discovery interval.
 
 ## Migrating from personal access token authentication
 

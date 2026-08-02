@@ -14,7 +14,7 @@ Use this checklist only during an authorized deployment window on an installatio
 
 1. Temporarily deny creation of the second test scale set at a controlled API boundary.
 2. Trigger discovery and confirm that the first registration remains present while the repository has no active session group.
-3. Restore creation access and wait for the configured discovery interval.
+3. Restore creation access and observe the pending repository repair retry without triggering another discovery or reload.
 4. Confirm that only the missing registration is created and both sessions become operational together.
 
 ## External-drift recovery

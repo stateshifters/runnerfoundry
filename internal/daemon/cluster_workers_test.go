@@ -55,6 +55,16 @@ func TestReconciliationRequestAfterLeadershipLossDoesNoWork(t *testing.T) {
 	}
 }
 
+func TestRepositoryRepairTimerIsDisabledWithoutLeadership(t *testing.T) {
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	daemon.leader = nil
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	if ready := daemon.resetRepositoryRepairTimer(timer); ready != nil {
+		t.Fatal("repository repair timer remained enabled without leadership")
+	}
+}
+
 func TestStoppedLeaderRejectsNewReconciliation(t *testing.T) {
 	discoveryCalls := 0
 	state := &fakeClusterState{}
@@ -70,18 +80,42 @@ func TestStoppedLeaderRejectsNewReconciliation(t *testing.T) {
 	}
 }
 
-func TestRepositorySessionStartFailureRecoversLeaderOperationalStatus(t *testing.T) {
+func TestRepositorySessionStartFailureKeepsLeaderOperational(t *testing.T) {
 	fixture := repositorySessionRetryFixture(t)
 	fixture.daemon.reconcileLeader(context.Background())
-	fixture.daemon.reconcileLeader(context.Background())
 
-	expected := "STATUS=leader reconciling\nSTATUS=leader degraded\n" +
-		"STATUS=leader reconciling\nSTATUS=leader operational"
+	expected := "STATUS=leader reconciling\nSTATUS=leader operational"
 	if actual := strings.Join(fixture.notifier.statuses, "\n"); actual != expected {
 		t.Fatalf("cluster status snapshot mismatch\nexpected: %s\nactual:   %s", expected, actual)
 	}
-	if fixture.startAttempts != 2 || len(fixture.leader.sessions) != 1 {
-		t.Fatalf("session start attempts=%d active sessions=%d, want 2 attempts and 1 session", fixture.startAttempts, len(fixture.leader.sessions))
+	if fixture.startAttempts != 1 || len(fixture.leader.sessions) != 0 {
+		t.Fatalf("session start attempts=%d active sessions=%d, want one failed attempt", fixture.startAttempts, len(fixture.leader.sessions))
+	}
+	fixture.leader.stop(context.Background())
+}
+
+func TestRepositorySessionFailureIsActivelyRepaired(t *testing.T) {
+	fixture := repositorySessionRetryFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	requests := make(chan struct{}, 1)
+	fixture.daemon.workers.Add(1)
+	go fixture.daemon.runReconciliationLoop(ctx, requests)
+	requestReconciliation(requests)
+
+	select {
+	case attempt := <-fixture.attempted:
+		if attempt != 2 {
+			t.Fatalf("repository attempt = %d, want first retry", attempt)
+		}
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		fixture.daemon.waitForWorkers()
+		t.Fatal("failed repository was not actively retried")
+	}
+	cancel()
+	fixture.daemon.waitForWorkers()
+	if len(fixture.leader.sessions) != 1 {
+		t.Fatalf("active sessions = %d, want repaired repository session", len(fixture.leader.sessions))
 	}
 	fixture.leader.stop(context.Background())
 }
@@ -92,6 +126,7 @@ type repositorySessionRetryTestFixture struct {
 	notifier      *clusterStatusSnapshotNotifier
 	successClient *fakeScaleSetClient
 	startAttempts int
+	attempted     chan int
 }
 
 func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixture {
@@ -100,7 +135,7 @@ func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixt
 		Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
 	}}}
 	daemon := activeClusteredDaemon(t, state)
-	fixture := &repositorySessionRetryTestFixture{daemon: &daemon}
+	fixture := &repositorySessionRetryTestFixture{daemon: &daemon, attempted: make(chan int, 1)}
 	fixture.daemon.discoverer = staticDiscoverer{result: githubapp.DiscoveryResult{Repositories: []githubapp.Repository{{
 		InstallationID: 1, URL: "https://github.com/acme/retry",
 	}}}}
@@ -120,6 +155,7 @@ func repositorySessionRetryFixture(t *testing.T) *repositorySessionRetryTestFixt
 	fixture.notifier = &clusterStatusSnapshotNotifier{}
 	fixture.daemon.notifier = fixture.notifier
 	fixture.leader = newClusterLeader(fixture.daemon, &fakeClusterLease{alive: true})
+	fixture.leader.repositoryRepairDelays = []time.Duration{time.Millisecond}
 	fixture.daemon.leader = fixture.leader
 	return fixture
 }
@@ -129,6 +165,7 @@ func (fixture *repositorySessionRetryTestFixture) clientForRepository(string) (*
 	if fixture.startAttempts == 1 {
 		return nil, errors.New("session unavailable")
 	}
+	fixture.attempted <- fixture.startAttempts
 	return fixture.successClient, nil
 }
 
