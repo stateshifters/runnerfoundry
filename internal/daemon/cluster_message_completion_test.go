@@ -10,7 +10,7 @@ import (
 	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
-func TestClusterPollerAcknowledgesInvalidCompletionOnce(t *testing.T) {
+func TestClusterPollerAcknowledgesRunnerNameCompletionOnce(t *testing.T) {
 	messageClient := &persistentCompletionMessageClient{message: &upstream.RunnerScaleSetMessage{
 		MessageID:  27,
 		Statistics: &upstream.RunnerScaleSetStatistic{},
@@ -25,7 +25,7 @@ func TestClusterPollerAcknowledgesInvalidCompletionOnce(t *testing.T) {
 	}
 
 	if err := poller.PollOnce(context.Background()); err != nil {
-		t.Fatalf("expected poison completion to be acknowledged, got %v", err)
+		t.Fatalf("expected runner-name completion to be acknowledged, got %v", err)
 	}
 	if err := poller.PollOnce(context.Background()); err != nil {
 		t.Fatalf("expected acknowledged completion not to be redelivered, got %v", err)
@@ -35,7 +35,7 @@ func TestClusterPollerAcknowledgesInvalidCompletionOnce(t *testing.T) {
 	}
 }
 
-func TestClusterMessageReconcilesInvalidCompletionByRunnerName(t *testing.T) {
+func TestClusterMessageReconcilesIdentityFreeCompletionByRunnerName(t *testing.T) {
 	state := &fakeClusterState{}
 	handler := clusterMessageHandlerForTest(state)
 
@@ -47,18 +47,18 @@ func TestClusterMessageReconcilesInvalidCompletionByRunnerName(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("expected invalid completion reconciliation, got %v", err)
+		t.Fatalf("expected identity-free completion reconciliation, got %v", err)
 	}
 	if len(state.completedJobs) != 1 || state.completedJobs[0].RunnerName != "linux-legacy" ||
 		state.completedJobs[0].RequestID != 0 {
 		t.Fatalf("completion reconciliation = %#v", state.completedJobs)
 	}
 	if len(state.removedDemand) != 0 || len(state.released) != 0 {
-		t.Fatalf("invalid completion mutated demand or assignments: demand=%#v assignments=%#v", state.removedDemand, state.released)
+		t.Fatalf("identity-free completion mutated demand or assignments: demand=%#v assignments=%#v", state.removedDemand, state.released)
 	}
 }
 
-func TestClusterMessageWarnsWhenDroppingInvalidCompletions(t *testing.T) {
+func TestClusterMessageReportsRunnerNameCompletionAndDropsOnlyUnidentifiedCompletions(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
 	handler := clusterMessageHandlerForTest(state)
@@ -83,12 +83,12 @@ func TestClusterMessageWarnsWhenDroppingInvalidCompletions(t *testing.T) {
 		t.Fatalf("unexpected clustered mutations: completions=%#v demand=%#v assignments=%#v",
 			state.completedJobs, state.removedDemand, state.released)
 	}
-	assertClusterLogSnapshot(t, logs, `{"level":"WARN","msg":"cluster_job_completion_invalid","action":"cluster_job_completion_invalid","phase":"dropped","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"linux-legacy","runnerID":91}
+	assertClusterLogSnapshot(t, logs, `{"level":"INFO","msg":"cluster_job_completion","action":"cluster_job_completion","phase":"completed","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"linux-legacy","runnerID":91,"identity":"runner_name"}
 {"level":"WARN","msg":"cluster_job_completion_invalid","action":"cluster_job_completion_invalid","phase":"dropped","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"","runnerID":0}
 {"level":"WARN","msg":"cluster_job_completion_invalid","action":"cluster_job_completion_invalid","phase":"dropped","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"","runnerID":0}`)
 }
 
-func TestClusterPollerRetriesTransientInvalidCompletionReconciliationFailure(t *testing.T) {
+func TestClusterPollerRetriesTransientRunnerNameCompletionReconciliationFailure(t *testing.T) {
 	state := &fakeClusterState{removeErr: errors.New("database unavailable")}
 	messageClient := &persistentCompletionMessageClient{message: &upstream.RunnerScaleSetMessage{
 		MessageID:            28,

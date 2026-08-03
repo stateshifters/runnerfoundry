@@ -103,17 +103,31 @@ func (handler clusterMessageHandler) handleCompleted(ctx context.Context, comple
 	if completed.RunnerRequestID > 0 {
 		return handler.completeJob(ctx, completed)
 	}
-	return handler.reconcileInvalidCompletion(ctx, completed)
+	return handler.reconcileIdentityFreeCompletion(ctx, completed)
 }
 
-func (handler clusterMessageHandler) reconcileInvalidCompletion(ctx context.Context, completed *upstream.JobCompleted) error {
+func (handler clusterMessageHandler) reconcileIdentityFreeCompletion(ctx context.Context, completed *upstream.JobCompleted) error {
 	if completed.RunnerName != "" {
 		if err := handler.completeJob(ctx, completed); err != nil {
 			return err
 		}
+		handler.logRunnerNameCompletion(ctx, completed)
+		return nil
 	}
 	handler.warnInvalidCompletion(ctx, completed)
 	return nil
+}
+
+func (handler clusterMessageHandler) logRunnerNameCompletion(ctx context.Context, completed *upstream.JobCompleted) {
+	logAction(ctx, handler.logger, slog.LevelInfo, "cluster_job_completion", "completed",
+		slog.String("repository", handler.session.key.repository),
+		slog.String("scaleSet", handler.session.key.scaleSet),
+		slog.String("messageType", string(upstream.MessageTypeJobCompleted)),
+		slog.Int64("requestID", completed.RunnerRequestID),
+		slog.String("runner", completed.RunnerName),
+		slog.Int("runnerID", completed.RunnerID),
+		slog.String("identity", "runner_name"),
+	)
 }
 
 func (handler clusterMessageHandler) completeJob(ctx context.Context, completed *upstream.JobCompleted) error {

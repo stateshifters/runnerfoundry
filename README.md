@@ -549,7 +549,7 @@ Together they advertise capacity of six. Neither host receives more assignments 
 
 ### 4. Start and verify the cluster
 
-Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations. Migration 005 persists epoch-fenced assigned-job observations and allows distributed assignments to represent identity-free recovery.
+Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations. Migration 005 persists epoch-fenced assigned-job observations and allows distributed assignments to represent identity-free recovery. Migration 006 permits that intentional request ID `0` in the retained libvirt compatibility lifecycle; it briefly locks and validates that table while all RunnerFoundry nodes are stopped.
 
 ```sh
 sudo systemctl enable --now runnerfoundry
@@ -717,7 +717,7 @@ On standalone restart, RunnerFoundry reopens SQLite and increments a controller 
 
 Standalone runner cleanup is checked once per second and before new provisioning. If GitHub reports that a runner still has a job running, RunnerFoundry retains the durable cleanup record and retries that runner after 5, 10, 20, 40, and then at most 60 seconds. The retained lifecycle continues to consume capacity and reserve its runner name across repositories until provider and GitHub absence are confirmed. Other repositories can use remaining capacity without attempting to replace the busy registration. The owning host must regain the matching scale-set configuration and provider access, and GitHub must become reachable, before RunnerFoundry can release the retained capacity and name.
 
-In clustered mode, PostgreSQL persists assigned-job observations under the active controller epoch and distributes their missing capacity as assignments. Positive-ID assignments move through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`; identity-free assignments begin at `ready` because there is no request to acquire. Their provider runner names derive from the durable assignment identity, while lifecycle request ID `0` records that no GitHub request identity exists. PostgreSQL separately retains provider-independent runner states through process and leader failure. A runner-name-only `JobStarted` marks the lifecycle row matching its exact name busy before acknowledgement without inventing or rewriting a request ID; positive-request messages retain their existing identity path. Terminal `JobCompleted` atomically records exact Docker or libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted positive-ID acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
+In clustered mode, PostgreSQL persists assigned-job observations under the active controller epoch and distributes their missing capacity as assignments. Positive-ID assignments move through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`; identity-free assignments begin at `ready` because there is no request to acquire. Their provider runner names derive from the durable assignment identity, while lifecycle request ID `0` records that no GitHub request identity exists. Aggregate assigned-count recovery does not create a `scaler_demand` row; that table records only positive request identities received in `JobAvailable`. PostgreSQL separately retains provider-independent runner states through process and leader failure. A runner-name-only `JobStarted` marks the lifecycle row matching its exact name busy before acknowledgement without inventing or rewriting a request ID; positive-request messages retain their existing identity path. A runner-name-only `JobCompleted` similarly records exact cleanup and is reported as successfully correlated by runner name. Terminal completion commits cleanup and completes any matching positive demand and assignments before acknowledgement. A replacement leader retries interrupted positive-ID acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
 
 Before starting a `starting` assignment, the selected host checks for its stable runner name. It checks again after an ambiguous infrastructure-provider error. A process restart repairs local `starting` assignments before claiming new work.
 
@@ -735,7 +735,7 @@ On a normal standalone shutdown, active jobs remain running while message sessio
 
 For a normal standalone package upgrade, review release notes, stop the service, install the new package, and start the service.
 
-The project does not publish a mixed-version cluster compatibility policy. Migration 005 advances the schema compatibility floor, so use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration and `leader operational`, then start and verify the remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
+The project does not publish a mixed-version cluster compatibility policy. Migration 005 advances the schema compatibility floor, so use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration and `leader operational`, then start and verify the remaining nodes. Migration 006 does not advance that floor, but it replaces the retained libvirt lifecycle constraint while the cluster is stopped. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
 
 Before downgrading a cluster:
 
@@ -744,6 +744,8 @@ Before downgrading a cluster:
 3. wait at least 30 seconds for heartbeats to expire;
 4. run `migrate down --to` with the newer executable;
 5. install and start the older release only after rollback succeeds.
+
+Rolling back migration 006 to version 5 additionally requires every identity-free libvirt lifecycle row to finish or be safely reaped. Rollback refuses while any retained libvirt lifecycle has request ID `0`; it never deletes those cleanup obligations.
 
 SQLite backups and moves require the standalone service to be stopped.
 

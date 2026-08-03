@@ -119,6 +119,23 @@ func TestRunnerRegistrationAcceptsExistingAndNonLibvirtRunners(t *testing.T) {
 	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
 }
 
+func TestRunnerRegistrationMirrorsIdentityFreeLibvirtLifecycle(t *testing.T) {
+	connection := &fakeDatabaseConnection{execTag: pgconn.NewCommandTag("INSERT 0 1")}
+	runner := scaler.RunnerLifecycle{
+		NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
+		RunnerName: "runner", RequestID: 0, AssignmentID: 2,
+	}
+
+	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
+	if len(connection.executions) != 2 {
+		t.Fatalf("registration executions = %d, want 2", len(connection.executions))
+	}
+	mirrorArguments := connection.executions[1].arguments
+	if len(mirrorArguments) != 5 || mirrorArguments[3] != int64(0) {
+		t.Fatalf("identity-free libvirt mirror arguments = %#v", mirrorArguments)
+	}
+}
+
 func TestRunnerLifecycleRowsDecodeEpochAsUnset(t *testing.T) {
 	runner := scaler.RunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderDocker,
 		RunnerName: "runner", RequestID: 1, Phase: scaler.RunnerWaitingForJob, WaitingSince: time.Unix(0, 0).UTC()}
