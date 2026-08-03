@@ -39,7 +39,13 @@ type demandKey struct {
 
 type QueuedDemand struct {
 	JobDemand
-	observationOrder uint64
+	ObligationID          int64
+	Source                CapacityObligationSource
+	AssignedObservationID int64
+	ControllerEpoch       int64
+	Attempt               int
+	NextAttemptAt         time.Time
+	observationOrder      uint64
 }
 
 type DemandRemoval struct {
@@ -54,16 +60,41 @@ type DemandStore interface {
 	Ordered(ctx context.Context, scaleSet string) ([]QueuedDemand, error)
 }
 
+// CapacityObligationStore extends positive-request demand with durable,
+// source-aware assigned-count obligations. Coordinators can retain DemandStore
+// compatibility while selecting this capability for unified scheduling.
+type CapacityObligationStore interface {
+	DemandStore
+	ObserveAssignedCapacity(ctx context.Context, observation AssignedCapacityObservation, activeCapacity int) (AssignedObligationDecision, error)
+	OrderedReady(ctx context.Context, scaleSet string, cutoff time.Time) ([]QueuedDemand, error)
+	RecordObligationFailure(ctx context.Context, obligationID int64, nextAttemptAt time.Time) error
+	DeleteObligation(ctx context.Context, obligationID int64) error
+}
+
+// LifecycleOwnedObligationStore completes obligation-to-lifecycle ownership
+// handoffs independently from scheduling operations.
+type LifecycleOwnedObligationStore interface {
+	DeleteLifecycleOwnedObligations(ctx context.Context, scaleSet string) error
+}
+
 type Coordinator struct {
-	maxRunners            int
-	scaleSet              string
-	store                 DemandStore
-	workers               map[string]RepositoryWorker
-	assigned              map[string]int
-	assignedControllers   map[string]*AssignedJobController
-	provisioningGate      chan struct{}
-	provisioningSuspended atomic.Bool
-	mutex                 sync.Mutex
+	maxRunners              int
+	scaleSet                string
+	store                   DemandStore
+	workers                 map[string]RepositoryWorker
+	assigned                map[string]int
+	assignedControllers     map[string]*AssignedJobController
+	controllerEpoch         int64
+	inFlightObligations     map[int64]struct{}
+	background              sync.WaitGroup
+	safetyLoop              sync.Once
+	executionDone           <-chan struct{}
+	schedulingErrorHandler  func(error)
+	pendingSchedulingErrors []error
+	now                     func() time.Time
+	provisioningGate        chan struct{}
+	provisioningSuspended   atomic.Bool
+	mutex                   sync.Mutex
 }
 
 func NewCoordinator(maxRunners int) *Coordinator {
@@ -78,10 +109,20 @@ func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *
 		workers:             map[string]RepositoryWorker{},
 		assigned:            map[string]int{},
 		assignedControllers: map[string]*AssignedJobController{},
+		inFlightObligations: map[int64]struct{}{},
+		now:                 time.Now,
 		provisioningGate:    make(chan struct{}, 1),
 	}
 	coordinator.provisioningGate <- struct{}{}
 	return coordinator
+}
+
+// SetControllerEpoch fences standalone capacity observations and execution to
+// the current repository-controller term.
+func (coordinator *Coordinator) SetControllerEpoch(epoch int64) {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	coordinator.controllerEpoch = epoch
 }
 
 func (coordinator *Coordinator) AddRepository(repository string, worker RepositoryWorker) {
@@ -129,10 +170,81 @@ func (coordinator *Coordinator) ObserveAssigned(repository string, assignedJobs 
 }
 
 func (coordinator *Coordinator) Schedule(ctx context.Context) error {
+	if store, supported := coordinator.store.(CapacityObligationStore); supported {
+		return coordinator.scheduleCapacityObligations(ctx, store)
+	}
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	_, _, err := coordinator.reconcileProvisioning(ctx)
 	return err
+}
+
+// SetSchedulingErrorHandler installs the observer for asynchronous obligation
+// execution and safety-loop failures. Errors are retained until an observer is
+// installed, so background failures are never silently discarded.
+func (coordinator *Coordinator) SetSchedulingErrorHandler(handler func(error)) {
+	coordinator.mutex.Lock()
+	pending := coordinator.pendingSchedulingErrors
+	coordinator.pendingSchedulingErrors = nil
+	coordinator.schedulingErrorHandler = handler
+	coordinator.mutex.Unlock()
+	if handler != nil {
+		for _, err := range pending {
+			handler(err)
+		}
+	}
+}
+
+func (coordinator *Coordinator) reportSchedulingError(err error) {
+	if err == nil {
+		return
+	}
+	coordinator.mutex.Lock()
+	handler := coordinator.schedulingErrorHandler
+	if handler == nil {
+		coordinator.pendingSchedulingErrors = append(coordinator.pendingSchedulingErrors, err)
+	}
+	coordinator.mutex.Unlock()
+	if handler != nil {
+		handler(err)
+	}
+}
+
+// WaitForScheduling waits until all capacity-obligation executions launched by
+// this coordinator have completed. It is primarily useful at shutdown and in tests.
+func (coordinator *Coordinator) WaitForScheduling() {
+	coordinator.background.Wait()
+}
+
+// UsesDurableCapacityObligations reports whether this coordinator's store can
+// persist aggregate capacity alongside exact GitHub demand.
+func (coordinator *Coordinator) UsesDurableCapacityObligations() bool {
+	_, supported := coordinator.store.(CapacityObligationStore)
+	return supported
+}
+
+// StartSchedulingSafetyLoop retries due obligations even when a wake-up signal
+// was lost. Repeated calls retain a single loop for the coordinator.
+func (coordinator *Coordinator) StartSchedulingSafetyLoop(ctx context.Context, interval time.Duration) {
+	coordinator.safetyLoop.Do(func() {
+		coordinator.mutex.Lock()
+		coordinator.executionDone = ctx.Done()
+		coordinator.mutex.Unlock()
+		coordinator.background.Add(1)
+		go func() {
+			defer coordinator.background.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					coordinator.reportSchedulingError(coordinator.Schedule(ctx))
+				}
+			}
+		}()
+	})
 }
 
 // SuspendProvisioning waits for the current scheduling pass and prevents later

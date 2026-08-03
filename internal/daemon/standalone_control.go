@@ -61,6 +61,13 @@ func startStandaloneControl(
 		return nil, err
 	}
 	control := newStandaloneControl(controlCtx, cancel, daemon, active, snapshot, options)
+	for _, coordinator := range active.Coordinators {
+		coordinator.SetControllerEpoch(snapshot.Control.ControllerEpoch)
+		coordinator.SetSchedulingErrorHandler(func(err error) {
+			active.Logger.Error("standalone capacity obligation failed", slog.String("error", err.Error()))
+		})
+		coordinator.StartSchedulingSafetyLoop(controlCtx, 5*time.Second)
+	}
 	logStandaloneCatalogLoaded(controlCtx, active, snapshot)
 	control.enqueueDurableRepositories(controlCtx, snapshot.Repositories)
 	return control, nil
@@ -216,6 +223,9 @@ func (control *standaloneControl) Stop() {
 	control.mutex.Unlock()
 	control.pool.wait()
 	control.background.Wait()
+	for _, coordinator := range control.active.Coordinators {
+		coordinator.WaitForScheduling()
+	}
 }
 
 func (control *standaloneControl) RequestDiscovery(ctx context.Context) {

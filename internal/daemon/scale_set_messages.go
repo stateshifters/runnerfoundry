@@ -59,21 +59,44 @@ func (handler coordinatedScaleSetHandler) applyMessageLifecycle(ctx context.Cont
 }
 
 func (handler coordinatedScaleSetHandler) reconcileAssignedCapacity(ctx context.Context, assignedJobs int) error {
-	reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, assignedJobs)
+	if !handler.Coordinator.UsesDurableCapacityObligations() {
+		reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, assignedJobs)
+		if err != nil {
+			return fmt.Errorf("schedule shared runner capacity: %w", err)
+		}
+		handler.logAssignedCapacity(assignedJobs, reconciliation.StartedRunners, 0, 0)
+		return nil
+	}
+	decision, err := handler.Coordinator.ObserveAssignedCapacity(
+		ctx, handler.Repository, assignedJobs, time.Now().UTC(),
+	)
 	if err != nil {
+		return fmt.Errorf("persist assigned runner capacity: %w", err)
+	}
+	if err = handler.Coordinator.Schedule(ctx); err != nil {
 		return fmt.Errorf("schedule shared runner capacity: %w", err)
 	}
+	handler.logAssignedCapacity(assignedJobs, 0, decision.Create, decision.Cancel)
+	return nil
+}
+
+func (handler coordinatedScaleSetHandler) logAssignedCapacity(
+	assignedJobs int,
+	startedRunners int,
+	queuedObligations int,
+	canceledObligations int,
+) {
 	effectiveLogger(handler.Logger).Info(
 		"assigned capacity reconciled",
 		slog.String("action", "assigned_recovery"),
 		slog.String("phase", "completed"),
 		slog.String("repository", handler.Repository),
 		slog.String("scaleSet", handler.ScaleSet),
-		slog.Int("assignedJobs", reconciliation.AssignedJobs),
-		slog.Int("runningRunners", reconciliation.RunningRunners),
-		slog.Int("startedRunners", reconciliation.StartedRunners),
+		slog.Int("assignedJobs", assignedJobs),
+		slog.Int("startedRunners", startedRunners),
+		slog.Int("queuedObligations", queuedObligations),
+		slog.Int("canceledObligations", canceledObligations),
 	)
-	return nil
 }
 
 func logScaleSetSessionStatistics(

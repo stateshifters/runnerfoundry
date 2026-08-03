@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 5
+const currentStateSchemaVersion = 6
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -78,6 +78,7 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		store.addLibvirtRunnerLifecycle,
 		store.addRunnerLifecycle,
 		store.addRepositoryState,
+		store.addCapacityObligations,
 	}
 	for ; version < currentStateSchemaVersion; version++ {
 		if err = migrations[version](ctx); err != nil {
@@ -85,6 +86,59 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+var capacityObligationMigrationSteps = []sqliteMigrationStep{
+	{operation: "retain legacy demand during capacity-obligation migration", statement: `ALTER TABLE demand RENAME TO demand_v5`},
+	{operation: "create assigned capacity observations", statement: `CREATE TABLE assigned_capacity_observations (
+		assigned_observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		scale_set TEXT NOT NULL CHECK(trim(scale_set) <> ''),
+		repository TEXT NOT NULL CHECK(trim(repository) <> ''),
+		controller_epoch INTEGER NOT NULL CHECK(controller_epoch > 0),
+		assigned_jobs INTEGER NOT NULL CHECK(assigned_jobs >= 0),
+		observed_at INTEGER NOT NULL,
+		UNIQUE(scale_set, repository, controller_epoch)
+	)`},
+	{operation: "create unified capacity obligations", statement: `CREATE TABLE demand (
+		demand_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		observation_order INTEGER NOT NULL UNIQUE,
+		scale_set TEXT NOT NULL,
+		repository TEXT NOT NULL,
+		request_id INTEGER,
+		queue_time INTEGER NOT NULL,
+		acquired INTEGER NOT NULL CHECK(acquired IN (0, 1)),
+		source TEXT NOT NULL CHECK(source IN ('job_available', 'assigned_count')),
+		assigned_observation_id INTEGER REFERENCES assigned_capacity_observations(assigned_observation_id) ON DELETE CASCADE,
+		controller_epoch INTEGER NOT NULL DEFAULT 0 CHECK(controller_epoch >= 0),
+		attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+		next_attempt_at INTEGER NOT NULL,
+		UNIQUE(scale_set, repository, request_id, source),
+		CHECK((source = 'job_available' AND request_id > 0 AND assigned_observation_id IS NULL AND controller_epoch = 0)
+		   OR (source = 'assigned_count' AND request_id IS NULL AND assigned_observation_id IS NOT NULL AND controller_epoch > 0))
+	)`},
+	{operation: "preserve exact FIFO capacity obligations", statement: `INSERT INTO demand(
+		demand_id, observation_order, scale_set, repository, request_id, queue_time, acquired,
+		source, assigned_observation_id, controller_epoch, attempt, next_attempt_at)
+		SELECT observation_order, observation_order, scale_set, repository, request_id, queue_time, acquired,
+		       'job_available', NULL, 0, 0, queue_time
+		FROM demand_v5 ORDER BY observation_order`},
+	{operation: "remove migrated legacy demand", statement: `DROP TABLE demand_v5`},
+	{operation: "index runnable capacity obligations", statement: `CREATE INDEX demand_runnable_fifo
+		ON demand(scale_set, next_attempt_at, queue_time, observation_order)`},
+	{operation: "index assigned capacity obligations", statement: `CREATE INDEX demand_assigned_observation
+		ON demand(assigned_observation_id, source)`},
+	{operation: "record capacity-obligation migration", statement: "PRAGMA user_version = 6"},
+}
+
+func (store *SQLiteDemandStore) addCapacityObligations(ctx context.Context) error {
+	return store.runMigration(ctx, "capacity-obligation migration", func(transaction *sql.Tx) error {
+		for _, step := range capacityObligationMigrationSteps {
+			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
+				return fmt.Errorf("%s: %w", step.operation, err)
+			}
+		}
+		return nil
+	})
 }
 
 var repositoryStateMigrationSteps = []sqliteMigrationStep{
@@ -314,10 +368,14 @@ func (store *SQLiteDemandStore) Apply(ctx context.Context, scaleSet string, obse
 
 func applyDemandChanges(ctx context.Context, transaction *sql.Tx, scaleSet string, observed []JobDemand, removed []DemandRemoval) error {
 	for _, demand := range observed {
-		_, err := transaction.ExecContext(ctx, `INSERT INTO demand(scale_set, repository, request_id, queue_time, acquired)
-			VALUES(?, ?, ?, ?, ?)
-			ON CONFLICT(scale_set, repository, request_id) DO UPDATE SET acquired = MAX(acquired, excluded.acquired)`,
-			scaleSet, demand.Repository, demand.RequestID, demand.QueueTime.UnixNano(), demand.Acquired)
+		_, err := transaction.ExecContext(ctx, `INSERT INTO demand(
+			observation_order, scale_set, repository, request_id, queue_time, acquired,
+			source, controller_epoch, attempt, next_attempt_at)
+			VALUES((SELECT COALESCE(MAX(observation_order), 0) + 1 FROM demand), ?, ?, ?, ?, ?,
+			       'job_available', 0, 0, ?)
+			ON CONFLICT(scale_set, repository, request_id, source)
+			DO UPDATE SET acquired = MAX(acquired, excluded.acquired)`,
+			scaleSet, demand.Repository, demand.RequestID, demand.QueueTime.UnixNano(), demand.Acquired, demand.QueueTime.UnixNano())
 		if err != nil {
 			return fmt.Errorf("record queued demand: %w", err)
 		}
@@ -341,24 +399,58 @@ func finishSQLiteTransaction(transaction *sql.Tx, transactionOpen *bool, descrip
 }
 
 func (store *SQLiteDemandStore) RemoveRepository(ctx context.Context, scaleSet string, repository string) error {
-	_, err := store.database.ExecContext(ctx, "DELETE FROM demand WHERE scale_set = ? AND repository = ?", scaleSet, repository)
-	if err != nil {
-		return fmt.Errorf("remove repository demand: %w", err)
-	}
-	return nil
+	return store.removeCapacityAuthority(ctx, "repository", scaleSet, repository)
 }
 
 func (store *SQLiteDemandStore) RemoveScaleSet(ctx context.Context, scaleSet string) error {
-	_, err := store.database.ExecContext(ctx, "DELETE FROM demand WHERE scale_set = ?", scaleSet)
+	return store.removeCapacityAuthority(ctx, "scale set", scaleSet, "")
+}
+
+func (store *SQLiteDemandStore) removeCapacityAuthority(ctx context.Context, description, scaleSet, repository string) (resultErr error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("remove scale set demand: %w", err)
+		return fmt.Errorf("begin remove %s demand: %w", description, err)
+	}
+	transactionOpen := true
+	defer finishSQLiteTransaction(transaction, &transactionOpen, "remove "+description+" demand", &resultErr)
+	observationStatement := "DELETE FROM assigned_capacity_observations WHERE scale_set = ?"
+	demandStatement := "DELETE FROM demand WHERE scale_set = ?"
+	arguments := []any{scaleSet}
+	if repository != "" {
+		observationStatement += " AND repository = ?"
+		demandStatement += " AND repository = ?"
+		arguments = append(arguments, repository)
+	}
+	if _, err = transaction.ExecContext(ctx, observationStatement, arguments...); err != nil {
+		return fmt.Errorf("remove %s assigned capacity observations: %w", description, err)
+	}
+	if _, err = transaction.ExecContext(ctx, demandStatement, arguments...); err != nil {
+		return fmt.Errorf("remove %s demand: %w", description, err)
+	}
+	transactionOpen = false
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit remove %s demand: %w", description, err)
 	}
 	return nil
 }
 
 func (store *SQLiteDemandStore) Ordered(ctx context.Context, scaleSet string) (result []QueuedDemand, resultErr error) {
-	rows, err := store.database.QueryContext(ctx, `SELECT repository, request_id, queue_time, acquired, observation_order
-		FROM demand WHERE scale_set = ? ORDER BY queue_time, observation_order`, scaleSet)
+	return store.loadCapacityObligations(ctx, scaleSet, time.Time{})
+}
+
+// OrderedReady returns runnable obligations in the shared FIFO order. A zero
+// cutoff returns every obligation and is used by startup recovery inspection.
+func (store *SQLiteDemandStore) OrderedReady(ctx context.Context, scaleSet string, cutoff time.Time) (result []QueuedDemand, resultErr error) {
+	return store.loadCapacityObligations(ctx, scaleSet, cutoff)
+}
+
+func (store *SQLiteDemandStore) loadCapacityObligations(
+	ctx context.Context,
+	scaleSet string,
+	cutoff time.Time,
+) (result []QueuedDemand, resultErr error) {
+	query, arguments := runnableCapacityObligationQuery(scaleSet, cutoff)
+	rows, err := store.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("query queued demand: %w", err)
 	}
@@ -367,13 +459,43 @@ func (store *SQLiteDemandStore) Ordered(ctx context.Context, scaleSet string) (r
 			resultErr = errors.Join(resultErr, fmt.Errorf("close queued demand rows: %w", closeErr))
 		}
 	}()
+	return scanCapacityObligations(rows)
+}
+
+func runnableCapacityObligationQuery(scaleSet string, cutoff time.Time) (string, []any) {
+	query := `SELECT demand_id, repository, COALESCE(request_id, 0), queue_time, acquired,
+		observation_order, source, COALESCE(assigned_observation_id, 0), controller_epoch,
+		attempt, next_attempt_at
+		FROM demand WHERE scale_set = ?
+		AND (source = 'job_available' OR NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
+			WHERE lifecycle.assignment_id = demand.demand_id))
+		ORDER BY queue_time, observation_order`
+	arguments := []any{scaleSet}
+	if !cutoff.IsZero() {
+		query = `SELECT demand_id, repository, COALESCE(request_id, 0), queue_time, acquired,
+			observation_order, source, COALESCE(assigned_observation_id, 0), controller_epoch,
+			attempt, next_attempt_at
+			FROM demand WHERE scale_set = ? AND next_attempt_at <= ?
+			AND (source = 'job_available' OR NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
+				WHERE lifecycle.assignment_id = demand.demand_id))
+			ORDER BY queue_time, observation_order`
+		arguments = append(arguments, cutoff.UnixNano())
+	}
+	return query, arguments
+}
+
+func scanCapacityObligations(rows *sql.Rows) ([]QueuedDemand, error) {
+	var result []QueuedDemand
 	for rows.Next() {
 		var demand QueuedDemand
-		var queueNanoseconds int64
-		if err := rows.Scan(&demand.Repository, &demand.RequestID, &queueNanoseconds, &demand.Acquired, &demand.observationOrder); err != nil {
+		var queueNanoseconds, nextAttemptNanoseconds int64
+		if err := rows.Scan(&demand.ObligationID, &demand.Repository, &demand.RequestID, &queueNanoseconds,
+			&demand.Acquired, &demand.observationOrder, &demand.Source, &demand.AssignedObservationID,
+			&demand.ControllerEpoch, &demand.Attempt, &nextAttemptNanoseconds); err != nil {
 			return nil, fmt.Errorf("scan queued demand: %w", err)
 		}
 		demand.QueueTime = time.Unix(0, queueNanoseconds).UTC()
+		demand.NextAttemptAt = time.Unix(0, nextAttemptNanoseconds).UTC()
 		result = append(result, demand)
 	}
 	if err := rows.Err(); err != nil {

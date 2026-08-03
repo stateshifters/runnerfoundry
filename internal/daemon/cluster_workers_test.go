@@ -384,7 +384,6 @@ type fakeClusterState struct {
 	assignedJobObservations  []cluster.AssignedJobObservation
 	assignedJobAssignments   []cluster.Assignment
 	observeAssignedJobsErr   error
-	assignAssignedJobErr     error
 	onObserveAssignedJobs    func()
 	assignedJobEvents        []string
 }
@@ -431,6 +430,8 @@ func (state *fakeClusterState) Enqueue(_ context.Context, demand cluster.Demand)
 }
 
 func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, time.Duration) (*cluster.Assignment, error) {
+	state.assignedJobsMutex.Lock()
+	defer state.assignedJobsMutex.Unlock()
 	if state.assignErr != nil {
 		return nil, state.assignErr
 	}
@@ -439,6 +440,10 @@ func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, 
 	}
 	assignment := state.assignments[0]
 	state.assignments = state.assignments[1:]
+	if assignment.IdentityFree {
+		state.assignedJobAssignments = append(state.assignedJobAssignments, *assignment)
+		state.assignedJobEvents = append(state.assignedJobEvents, "assign-identity-free")
+	}
 	return assignment, nil
 }
 
@@ -478,33 +483,18 @@ func (state *fakeClusterState) ObserveAssignedJobs(
 	onObserve := state.onObserveAssignedJobs
 	capacity := state.assignedJobCapacity
 	capacity.AvailableCapacity = max(capacity.AvailableCapacity-len(state.assignedJobAssignments), 0)
+	if observation.AssignedJobs > capacity.ActiveRunners && capacity.AvailableCapacity > 0 {
+		state.assignments = append(state.assignments, &cluster.Assignment{
+			ID: cluster.AssignmentID(len(state.assignedJobAssignments) + 1), ScaleSet: observation.ScaleSet,
+			Repository: observation.Repository, IdentityFree: true, State: cluster.AssignmentReady,
+		})
+	}
 	err := state.observeAssignedJobsErr
 	state.assignedJobsMutex.Unlock()
 	if onObserve != nil {
 		onObserve()
 	}
 	return capacity, err
-}
-
-func (state *fakeClusterState) AssignAssignedJob(
-	_ context.Context,
-	observation cluster.AssignedJobObservation,
-	_ time.Time,
-	_ time.Duration,
-) (*cluster.Assignment, error) {
-	state.assignedJobsMutex.Lock()
-	defer state.assignedJobsMutex.Unlock()
-	if state.assignAssignedJobErr != nil {
-		return nil, state.assignAssignedJobErr
-	}
-	assignment := cluster.Assignment{
-		ID:       cluster.AssignmentID(len(state.assignedJobAssignments) + 1),
-		ScaleSet: observation.ScaleSet, Repository: observation.Repository,
-		ControllerEpoch: observation.ControllerEpoch, IdentityFree: true,
-	}
-	state.assignedJobAssignments = append(state.assignedJobAssignments, assignment)
-	state.assignedJobEvents = append(state.assignedJobEvents, "assign-identity-free")
-	return &assignment, nil
 }
 
 func (state *fakeClusterState) assignedJobsSnapshot() (
@@ -590,6 +580,17 @@ func (state *fakeClusterState) CompleteAssignment(
 	assignmentID cluster.AssignmentID,
 	_ cluster.NodeID,
 	_ cluster.AssignmentState,
+) error {
+	state.released = append(state.released, assignmentID)
+	return state.releaseErr
+}
+
+func (state *fakeClusterState) DeferAssignment(
+	_ context.Context,
+	assignmentID cluster.AssignmentID,
+	_ cluster.NodeID,
+	_ cluster.AssignmentState,
+	_ time.Time,
 ) error {
 	state.released = append(state.released, assignmentID)
 	return state.releaseErr

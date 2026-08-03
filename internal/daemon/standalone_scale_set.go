@@ -144,7 +144,9 @@ func startCoordinatedLifecycle(
 		return scaleSetLifecycle{}, err
 	}
 	prepareCoordinatedLifecycle(ctx, &lifecycleConfig)
-	registerCoordinatedRepository(ctx, lifecycleConfig, statistics)
+	if err = registerCoordinatedRepository(ctx, lifecycleConfig, statistics); err != nil {
+		return scaleSetLifecycle{}, err
+	}
 	pollerCtx, stopPolling := context.WithCancel(ctx)
 	pollerDone := startCoordinatedPoller(pollerCtx, lifecycleConfig)
 	return coordinatedScaleSetLifecycle(lifecycleConfig, stopPolling, pollerDone), nil
@@ -185,7 +187,7 @@ func registerCoordinatedRepository(
 	ctx context.Context,
 	lifecycleConfig coordinatedLifecycleConfig,
 	statistics *upstream.RunnerScaleSetStatistic,
-) {
+) error {
 	worker := coordinatedRepositoryWorker{
 		Reconciler:    lifecycleConfig.Reconciler,
 		MessageClient: lifecycleConfig.MessageClient,
@@ -194,10 +196,21 @@ func registerCoordinatedRepository(
 		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	}
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, worker)
-	lifecycleConfig.Coordinator.ObserveAssigned(lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs)
+	if _, err := lifecycleConfig.Coordinator.ObserveAssignedCapacity(
+		ctx, lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs, time.Now().UTC(),
+	); err != nil {
+		lifecycleConfig.Coordinator.DetachRepository(lifecycleConfig.RepositoryURL)
+		return fmt.Errorf("persist initial assigned runner capacity: %w", err)
+	}
 	logScaleSetSessionStatistics(
 		ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, "session", statistics,
 	)
+	if lifecycleConfig.Coordinator.UsesDurableCapacityObligations() {
+		if err := lifecycleConfig.Coordinator.Schedule(ctx); err != nil {
+			return fmt.Errorf("schedule initial runner capacity: %w", err)
+		}
+	}
+	return nil
 }
 
 func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) <-chan struct{} {
@@ -476,6 +489,21 @@ func (worker coordinatedRepositoryWorker) StartAssigned(ctx context.Context) err
 	if err := worker.Reconciler.StartOne(ctx); err != nil {
 		return fmt.Errorf("start assigned repository runner: %w", err)
 	}
+	return nil
+}
+
+func (worker coordinatedRepositoryWorker) StartAssignedObligation(ctx context.Context, obligationID int64) error {
+	reconciler := worker.Reconciler
+	reconciler.ScaleSet.AssignmentID = obligationID
+	if err := reconciler.StartOne(ctx); err != nil {
+		return fmt.Errorf("start assigned repository runner: %w", err)
+	}
+	effectiveLogger(worker.Logger).Info("assigned runner started",
+		slog.String("action", "capacity_obligation"), slog.String("phase", "assigned"),
+		slog.String("source", string(scaler.CapacityObligationAssignedCount)),
+		slog.Int64("obligationID", obligationID), slog.String("repository", worker.Repository),
+		slog.String("scaleSet", worker.ScaleSet), slog.Int64("requestID", 0),
+	)
 	return nil
 }
 

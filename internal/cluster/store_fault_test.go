@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
@@ -28,7 +29,7 @@ func TestScaleSetsSurfacesConnectionFailure(t *testing.T) {
 
 func TestEnqueueSurfacesConnectionFailure(t *testing.T) {
 	assertStoreConnectionFailure(t, func(store *Store) error {
-		return store.Enqueue(context.Background(), Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+		return store.Enqueue(context.Background(), Demand{AppID: 1, ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
 	})
 }
 
@@ -81,6 +82,12 @@ func TestConfirmRunningSurfacesConnectionFailure(t *testing.T) {
 func TestCompleteAssignmentSurfacesConnectionFailure(t *testing.T) {
 	assertStoreConnectionFailure(t, func(store *Store) error {
 		return store.CompleteAssignment(context.Background(), 1, "node", AssignmentReserved)
+	})
+}
+
+func TestDeferAssignmentSurfacesConnectionFailure(t *testing.T) {
+	assertStoreConnectionFailure(t, func(store *Store) error {
+		return store.DeferAssignment(context.Background(), 1, "node", AssignmentStarting, time.Now())
 	})
 }
 
@@ -282,7 +289,7 @@ func TestScaleSetsSurfacesDatabaseQueryFailure(t *testing.T) {
 
 func TestEnqueueSurfacesDatabaseExecutionFailure(t *testing.T) {
 	assertDatabaseOperationFailure(t, &fakeDatabaseConnection{execErrors: []error{databaseFailure()}}, func(store *Store) error {
-		return store.Enqueue(context.Background(), Demand{ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
+		return store.Enqueue(context.Background(), Demand{AppID: 1, ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now()})
 	})
 }
 
@@ -477,6 +484,11 @@ func assignmentRows(t *testing.T) (oldest fakeRow, contributor fakeRow, identifi
 		*destination[string](t, destinations[1]) = "repo"
 		*destination[int64](t, destinations[2]) = 2
 		*destination[time.Time](t, destinations[3]) = time.Now()
+		*destination[string](t, destinations[4]) = "job_available"
+		*destination[int64](t, destinations[5]) = 0
+		*destination[githubapp.InstallationID](t, destinations[6]) = 0
+		*destination[int](t, destinations[7]) = 0
+		*destination[int64](t, destinations[8]) = 0
 	}}
 	contributor = fakeRow{scan: func(destinations ...any) { *destination[NodeID](t, destinations[0]) = "node" }}
 	identifier = fakeRow{scan: func(destinations ...any) { *destination[AssignmentID](t, destinations[0]) = 3 }}
@@ -535,7 +547,7 @@ func TestStoreReturnsConnectionCloseFailure(t *testing.T) {
 	closeErr := errors.New("close failed")
 	store := storeWithConnection(&fakeDatabaseConnection{closeErr: closeErr})
 	err := store.Enqueue(context.Background(), Demand{
-		ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now(),
+		AppID: 1, ScaleSet: "set", Repository: "repo", RequestID: 1, QueueTime: time.Now(),
 	})
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("enqueue error = %v, want connection close failure", err)

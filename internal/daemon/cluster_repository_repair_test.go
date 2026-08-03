@@ -347,7 +347,6 @@ func TestRepositoryRepairLogsLifecycle(t *testing.T) {
 			"{\"level\":\"WARN\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"pending\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":1,\"retryAfter\":5000000000,\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"retrying\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"session_statistics\",\"action\":\"session_statistics\",\"phase\":\"observed\",\"trigger\":\"session\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0}\n"+
-			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery_trigger\",\"action\":\"assigned_recovery_trigger\",\"phase\":\"queued\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"trigger\":\"session\",\"epoch\":0,\"queueDepth\":1,\"activeWorkers\":0}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}")
 	leader.stop(context.Background())
 }

@@ -12,12 +12,87 @@ import (
 
 type clusterScheduler struct {
 	store                       clusterExactSchedulingState
+	workerDone                  <-chan struct{}
+	workerWait                  sync.WaitGroup
+	wakeMutex                   sync.Mutex
+	wakeChannels                map[string]chan struct{}
+	reportScheduleError         func(string, error)
+	safetyWakeInterval          time.Duration
 	sessionsMutex               sync.RWMutex
 	sessions                    map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
 	scheduleLocksMutex          sync.Mutex
 	scheduleLocks               map[string]*sync.Mutex
 	acquisitionConfirmationWait time.Duration
 	waitBeforeConfirmationRetry func(context.Context, time.Duration) bool
+}
+
+func (scheduler *clusterScheduler) wake(ctx context.Context, scaleSet string) {
+	scheduler.wakeMutex.Lock()
+	if scheduler.wakeChannels == nil {
+		scheduler.wakeChannels = make(map[string]chan struct{})
+	}
+	wakeChannel := scheduler.wakeChannels[scaleSet]
+	if wakeChannel == nil {
+		wakeChannel = make(chan struct{}, 1)
+		scheduler.wakeChannels[scaleSet] = wakeChannel
+		scheduler.workerWait.Add(1)
+		go scheduler.runWakeLoop(ctx, scaleSet, wakeChannel)
+	}
+	scheduler.wakeMutex.Unlock()
+	select {
+	case wakeChannel <- struct{}{}:
+	default:
+	}
+}
+
+func (scheduler *clusterScheduler) runWakeLoop(ctx context.Context, scaleSet string, wakeChannel <-chan struct{}) {
+	defer scheduler.workerWait.Done()
+	workerCtx, cancelWorker := scheduler.workerLoopContext(ctx)
+	defer cancelWorker()
+	safetyWake := time.NewTicker(scheduler.wakeInterval())
+	defer safetyWake.Stop()
+	for {
+		select {
+		case <-workerCtx.Done():
+			return
+		case <-wakeChannel:
+		case <-safetyWake.C:
+		}
+		scheduler.scheduleAndReport(workerCtx, scaleSet)
+	}
+}
+
+func (scheduler *clusterScheduler) workerLoopContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	workerCtx, cancelWorker := context.WithCancel(context.WithoutCancel(ctx))
+	if scheduler.workerDone == nil {
+		return workerCtx, cancelWorker
+	}
+	go func() {
+		select {
+		case <-scheduler.workerDone:
+			cancelWorker()
+		case <-workerCtx.Done():
+		}
+	}()
+	return workerCtx, cancelWorker
+}
+
+func (scheduler *clusterScheduler) wakeInterval() time.Duration {
+	if scheduler.safetyWakeInterval > 0 {
+		return scheduler.safetyWakeInterval
+	}
+	return assignedJobRecoveryInterval
+}
+
+func (scheduler *clusterScheduler) scheduleAndReport(ctx context.Context, scaleSet string) {
+	err := scheduler.schedule(ctx, scaleSet)
+	if err != nil && scheduler.reportScheduleError != nil {
+		scheduler.reportScheduleError(scaleSet, err)
+	}
+}
+
+func (scheduler *clusterScheduler) wait() {
+	scheduler.workerWait.Wait()
 }
 
 func (scheduler *clusterScheduler) add(session *repositoryScaleSetSession) {
@@ -106,10 +181,10 @@ func (scheduler *clusterScheduler) repairPendingAcquisition(
 	if session != nil {
 		return scheduler.acquireAssignment(ctx, assignment, session)
 	}
-	if err := scheduler.store.CompleteAssignment(
-		ctx, assignment.ID, assignment.NodeID, assignment.State,
+	if err := scheduler.store.DeferAssignment(
+		ctx, assignment.ID, assignment.NodeID, assignment.State, time.Now(),
 	); err != nil {
-		return fmt.Errorf("complete acquisition without a repository scale-set session: %w", err)
+		return fmt.Errorf("defer acquisition without a repository scale-set session: %w", err)
 	}
 	return nil
 }
@@ -122,12 +197,15 @@ func (scheduler *clusterScheduler) scheduleOne(ctx context.Context, scaleSet str
 	if err != nil {
 		return scheduleDrained, fmt.Errorf("assign oldest clustered demand: %w", err)
 	}
+	if assignment.IdentityFree {
+		return scheduleProgressed, nil
+	}
 	session := scheduler.session(repositoryScaleSetSessionKey{repository: assignment.Repository, scaleSet: scaleSet})
 	if session == nil {
-		if releaseErr := scheduler.store.CompleteAssignment(
-			ctx, assignment.ID, assignment.NodeID, cluster.AssignmentReserved,
+		if releaseErr := scheduler.store.DeferAssignment(
+			ctx, assignment.ID, assignment.NodeID, cluster.AssignmentReserved, time.Now(),
 		); releaseErr != nil {
-			return scheduleDrained, fmt.Errorf("release demand without a repository scale-set session: %w", releaseErr)
+			return scheduleDrained, fmt.Errorf("defer demand without a repository scale-set session: %w", releaseErr)
 		}
 		return scheduleProgressed, nil
 	}
@@ -160,14 +238,25 @@ func (scheduler *clusterScheduler) acquireAssignment(
 	err := session.messageClient.Acquire(acquireCtx, assignment.RequestID)
 	cancelAcquire()
 	if err != nil {
-		if releaseErr := scheduler.store.CompleteAssignment(
-			context.WithoutCancel(ctx), assignment.ID, assignment.NodeID, cluster.AssignmentAcquiring,
-		); releaseErr != nil {
-			return errors.Join(err, fmt.Errorf("release unacquired clustered demand: %w", releaseErr))
-		}
-		return err
+		return scheduler.deferUnacquiredAssignment(ctx, assignment, err)
 	}
 	return scheduler.confirmAcquisition(ctx, assignment.ID)
+}
+
+func (scheduler *clusterScheduler) deferUnacquiredAssignment(
+	ctx context.Context,
+	assignment *cluster.Assignment,
+	acquireErr error,
+) error {
+	deferCtx, cancelDefer := context.WithTimeout(context.WithoutCancel(ctx), clusterCoordinationTimeout)
+	deferErr := scheduler.store.DeferAssignment(
+		deferCtx, assignment.ID, assignment.NodeID, cluster.AssignmentAcquiring, time.Now(),
+	)
+	cancelDefer()
+	if deferErr != nil {
+		return errors.Join(acquireErr, fmt.Errorf("defer unacquired clustered demand: %w", deferErr))
+	}
+	return acquireErr
 }
 
 func (scheduler *clusterScheduler) confirmAcquisition(ctx context.Context, assignmentID cluster.AssignmentID) error {

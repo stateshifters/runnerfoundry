@@ -7,16 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
 func TestObserveAssignedJobsReturnsEpochFencedCapacity(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
 		*destination[int](t, destinations[0]) = 2
 		*destination[int](t, destinations[1]) = 3
-	}}}}
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }}}}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 	capacity, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
 	if err != nil {
@@ -25,6 +23,46 @@ func TestObserveAssignedJobsReturnsEpochFencedCapacity(t *testing.T) {
 	assertAssignedCapacity(t, capacity.ActiveRunners, capacity.AvailableCapacity)
 	assertAssignedObservationTransitions(t, transaction)
 	assertAssignedCapacityQuery(t, transaction.queries[0].statement)
+}
+
+func TestObserveAssignedJobsQueuesIdentityFreeObligations(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
+		*destination[int](t, destinations[0]) = 0
+		*destination[int](t, destinations[1]) = 3
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }}}}
+	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
+	if _, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture()); err != nil {
+		t.Fatal(err)
+	}
+	foundInsert := false
+	for _, execution := range transaction.executions {
+		if strings.Contains(execution.statement, "INSERT INTO scaler_demand") &&
+			strings.Contains(execution.statement, "'assigned_count'") {
+			foundInsert = true
+		}
+	}
+	if !foundInsert {
+		t.Fatalf("assigned observation did not queue identity-free obligations: %#v", transaction.executions)
+	}
+}
+
+func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
+		*destination[int](t, destinations[0]) = 2
+		*destination[int](t, destinations[1]) = 3
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 3 }}}}
+	observation := assignedObservationFixture()
+	observation.AssignedJobs = 2
+	if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ObserveAssignedJobs(
+		context.Background(), observation,
+	); err != nil {
+		t.Fatal(err)
+	}
+	lastExecution := transaction.executions[len(transaction.executions)-1]
+	if !strings.Contains(lastExecution.statement, "ORDER BY demand.queue_time DESC") ||
+		lastExecution.arguments[3] != 3 {
+		t.Fatalf("assigned obligation cancellation = %#v", lastExecution)
+	}
 }
 
 func assertAssignedCapacity(t *testing.T, activeRunners int, availableCapacity int) {
@@ -69,7 +107,10 @@ func TestRepeatedAssignedObservationCountsPendingAssignmentsAsActive(t *testing.
 		*destination[int](t, destinations[0]) = 3
 		*destination[int](t, destinations[1]) = 7
 	}
-	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: capacityRow}, {scan: capacityRow}}}
+	queuedRow := func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
+		{scan: capacityRow}, {scan: queuedRow}, {scan: capacityRow}, {scan: queuedRow},
+	}}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 	for range 2 {
 		capacity, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
@@ -88,42 +129,6 @@ func TestObserveAssignedJobsRejectsObsoleteEpoch(t *testing.T) {
 	_, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
 	if !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("obsolete assigned observation error = %v", err)
-	}
-}
-
-func TestAssignAssignedJobReturnsIdentityFreeReadyAssignment(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	connection := &fakeDatabaseConnection{rowResults: []fakeRow{{scan: func(destinations ...any) {
-		*destination[AssignmentID](t, destinations[0]) = 9
-		*destination[NodeID](t, destinations[1]) = "node-a"
-		*destination[string](t, destinations[2]) = "linux"
-		*destination[string](t, destinations[3]) = "repo"
-		*destination[time.Time](t, destinations[4]) = now
-		*destination[githubapp.InstallationID](t, destinations[5]) = 7
-		*destination[int](t, destinations[6]) = 11
-		*destination[int64](t, destinations[7]) = 4
-		*destination[AssignmentState](t, destinations[8]) = AssignmentReady
-	}}}}
-	assignment, err := storeWithConnection(connection).AssignAssignedJob(
-		context.Background(), assignedObservationFixture(), now, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if assignment.ID != 9 || assignment.RequestID != 0 || !assignment.IdentityFree ||
-		assignment.ControllerEpoch != 4 || assignment.State != AssignmentReady {
-		t.Fatalf("identity-free assignment = %#v", assignment)
-	}
-	if !strings.Contains(connection.queries[0].statement, "eligible_contributions") ||
-		connection.queries[0].arguments[0] != now.Add(-time.Minute) {
-		t.Fatalf("assigned contributor policy query = %#v", connection.queries[0])
-	}
-}
-
-func TestAssignAssignedJobReturnsNoAssignmentForSatisfiedObservation(t *testing.T) {
-	store := storeWithConnection(&fakeDatabaseConnection{rowResults: []fakeRow{{err: pgx.ErrNoRows}}})
-	_, err := store.AssignAssignedJob(context.Background(), assignedObservationFixture(), time.Now().UTC(), time.Minute)
-	if !errors.Is(err, ErrNoAssignment) {
-		t.Fatalf("satisfied assigned observation error = %v", err)
 	}
 }
 

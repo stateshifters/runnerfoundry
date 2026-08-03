@@ -16,14 +16,17 @@ func TestSQLiteStoreErrorPathsStayInMemory(t *testing.T) {
 	for _, operation := range []func() error{
 		func() error { return fixture.store.RemoveRepository(context.Background(), "set", "repo") },
 		func() error { return fixture.store.RemoveScaleSet(context.Background(), "set") },
-		func() error { return fixture.store.Delete(context.Background(), "set", "repo", 1) },
 	} {
-		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(failure)
+		fixture.mock.ExpectBegin().WillReturnError(failure)
 		if err := operation(); err == nil {
 			t.Fatal("expected mutation error")
 		}
 	}
-	fixture.mock.ExpectQuery("SELECT repository").WillReturnError(failure)
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(failure)
+	if err := fixture.store.Delete(context.Background(), "set", "repo", 1); err == nil {
+		t.Fatal("expected mutation error")
+	}
+	fixture.mock.ExpectQuery("SELECT demand_id").WillReturnError(failure)
 	if _, err := fixture.store.Ordered(context.Background(), "set"); err == nil {
 		t.Fatal("expected query error")
 	}

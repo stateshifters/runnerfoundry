@@ -308,6 +308,38 @@ func TestSQLiteDemandStoreReportsRepositoryStateMigrationStepFailures(t *testing
 	}
 }
 
+func TestSQLiteDemandStoreReportsCapacityObligationMigrationStepFailures(t *testing.T) {
+	for failedIndex := range capacityObligationMigrationSteps {
+		t.Run(fmt.Sprintf("step-%d", failedIndex), func(t *testing.T) {
+			assertCapacityObligationMigrationStepFailure(t, failedIndex)
+		})
+	}
+}
+
+func assertCapacityObligationMigrationStepFailure(t *testing.T, failedIndex int) {
+	t.Helper()
+	fixture := mockDemandStore(t)
+	expectSchemaVersion(fixture.mock, 5)
+	fixture.mock.ExpectBegin()
+	expectCapacityObligationMigrationFailure(fixture.mock, failedIndex)
+	fixture.mock.ExpectRollback()
+	err := fixture.store.migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), capacityObligationMigrationSteps[failedIndex].operation) {
+		t.Fatalf("capacity-obligation migration error = %v", err)
+	}
+}
+
+func expectCapacityObligationMigrationFailure(mock sqlmock.Sqlmock, failedIndex int) {
+	for index, step := range capacityObligationMigrationSteps {
+		expectation := mock.ExpectExec(regexp.QuoteMeta(step.statement))
+		if index == failedIndex {
+			expectation.WillReturnError(errors.New("failed"))
+			return
+		}
+		expectation.WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+}
+
 func assertRepositoryStateMigrationStepFailure(t *testing.T, failedIndex int) {
 	t.Helper()
 	fixture := mockDemandStore(t)
@@ -381,10 +413,10 @@ func TestSQLiteDemandStoreReportsDemandCommitFailure(t *testing.T) {
 func TestSQLiteDemandStoreReportsRowCloseFailure(t *testing.T) {
 	fixture := mockDemandStore(t)
 	closeErr := errors.New("close failed")
-	rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
-		AddRow("repo", "invalid", 0, false, 1).
+	rows := sqlmock.NewRows([]string{"demand_id", "repository", "request_id", "queue_time", "acquired", "observation_order", "source", "assigned_observation_id", "controller_epoch", "attempt", "next_attempt_at"}).
+		AddRow(1, "repo", "invalid", 0, false, 1, "job_available", 0, 0, 0, 0).
 		CloseError(closeErr)
-	fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
+	fixture.mock.ExpectQuery("SELECT demand_id").WillReturnRows(rows)
 	if _, err := fixture.store.Ordered(context.Background(), "linux"); !errors.Is(err, closeErr) {
 		t.Fatalf("scan error = %v, want row close failure", err)
 	}
@@ -392,10 +424,10 @@ func TestSQLiteDemandStoreReportsRowCloseFailure(t *testing.T) {
 
 func TestSQLiteDemandStoreReportsRowIterationFailure(t *testing.T) {
 	fixture := mockDemandStore(t)
-	rows := sqlmock.NewRows([]string{"repository", "request_id", "queue_time", "acquired", "observation_order"}).
-		AddRow("repo", 1, 0, false, 1).
+	rows := sqlmock.NewRows([]string{"demand_id", "repository", "request_id", "queue_time", "acquired", "observation_order", "source", "assigned_observation_id", "controller_epoch", "attempt", "next_attempt_at"}).
+		AddRow(1, "repo", 1, 0, false, 1, "job_available", 0, 0, 0, 0).
 		RowError(0, errors.New("iteration failed"))
-	fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(rows)
+	fixture.mock.ExpectQuery("SELECT demand_id").WillReturnRows(rows)
 	if _, err := fixture.store.Ordered(context.Background(), "linux"); err == nil {
 		t.Fatal("expected iteration error")
 	}

@@ -4,7 +4,7 @@ Date: 2026-08-03
 
 ## Status
 
-Accepted
+Superseded by [10. Persist unified capacity obligations for FIFO scheduling](0010-persist-unified-capacity-obligations-for-fifo-scheduling.md)
 
 Supersedes [8. Unify assigned-job recovery across runtime modes](0008-unify-assigned-job-recovery-across-runtime-modes.md)
 

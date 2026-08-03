@@ -33,7 +33,6 @@ type clusterLeader struct {
 	now                       func() time.Time
 	pendingRepositoryRepairs  map[string]repositoryRepair
 	repositoryWorkers         *repositoryWorkerPool
-	assignedJobWorkers        *assignedJobRecoveryExecutor
 	repositoryWorkerDone      <-chan struct{}
 	stopRepositoryWorkers     context.CancelFunc
 	repositorySnapshot        repositorystate.Snapshot
@@ -76,8 +75,16 @@ type repositorySessionRemoval struct {
 }
 
 func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluster.Lease) *clusterLeader {
-	scheduler := &clusterScheduler{store: daemon.assignments, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}}
 	workerCtx, stopRepositoryWorkers := context.WithCancel(ctx)
+	scheduler := &clusterScheduler{
+		store: daemon.assignments, workerDone: workerCtx.Done(),
+		sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
+		reportScheduleError: func(scaleSet string, err error) {
+			daemon.logger.Error("capacity obligation scheduling failed",
+				slog.String("action", "capacity_obligation"), slog.String("phase", "retrying"),
+				slog.String("scaleSet", scaleSet), slog.String("error", err.Error()))
+		},
+	}
 	leader := &clusterLeader{
 		daemon: daemon, lease: lease, scheduler: scheduler,
 		sessions:               map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
@@ -90,7 +97,6 @@ func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluste
 		confirmedRegistrations:   map[repositoryScaleSetSessionKey]repositorystate.Registration{},
 	}
 	leader.repositoryWorkers = newRepositoryWorkerPool(workerCtx, leader.githubOperationTimeout)
-	leader.assignedJobWorkers = newAssignedJobRecoveryExecutor(workerCtx, clusterCoordinationTimeout)
 	return leader
 }
 
@@ -571,10 +577,8 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.cancelActiveOperation()
 	leader.stopRepositoryWorkers()
-	if leader.assignedJobWorkers != nil {
-		leader.assignedJobWorkers.stop()
-	}
 	leader.background.Wait()
+	leader.scheduler.wait()
 	leader.repositoryWorkers.wait()
 	leader.operationMutex.Lock()
 	defer leader.operationMutex.Unlock()

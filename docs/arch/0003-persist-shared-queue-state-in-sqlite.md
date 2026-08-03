@@ -8,6 +8,8 @@ Superseded by [4. Coordinate multi-host scaling in PostgreSQL](0004-coordinate-m
 
 Supersedes [2. Use GitHub App installations and shared runner capacity](0002-use-github-app-installations-and-shared-runner-capacity.md)
 
+Amended by [10. Persist unified capacity obligations for FIFO scheduling](0010-persist-unified-capacity-obligations-for-fifo-scheduling.md)
+
 ## Context
 
 The shared capacity decision acknowledged Github messages after copying waiting demand into memory. Demand that could not immediately receive capacity was therefore acknowledged but existed only inside the process. A reload, crash, or host replacement could lose that queue and its cross-repository ordering.

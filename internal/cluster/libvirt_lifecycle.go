@@ -93,39 +93,53 @@ func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (
 	return nil
 }
 
-func completeJobInTransaction(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	completion JobCompletion,
-) error {
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
+type jobCompletionOperation struct {
+	statement string
+	failure   string
+}
+
+var jobCompletionOperations = []jobCompletionOperation{
+	{statement: `UPDATE scaler_runner_lifecycle
 		SET phase = 'reap_pending', reap_reason = 'job_completed', updated_at = clock_timestamp()
 		WHERE scale_set = $1 AND repository = $2
 		  AND (($3 > 0 AND request_id = $3) OR ($3 <= 0 AND $4 <> '' AND runner_name = $4))`,
-		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
-		return fmt.Errorf("request clustered runner reap: %w", err)
-	}
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
+		failure: "request clustered runner reap"},
+	{statement: `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
 		WHERE scale_set = $1 AND repository = $2
 		  AND (($3 > 0 AND request_id = $3) OR ($3 <= 0 AND $4 <> '' AND runner_name = $4))`,
-		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
-		return fmt.Errorf("request clustered libvirt runner reap: %w", err)
-	}
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
+		failure: "request clustered libvirt runner reap"},
+	{statement: `UPDATE scaler_assignments assignment SET state = 'complete'
 		WHERE assignment.assignment_id IN (
 			SELECT assignment_id FROM scaler_runner_lifecycle
 			WHERE scale_set = $1 AND repository = $2 AND assignment_id IS NOT NULL
 			  AND (($3 > 0 AND request_id = $3) OR ($4 <> '' AND runner_name = $4))
 		) AND assignment.assigned_observation_id IS NOT NULL AND assignment.state <> 'complete'`,
-		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
-		return fmt.Errorf("complete observed assignment: %w", err)
-	}
-	if completion.RequestID > 0 {
-		if err := completeDemandInTransaction(ctx, transaction, completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
-			return err
+		failure: "complete observed assignment"},
+	{statement: `DELETE FROM scaler_demand demand
+		USING scaler_assignments assignment, scaler_runner_lifecycle lifecycle
+		WHERE assignment.demand_id = demand.demand_id
+		  AND lifecycle.assignment_id = assignment.assignment_id
+		  AND demand.source = 'assigned_count'
+		  AND lifecycle.scale_set = $1 AND lifecycle.repository = $2
+		  AND (($3 > 0 AND lifecycle.request_id = $3) OR ($4 <> '' AND lifecycle.runner_name = $4))`,
+		failure: "complete assigned capacity obligation"},
+}
+
+func completeJobInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	completion JobCompletion,
+) error {
+	for _, operation := range jobCompletionOperations {
+		if _, err := transaction.Exec(ctx, operation.statement, completion.ScaleSet, completion.Repository,
+			completion.RequestID, completion.RunnerName); err != nil {
+			return fmt.Errorf("%s: %w", operation.failure, err)
 		}
 	}
-	return nil
+	if completion.RequestID <= 0 {
+		return nil
+	}
+	return completeDemandInTransaction(ctx, transaction, completion.ScaleSet, completion.Repository, completion.RequestID)
 }
 
 func (store *Store) PendingLibvirtReaps(

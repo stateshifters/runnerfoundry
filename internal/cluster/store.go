@@ -115,6 +115,7 @@ type ScaleSetStatus struct {
 }
 
 type Demand struct {
+	AppID      int64
 	ScaleSet   string
 	Repository string
 	RequestID  int64

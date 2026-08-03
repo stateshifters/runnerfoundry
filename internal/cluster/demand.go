@@ -16,7 +16,7 @@ import (
 // scale set or repository, a non-positive request ID, or a zero queue time;
 // callers should correct or discard that input rather than retry it unchanged.
 func (store *Store) Enqueue(ctx context.Context, demand Demand) (resultErr error) {
-	if strings.TrimSpace(demand.ScaleSet) == "" || strings.TrimSpace(demand.Repository) == "" || demand.RequestID <= 0 || demand.QueueTime.IsZero() {
+	if demand.AppID <= 0 || strings.TrimSpace(demand.ScaleSet) == "" || strings.TrimSpace(demand.Repository) == "" || demand.RequestID <= 0 || demand.QueueTime.IsZero() {
 		return ErrInvalidDemand
 	}
 	connection, err := store.connector(ctx)
@@ -25,10 +25,13 @@ func (store *Store) Enqueue(ctx context.Context, demand Demand) (resultErr error
 	}
 	defer finishConnection(ctx, connection, &resultErr)
 	if _, err = connection.Exec(ctx, `
-		INSERT INTO scaler_demand (scale_set, repository, request_id, queue_time)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (scale_set, repository, request_id) DO NOTHING`,
-		demand.ScaleSet, demand.Repository, demand.RequestID, demand.QueueTime,
+		INSERT INTO scaler_demand
+			(app_id, scale_set, repository, request_id, queue_time, source,
+			 controller_epoch, attempt, next_attempt_at)
+		VALUES ($1, $2, $3, $4, $5, 'job_available', 0, 0, $5)
+		ON CONFLICT (app_id, scale_set, repository, request_id)
+		WHERE source = 'job_available' DO NOTHING`,
+		demand.AppID, demand.ScaleSet, demand.Repository, demand.RequestID, demand.QueueTime,
 	); err != nil {
 		return fmt.Errorf("enqueue scale-set demand: %w", err)
 	}
@@ -84,22 +87,40 @@ func assignOldestInTransaction(
 	if err := releaseUnavailableAssignments(ctx, transaction, now.Add(-liveFor)); err != nil {
 		return nil, err
 	}
-	demandID, assignment, err := loadOldestDemand(ctx, transaction, scaleSet)
+	obligation, err := loadOldestDemand(ctx, transaction, scaleSet, now)
 	if err != nil {
 		return nil, err
 	}
+	assignment := obligation.assignment
 	if err = selectContributor(ctx, transaction, scaleSet, now.Add(-liveFor), assignment); err != nil {
 		return nil, err
 	}
 	assignment.ScaleSet = scaleSet
-	assignment.State = AssignmentReserved
-	if err = transaction.QueryRow(ctx, `
-		INSERT INTO scaler_assignments (demand_id, node_id, state)
-		VALUES ($1, $2, 'reserved')
-		RETURNING assignment_id`, demandID, assignment.NodeID).Scan(&assignment.ID); err != nil {
-		return nil, fmt.Errorf("persist FIFO assignment: %w", err)
+	if err = persistAssignment(ctx, transaction, obligation); err != nil {
+		return nil, err
 	}
 	return assignment, nil
+}
+
+func persistAssignment(ctx context.Context, transaction *databaseTransaction, obligation oldestDemand) error {
+	assignment := obligation.assignment
+	insertStatement := `INSERT INTO scaler_assignments (demand_id, node_id, state)
+		VALUES ($1, $2, 'reserved') RETURNING assignment_id`
+	insertArguments := []any{obligation.demandID, assignment.NodeID}
+	assignment.State = AssignmentReserved
+	if assignment.IdentityFree {
+		insertStatement = `INSERT INTO scaler_assignments
+			(demand_id, assigned_observation_id, node_id, installation_id,
+			 github_scale_set_id, controller_epoch, state)
+			VALUES ($1, $2, $3, $4, $5, $6, 'ready') RETURNING assignment_id`
+		insertArguments = []any{obligation.demandID, obligation.assignedObservationID, assignment.NodeID,
+			assignment.InstallationID, assignment.GitHubScaleSetID, assignment.ControllerEpoch}
+		assignment.State = AssignmentReady
+	}
+	if err := transaction.QueryRow(ctx, insertStatement, insertArguments...).Scan(&assignment.ID); err != nil {
+		return fmt.Errorf("persist FIFO assignment: %w", err)
+	}
+	return nil
 }
 
 func releaseUnavailableAssignments(ctx context.Context, transaction *databaseTransaction, expiredBefore time.Time) error {
@@ -115,31 +136,72 @@ func releaseUnavailableAssignments(ctx context.Context, transaction *databaseTra
 	return nil
 }
 
-func loadOldestDemand(ctx context.Context, transaction *databaseTransaction, scaleSet string) (int64, *Assignment, error) {
-	var demandID int64
-	var assignment Assignment
-	err := transaction.QueryRow(ctx, `
-		SELECT demand_id, repository, request_id, queue_time
-		FROM scaler_demand
-		WHERE scale_set = $1
-		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments WHERE scaler_assignments.demand_id = scaler_demand.demand_id AND state <> 'complete')
-		  AND NOT EXISTS (
-		      SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
-		      WHERE lifecycle.scale_set = scaler_demand.scale_set
-		        AND lifecycle.repository = scaler_demand.repository
-		        AND lifecycle.request_id = scaler_demand.request_id
-		        AND lifecycle.reap_requested
-		  )
-		ORDER BY queue_time, observation_id
-		LIMIT 1
-		FOR UPDATE`, scaleSet).Scan(&demandID, &assignment.Repository, &assignment.RequestID, &assignment.QueueTime)
+type oldestDemand struct {
+	demandID              int64
+	assignedObservationID int64
+	assignment            *Assignment
+}
+
+const loadOldestDemandSQL = `
+	SELECT demand.demand_id, demand.repository, COALESCE(demand.request_id, 0),
+	       demand.queue_time, demand.source, COALESCE(demand.assigned_observation_id, 0),
+	       COALESCE(repository.installation_id, 0),
+	       COALESCE(registration.github_scale_set_id, 0), demand.controller_epoch
+	FROM scaler_demand demand
+	LEFT JOIN scaler_assigned_job_observations assigned
+	  ON assigned.assigned_observation_id = demand.assigned_observation_id
+	LEFT JOIN scaler_repository_controls control ON control.app_id = assigned.app_id
+	LEFT JOIN scaler_repositories repository
+	  ON repository.app_id = assigned.app_id AND repository.repository_url = demand.repository
+	LEFT JOIN scaler_registrations registration
+	  ON registration.app_id = assigned.app_id AND registration.repository_url = demand.repository
+	 AND registration.scale_set_name = demand.scale_set
+	WHERE demand.scale_set = $1 AND demand.next_attempt_at <= $2
+	  AND (demand.source = 'job_available' OR (
+	      assigned.controller_epoch = demand.controller_epoch
+	      AND control.controller_epoch = demand.controller_epoch
+	  ))
+	  AND NOT EXISTS (SELECT 1 FROM scaler_assignments WHERE scaler_assignments.demand_id = demand.demand_id AND state <> 'complete')
+	  AND NOT EXISTS (
+	      SELECT 1 FROM scaler_runner_lifecycle lifecycle
+	      JOIN scaler_assignments lifecycle_assignment
+	        ON lifecycle_assignment.assignment_id = lifecycle.assignment_id
+	      WHERE lifecycle_assignment.demand_id = demand.demand_id
+	  )
+	  AND NOT EXISTS (
+	      SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
+	      WHERE lifecycle.scale_set = demand.scale_set
+	        AND lifecycle.repository = demand.repository
+	        AND lifecycle.request_id = COALESCE(demand.request_id, 0)
+	        AND lifecycle.reap_requested
+	  )
+	ORDER BY demand.queue_time, demand.observation_id
+	LIMIT 1
+	FOR UPDATE OF demand`
+
+func loadOldestDemand(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet string,
+	now time.Time,
+) (oldestDemand, error) {
+	var obligation oldestDemand
+	var source string
+	obligation.assignment = &Assignment{}
+	err := transaction.QueryRow(ctx, loadOldestDemandSQL, scaleSet, now).Scan(
+		&obligation.demandID, &obligation.assignment.Repository, &obligation.assignment.RequestID,
+		&obligation.assignment.QueueTime, &source, &obligation.assignedObservationID,
+		&obligation.assignment.InstallationID, &obligation.assignment.GitHubScaleSetID,
+		&obligation.assignment.ControllerEpoch,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil, ErrNoAssignment
+		return oldestDemand{}, ErrNoAssignment
 	}
 	if err != nil {
-		return 0, nil, fmt.Errorf("load oldest scale-set demand: %w", err)
+		return oldestDemand{}, fmt.Errorf("load oldest scale-set demand: %w", err)
 	}
-	return demandID, &assignment, nil
+	obligation.assignment.IdentityFree = source == "assigned_count"
+	return obligation, nil
 }
 
 func selectContributor(

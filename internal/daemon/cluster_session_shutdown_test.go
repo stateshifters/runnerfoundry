@@ -29,6 +29,27 @@ type sessionCloseTracker struct {
 	entered chan struct{}
 }
 
+func TestClusterLeaderReportsDurableSchedulingFailure(t *testing.T) {
+	logs := &bytes.Buffer{}
+	state := &fakeClusterState{assignErr: errors.New("database unavailable")}
+	daemon := clusteredDaemonForTest(state)
+	daemon.assignments = state
+	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	leader := newClusterLeader(context.Background(), daemon, &fakeClusterLease{alive: true})
+	t.Cleanup(func() {
+		leader.stopRepositoryWorkers()
+		leader.repositoryWorkers.wait()
+		leader.scheduler.wait()
+	})
+
+	leader.scheduler.scheduleAndReport(context.Background(), "linux")
+	output := logs.String()
+	if !strings.Contains(output, "capacity obligation scheduling failed") ||
+		!strings.Contains(output, "scaleSet=linux") || !strings.Contains(output, "database unavailable") {
+		t.Fatalf("scheduling failure log = %q", output)
+	}
+}
+
 func (client blockingSessionCloseClient) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
 	return nil, errors.New("no message")
 }
@@ -287,7 +308,6 @@ func TestSessionCloseWorkerStopsBeforeTakingWorkAfterCancellation(t *testing.T) 
 	workers.Wait()
 	leader.stopRepositoryWorkers()
 	leader.repositoryWorkers.wait()
-	leader.assignedJobWorkers.stop()
 }
 
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {

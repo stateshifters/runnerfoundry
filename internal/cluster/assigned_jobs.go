@@ -2,12 +2,9 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -121,7 +118,97 @@ func applyAssignedJobObservation(
 			return err
 		}
 	}
-	return loadAssignedJobCapacity(ctx, transaction, observation, capacity)
+	if err := loadAssignedJobCapacity(ctx, transaction, observation, capacity); err != nil {
+		return err
+	}
+	return reconcileQueuedAssignedObligations(ctx, transaction, observation, capacity.ActiveRunners)
+}
+
+func reconcileQueuedAssignedObligations(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+	activeCapacity int,
+) error {
+	var queuedObligations int
+	err := transaction.QueryRow(ctx, `SELECT COUNT(*)
+		FROM scaler_demand demand
+		JOIN scaler_assigned_job_observations assigned
+		  ON assigned.assigned_observation_id = demand.assigned_observation_id
+		WHERE assigned.app_id = $1 AND assigned.repository_url = $2
+		  AND assigned.scale_set = $3 AND demand.source = 'assigned_count'
+		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')`,
+		observation.AppID, observation.Repository, observation.ScaleSet).Scan(&queuedObligations)
+	if err != nil {
+		return fmt.Errorf("count queued assigned obligations: %w", err)
+	}
+	decision := scaler.DecideAssignedObligations(scaler.AssignedObligationSnapshot{
+		AssignedJobs: observation.AssignedJobs, ActiveCapacity: activeCapacity,
+		QueuedObligations: queuedObligations,
+	})
+	if decision.Cancel > 0 {
+		if err = cancelQueuedAssignedObligations(ctx, transaction, observation, decision.Cancel); err != nil {
+			return err
+		}
+	}
+	if decision.Create > 0 {
+		if err = createQueuedAssignedObligations(ctx, transaction, observation, decision.Create); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cancelQueuedAssignedObligations(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+	count int,
+) error {
+	_, err := transaction.Exec(ctx, `WITH canceled AS (
+		SELECT demand.demand_id
+		FROM scaler_demand demand
+		JOIN scaler_assigned_job_observations assigned
+		  ON assigned.assigned_observation_id = demand.assigned_observation_id
+		WHERE assigned.app_id = $1 AND assigned.repository_url = $2
+		  AND assigned.scale_set = $3 AND demand.source = 'assigned_count'
+		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')
+		ORDER BY demand.queue_time DESC, demand.observation_id DESC
+		LIMIT $4
+	)
+	DELETE FROM scaler_demand demand USING canceled
+	WHERE demand.demand_id = canceled.demand_id`, observation.AppID, observation.Repository,
+		observation.ScaleSet, count)
+	if err != nil {
+		return fmt.Errorf("cancel queued assigned obligations: %w", err)
+	}
+	return nil
+}
+
+func createQueuedAssignedObligations(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+	count int,
+) error {
+	_, err := transaction.Exec(ctx, `INSERT INTO scaler_demand
+		(app_id, scale_set, repository, request_id, queue_time, source,
+		 assigned_observation_id, controller_epoch, attempt, next_attempt_at)
+	SELECT assigned.app_id, assigned.scale_set, assigned.repository_url, NULL,
+	       assigned.observed_at, 'assigned_count', assigned.assigned_observation_id,
+	       assigned.controller_epoch, 0, assigned.observed_at
+	FROM scaler_assigned_job_observations assigned
+	CROSS JOIN generate_series(1, $5)
+	WHERE assigned.app_id = $1 AND assigned.repository_url = $2
+	  AND assigned.scale_set = $3 AND assigned.controller_epoch = $4`,
+		observation.AppID, observation.Repository, observation.ScaleSet,
+		observation.ControllerEpoch, count)
+	if err != nil {
+		return fmt.Errorf("queue assigned obligations: %w", err)
+	}
+	return nil
 }
 
 func adoptLifecycleBackedAssignedAssignments(
@@ -271,87 +358,3 @@ func loadAssignedJobCapacity(
 	}
 	return nil
 }
-
-// AssignAssignedJob atomically reserves one identity-free assigned job on an
-// eligible contributor when the observation still has a deficit and capacity.
-func (store *Store) AssignAssignedJob(
-	ctx context.Context,
-	observation AssignedJobObservation,
-	now time.Time,
-	liveFor time.Duration,
-) (assignment *Assignment, resultErr error) {
-	if err := validateAssignedJobObservation(observation); err != nil || now.IsZero() || liveFor <= 0 {
-		return nil, ErrInvalidDemand
-	}
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	var assigned Assignment
-	err = connection.QueryRow(ctx, assignAssignedJobSQL, now.Add(-liveFor), observation.AppID,
-		observation.Repository, observation.ScaleSet, observation.ControllerEpoch).Scan(
-		&assigned.ID, &assigned.NodeID, &assigned.ScaleSet, &assigned.Repository, &assigned.QueueTime,
-		&assigned.InstallationID, &assigned.GitHubScaleSetID, &assigned.ControllerEpoch, &assigned.State)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNoAssignment
-	}
-	if err != nil {
-		return nil, fmt.Errorf("assign observed assigned job: %w", err)
-	}
-	assigned.IdentityFree = true
-	return &assigned, nil
-}
-
-const assignAssignedJobSQL = contributorEligibilitySQL + `, observation AS (
-	SELECT assigned.assigned_observation_id, assigned.repository_url, assigned.scale_set,
-	       assigned.assigned_jobs, assigned.controller_epoch, assigned.observed_at,
-	       repository.installation_id, registration.github_scale_set_id
-	FROM scaler_assigned_job_observations assigned
-	JOIN scaler_repository_controls control ON control.app_id = assigned.app_id
-	JOIN scaler_repositories repository
-	  ON repository.app_id = assigned.app_id AND repository.repository_url = assigned.repository_url
-	JOIN scaler_registrations registration
-	  ON registration.app_id = assigned.app_id AND registration.repository_url = assigned.repository_url
-	 AND registration.scale_set_name = assigned.scale_set
-	WHERE assigned.app_id = $2 AND assigned.repository_url = $3 AND assigned.scale_set = $4
-	  AND assigned.controller_epoch = $5 AND control.controller_epoch = $5
-	FOR UPDATE OF assigned
-), contributor AS (
-	SELECT contribution.node_id
-	FROM scaler_contributions contribution
-	JOIN eligible_contributions eligible
-	  ON eligible.node_id = contribution.node_id AND eligible.scale_set = contribution.scale_set
-	CROSS JOIN observation
-	WHERE contribution.scale_set = observation.scale_set
-	  AND contribution.max_runners > (
-		SELECT COUNT(*) FROM scaler_assignments assignment
-		LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		LEFT JOIN scaler_assigned_job_observations assigned
-		  ON assigned.assigned_observation_id = assignment.assigned_observation_id
-		WHERE assignment.node_id = contribution.node_id
-		  AND COALESCE(demand.scale_set, assigned.scale_set) = contribution.scale_set
-		  AND assignment.state <> 'complete'
-	  ) + (SELECT COUNT(*) FROM scaler_runner_lifecycle lifecycle
-		WHERE lifecycle.node_id = contribution.node_id AND lifecycle.scale_set = contribution.scale_set
-		  AND lifecycle.phase = 'reap_pending')
-	  AND observation.assigned_jobs > (SELECT COUNT(*) FROM scaler_assignments assignment
-		LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		LEFT JOIN scaler_assigned_job_observations assigned
-		  ON assigned.assigned_observation_id = assignment.assigned_observation_id
-		WHERE COALESCE(demand.scale_set, assigned.scale_set) = observation.scale_set
-		  AND COALESCE(demand.repository, assigned.repository_url) = observation.repository_url
-		  AND assignment.state <> 'complete')
-	ORDER BY contribution.node_id LIMIT 1 FOR UPDATE OF contribution
-), inserted AS (
-	INSERT INTO scaler_assignments
-		(demand_id, assigned_observation_id, node_id, installation_id, github_scale_set_id, controller_epoch, state)
-	SELECT NULL, observation.assigned_observation_id, contributor.node_id, observation.installation_id,
-	       observation.github_scale_set_id, observation.controller_epoch, 'ready'
-	FROM observation, contributor
-	RETURNING assignment_id, node_id, installation_id, github_scale_set_id, controller_epoch, state
-)
-SELECT inserted.assignment_id, inserted.node_id, observation.scale_set, observation.repository_url,
-	observation.observed_at, inserted.installation_id, inserted.github_scale_set_id,
-	inserted.controller_epoch, inserted.state
-FROM inserted, observation`

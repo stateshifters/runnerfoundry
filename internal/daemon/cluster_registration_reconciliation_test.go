@@ -44,18 +44,24 @@ func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFail
 	leader.stop(context.Background())
 }
 
-func TestClusterRepositoryActivationRecoversInitialAssignedJobsWithoutBlockingPolling(t *testing.T) {
+func TestClusterRepositoryActivationPersistsInitialAssignedJobsBeforePolling(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
 	bootstrapEntered, releaseBootstrap := blockInitialAssignedRecovery(&fixture)
-	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err != nil {
-		t.Fatal(err)
-	}
+	completed := make(chan error, 1)
+	go func() {
+		completed <- fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories)
+	}()
 	<-bootstrapEntered
-	<-fixture.registry.pollObserved
-	if !fixture.registry.polledBeforeBootstrap {
-		t.Fatal("message polling waited for initial assigned-job recovery")
+	select {
+	case <-fixture.registry.pollObserved:
+		t.Fatal("message polling started before assigned-job obligations were durable")
+	default:
 	}
 	close(releaseBootstrap)
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	<-fixture.registry.pollObserved
 	fixture.leader.stop(context.Background())
 	assertInitialAssignedRecovery(t, fixture.state)
 }
@@ -91,37 +97,45 @@ func assertInitialAssignedRecovery(t *testing.T, state *fakeClusterState) {
 	}
 }
 
-func TestClusterRepositoryActivationPublishesSessionDuringBlockedAssignedRecovery(t *testing.T) {
+func TestClusterRepositoryActivationDoesNotPublishSessionBeforeAssignedRecoveryIsDurable(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
 	linuxKey := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	fixture.desired = map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{linuxKey: fixture.desired[linuxKey]}
-	bootstrapEntered := make(chan struct{})
-	releaseBootstrap := make(chan struct{})
-	var bootstrapOnce sync.Once
-	fixture.state.onObserveAssignedJobs = func() {
-		bootstrapOnce.Do(func() {
-			close(bootstrapEntered)
-			<-releaseBootstrap
-		})
-	}
+	bootstrapEntered, releaseBootstrap := blockAssignedObservation(fixture.state)
 	completed := make(chan error, 1)
 	go func() {
 		completed <- fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories)
 	}()
 	<-bootstrapEntered
-	if session := fixture.leader.scheduler.session(linuxKey); session == nil {
-		t.Fatal("scheduler did not publish session while assigned recovery was blocked")
+	if session := fixture.leader.scheduler.session(linuxKey); session != nil {
+		t.Fatal("scheduler published session before assigned recovery was durable")
 	}
 	select {
 	case err := <-completed:
-		if err != nil {
-			t.Fatal(err)
-		}
+		t.Fatalf("repository activation completed before assigned recovery: %v", err)
 	default:
-		t.Fatal("repository activation waited for assigned recovery")
 	}
 	close(releaseBootstrap)
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	if session := fixture.leader.scheduler.session(linuxKey); session == nil {
+		t.Fatal("scheduler did not publish session after assigned recovery became durable")
+	}
 	fixture.leader.stop(context.Background())
+}
+
+func blockAssignedObservation(state *fakeClusterState) (<-chan struct{}, chan struct{}) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	state.onObserveAssignedJobs = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	return entered, release
 }
 
 func TestClusterRepositoryActivationQueuesRepairWhenInitialStatisticsAreMissing(t *testing.T) {

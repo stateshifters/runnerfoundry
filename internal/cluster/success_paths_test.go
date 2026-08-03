@@ -32,7 +32,46 @@ func TestAssignmentSuccessPathsUseInMemoryDatabase(t *testing.T) {
 		t.Fatalf("assignment = %#v, %v", assigned, err)
 	}
 	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).ConfirmAcquisition(context.Background(), 1))
+	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).DeferAssignment(
+		context.Background(), 1, "node", AssignmentStarting, now,
+	))
 	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).CompleteDemand(context.Background(), "set", "repo", 1))
+}
+
+func TestAssignOldestReturnsIdentityFreeObligationReadyForNodeExecution(t *testing.T) {
+	now := time.Unix(2, 0).UTC()
+	oldest := identityFreeObligationRow(t, now)
+	contributor := fakeRow{scan: func(destinations ...any) {
+		*destination[NodeID](t, destinations[0]) = "node"
+	}}
+	identifier := fakeRow{scan: func(destinations ...any) {
+		*destination[AssignmentID](t, destinations[0]) = 9
+	}}
+	assignment, err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{
+		rowResults: []fakeRow{oldest, contributor, identifier},
+	}}).AssignOldest(context.Background(), "set", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !assignment.IdentityFree || assignment.RequestID != 0 || assignment.State != AssignmentReady ||
+		assignment.InstallationID != 7 || assignment.GitHubScaleSetID != 11 {
+		t.Fatalf("identity-free FIFO assignment = %#v", assignment)
+	}
+}
+
+func identityFreeObligationRow(t *testing.T, now time.Time) fakeRow {
+	t.Helper()
+	return fakeRow{scan: func(destinations ...any) {
+		*destination[int64](t, destinations[0]) = 4
+		*destination[string](t, destinations[1]) = "repo"
+		*destination[int64](t, destinations[2]) = 0
+		*destination[time.Time](t, destinations[3]) = now
+		*destination[string](t, destinations[4]) = "assigned_count"
+		*destination[int64](t, destinations[5]) = 8
+		*destination[githubapp.InstallationID](t, destinations[6]) = 7
+		*destination[int](t, destinations[7]) = 11
+		*destination[int64](t, destinations[8]) = 5
+	}}
 }
 
 func TestAssignmentRowsDecodeInMemory(t *testing.T) {

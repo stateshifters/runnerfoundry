@@ -97,6 +97,39 @@ func TestAssignmentExecutorReportsProviderStartFailure(t *testing.T) {
 	}
 }
 
+func TestAssignmentExecutorDefersObligationAfterProviderStartFailure(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.buildReconciler = reconcilerWithProvider(failingStartProvider{})
+	assignment := localAssignment()
+	assignment.State = cluster.AssignmentStarting
+	if daemon.executeClaimedAssignment(context.Background(), assignment, assignmentExecutionPhaseStart) {
+		t.Fatal("failed provider start unexpectedly made progress")
+	}
+	if len(state.released) != 1 || state.released[0] != assignment.ID {
+		t.Fatalf("deferred assignments = %v", state.released)
+	}
+}
+
+func TestAssignmentExecutorReportsFailureToDeferFailedStart(t *testing.T) {
+	logs := &bytes.Buffer{}
+	deferFailure := errors.New("defer unavailable")
+	state := &fakeClusterState{releaseErr: deferFailure}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.logger = slog.New(slog.NewTextHandler(logs, nil))
+	daemon.buildReconciler = reconcilerWithProvider(failingStartProvider{})
+	assignment := localAssignment()
+	assignment.State = cluster.AssignmentStarting
+	if daemon.executeClaimedAssignment(context.Background(), assignment, assignmentExecutionPhaseStart) {
+		t.Fatal("failed provider start unexpectedly made progress")
+	}
+	output := logs.String()
+	if !strings.Contains(output, "start assigned runner") ||
+		!strings.Contains(output, "defer failed runner assignment") || !strings.Contains(output, deferFailure.Error()) {
+		t.Fatalf("assignment failure log = %q", output)
+	}
+}
+
 func TestAssignmentExecutorReportsRunningTransitionFailure(t *testing.T) {
 	state := &fakeClusterState{startedErr: errors.New("failed")}
 	daemon := activeClusteredDaemon(t, state)

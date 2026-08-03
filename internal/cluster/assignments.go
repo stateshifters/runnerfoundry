@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
@@ -189,6 +190,51 @@ func (store *Store) CompleteAssignment(
 	return store.transitionAssignment(ctx, assignmentID, expectedState, `
 		UPDATE scaler_assignments SET state = 'complete'
 		WHERE assignment_id = $1 AND node_id = $2 AND state = $3`, nodeID, expectedState)
+}
+
+// DeferAssignment releases a failed assignment and durably advances the
+// obligation's bounded retry deadline. The assignment and obligation update
+// are one statement so another scheduler cannot reclaim the obligation in
+// between them.
+func (store *Store) DeferAssignment(
+	ctx context.Context,
+	assignmentID AssignmentID,
+	nodeID NodeID,
+	expectedState AssignmentState,
+	now time.Time,
+) (resultErr error) {
+	connection, err := store.connector(ctx)
+	if err != nil {
+		return err
+	}
+	defer finishConnection(ctx, connection, &resultErr)
+	commandTag, err := connection.Exec(ctx, `
+		WITH completed AS (
+			UPDATE scaler_assignments
+			SET state = 'complete'
+			WHERE assignment_id = $1 AND node_id = $2 AND state = $3
+			RETURNING demand_id
+		)
+		UPDATE scaler_demand demand
+		SET attempt = demand.attempt + 1,
+		    next_attempt_at = $4 + CASE demand.attempt
+		        WHEN 0 THEN interval '5 seconds'
+		        WHEN 1 THEN interval '10 seconds'
+		        WHEN 2 THEN interval '20 seconds'
+		        WHEN 3 THEN interval '40 seconds'
+		        ELSE interval '60 seconds'
+		    END
+		FROM completed
+		WHERE demand.demand_id = completed.demand_id`,
+		assignmentID, nodeID, expectedState, now.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("defer runner assignment: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return &AssignmentTransitionError{AssignmentID: assignmentID, Expected: expectedState}
+	}
+	return nil
 }
 
 func (store *Store) transitionAssignment(

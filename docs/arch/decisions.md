@@ -9,3 +9,4 @@
 - [7. Persist repository control independently from message sessions](0007-persist-repository-control-independently-from-message-sessions.md)
 - [8. Unify assigned-job recovery across runtime modes](0008-unify-assigned-job-recovery-across-runtime-modes.md)
 - [9. Schedule assigned recovery through a bounded leader executor](0009-schedule-assigned-recovery-through-a-bounded-leader-executor.md)
+- [10. Persist unified capacity obligations for FIFO scheduling](0010-persist-unified-capacity-obligations-for-fifo-scheduling.md)

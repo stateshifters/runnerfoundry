@@ -48,6 +48,7 @@ func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messa
 			return errors.New("job available message requires a positive runner request ID and queue time")
 		}
 		if err := handler.store.Enqueue(ctx, cluster.Demand{
+			AppID:    handler.session.assignedJobs.appID,
 			ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
 			RequestID: available.RunnerRequestID, QueueTime: available.QueueTime,
 		}); err != nil {

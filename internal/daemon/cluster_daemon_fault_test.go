@@ -656,8 +656,8 @@ func TestSchedulerReportsAcquisitionAndReleaseFailure(t *testing.T) {
 			runnerScaleSet: &upstream.RunnerScaleSet{ID: 1},
 		},
 	}}
-	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil || !strings.Contains(err.Error(), "release unacquired") {
-		t.Fatalf("expected joined acquisition and release failure, got %v", err)
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err == nil || !strings.Contains(err.Error(), "defer unacquired") {
+		t.Fatalf("expected joined acquisition and defer failure, got %v", err)
 	}
 }
 

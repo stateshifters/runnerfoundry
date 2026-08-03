@@ -15,6 +15,13 @@ import (
 
 type assignmentExecutionPhase string
 
+type assignmentStartError struct {
+	err error
+}
+
+func (failure *assignmentStartError) Error() string { return failure.err.Error() }
+func (failure *assignmentStartError) Unwrap() error { return failure.err }
+
 const (
 	assignmentExecutionPhaseStart  assignmentExecutionPhase = "start"
 	assignmentExecutionPhaseRepair assignmentExecutionPhase = "repair"
@@ -219,6 +226,17 @@ func (daemon *clusteredDaemon) executeClaimedAssignment(
 			slog.Int64("requestID", assignment.RequestID))
 		return true
 	}
+	var startFailure *assignmentStartError
+	if errors.As(err, &startFailure) {
+		deferCtx, cancelDefer := context.WithTimeout(context.WithoutCancel(ctx), clusterCoordinationTimeout)
+		deferErr := daemon.assignments.DeferAssignment(
+			deferCtx, assignment.ID, assignment.NodeID, cluster.AssignmentStarting, time.Now(),
+		)
+		cancelDefer()
+		if deferErr != nil {
+			err = errors.Join(err, fmt.Errorf("defer failed runner assignment: %w", deferErr))
+		}
+	}
 	daemon.logger.Error("runner assignment failed",
 		slog.String("phase", string(phase)), slog.Int64("assignmentID", int64(assignment.ID)),
 		slog.String("scaleSet", assignment.ScaleSet), slog.String("repository", assignment.Repository),
@@ -232,31 +250,46 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 	if !exists {
 		return daemon.completeRemovedScaleSetAssignment(ctx, assignment)
 	}
+	reconciler, err := daemon.assignmentReconciler(ctx, configuration, scaleSet, assignment)
+	if err != nil {
+		return &assignmentStartError{err: err}
+	}
+	if err = startAssignmentRunner(ctx, reconciler, assignment); err != nil {
+		return &assignmentStartError{err: err}
+	}
+	if err = daemon.assignments.ConfirmRunning(ctx, assignment.ID, assignment.NodeID); err != nil {
+		return fmt.Errorf("record started runner assignment: %w", err)
+	}
+	return nil
+}
+
+func (daemon *clusteredDaemon) assignmentReconciler(
+	ctx context.Context,
+	configuration clusteredConfigurationSnapshot,
+	scaleSet config.ScaleSetConfig,
+	assignment *cluster.Assignment,
+) (scaler.Reconciler, error) {
 	client, err := daemon.newGitHubClient(assignment.Repository, assignment.InstallationID, configuration.credentials)
 	if err != nil {
-		return fmt.Errorf("create assignment GitHub client: %w", err)
+		return scaler.Reconciler{}, fmt.Errorf("create assignment GitHub client: %w", err)
 	}
 	reconciler, err := daemon.buildReconciler(ctx, assignment.Repository, scaleSet, client, assignment.GitHubScaleSetID)
 	if err != nil {
-		return err
+		return scaler.Reconciler{}, err
 	}
 	if lifecycleStore, supported := daemon.assignments.(scaler.RunnerLifecycleStore); supported {
 		configureAssignmentRunnerLifecycle(&reconciler, lifecycleStore, scaleSet, assignment)
 	} else if scaleSet.Libvirt != nil {
 		configureLegacyAssignmentLifecycle(daemon, &reconciler, assignment)
 	}
+	return reconciler, nil
+}
+
+func startAssignmentRunner(ctx context.Context, reconciler scaler.Reconciler, assignment *cluster.Assignment) error {
 	if assignment.IdentityFree {
-		err = ensureIdentityFreeAssignedRunner(ctx, reconciler)
-	} else {
-		err = ensureAssignedRunner(ctx, reconciler, assignment.RequestID)
+		return ensureIdentityFreeAssignedRunner(ctx, reconciler)
 	}
-	if err != nil {
-		return err
-	}
-	if err = daemon.assignments.ConfirmRunning(ctx, assignment.ID, assignment.NodeID); err != nil {
-		return fmt.Errorf("record started runner assignment: %w", err)
-	}
-	return nil
+	return ensureAssignedRunner(ctx, reconciler, assignment.RequestID)
 }
 
 func ensureIdentityFreeAssignedRunner(ctx context.Context, reconciler scaler.Reconciler) error {

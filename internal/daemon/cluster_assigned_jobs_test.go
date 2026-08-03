@@ -14,75 +14,25 @@ import (
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-type blockingAssignedJobBackend struct {
-	entered chan struct{}
-	release <-chan struct{}
-}
-
-func (backend blockingAssignedJobBackend) Prepare(context.Context, int) (scaler.AssignedJobCapacity, error) {
-	close(backend.entered)
-	<-backend.release
-	return scaler.AssignedJobCapacity{}, nil
-}
-
-func (blockingAssignedJobBackend) StartAssigned(context.Context) (bool, error) { return false, nil }
-
-type inertAssignedJobBackend struct{}
-
-func (inertAssignedJobBackend) Prepare(context.Context, int) (scaler.AssignedJobCapacity, error) {
-	return scaler.AssignedJobCapacity{}, nil
-}
-
-func (inertAssignedJobBackend) StartAssigned(context.Context) (bool, error) { return false, nil }
-
 func inertAssignedJobRecovery() *clusterAssignedJobRecovery {
 	return &clusterAssignedJobRecovery{
-		controller: scaler.NewAssignedJobController(inertAssignedJobBackend{}), logger: slog.Default(),
+		backend: &clusterAssignedJobBackend{
+			state: &fakeClusterState{}, appID: 1, repository: "repo", scaleSet: "linux",
+			controllerEpoch: 1, now: func() time.Time { return time.Unix(100, 0) },
+		},
+		logger: slog.Default(), repository: "repo", scaleSet: "linux",
 	}
 }
 
-func TestClusterAssignedJobBackendReportsObservationAndAssignmentFailures(t *testing.T) {
+func TestClusterAssignedJobBackendReportsObservationFailure(t *testing.T) {
 	observationFailure := errors.New("observation unavailable")
-	backend := assignedJobBackendForTest(&fakeClusterState{observeAssignedJobsErr: observationFailure})
+	backend := &clusterAssignedJobBackend{
+		state: &fakeClusterState{observeAssignedJobsErr: observationFailure}, appID: 1,
+		repository: "repo", scaleSet: "linux", controllerEpoch: 1,
+		now: func() time.Time { return time.Unix(100, 0) },
+	}
 	if _, err := backend.Prepare(context.Background(), 2); !errors.Is(err, observationFailure) {
 		t.Fatalf("prepare error = %v, want observation failure", err)
-	}
-
-	backend = assignedJobBackendForTest(&fakeClusterState{assignAssignedJobErr: cluster.ErrNoAssignment})
-	if started, err := backend.StartAssigned(context.Background()); err != nil || started {
-		t.Fatalf("no-assignment start = %t, %v", started, err)
-	}
-
-	assignmentFailure := errors.New("assignment unavailable")
-	backend = assignedJobBackendForTest(&fakeClusterState{assignAssignedJobErr: assignmentFailure})
-	if started, err := backend.StartAssigned(context.Background()); !errors.Is(err, assignmentFailure) || started {
-		t.Fatalf("failed start = %t, %v", started, err)
-	}
-}
-
-func assignedJobBackendForTest(state *fakeClusterState) *clusterAssignedJobBackend {
-	return &clusterAssignedJobBackend{
-		state: state, repository: "repo", scaleSet: "linux", now: func() time.Time { return time.Unix(100, 0) },
-	}
-}
-
-func TestClusterAssignedJobRecoveryFailureHasRetryStateAndNoDuplicateLegacyEvent(t *testing.T) {
-	logs := &bytes.Buffer{}
-	state := &fakeClusterState{observeAssignedJobsErr: errors.New("unavailable")}
-	recovery := &clusterAssignedJobRecovery{
-		controller: scaler.NewAssignedJobController(assignedJobBackendForTest(state)),
-		logger:     slog.New(slog.NewTextHandler(logs, nil)), repository: "repo", scaleSet: "linux",
-	}
-	recovery.remember(&upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1})
-	if err := recovery.reconcileLatest(context.Background(), "safety"); err == nil {
-		t.Fatal("expected assigned recovery failure")
-	}
-	output := logs.String()
-	if !strings.Contains(output, "action=assigned_recovery phase=failed") || !strings.Contains(output, "retryAfter=5s") {
-		t.Fatalf("assigned recovery failure log = %s", output)
-	}
-	if strings.Contains(output, "assigned_job_recovery") {
-		t.Fatalf("obsolete duplicate recovery event = %s", output)
 	}
 }
 
@@ -101,19 +51,52 @@ func TestScaleSetStatisticsUsesIngestionSafeTriggerField(t *testing.T) {
 	}
 }
 
-func TestClusterAssignedJobRecoveryHandlesMissingStateAndStatistics(t *testing.T) {
+func TestClusterAssignedJobRecoveryHandlesMissingState(t *testing.T) {
 	recovery := inertAssignedJobRecovery()
 	ctx, cancel := context.WithCancel(context.Background())
 	recovery.start(ctx)
 	cancel()
-	if err := recovery.reconcileLatest(context.Background(), "safety"); err != nil {
-		t.Fatal(err)
-	}
 	if latest := recovery.latest(); latest != nil {
 		t.Fatalf("latest statistics = %#v, want nil", latest)
 	}
-	if err := recovery.reconcile(context.Background(), nil, "session"); err == nil {
-		t.Fatal("expected missing statistics failure")
+}
+
+func TestClusterAssignedJobRecoveryRequiresDurableBackend(t *testing.T) {
+	recovery := inertAssignedJobRecovery()
+	recovery.backend = nil
+	statistics := &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
+	if err := recovery.observe(context.Background(), statistics, "message"); err == nil ||
+		!strings.Contains(err.Error(), "observation backend is required") {
+		t.Fatalf("observe() error = %v, want missing backend failure", err)
+	}
+	if latest := recovery.latest(); latest == nil || latest.TotalAssignedJobs != 1 {
+		t.Fatalf("latest statistics = %#v, want remembered observation", latest)
+	}
+}
+
+func TestClusterAssignedJobRecoveryReportsDurableObservationFailure(t *testing.T) {
+	persistenceFailure := errors.New("observation unavailable")
+	recovery := inertAssignedJobRecovery()
+	recovery.backend.state = &fakeClusterState{observeAssignedJobsErr: persistenceFailure}
+	if err := recovery.observe(
+		context.Background(), &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}, "message",
+	); !errors.Is(err, persistenceFailure) {
+		t.Fatalf("observe() error = %v, want %v", err, persistenceFailure)
+	}
+}
+
+func TestClusterAssignedJobRecoveryFailureLogIncludesRetryContext(t *testing.T) {
+	logs := &bytes.Buffer{}
+	recovery := inertAssignedJobRecovery()
+	recovery.logger = slog.New(slog.NewTextHandler(logs, nil))
+	recovery.logStatistics(
+		context.Background(), &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		"message", "failed", errors.New("observation unavailable"),
+	)
+	output := logs.String()
+	if !strings.Contains(output, "assigned_recovery") || !strings.Contains(output, "retryAfter=") ||
+		!strings.Contains(output, "observation unavailable") {
+		t.Fatalf("assigned recovery failure log = %q", output)
 	}
 }
 
@@ -135,53 +118,39 @@ func TestClusterMessageHandlerRequiresStatisticsAndAssignedRecovery(t *testing.T
 	}
 }
 
-func TestClusterMessageAcknowledgementDoesNotWaitForAssignedRecovery(t *testing.T) {
-	fixture := blockedAssignedRecoveryHandler(t)
-	result := make(chan error, 1)
-	go func() {
-		result <- fixture.handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
-			Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
-		})
-	}()
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("message acknowledgement waited for assigned recovery")
-	}
-}
-
-type blockedAssignedRecoveryHandlerFixture struct {
-	handler clusterMessageHandler
-}
-
-func blockedAssignedRecoveryHandler(t *testing.T) blockedAssignedRecoveryHandlerFixture {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	release := make(chan struct{})
-	executor := newAssignedJobRecoveryExecutor(ctx, clusterCoordinationTimeout)
-	recovery := &clusterAssignedJobRecovery{
-		controller: scaler.NewAssignedJobController(blockingAssignedJobBackend{
-			entered: make(chan struct{}), release: release,
-		}),
-		logger: slog.Default(), repository: "repo", scaleSet: "linux", executor: executor,
-	}
-	recovery.start(ctx)
-	t.Cleanup(func() {
-		close(release)
-		recovery.stop()
-		executor.stop()
-		cancel()
-	})
+func TestClusterMessageAcknowledgementWaitsForDurableAssignedObligations(t *testing.T) {
 	state := &fakeClusterState{}
-	return blockedAssignedRecoveryHandlerFixture{handler: clusterMessageHandler{
-		store: state, session: &repositoryScaleSetSession{
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	state.onObserveAssignedJobs = func() {
+		close(entered)
+		<-release
+	}
+	recovery := inertAssignedJobRecovery()
+	recovery.backend.state = state
+	handler := clusterMessageHandler{
+		store: state,
+		session: &repositoryScaleSetSession{
 			key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, assignedJobs: recovery,
 		},
 		scheduler: &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}},
-	}}
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+			Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		})
+	}()
+	<-entered
+	select {
+	case err := <-result:
+		t.Fatalf("message completed before obligations were durable: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestClusterMessageHandlerReportsSchedulingFailure(t *testing.T) {
@@ -275,7 +244,7 @@ func assignedJobMessageHandler(
 	t.Cleanup(func() {
 		leader.stopRepositoryWorkers()
 		leader.repositoryWorkers.wait()
-		leader.assignedJobWorkers.stop()
+		leader.scheduler.wait()
 	})
 	leader.now = func() time.Time { return observedAt }
 	leader.repositoryAppID = 7
@@ -320,7 +289,7 @@ func assertExactDemandPrecedesRecovery(t *testing.T, state *fakeClusterState, me
 	}
 }
 
-func TestClusterAssignedJobRecoveryRunsThroughSharedExecutor(t *testing.T) {
+func TestClusterAssignedJobRecoveryPersistsBeforeScheduling(t *testing.T) {
 	state := &fakeClusterState{}
 	daemon := clusteredDaemonForTest(state)
 	daemon.assignments = state
@@ -328,8 +297,8 @@ func TestClusterAssignedJobRecoveryRunsThroughSharedExecutor(t *testing.T) {
 	leader := newClusterLeader(ctx, daemon, &fakeClusterLease{})
 	defer func() {
 		cancel()
-		leader.assignedJobWorkers.stop()
 		leader.stopRepositoryWorkers()
+		leader.scheduler.wait()
 		leader.repositoryWorkers.wait()
 	}()
 	leader.repositoryAppID = 7
@@ -339,9 +308,11 @@ func TestClusterAssignedJobRecoveryRunsThroughSharedExecutor(t *testing.T) {
 		installationID: 11, runnerScaleSet: &upstream.RunnerScaleSet{ID: 13},
 	}
 	recovery := newClusterAssignedJobRecovery(leader, session)
-	recovery.remember(&upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2})
 	observed := make(chan struct{}, 1)
 	state.onObserveAssignedJobs = func() { observed <- struct{}{} }
+	if err := recovery.prepareInitial(ctx, &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2}); err != nil {
+		t.Fatal(err)
+	}
 	recovery.start(ctx)
 	<-observed
 	observations, _, _ := state.assignedJobsSnapshot()
@@ -350,28 +321,32 @@ func TestClusterAssignedJobRecoveryRunsThroughSharedExecutor(t *testing.T) {
 	}
 }
 
-func TestSuccessfulClusterHeartbeatSignalsIndependentAssignedJobRecovery(t *testing.T) {
-	state := &fakeClusterState{}
+func TestSuccessfulClusterHeartbeatWakesUnifiedObligationScheduling(t *testing.T) {
+	state := &fakeClusterState{assignments: []*cluster.Assignment{{
+		ID: 1, Repository: "independent", ScaleSet: "windows", IdentityFree: true,
+	}}}
 	daemon := activeClusteredDaemon(t, state)
-	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	leader := newClusterLeader(ctx, &daemon, &fakeClusterLease{alive: true})
 	t.Cleanup(func() {
+		cancel()
 		leader.stopRepositoryWorkers()
 		leader.repositoryWorkers.wait()
-		leader.assignedJobWorkers.stop()
+		leader.scheduler.wait()
 	})
-	independent := &clusterAssignedJobRecovery{
-		controller: scaler.NewAssignedJobController(assignedJobBackendForTest(state)),
-		logger:     slog.Default(), repository: "independent", scaleSet: "windows", executor: leader.assignedJobWorkers,
-	}
-	independent.remember(&upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1})
-	observed := make(chan struct{}, 2)
-	state.onObserveAssignedJobs = func() { observed <- struct{}{} }
-	independent.start(context.Background())
+	key := repositoryScaleSetSessionKey{repository: "independent", scaleSet: "windows"}
+	leader.sessions[key] = &repositoryScaleSetSession{key: key}
 	daemon.leader = leader
 	daemon.heartbeat(context.Background())
-	select {
-	case <-observed:
-	case <-time.After(time.Second):
-		t.Fatal("successful heartbeat did not signal independent assigned-job recovery")
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, assignments, _ := state.assignedJobsSnapshot()
+		if len(assignments) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("successful heartbeat did not wake unified obligation scheduling")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

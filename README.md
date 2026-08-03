@@ -192,9 +192,9 @@ In clustered mode, `max_runners` is a per-host contribution. Compatible live hos
 
 For libvirt pools, a runner whose cleanup is still pending continues to consume capacity. RunnerFoundry also fences that request identity until libvirt confirms that the exact owned domain is absent.
 
-Jobs enter one FIFO admission queue per configured runner pool, ordered by GitHub queue time across repositories and hosts. RunnerFoundry gives the oldest repository demand the next available capacity. GitHub selects the exact job within that repository.
+Jobs enter one durable FIFO admission queue per configured runner pool, ordered by GitHub queue time and then by durable observation order across repositories and hosts. The queue contains both identified `JobAvailable` requests and identity-free capacity obligations derived from assigned-job statistics. RunnerFoundry gives capacity to the oldest obligation that is due and runnable; an entry waiting for its retry time does not block later runnable work. GitHub selects the exact job for aggregate assigned capacity.
 
-Jobs already assigned by GitHub are recovered from the initial statistics of each new message session and from every later statistics update in both runtime modes. Positive-request-ID FIFO demand remains distinct and receives capacity first. Aggregate recovery uses only the remaining capacity and never invents a request ID; because the statistic is a count, it cannot restore individual job identity or ordering.
+A positive request ID is optional in this queue because GitHub's aggregate `TotalAssignedJobs` statistic is a count, not a list of requests. Identified obligations retain their positive request ID and use GitHub request acquisition. Aggregate obligations retain their assigned observation and controller epoch, never invent a request ID, and use lifecycle request ID `0` only after assignment reaches provider execution. Durable attempt and next-attempt state preserve retry eligibility through restart or leader failover.
 
 ## Compatibility and supported versions
 
@@ -229,7 +229,7 @@ flowchart LR
 
 ### Standalone mode
 
-Use standalone mode when one RunnerFoundry process and one infrastructure host provide enough capacity. SQLite retains the last conclusive repository catalog, confirmed scale-set registrations, identifiable queued demand, FIFO order, and runner lifecycle state. Put `state.path` on durable local storage so a replacement service can reconnect repository sessions and resume queued work. Stop the service before copying, backing up, or moving the database.
+Use standalone mode when one RunnerFoundry process and one infrastructure host provide enough capacity. SQLite retains the last conclusive repository catalog, confirmed scale-set registrations, unified capacity obligations, FIFO and retry order, assigned observations, and runner lifecycle state. Put `state.path` on durable local storage so a replacement service can reconnect repository sessions and resume queued work. Stop the service before copying, backing up, or moving the database.
 
 Standalone mode is the simplest operating shape, but it has no control-plane failover. Only one process may open a given SQLite database.
 
@@ -237,7 +237,7 @@ Standalone mode is the simplest operating shape, but it has no control-plane fai
 
 Use clustered mode when capacity spans multiple hosts or the control plane needs leader failover. Every node publishes local capacity to PostgreSQL and contends for leadership. One active leader owns GitHub-facing discovery and scale-set sessions. Every live host can execute assignments directed to its operating-system hostname.
 
-PostgreSQL retains the last conclusive repository catalog, confirmed scale-set registrations, global demand, assigned-job observations, host contributions, and assignment state. A replacement leader can reconnect GitHub-facing sessions from that catalog while fresh discovery runs independently. PostgreSQL availability is required for shared scheduling and leadership.
+PostgreSQL retains the last conclusive repository catalog, confirmed scale-set registrations, global capacity obligations and their retry state, assigned-job observations, host contributions, and assignment state. A replacement leader can reconnect GitHub-facing sessions from that catalog while fresh discovery runs independently. PostgreSQL availability is required for shared scheduling and leadership.
 
 ### Docker Compose or libvirt
 
@@ -549,7 +549,7 @@ Together they advertise capacity of six. Neither host receives more assignments 
 
 ### 4. Start and verify the cluster
 
-Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations. Migration 005 persists epoch-fenced assigned-job observations and allows distributed assignments to represent identity-free recovery. Migration 006 permits that intentional request ID `0` in the retained libvirt compatibility lifecycle; it briefly locks and validates that table while all RunnerFoundry nodes are stopped.
+Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 007 unifies identified and assigned-count capacity obligations in `scaler_demand`, makes its request identity optional, and persists retry eligibility. It advances the compatibility floor and must be applied while every RunnerFoundry node is stopped. The equivalent standalone model is SQLite schema version 6 and migrates automatically under SQLite's exclusive process ownership.
 
 ```sh
 sudo systemctl enable --now runnerfoundry
@@ -709,15 +709,15 @@ To drain one clustered host, remove its scale-set contributions from that host's
 
 ### Restart and failover behavior
 
-RunnerFoundry commits identifiable GitHub demand to SQLite or PostgreSQL before acknowledging the message that delivered it. Duplicate delivery updates the existing demand instead of creating another queue entry.
+RunnerFoundry commits capacity obligations from GitHub messages and assigned-job statistics to SQLite or PostgreSQL before acknowledging the message that delivered them. Duplicate delivery updates existing state instead of creating another obligation. Every recreated message session publishes its initial assigned-job observation before polling starts, and each later statistic reconciles the durable aggregate obligations under the current controller epoch.
 
-Every recreated GitHub message session publishes initial assigned-job statistics before polling starts, and each later message refreshes that observation. In clustered mode, publication submits independently scheduled work to a leader-owned four-worker recovery executor. The worker persists the epoch-fenced PostgreSQL observation during its bounded attempt; message acknowledgement does not wait for that persistence, capacity inspection, or runner startup. Work is coalesced by repository and scale set, and clean sessions are not periodically safety-audited. Positive-ID FIFO demand remains higher priority; aggregate recovery starts only the missing capacity and never fabricates request IDs. A lower count reaps only excess waiting runners, while busy runners remain protected.
+Both demand sources share one FIFO ordered by queue time and durable observation ID. Scheduling selects the oldest due, runnable obligation. Provider, GitHub, or coordination failures increment the durable attempt and set its next retry time; an entry in backoff is skipped until due, so it does not hold unused capacity ahead of runnable work. This recovery boundary does not depend on a fixed worker count. A lower assigned count reaps only excess waiting identity-free runners, while busy runners remain protected.
 
 On standalone restart, RunnerFoundry reopens SQLite and increments a controller epoch that fences late writes from the previous controller. It reconnects process-local message sessions from durable repository and registration records while fresh discovery runs independently, then schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
 
 Standalone runner cleanup is checked once per second and before new provisioning. If GitHub reports that a runner still has a job running, RunnerFoundry retains the durable cleanup record and retries that runner after 5, 10, 20, 40, and then at most 60 seconds. The retained lifecycle continues to consume capacity and reserve its runner name across repositories until provider and GitHub absence are confirmed. Other repositories can use remaining capacity without attempting to replace the busy registration. The owning host must regain the matching scale-set configuration and provider access, and GitHub must become reachable, before RunnerFoundry can release the retained capacity and name.
 
-In clustered mode, PostgreSQL persists assigned-job observations under the active controller epoch and distributes their missing capacity as assignments. Positive-ID assignments move through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`; identity-free assignments begin at `ready` because there is no request to acquire. Their provider runner names derive from the durable assignment identity, while lifecycle request ID `0` records that no GitHub request identity exists. Aggregate assigned-count recovery does not create a `scaler_demand` row; that table records only positive request identities received in `JobAvailable`. PostgreSQL separately retains provider-independent runner states through process and leader failure. A runner-name-only `JobStarted` marks the lifecycle row matching its exact name busy before acknowledgement without inventing or rewriting a request ID; positive-request messages retain their existing identity path. A runner-name-only `JobCompleted` similarly records exact cleanup and is reported as successfully correlated by runner name. Terminal completion commits cleanup and completes any matching positive demand and assignments before acknowledgement. A replacement leader retries interrupted positive-ID acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
+In clustered mode, PostgreSQL persists assigned-job observations under the active controller epoch and materializes their missing capacity as `assigned_count` rows in the same `scaler_demand` queue used by `job_available`. Positive-ID assignments move through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`; aggregate assignments reference both their demand row and assigned observation and begin at `ready` because there is no request to acquire. Their provider runner names derive from the durable assignment identity, while lifecycle request ID `0` records that no GitHub request identity exists. PostgreSQL separately retains provider-independent runner states through process and leader failure. Runner-name-only lifecycle messages correlate by exact name without inventing or rewriting a request ID. Terminal completion commits cleanup and completes matching demand and assignments before acknowledgement. A replacement leader retries interrupted positive-ID acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
 
 Before starting a `starting` assignment, the selected host checks for its stable runner name. It checks again after an ambiguous infrastructure-provider error. A process restart repairs local `starting` assignments before claiming new work.
 
@@ -729,13 +729,13 @@ When a host heartbeat expires, its active assignments complete while their deman
 
 When a successful discovery confirms that a repository or installation is no longer exposed to the GitHub App, RunnerFoundry updates durable authority and schedules scoped removal of queued demand, active local runners, message sessions, and managed scale sets. A failed installation repository listing retains that installation's previous authority and does not trigger broad cleanup. A confirmed access change can interrupt active jobs, so drain or schedule it accordingly.
 
-On a normal standalone shutdown, active jobs remain running while message sessions close and scale sets unregister. On clustered shutdown, the leader stops accepting assigned-recovery triggers, cancels the recovery executor, and waits for its four workers to finish bounded calls. Active jobs remain running, sessions close, and the node publishes itself unhealthy. A clustered leader does not delete the shared scale sets when it stops.
+On a normal standalone shutdown, active jobs remain running while message sessions close and scale sets unregister. On clustered shutdown, the leader stops scheduling new obligations and cancels its bounded active calls. Active jobs remain running, sessions close, and the node publishes itself unhealthy. A clustered leader does not delete the shared scale sets when it stops.
 
 ### Upgrade and downgrade
 
 For a normal standalone package upgrade, review release notes, stop the service, install the new package, and start the service.
 
-The project does not publish a mixed-version cluster compatibility policy. Migration 005 advances the schema compatibility floor, so use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration and `leader operational`, then start and verify the remaining nodes. Migration 006 does not advance that floor, but it replaces the retained libvirt lifecycle constraint while the cluster is stopped. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
+The project does not publish a mixed-version cluster compatibility policy. Migration 007 advances the schema compatibility floor for unified capacity obligations. Use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration 007 and `leader operational`, then start and verify the remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
 
 Before downgrading a cluster:
 
@@ -746,6 +746,8 @@ Before downgrading a cluster:
 5. install and start the older release only after rollback succeeds.
 
 Rolling back migration 006 to version 5 additionally requires every identity-free libvirt lifecycle row to finish or be safely reaped. Rollback refuses while any retained libvirt lifecycle has request ID `0`; it never deletes those cleanup obligations.
+
+Rolling back below migration 007 also refuses to discard unified capacity obligations that the target schema cannot represent. Drain or complete those obligations with the current executable before retrying the rollback.
 
 SQLite backups and moves require the standalone service to be stopped.
 
@@ -767,7 +769,7 @@ Confirm that workflow `runs-on` exactly matches `scale_sets[].name`. Check that 
 
 If capacity appears full but no job is running, inspect structured logs for `runner_orphan_detect`, `runner_timeout`, and `runner_reap`. RunnerFoundry verifies GitHub registration when waiting capacity blocks demand, retains the exact cleanup obligation until both provider and GitHub absence are confirmed, and then schedules retained demand. A debug-level `runner_reap` event with phase `deferred` means GitHub still considers the registration busy; this is expected incomplete cleanup and does not degrade repository polling. A `completed` phase means the retained capacity and runner name were released. A `failed` phase remains an actionable provider, GitHub, or lifecycle-store error. Do not manually delete the lifecycle database row.
 
-For clustered assigned capacity, `assigned_recovery_trigger` records why work was submitted or coalesced, and `assigned_recovery` records bounded execution. A failed recovery does not withhold acknowledgement after the session accepted the latest statistics. Repeated failures indicate a PostgreSQL, capacity, provider, or leader-epoch problem rather than a need to recreate a clean message session.
+For clustered assigned capacity, inspect scheduling errors for the obligation source, attempt, and next-attempt time. A backed-off obligation remains durable and becomes eligible again when due; later runnable obligations can continue. Repeated failures indicate a PostgreSQL, capacity, provider, session, or leader-epoch problem rather than a need to recreate a clean message session.
 
 ### Docker capacity is unhealthy
 
@@ -808,7 +810,7 @@ A leader lease, live node heartbeat, or Docker cleanup obligation that the older
 
 ### Repository repairs remain pending
 
-Inspect structured `repository_repair` events for the affected repository and attempt number. Correct App access, GitHub permissions, scale-set conflicts, or network access. Four repository workers execute reconnect and repair work; routine reconciliation uses at most three so urgent recovery retains one worker. Each GitHub attempt is limited to 30 seconds. RunnerFoundry retries only pending repositories after 5, 10, 20, 40, and then 60 seconds until the complete configured registration and session group is active. A pending repository repair does not change an otherwise healthy leader from `leader operational`.
+Inspect structured `repository_repair` events for the affected repository and attempt number. Correct App access, GitHub permissions, scale-set conflicts, or network access. Repository work is bounded and prioritized so urgent reconnect or repair is not starved by routine reconciliation. Each GitHub attempt is limited to 30 seconds. RunnerFoundry retries only pending repositories after 5, 10, 20, 40, and then 60 seconds until the complete configured registration and session group is active. A pending repository repair does not change an otherwise healthy leader from `leader operational`.
 
 If the service reports `leader degraded`, inspect initial repository discovery, repository-state publication, and clustered scale-set aggregation errors. Those failures prevent the leader from establishing desired state and retry on the discovery interval. Once a durable catalog exists, a later discovery failure is logged as stale discovery while the leader remains operational.
 

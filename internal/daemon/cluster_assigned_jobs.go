@@ -74,8 +74,17 @@ func (leader *clusterLeader) startSessionRuntime(ctx context.Context, session *r
 }
 
 func (leader *clusterLeader) wakeAssignedJobRecovery(ctx context.Context) {
-	if leader.assignedJobWorkers != nil {
-		leader.assignedJobWorkers.wakeAssigned(ctx)
+	if ctx.Err() != nil || leader.scheduler == nil {
+		return
+	}
+	leader.sessionsMutex.Lock()
+	scaleSets := make(map[string]struct{}, len(leader.sessions))
+	for key := range leader.sessions {
+		scaleSets[key.scaleSet] = struct{}{}
+	}
+	leader.sessionsMutex.Unlock()
+	for scaleSet := range scaleSets {
+		leader.scheduler.wake(ctx, scaleSet)
 	}
 }
 
@@ -108,20 +117,11 @@ func (backend *clusterAssignedJobBackend) Prepare(
 	return capacity, nil
 }
 
-func (backend *clusterAssignedJobBackend) StartAssigned(ctx context.Context) (bool, error) {
-	_, err := backend.state.AssignAssignedJob(ctx, backend.observation(backend.assignedJobs), backend.now().UTC(), clusterNodeLifetime)
-	if errors.Is(err, cluster.ErrNoAssignment) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("assign clustered assigned job: %w", err)
-	}
-	return true, nil
-}
-
 type clusterAssignedJobRecovery struct {
-	controller       *scaler.AssignedJobController
+	backend          *clusterAssignedJobBackend
+	scheduler        *clusterScheduler
 	logger           *slog.Logger
+	appID            int64
 	repository       string
 	scaleSet         string
 	installationID   githubapp.InstallationID
@@ -129,56 +129,15 @@ type clusterAssignedJobRecovery struct {
 	controllerEpoch  int64
 	statisticsMutex  sync.RWMutex
 	statistics       *upstream.RunnerScaleSetStatistic
-	runtimeDone      <-chan struct{}
-	executor         *assignedJobRecoveryExecutor
 }
 
 func (recovery *clusterAssignedJobRecovery) start(ctx context.Context) {
-	recovery.statisticsMutex.Lock()
-	recovery.runtimeDone = ctx.Done()
-	recovery.statisticsMutex.Unlock()
-	if recovery.executor == nil {
-		return
-	}
-	recovery.executor.register(recovery)
-	if recovery.latest() != nil {
-		recovery.executor.enqueue(ctx, recovery, "session")
-	}
-}
-
-func (recovery *clusterAssignedJobRecovery) cancelAttemptWhenStopped(cancel context.CancelFunc) func() bool {
-	recovery.statisticsMutex.RLock()
-	runtimeDone := recovery.runtimeDone
-	recovery.statisticsMutex.RUnlock()
-	if runtimeDone == nil {
-		return func() bool { return false }
-	}
-	finished := make(chan struct{})
-	go func() {
-		select {
-		case <-runtimeDone:
-			cancel()
-		case <-finished:
-		}
-	}()
-	return func() bool {
-		close(finished)
-		return true
+	if recovery.latest() != nil && recovery.scheduler != nil {
+		recovery.scheduler.wake(ctx, recovery.scaleSet)
 	}
 }
 
 func (recovery *clusterAssignedJobRecovery) stop() {
-	if recovery.executor != nil {
-		recovery.executor.unregister(recovery)
-	}
-}
-
-func (recovery *clusterAssignedJobRecovery) reconcileLatest(ctx context.Context, trigger string) error {
-	statistics := recovery.latest()
-	if statistics == nil {
-		return nil
-	}
-	return recovery.reconcile(ctx, statistics, trigger)
 }
 
 func (recovery *clusterAssignedJobRecovery) observe(
@@ -191,8 +150,19 @@ func (recovery *clusterAssignedJobRecovery) observe(
 	}
 	recovery.remember(statistics)
 	logScaleSetSessionStatistics(ctx, recovery.logger, recovery.repository, recovery.scaleSet, trigger, statistics)
-	if recovery.executor != nil {
-		recovery.executor.enqueue(ctx, recovery, trigger)
+	if recovery.backend == nil {
+		return errors.New("cluster assigned-job observation backend is required")
+	}
+	observationCtx, cancelObservation := context.WithTimeout(ctx, clusterCoordinationTimeout)
+	capacity, err := recovery.backend.Prepare(observationCtx, statistics.TotalAssignedJobs)
+	cancelObservation()
+	if err != nil {
+		return fmt.Errorf("persist clustered capacity obligations: %w", err)
+	}
+	recovery.logStatistics(ctx, statistics, trigger, "completed", nil,
+		slog.Int("runningRunners", capacity.ActiveRunners), slog.Int("queuedRunners", statistics.TotalAssignedJobs-capacity.ActiveRunners))
+	if recovery.scheduler != nil {
+		recovery.scheduler.wake(ctx, recovery.scaleSet)
 	}
 	return nil
 }
@@ -202,15 +172,6 @@ func (recovery *clusterAssignedJobRecovery) prepareInitial(
 	statistics *upstream.RunnerScaleSetStatistic,
 ) error {
 	return recovery.observe(ctx, statistics, "session")
-}
-
-func (recovery *clusterAssignedJobRecovery) key() repositoryScaleSetSessionKey {
-	return repositoryScaleSetSessionKey{repository: recovery.repository, scaleSet: recovery.scaleSet}
-}
-
-func (recovery *clusterAssignedJobRecovery) hasAssignedJobs() bool {
-	statistics := recovery.latest()
-	return statistics != nil && statistics.TotalAssignedJobs > 0
 }
 
 func newClusterAssignedJobRecovery(
@@ -223,30 +184,12 @@ func newClusterAssignedJobRecovery(
 		controllerEpoch: leader.repositoryControllerEpoch, now: leader.now,
 	}
 	return &clusterAssignedJobRecovery{
-		controller: scaler.NewAssignedJobController(backend), logger: leader.daemon.logger,
+		logger: leader.daemon.logger, backend: backend, scheduler: leader.scheduler,
+		appID:      leader.repositoryAppID,
 		repository: session.key.repository, scaleSet: session.key.scaleSet,
 		installationID: session.installationID, githubScaleSetID: session.runnerScaleSet.ID,
-		controllerEpoch: leader.repositoryControllerEpoch, executor: leader.assignedJobWorkers,
+		controllerEpoch: leader.repositoryControllerEpoch,
 	}
-}
-
-func (recovery *clusterAssignedJobRecovery) reconcile(
-	ctx context.Context,
-	statistics *upstream.RunnerScaleSetStatistic,
-	trigger string,
-) error {
-	if statistics == nil {
-		return errors.New("initial scale set session statistics are required")
-	}
-	recovery.logStatistics(ctx, statistics, trigger, "started", nil)
-	result, err := recovery.controller.Reconcile(ctx, statistics.TotalAssignedJobs)
-	if err != nil {
-		recovery.logStatistics(ctx, statistics, trigger, "failed", err)
-		return fmt.Errorf("reconcile clustered assigned jobs: %w", err)
-	}
-	recovery.logStatistics(ctx, statistics, trigger, "completed", nil,
-		slog.Int("runningRunners", result.RunningRunners), slog.Int("startedRunners", result.StartedRunners))
-	return nil
 }
 
 func (recovery *clusterAssignedJobRecovery) remember(statistics *upstream.RunnerScaleSetStatistic) {

@@ -59,7 +59,7 @@ func TestSQLiteStoreReportsInMemoryLockAndOpenFailures(t *testing.T) {
 func TestSQLiteStoreRunsEveryMigrationInMemory(t *testing.T) {
 	fixture := mockDemandStore(t)
 	expectSchemaVersion(fixture.mock, 0)
-	for _, statementCount := range []int{2, 2, 2, len(runnerLifecycleMigrationSteps), len(repositoryStateMigrationSteps)} {
+	for _, statementCount := range []int{2, 2, 2, len(runnerLifecycleMigrationSteps), len(repositoryStateMigrationSteps), len(capacityObligationMigrationSteps)} {
 		fixture.mock.ExpectBegin()
 		for range statementCount {
 			fixture.mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -86,20 +86,26 @@ func TestSQLiteDemandMutationsSucceedInMemory(t *testing.T) {
 	for _, operation := range []func() error{
 		func() error { return fixture.store.RemoveRepository(context.Background(), "set", "repo") },
 		func() error { return fixture.store.RemoveScaleSet(context.Background(), "set") },
-		func() error { return fixture.store.Delete(context.Background(), "set", "repo", 1) },
 	} {
+		fixture.mock.ExpectBegin()
+		fixture.mock.ExpectExec("DELETE FROM assigned_capacity_observations").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectCommit()
 		if err = operation(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err = fixture.store.Delete(context.Background(), "set", "repo", 1); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestSQLiteDemandRowsDecodeInMemory(t *testing.T) {
 	fixture := mockDemandStore(t)
-	fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(sqlmock.NewRows(
-		[]string{"repository", "request_id", "queue_time", "acquired", "observation_order"},
-	).AddRow("repo", 1, int64(2), true, 3))
+	fixture.mock.ExpectQuery("SELECT demand_id").WillReturnRows(sqlmock.NewRows(
+		[]string{"demand_id", "repository", "request_id", "queue_time", "acquired", "observation_order", "source", "assigned_observation_id", "controller_epoch", "attempt", "next_attempt_at"},
+	).AddRow(3, "repo", 1, int64(2), true, 3, "job_available", 0, 0, 0, int64(2)))
 	demands, err := fixture.store.Ordered(context.Background(), "set")
 	if err != nil || len(demands) != 1 || demands[0].Repository != "repo" {
 		t.Fatalf("demands = %#v, %v", demands, err)

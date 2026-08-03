@@ -121,6 +121,44 @@ func TestClusterSchedulerAllowsUnrelatedScaleSetsToAcquireConcurrently(t *testin
 	assertScheduleSucceeded(t, windowsDone)
 }
 
+func TestClusterSchedulerMakesIdentityFreeObligationReadyWithoutAcquisition(t *testing.T) {
+	state := &fakeClusterState{assignments: []*cluster.Assignment{{
+		ID: 8, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo",
+		IdentityFree: true, State: cluster.AssignmentReady,
+	}}}
+	messageClient := &fakeMessageClient{}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	scheduler := &clusterScheduler{store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{
+		key: {key: key, messageClient: scaleSetMessageClient{Client: messageClient}},
+	}}
+	if _, err := scheduler.scheduleOne(context.Background(), "linux"); err != nil {
+		t.Fatal(err)
+	}
+	if len(messageClient.acquiredIDs) != 0 || len(state.ready) != 0 {
+		t.Fatalf("identity-free obligation acquired=%v confirmed=%v", messageClient.acquiredIDs, state.ready)
+	}
+}
+
+func TestClusterSchedulerUsesConfiguredSafetyWakeInterval(t *testing.T) {
+	expectedInterval := 17 * time.Millisecond
+	scheduler := &clusterScheduler{safetyWakeInterval: expectedInterval}
+	if interval := scheduler.wakeInterval(); interval != expectedInterval {
+		t.Fatalf("wake interval = %v, want %v", interval, expectedInterval)
+	}
+}
+
+func TestClusterSchedulerWithoutLeaderLifetimeUsesCallerCancellation(t *testing.T) {
+	scheduler := &clusterScheduler{}
+	workerCtx, cancelWorker := scheduler.workerLoopContext(context.Background())
+	if err := workerCtx.Err(); err != nil {
+		t.Fatalf("worker context started canceled: %v", err)
+	}
+	cancelWorker()
+	if err := workerCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker context error = %v, want cancellation", err)
+	}
+}
+
 type parallelAcquisitionFixture struct {
 	scheduler      *clusterScheduler
 	linuxClient    *blockingAcquisitionMessageClient
