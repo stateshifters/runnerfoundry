@@ -155,12 +155,6 @@ func assertCoordinatorClaimBranches(t *testing.T, coordinator *Coordinator) {
 }
 
 func TestCoordinatorScheduleStoreAndCapacityFailures(t *testing.T) {
-	cleanupStore := newRecordingCapacityObligationStore(nil)
-	cleanupStore.cleanupErr = errors.New("cleanup")
-	if err := NewDurableCoordinator("linux", 1, cleanupStore).Schedule(context.Background()); err == nil {
-		t.Fatal("expected cleanup failure")
-	}
-
 	orderedStore := newRecordingCapacityObligationStore(nil)
 	orderedStore.orderedErr = errors.New("ordered")
 	if err := NewDurableCoordinator("linux", 1, orderedStore).Schedule(context.Background()); err == nil {
@@ -189,15 +183,11 @@ func TestCoordinatorExecutionFailureBranches(t *testing.T) {
 	store := newRecordingCapacityObligationStore(nil)
 	coordinator := NewDurableCoordinator("linux", 1, store)
 	aggregate := capacityTestDemand(1, "repo", 0, CapacityObligationAssignedCount, time.Now())
-	if err := coordinator.executeAssignedObligation(context.Background(), store, &plainCapacityWorker{}, aggregate); err == nil {
+	if err := coordinator.executeAssignedObligation(context.Background(), &plainCapacityWorker{}, aggregate); err == nil {
 		t.Fatal("expected unsupported aggregate worker")
 	}
-	if err := coordinator.executeAssignedObligation(context.Background(), store, &recordingCapacityWorker{assignedErr: errors.New("start")}, aggregate); err == nil {
+	if err := coordinator.executeAssignedObligation(context.Background(), &recordingCapacityWorker{assignedErr: errors.New("start")}, aggregate); err == nil {
 		t.Fatal("expected aggregate start failure")
-	}
-	store.deleteErr = errors.New("delete")
-	if err := coordinator.executeAssignedObligation(context.Background(), store, &recordingCapacityWorker{}, aggregate); err == nil {
-		t.Fatal("expected aggregate deletion failure")
 	}
 	assertExactExecutionBranches(t, coordinator, store)
 }
@@ -272,12 +262,6 @@ func TestCapacityObligationRetryDelayBounds(t *testing.T) {
 
 func TestCoordinatorRemainingCapacityObligationBranches(t *testing.T) {
 	baseStore := newRecordingCapacityObligationStore(nil)
-	withoutCleanup := &capacityStoreWithoutCleanup{DemandStore: baseStore, capacity: baseStore}
-	coordinator := NewDurableCoordinator("linux", 1, withoutCleanup)
-	if err := coordinator.deleteLifecycleOwnedObligations(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
 	inventoryStore := &inventoryRecordingCapacityStore{
 		recordingCapacityObligationStore: baseStore, inventoryErr: errors.New("inventory"),
 	}
@@ -380,33 +364,3 @@ func (worker *contextInspectingCapacityWorker) Acquire(ctx context.Context, _ in
 }
 func (*contextInspectingCapacityWorker) StartOne(context.Context, int64) error { return nil }
 func (*contextInspectingCapacityWorker) StartAssigned(context.Context) error   { return nil }
-
-type capacityStoreWithoutCleanup struct {
-	DemandStore
-	capacity *recordingCapacityObligationStore
-}
-
-func (store *capacityStoreWithoutCleanup) ObserveAssignedCapacity(
-	ctx context.Context,
-	observation AssignedCapacityObservation,
-	activeCapacity int,
-) (AssignedObligationDecision, error) {
-	return store.capacity.ObserveAssignedCapacity(ctx, observation, activeCapacity)
-}
-func (store *capacityStoreWithoutCleanup) OrderedReady(
-	ctx context.Context,
-	scaleSet string,
-	cutoff time.Time,
-) ([]QueuedDemand, error) {
-	return store.capacity.OrderedReady(ctx, scaleSet, cutoff)
-}
-func (store *capacityStoreWithoutCleanup) RecordObligationFailure(
-	ctx context.Context,
-	obligationID int64,
-	retryAt time.Time,
-) error {
-	return store.capacity.RecordObligationFailure(ctx, obligationID, retryAt)
-}
-func (store *capacityStoreWithoutCleanup) DeleteObligation(ctx context.Context, obligationID int64) error {
-	return store.capacity.DeleteObligation(ctx, obligationID)
-}

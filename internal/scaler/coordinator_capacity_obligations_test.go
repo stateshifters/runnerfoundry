@@ -43,8 +43,8 @@ func assertAggregateObligationExecution(
 	if len(worker.acquired) != 0 || len(worker.namedStarts) != 0 {
 		t.Fatalf("aggregate obligation used exact path: acquired=%#v named=%#v", worker.acquired, worker.namedStarts)
 	}
-	if !store.wasDeleted(1) {
-		t.Fatal("successful aggregate obligation was not removed after durable lifecycle reservation")
+	if store.wasDeleted(1) {
+		t.Fatal("successful aggregate obligation was removed before terminal completion")
 	}
 }
 

@@ -34,7 +34,31 @@ func TestSQLiteMessageUpdateReportsCommitFailure(t *testing.T) {
 	}
 }
 
+func TestSQLiteMessageUpdateReportsExactInspectionFailure(t *testing.T) {
+	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithDemand(), func(mock sqlmock.Sqlmock, failure error) {
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM demand").WillReturnError(failure)
+	})
+}
+
+func TestSQLiteMessageUpdateReportsQueueSnapshotFailure(t *testing.T) {
+	want := errors.New("snapshot failed")
+	fixture := newSQLiteMessageUpdateFixture(t)
+	expectSQLiteMessageThroughAssignedReconciliation(fixture.mock)
+	fixture.mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM").WillReturnError(want)
+	fixture.mock.ExpectRollback()
+	if _, err := fixture.store.ApplyMessageUpdate(context.Background(), validSQLiteMessageUpdate()); !errors.Is(err, want) {
+		t.Fatalf("queue snapshot error = %v, want %v", err, want)
+	}
+}
+
 func expectSQLiteMessageThroughCapacityReconciliation(mock sqlmock.Sqlmock) {
+	expectSQLiteMessageThroughAssignedReconciliation(mock)
+	mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM").WillReturnRows(
+		sqlmock.NewRows([]string{"job_available", "assigned_count", "oldest_runnable_at"}).AddRow(0, 0, nil),
+	)
+}
+
+func expectSQLiteMessageThroughAssignedReconciliation(mock sqlmock.Sqlmock) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT 1 FROM repository_controls").
 		WillReturnRows(sqlmock.NewRows([]string{"current"}).AddRow(1))

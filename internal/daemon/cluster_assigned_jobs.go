@@ -22,8 +22,25 @@ func (leader *clusterLeader) activateRepositorySessionGeneration(
 	statuses []cluster.ScaleSetStatus,
 	started []*repositoryScaleSetSession,
 ) error {
+	desired, exists := leader.currentDesiredRepository(repository)
+	if !exists {
+		desired = desiredRepositoryGeneration{repository: githubapp.Repository{URL: repository}, statuses: statuses}
+	}
+	return leader.activateDesiredRepositorySessionGeneration(ctx, desired, started)
+}
+
+func (leader *clusterLeader) activateDesiredRepositorySessionGeneration(
+	ctx context.Context,
+	expected desiredRepositoryGeneration,
+	started []*repositoryScaleSetSession,
+) error {
+	if err := leader.bootstrapRepositorySessionGeneration(ctx, started); err != nil {
+		return err
+	}
 	leader.desiredMutex.Lock()
-	if leader.desiredStateKnown && !sameScaleSetStatuses(leader.desiredRepositories[repository], statuses) {
+	desired, exists := leader.desiredRepositories[expected.repository.URL]
+	if leader.desiredStateKnown && (!exists || desired.generation != expected.generation ||
+		desired.repository != expected.repository || !sameScaleSetStatuses(desired.statuses, expected.statuses)) {
 		leader.desiredMutex.Unlock()
 		return errRepositoryWorkObsolete
 	}
@@ -33,10 +50,6 @@ func (leader *clusterLeader) activateRepositorySessionGeneration(
 		leader.sessions[session.key] = session
 	}
 	leader.sessionsMutex.Unlock()
-	if err := leader.bootstrapRepositorySessionGeneration(ctx, started); err != nil {
-		leader.detachRepositorySessionGeneration(started)
-		return err
-	}
 	for _, session := range started {
 		leader.scheduler.add(session)
 	}
@@ -89,13 +102,15 @@ func (leader *clusterLeader) wakeAssignedJobRecovery(ctx context.Context) {
 }
 
 type clusterAssignedJobBackend struct {
-	state           clusterAssignedJobState
-	appID           int64
-	repository      string
-	scaleSet        string
-	controllerEpoch int64
-	now             func() time.Time
-	assignedJobs    int
+	state            clusterAssignedJobState
+	appID            int64
+	repository       string
+	scaleSet         string
+	controllerEpoch  int64
+	now              func() time.Time
+	assignedJobs     int
+	latestResult     cluster.AssignedJobObservationResult
+	latestObservedAt time.Time
 }
 
 func (backend clusterAssignedJobBackend) observation(assignedJobs int) cluster.AssignedJobObservation {
@@ -110,11 +125,14 @@ func (backend *clusterAssignedJobBackend) Prepare(
 	assignedJobs int,
 ) (scaler.AssignedJobCapacity, error) {
 	backend.assignedJobs = assignedJobs
-	capacity, err := backend.state.ObserveAssignedJobs(ctx, backend.observation(assignedJobs))
+	observation := backend.observation(assignedJobs)
+	result, err := backend.state.ObserveAssignedJobs(ctx, observation)
 	if err != nil {
 		return scaler.AssignedJobCapacity{}, fmt.Errorf("observe clustered assigned jobs: %w", err)
 	}
-	return capacity, nil
+	backend.latestResult = result
+	backend.latestObservedAt = observation.ObservedAt
+	return result.Capacity, nil
 }
 
 type clusterAssignedJobRecovery struct {
@@ -127,6 +145,7 @@ type clusterAssignedJobRecovery struct {
 	installationID   githubapp.InstallationID
 	githubScaleSetID int
 	controllerEpoch  int64
+	generation       uint64
 	statisticsMutex  sync.RWMutex
 	statistics       *upstream.RunnerScaleSetStatistic
 }
@@ -158,6 +177,10 @@ func (recovery *clusterAssignedJobRecovery) observe(
 	}
 	recovery.logStatistics(ctx, statistics, trigger, "completed", nil,
 		slog.Int("runningRunners", capacity.ActiveRunners), slog.Int("queuedRunners", statistics.TotalAssignedJobs-capacity.ActiveRunners))
+	logCapacityObligationState(ctx, recovery.logger, recovery.generation, scaler.MessageUpdate{
+		Repository: recovery.repository, ScaleSet: recovery.scaleSet,
+		ControllerEpoch: recovery.controllerEpoch, ObservedAt: recovery.backend.latestObservedAt,
+	}, recovery.backend.latestResult.QueueUpdate)
 	if recovery.scheduler != nil {
 		recovery.scheduler.wake(ctx, recovery.scaleSet)
 	}
@@ -175,6 +198,7 @@ func newClusterAssignedJobRecovery(
 	leader *clusterLeader,
 	session *repositoryScaleSetSession,
 ) *clusterAssignedJobRecovery {
+	desired, _ := leader.currentDesiredRepository(session.key.repository)
 	backend := &clusterAssignedJobBackend{
 		state: leader.daemon.assignments, appID: leader.repositoryAppID,
 		repository: session.key.repository, scaleSet: session.key.scaleSet,
@@ -185,7 +209,7 @@ func newClusterAssignedJobRecovery(
 		appID:      leader.repositoryAppID,
 		repository: session.key.repository, scaleSet: session.key.scaleSet,
 		installationID: session.installationID, githubScaleSetID: session.runnerScaleSet.ID,
-		controllerEpoch: leader.repositoryControllerEpoch,
+		controllerEpoch: leader.repositoryControllerEpoch, generation: desired.generation,
 	}
 }
 

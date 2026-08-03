@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -43,6 +44,124 @@ func TestClusterMessageUpdateRollsBackStatisticsWithPriorEffects(t *testing.T) {
 	assertClusterMessageRollback(
 		t, clusterMessageUpdateWithDemandAndStart(), 3, "INSERT INTO scaler_assigned_job_observations",
 	)
+}
+
+func TestClusterMessageUpdateReturnsCommittedQueueReconciliationAndSnapshot(t *testing.T) {
+	oldestRunnableAt := time.Unix(80, 0).UTC()
+	transaction := committedClusterMessageTransaction(t, oldestRunnableAt)
+	update := clusterMessageUpdateWithDemand()
+	update.AssignedJobs = 2
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), update,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommittedClusterQueueSnapshot(t, result, oldestRunnableAt)
+}
+
+func committedClusterMessageTransaction(t *testing.T, oldestRunnableAt time.Time) *fakeDatabaseTransaction {
+	t.Helper()
+	transaction := successfulClusterMessageTransaction(t)
+	transaction.execTags = []pgconn.CommandTag{
+		pgconn.NewCommandTag("INSERT 0 1"),
+		pgconn.NewCommandTag("INSERT 0 1"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("INSERT 0 2"),
+	}
+	transaction.rowResults[len(transaction.rowResults)-1] = capacityObligationQueueSnapshotRow(
+		t, 1, 2, &oldestRunnableAt,
+	)
+	return transaction
+}
+
+func assertCommittedClusterQueueSnapshot(
+	t *testing.T,
+	result scaler.MessageUpdateResult,
+	oldestRunnableAt time.Time,
+) {
+	t.Helper()
+	if result.AssignedObligations != (scaler.AssignedObligationDecision{Create: 2}) {
+		t.Fatalf("assigned obligation decision = %#v", result.AssignedObligations)
+	}
+	wantSnapshot := scaler.CapacityObligationQueueSnapshot{
+		JobAvailable: 1, AssignedCount: 2, NewlyQueued: 3, OldestRunnableAt: &oldestRunnableAt,
+	}
+	if result.QueueSnapshot.JobAvailable != wantSnapshot.JobAvailable ||
+		result.QueueSnapshot.AssignedCount != wantSnapshot.AssignedCount ||
+		result.QueueSnapshot.NewlyQueued != wantSnapshot.NewlyQueued ||
+		result.QueueSnapshot.Canceled != wantSnapshot.Canceled ||
+		result.QueueSnapshot.OldestRunnableAt == nil ||
+		!result.QueueSnapshot.OldestRunnableAt.Equal(*wantSnapshot.OldestRunnableAt) {
+		t.Fatalf("queue snapshot = %#v, want %#v", result.QueueSnapshot, wantSnapshot)
+	}
+}
+
+func TestClusterMessageUpdateCountsOnlyNewExactObligations(t *testing.T) {
+	transaction := successfulClusterMessageTransaction(t)
+	transaction.execTags = []pgconn.CommandTag{
+		pgconn.NewCommandTag("INSERT 0 1"), pgconn.NewCommandTag("INSERT 0 0"),
+	}
+	transaction.rowResults[len(transaction.rowResults)-1] = capacityObligationQueueSnapshotRow(t, 1, 0, nil)
+	update := clusterMessageUpdateWithDemand()
+	update.Available = append(update.Available, update.Available[0])
+
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), update,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QueueSnapshot.NewlyQueued != 1 || result.QueueSnapshot.JobAvailable != 1 {
+		t.Fatalf("deduplicated exact queue snapshot = %#v", result.QueueSnapshot)
+	}
+}
+
+func TestClusterMessageUpdateReturnsActuallyCanceledAggregateObligations(t *testing.T) {
+	transaction := successfulClusterMessageTransaction(t)
+	transaction.execTags = []pgconn.CommandTag{
+		pgconn.NewCommandTag("INSERT 0 1"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("UPDATE 0"),
+		pgconn.NewCommandTag("DELETE 2"),
+	}
+	transaction.rowResults[2] = queuedObligationCountRow(t, 2)
+	transaction.rowResults[len(transaction.rowResults)-1] = capacityObligationQueueSnapshotRow(t, 0, 0, nil)
+
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), validClusterMessageUpdate(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AssignedObligations.Cancel != 2 || result.QueueSnapshot.Canceled != 2 {
+		t.Fatalf("aggregate cancellation result = %#v", result)
+	}
+}
+
+func capacityObligationQueueSnapshotRow(
+	t *testing.T,
+	jobAvailable int,
+	assignedCount int,
+	oldestRunnableAt *time.Time,
+) fakeRow {
+	t.Helper()
+	return fakeRow{scan: func(destinations ...any) {
+		*destination[int](t, destinations[0]) = jobAvailable
+		*destination[int](t, destinations[1]) = assignedCount
+		*destination[*time.Time](t, destinations[2]) = oldestRunnableAt
+	}}
 }
 
 func assertClusterMessageRollback(

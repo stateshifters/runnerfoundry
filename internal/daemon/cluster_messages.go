@@ -36,15 +36,42 @@ func (handler clusterMessageHandler) HandleMessage(ctx context.Context, message 
 	update.AppID = handler.session.assignedJobs.appID
 	update.ControllerEpoch = handler.session.assignedJobs.controllerEpoch
 	updateCtx, cancelUpdate := context.WithTimeout(ctx, messageUpdateTimeout)
-	_, err = handler.store.ApplyMessageUpdate(updateCtx, update)
+	result, err := handler.store.ApplyMessageUpdate(updateCtx, update)
 	cancelUpdate()
 	if err != nil {
 		return fmt.Errorf("persist clustered scale-set message: %w", err)
 	}
 	handler.logCommittedDemand(ctx, update)
 	handler.logCommittedCompletions(ctx, message.JobCompletedMessages)
+	logCapacityObligationState(ctx, handler.logger, handler.session.assignedJobs.generation, update, result)
 	handler.session.assignedJobs.remember(message.Statistics)
 	return handler.scheduler.schedule(ctx, update.ScaleSet)
+}
+
+func logCapacityObligationState(
+	ctx context.Context,
+	logger *slog.Logger,
+	generation uint64,
+	update scaler.MessageUpdate,
+	result scaler.MessageUpdateResult,
+) {
+	attributes := []slog.Attr{
+		slog.String("repository", update.Repository),
+		slog.String("scaleSet", update.ScaleSet),
+		slog.Int("jobAvailable", result.QueueSnapshot.JobAvailable),
+		slog.Int("assignedCount", result.QueueSnapshot.AssignedCount),
+		slog.Int("newlyQueued", result.QueueSnapshot.NewlyQueued),
+		slog.Int("canceled", result.QueueSnapshot.Canceled),
+		slog.Int("createdAssigned", result.AssignedObligations.Create),
+		slog.Int("canceledAssigned", result.AssignedObligations.Cancel),
+		slog.Uint64("generation", generation),
+		slog.Int64("epoch", update.ControllerEpoch),
+	}
+	if result.QueueSnapshot.OldestRunnableAt != nil {
+		age := max(update.ObservedAt.Sub(*result.QueueSnapshot.OldestRunnableAt), time.Duration(0))
+		attributes = append(attributes, slog.Duration("oldestRunnableAge", age))
+	}
+	logAction(ctx, logger, slog.LevelInfo, "capacity_obligation", "reconciled", attributes...)
 }
 
 func (handler clusterMessageHandler) observedAt() time.Time {

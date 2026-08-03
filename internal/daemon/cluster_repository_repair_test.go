@@ -149,9 +149,9 @@ func assertDuplicateRepairFailureCoalesced(t *testing.T, leader *clusterLeader, 
 	if repair.attempts != 1 {
 		t.Fatalf("recorded repair attempts = %d, want 1", repair.attempts)
 	}
-	leader.recordRepositoryRepair(
-		context.Background(), repair.repository, repair.statuses, errors.New("duplicate failure"),
-	)
+	leader.recordDesiredRepositoryRepair(context.Background(), desiredRepositoryGeneration{
+		repository: repair.repository, statuses: repair.statuses, generation: repair.generation,
+	}, errors.New("duplicate failure"))
 	repair = pendingRepairSnapshot(leader, "https://github.com/acme/failing")
 	if repair.attempts != 1 {
 		t.Fatalf("duplicate failure advanced repair attempts to %d", repair.attempts)
@@ -347,6 +347,7 @@ func TestRepositoryRepairLogsLifecycle(t *testing.T) {
 			"{\"level\":\"WARN\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"pending\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":1,\"retryAfter\":5000000000,\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"retrying\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"session_statistics\",\"action\":\"session_statistics\",\"phase\":\"observed\",\"trigger\":\"session\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"capacity_obligation\",\"action\":\"capacity_obligation\",\"phase\":\"reconciled\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"jobAvailable\":0,\"assignedCount\":0,\"newlyQueued\":0,\"canceled\":0,\"createdAssigned\":0,\"canceledAssigned\":0,\"generation\":1,\"epoch\":0}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}")
 	leader.stop(context.Background())
 }

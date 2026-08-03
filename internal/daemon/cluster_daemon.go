@@ -109,7 +109,7 @@ type clusterExactSchedulingState interface {
 }
 
 type clusterAssignedJobState interface {
-	ObserveAssignedJobs(ctx context.Context, observation cluster.AssignedJobObservation) (scaler.AssignedJobCapacity, error)
+	ObserveAssignedJobs(ctx context.Context, observation cluster.AssignedJobObservation) (cluster.AssignedJobObservationResult, error)
 }
 
 type clusterAssignmentState interface {

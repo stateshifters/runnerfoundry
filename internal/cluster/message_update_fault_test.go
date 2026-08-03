@@ -76,6 +76,19 @@ func TestClusterMessageUpdateReportsCommitFailure(t *testing.T) {
 	}
 }
 
+func TestClusterMessageUpdateRollsBackQueueSnapshotFailure(t *testing.T) {
+	failure := errors.New("snapshot failed")
+	transaction := successfulClusterMessageTransaction(t)
+	transaction.rowResults[len(transaction.rowResults)-1] = fakeRow{err: failure}
+
+	_, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), validClusterMessageUpdate(),
+	)
+	if !errors.Is(err, failure) || transaction.rollbackCalls != 1 {
+		t.Fatalf("snapshot error = %v, rollbacks = %d", err, transaction.rollbackCalls)
+	}
+}
+
 func TestClusterMessageUpdateReportsConnectionCloseFailure(t *testing.T) {
 	failure := errors.New("close failed")
 	connection := &fakeDatabaseConnection{transaction: successfulClusterMessageTransaction(t), closeErr: failure}
@@ -120,5 +133,6 @@ func successfulClusterMessageTransaction(t *testing.T) *fakeDatabaseTransaction 
 	t.Helper()
 	return &fakeDatabaseTransaction{rowResults: []fakeRow{
 		clusterEpochRow(t, 3), availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0),
+		capacityObligationQueueSnapshotRow(t, 0, 0, nil),
 	}}
 }

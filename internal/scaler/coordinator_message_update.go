@@ -33,5 +33,6 @@ func (coordinator *Coordinator) ApplyMessageUpdate(
 	if _, durable := coordinator.store.(CapacityObligationStore); !durable {
 		coordinator.ObserveAssigned(update.Repository, update.AssignedJobs)
 	}
+	result.ControllerEpoch = update.ControllerEpoch
 	return result, nil
 }

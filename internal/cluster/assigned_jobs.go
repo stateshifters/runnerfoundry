@@ -76,29 +76,53 @@ const completeExcessAssignedAssignmentsSQL = `UPDATE scaler_assignments assignme
 func (store *Store) ObserveAssignedJobs(
 	ctx context.Context,
 	observation AssignedJobObservation,
-) (capacity scaler.AssignedJobCapacity, resultErr error) {
+) (result AssignedJobObservationResult, resultErr error) {
 	if err := validateAssignedJobObservation(observation); err != nil {
-		return capacity, err
+		return result, err
 	}
 	connection, err := store.connector(ctx)
 	if err != nil {
-		return capacity, err
+		return result, err
 	}
 	defer finishConnection(ctx, connection, &resultErr)
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
-		return capacity, fmt.Errorf("begin assigned-job observation: %w", err)
+		return result, fmt.Errorf("begin assigned-job observation: %w", err)
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	if err = applyAssignedJobObservation(ctx, transaction, observation, &capacity); err != nil {
-		return capacity, err
+	result, err = observeAssignedJobsInTransaction(ctx, transaction, observation)
+	if err != nil {
+		return result, err
 	}
 	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
-		return capacity, fmt.Errorf("commit assigned-job observation: %w", err)
+		return result, fmt.Errorf("commit assigned-job observation: %w", err)
 	}
-	return capacity, nil
+	return result, nil
+}
+
+func observeAssignedJobsInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+) (AssignedJobObservationResult, error) {
+	result := AssignedJobObservationResult{}
+	decision, err := applyAssignedJobObservation(ctx, transaction, observation, &result.Capacity)
+	if err != nil {
+		return result, err
+	}
+	result.QueueUpdate.AssignedObligations = decision
+	result.QueueUpdate.QueueSnapshot, err = loadCapacityObligationQueueSnapshot(ctx, transaction, scaler.MessageUpdate{
+		AppID: observation.AppID, Repository: observation.Repository, ScaleSet: observation.ScaleSet,
+		ControllerEpoch: observation.ControllerEpoch, ObservedAt: observation.ObservedAt,
+	})
+	if err != nil {
+		return AssignedJobObservationResult{}, err
+	}
+	result.QueueUpdate.QueueSnapshot.NewlyQueued = decision.Create
+	result.QueueUpdate.QueueSnapshot.Canceled = decision.Cancel
+	return result, nil
 }
 
 func applyAssignedJobObservation(
@@ -106,7 +130,7 @@ func applyAssignedJobObservation(
 	transaction *databaseTransaction,
 	observation AssignedJobObservation,
 	capacity *scaler.AssignedJobCapacity,
-) error {
+) (scaler.AssignedObligationDecision, error) {
 	operations := []func(context.Context, *databaseTransaction, AssignedJobObservation) error{
 		upsertAssignedJobObservation,
 		adoptLifecycleBackedAssignedAssignments,
@@ -116,11 +140,11 @@ func applyAssignedJobObservation(
 	}
 	for _, operation := range operations {
 		if err := operation(ctx, transaction, observation); err != nil {
-			return err
+			return scaler.AssignedObligationDecision{}, err
 		}
 	}
 	if err := loadAssignedJobCapacity(ctx, transaction, observation, capacity); err != nil {
-		return err
+		return scaler.AssignedObligationDecision{}, err
 	}
 	return reconcileQueuedAssignedObligations(ctx, transaction, observation, capacity.ActiveRunners)
 }
@@ -151,7 +175,7 @@ func reconcileQueuedAssignedObligations(
 	transaction *databaseTransaction,
 	observation AssignedJobObservation,
 	activeCapacity int,
-) error {
+) (scaler.AssignedObligationDecision, error) {
 	var queuedObligations int
 	err := transaction.QueryRow(ctx, `SELECT COUNT(*)
 		FROM scaler_demand demand
@@ -163,23 +187,40 @@ func reconcileQueuedAssignedObligations(
 		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')`,
 		observation.AppID, observation.Repository, observation.ScaleSet).Scan(&queuedObligations)
 	if err != nil {
-		return fmt.Errorf("count queued assigned obligations: %w", err)
+		return scaler.AssignedObligationDecision{}, fmt.Errorf("count queued assigned obligations: %w", err)
 	}
-	decision := scaler.DecideAssignedObligations(scaler.AssignedObligationSnapshot{
+	requested := scaler.DecideAssignedObligations(scaler.AssignedObligationSnapshot{
 		AssignedJobs: observation.AssignedJobs, ActiveCapacity: activeCapacity,
 		QueuedObligations: queuedObligations,
 	})
-	if decision.Cancel > 0 {
-		if err = cancelQueuedAssignedObligations(ctx, transaction, observation, decision.Cancel); err != nil {
-			return err
+	return applyAssignedObligationDecision(ctx, transaction, observation, requested)
+}
+
+func applyAssignedObligationDecision(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+	requested scaler.AssignedObligationDecision,
+) (scaler.AssignedObligationDecision, error) {
+	actualDecision := scaler.AssignedObligationDecision{}
+	var err error
+	if requested.Cancel > 0 {
+		actualDecision.Cancel, err = cancelQueuedAssignedObligations(
+			ctx, transaction, observation, requested.Cancel,
+		)
+		if err != nil {
+			return scaler.AssignedObligationDecision{}, err
 		}
 	}
-	if decision.Create > 0 {
-		if err = createQueuedAssignedObligations(ctx, transaction, observation, decision.Create); err != nil {
-			return err
+	if requested.Create > 0 {
+		actualDecision.Create, err = createQueuedAssignedObligations(
+			ctx, transaction, observation, requested.Create,
+		)
+		if err != nil {
+			return scaler.AssignedObligationDecision{}, err
 		}
 	}
-	return nil
+	return actualDecision, nil
 }
 
 func cancelQueuedAssignedObligations(
@@ -187,8 +228,8 @@ func cancelQueuedAssignedObligations(
 	transaction *databaseTransaction,
 	observation AssignedJobObservation,
 	count int,
-) error {
-	_, err := transaction.Exec(ctx, `WITH canceled AS (
+) (int, error) {
+	commandTag, err := transaction.Exec(ctx, `WITH canceled AS (
 		SELECT demand.demand_id
 		FROM scaler_demand demand
 		JOIN scaler_assigned_job_observations assigned
@@ -204,9 +245,9 @@ func cancelQueuedAssignedObligations(
 	WHERE demand.demand_id = canceled.demand_id`, observation.AppID, observation.Repository,
 		observation.ScaleSet, count)
 	if err != nil {
-		return fmt.Errorf("cancel queued assigned obligations: %w", err)
+		return 0, fmt.Errorf("cancel queued assigned obligations: %w", err)
 	}
-	return nil
+	return int(commandTag.RowsAffected()), nil
 }
 
 func createQueuedAssignedObligations(
@@ -214,8 +255,8 @@ func createQueuedAssignedObligations(
 	transaction *databaseTransaction,
 	observation AssignedJobObservation,
 	count int,
-) error {
-	_, err := transaction.Exec(ctx, `INSERT INTO scaler_demand
+) (int, error) {
+	commandTag, err := transaction.Exec(ctx, `INSERT INTO scaler_demand
 		(app_id, scale_set, repository, request_id, queue_time, source,
 		 assigned_observation_id, controller_epoch, attempt, next_attempt_at)
 	SELECT assigned.app_id, assigned.scale_set, assigned.repository_url, NULL,
@@ -228,9 +269,9 @@ func createQueuedAssignedObligations(
 		observation.AppID, observation.Repository, observation.ScaleSet,
 		observation.ControllerEpoch, count)
 	if err != nil {
-		return fmt.Errorf("queue assigned obligations: %w", err)
+		return 0, fmt.Errorf("queue assigned obligations: %w", err)
 	}
-	return nil
+	return int(commandTag.RowsAffected()), nil
 }
 
 func adoptLifecycleBackedAssignedAssignments(

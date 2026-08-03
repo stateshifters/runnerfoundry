@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,9 +62,54 @@ func TestClusterMessageSchedulesOnlyAfterAtomicCommit(t *testing.T) {
 	}
 }
 
+func TestClusterMessageReportsCommittedCapacityObligationState(t *testing.T) {
+	oldestRunnableAt := time.Unix(90, 0).UTC()
+	logs, handler := capacityObligationMessageHandler(oldestRunnableAt)
+	message := &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 4}}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	assertCapacityObligationMessageLog(t, logs.String())
+}
+
+func capacityObligationMessageHandler(oldestRunnableAt time.Time) (*bytes.Buffer, clusterMessageHandler) {
+	state := &messageUpdateHandlerState{
+		fakeClusterState: &fakeClusterState{},
+		result: scaler.MessageUpdateResult{
+			AssignedObligations: scaler.AssignedObligationDecision{Create: 2, Cancel: 1},
+			QueueSnapshot: scaler.CapacityObligationQueueSnapshot{
+				JobAvailable: 3, AssignedCount: 4, NewlyQueued: 2, Canceled: 1,
+				OldestRunnableAt: &oldestRunnableAt,
+			},
+		},
+	}
+	logs := &bytes.Buffer{}
+	handler := messageUpdateClusterHandler(state)
+	handler.logger = slog.New(slog.NewJSONHandler(logs, nil))
+	handler.session.assignedJobs.controllerEpoch = 1
+	handler.session.assignedJobs.generation = 5
+	return logs, handler
+}
+
+func assertCapacityObligationMessageLog(t *testing.T, logged string) {
+	t.Helper()
+	for _, expected := range []string{
+		`"action":"capacity_obligation"`, `"phase":"reconciled"`, `"repository":"repo"`,
+		`"scaleSet":"linux"`, `"jobAvailable":3`, `"assignedCount":4`, `"newlyQueued":2`,
+		`"canceled":1`, `"createdAssigned":2`, `"canceledAssigned":1`, `"epoch":1`,
+		`"generation":5`,
+	} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("capacity obligation log %q does not contain %q", logged, expected)
+		}
+	}
+}
+
 type messageUpdateHandlerState struct {
 	*fakeClusterState
 	applyErr       error
+	result         scaler.MessageUpdateResult
 	applyCalls     int
 	scheduleCalls  int
 	committed      bool
@@ -79,7 +127,7 @@ func (state *messageUpdateHandlerState) ApplyMessageUpdate(
 		return scaler.MessageUpdateResult{}, state.applyErr
 	}
 	state.committed = true
-	return scaler.MessageUpdateResult{}, nil
+	return state.result, nil
 }
 
 func (state *messageUpdateHandlerState) AssignOldest(

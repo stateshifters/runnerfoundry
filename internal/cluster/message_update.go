@@ -29,16 +29,37 @@ func (store *Store) ApplyMessageUpdate(
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	if err = validateClusterMessageEpoch(ctx, transaction, update); err != nil {
-		return result, err
-	}
-	if err = applyClusterMessageEffects(ctx, transaction, update); err != nil {
+	result, err = applyMessageUpdateInTransaction(ctx, transaction, update)
+	if err != nil {
 		return result, err
 	}
 	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
 		return result, fmt.Errorf("commit clustered message update: %w", err)
 	}
+	return result, nil
+}
+
+func applyMessageUpdateInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update scaler.MessageUpdate,
+) (scaler.MessageUpdateResult, error) {
+	result := scaler.MessageUpdateResult{}
+	if err := validateClusterMessageEpoch(ctx, transaction, update); err != nil {
+		return result, err
+	}
+	newlyQueued, decision, err := applyClusterMessageEffects(ctx, transaction, update)
+	if err != nil {
+		return result, err
+	}
+	result.AssignedObligations = decision
+	result.QueueSnapshot, err = loadCapacityObligationQueueSnapshot(ctx, transaction, update)
+	if err != nil {
+		return scaler.MessageUpdateResult{}, err
+	}
+	result.QueueSnapshot.NewlyQueued = newlyQueued + decision.Create
+	result.QueueSnapshot.Canceled = decision.Cancel
 	return result, nil
 }
 
@@ -67,32 +88,41 @@ func applyClusterMessageEffects(
 	ctx context.Context,
 	transaction *databaseTransaction,
 	update scaler.MessageUpdate,
-) error {
-	if err := applyClusterMessageDemand(ctx, transaction, update); err != nil {
-		return err
+) (int, scaler.AssignedObligationDecision, error) {
+	newlyQueued, err := applyClusterMessageDemand(ctx, transaction, update)
+	if err != nil {
+		return 0, scaler.AssignedObligationDecision{}, err
 	}
-	if err := applyClusterMessageStarts(ctx, transaction, update); err != nil {
-		return err
+	if startErr := applyClusterMessageStarts(ctx, transaction, update); startErr != nil {
+		return 0, scaler.AssignedObligationDecision{}, startErr
 	}
-	if err := applyClusterMessageCompletions(ctx, transaction, update); err != nil {
-		return err
+	if completionErr := applyClusterMessageCompletions(ctx, transaction, update); completionErr != nil {
+		return 0, scaler.AssignedObligationDecision{}, completionErr
 	}
-	return applyClusterMessageStatistics(ctx, transaction, update)
+	decision, err := applyClusterMessageStatistics(ctx, transaction, update)
+	return newlyQueued, decision, err
 }
 
-func applyClusterMessageDemand(ctx context.Context, transaction *databaseTransaction, update scaler.MessageUpdate) error {
+func applyClusterMessageDemand(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update scaler.MessageUpdate,
+) (int, error) {
+	newlyQueued := 0
 	for _, demand := range update.Available {
-		if _, err := transaction.Exec(ctx, `INSERT INTO scaler_demand
+		commandTag, err := transaction.Exec(ctx, `INSERT INTO scaler_demand
 			(app_id, scale_set, repository, request_id, queue_time, source,
 			 controller_epoch, attempt, next_attempt_at)
 			VALUES ($1, $2, $3, $4, $5, 'job_available', 0, 0, $5)
 			ON CONFLICT (app_id, scale_set, repository, request_id)
 			WHERE source = 'job_available' DO NOTHING`,
-			update.AppID, update.ScaleSet, update.Repository, demand.RequestID, demand.QueueTime); err != nil {
-			return fmt.Errorf("record clustered message demand: %w", err)
+			update.AppID, update.ScaleSet, update.Repository, demand.RequestID, demand.QueueTime)
+		if err != nil {
+			return 0, fmt.Errorf("record clustered message demand: %w", err)
 		}
+		newlyQueued += int(commandTag.RowsAffected())
 	}
-	return nil
+	return newlyQueued, nil
 }
 
 func applyClusterMessageStarts(ctx context.Context, transaction *databaseTransaction, update scaler.MessageUpdate) error {
@@ -116,12 +146,55 @@ func applyClusterMessageCompletions(ctx context.Context, transaction *databaseTr
 	return nil
 }
 
-func applyClusterMessageStatistics(ctx context.Context, transaction *databaseTransaction, update scaler.MessageUpdate) error {
+func applyClusterMessageStatistics(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update scaler.MessageUpdate,
+) (scaler.AssignedObligationDecision, error) {
 	capacity := scaler.AssignedJobCapacity{}
 	return applyAssignedJobObservation(ctx, transaction, AssignedJobObservation{
 		AppID: update.AppID, Repository: update.Repository, ScaleSet: update.ScaleSet,
 		ControllerEpoch: update.ControllerEpoch, AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
 	}, &capacity)
+}
+
+func loadCapacityObligationQueueSnapshot(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update scaler.MessageUpdate,
+) (scaler.CapacityObligationQueueSnapshot, error) {
+	var snapshot scaler.CapacityObligationQueueSnapshot
+	err := transaction.QueryRow(ctx, `SELECT
+		COUNT(*) FILTER (WHERE demand.source = 'job_available'),
+		COUNT(*) FILTER (WHERE demand.source = 'assigned_count'),
+		MIN(demand.queue_time) FILTER (WHERE demand.next_attempt_at <= $5
+		  AND (demand.source = 'job_available' OR (
+		      assigned.controller_epoch = demand.controller_epoch
+		      AND control.controller_epoch = demand.controller_epoch
+		  ))
+		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')
+		  AND NOT EXISTS (SELECT 1 FROM scaler_runner_lifecycle lifecycle
+		      JOIN scaler_assignments lifecycle_assignment
+		        ON lifecycle_assignment.assignment_id = lifecycle.assignment_id
+		      WHERE lifecycle_assignment.demand_id = demand.demand_id)
+		  AND NOT EXISTS (SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
+		      WHERE lifecycle.scale_set = demand.scale_set
+		        AND lifecycle.repository = demand.repository
+		        AND lifecycle.request_id = COALESCE(demand.request_id, 0)
+		        AND lifecycle.reap_requested))
+		FROM scaler_demand demand
+		LEFT JOIN scaler_assigned_job_observations assigned
+		  ON assigned.assigned_observation_id = demand.assigned_observation_id
+		LEFT JOIN scaler_repository_controls control ON control.app_id = demand.app_id
+		WHERE demand.app_id = $1 AND demand.repository = $2 AND demand.scale_set = $3
+		  AND control.controller_epoch = $4`,
+		update.AppID, update.Repository, update.ScaleSet, update.ControllerEpoch, update.ObservedAt,
+	).Scan(&snapshot.JobAvailable, &snapshot.AssignedCount, &snapshot.OldestRunnableAt)
+	if err != nil {
+		return scaler.CapacityObligationQueueSnapshot{}, fmt.Errorf("load clustered capacity-obligation queue snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 func applyClusterMessageStart(

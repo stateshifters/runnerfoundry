@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ApplyMessageUpdate persists one complete GitHub message under the current
@@ -54,6 +55,22 @@ func applySQLiteMessageEffects(
 	update MessageUpdate,
 	result *MessageUpdateResult,
 ) error {
+	newExactObligations, err := countNewSQLiteExactObligations(ctx, transaction, update)
+	if err != nil {
+		return err
+	}
+	if err = applySQLiteMessageLifecycleEffects(ctx, transaction, update); err != nil {
+		return err
+	}
+	decision, err := reconcileSQLiteMessageStatistics(ctx, transaction, update)
+	result.AssignedObligations = decision
+	if err != nil {
+		return err
+	}
+	return populateSQLiteMessageQueueSnapshot(ctx, transaction, update, newExactObligations, decision, result)
+}
+
+func applySQLiteMessageLifecycleEffects(ctx context.Context, transaction *sql.Tx, update MessageUpdate) error {
 	removals := startedDemandRemovals(update)
 	if err := applyDemandChanges(ctx, transaction, update.ScaleSet, update.Available, removals); err != nil {
 		return err
@@ -71,16 +88,95 @@ func applySQLiteMessageEffects(
 			return err
 		}
 	}
+	return nil
+}
+
+func reconcileSQLiteMessageStatistics(
+	ctx context.Context,
+	transaction *sql.Tx,
+	update MessageUpdate,
+) (AssignedObligationDecision, error) {
 	activeCapacity, err := sqliteMessageActiveCapacity(ctx, transaction, update.ScaleSet, update.Repository)
 	if err != nil {
-		return err
+		return AssignedObligationDecision{}, err
 	}
 	decision, err := reconcileAssignedCapacityObservation(ctx, transaction, AssignedCapacityObservation{
 		ScaleSet: update.ScaleSet, Repository: update.Repository, ControllerEpoch: update.ControllerEpoch,
 		AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
 	}, activeCapacity)
-	result.AssignedObligations = decision
-	return err
+	return decision, err
+}
+
+func populateSQLiteMessageQueueSnapshot(
+	ctx context.Context,
+	transaction *sql.Tx,
+	update MessageUpdate,
+	newExactObligations int,
+	decision AssignedObligationDecision,
+	result *MessageUpdateResult,
+) error {
+	queueSnapshot, err := sqliteCapacityObligationQueueSnapshot(ctx, transaction, update.ScaleSet, update.ObservedAt)
+	if err != nil {
+		return err
+	}
+	queueSnapshot.NewlyQueued = newExactObligations + decision.Create
+	queueSnapshot.Canceled = decision.Cancel
+	result.QueueSnapshot = queueSnapshot
+	return nil
+}
+
+func countNewSQLiteExactObligations(
+	ctx context.Context,
+	transaction *sql.Tx,
+	update MessageUpdate,
+) (int, error) {
+	seen := make(map[int64]struct{}, len(update.Available))
+	newObligations := 0
+	for _, demand := range update.Available {
+		if _, duplicate := seen[demand.RequestID]; duplicate {
+			continue
+		}
+		seen[demand.RequestID] = struct{}{}
+		var existing int
+		err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM demand
+			WHERE scale_set = ? AND repository = ? AND request_id = ? AND source = 'job_available'`,
+			update.ScaleSet, update.Repository, demand.RequestID).Scan(&existing)
+		if err != nil {
+			return 0, fmt.Errorf("inspect existing exact capacity obligation: %w", err)
+		}
+		if existing == 0 {
+			newObligations++
+		}
+	}
+	return newObligations, nil
+}
+
+func sqliteCapacityObligationQueueSnapshot(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet string,
+	runnableAt time.Time,
+) (CapacityObligationQueueSnapshot, error) {
+	var snapshot CapacityObligationQueueSnapshot
+	var oldestRunnableNanoseconds sql.NullInt64
+	err := transaction.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN source = 'job_available' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN source = 'assigned_count' THEN 1 ELSE 0 END), 0),
+		MIN(CASE WHEN next_attempt_at <= ? AND (
+			source = 'job_available' OR NOT EXISTS (
+				SELECT 1 FROM runner_lifecycle lifecycle WHERE lifecycle.assignment_id = demand.demand_id
+			)
+		) THEN queue_time END)
+		FROM demand WHERE scale_set = ?`, runnableAt.UnixNano(), scaleSet).
+		Scan(&snapshot.JobAvailable, &snapshot.AssignedCount, &oldestRunnableNanoseconds)
+	if err != nil {
+		return snapshot, fmt.Errorf("load capacity obligation queue snapshot: %w", err)
+	}
+	if oldestRunnableNanoseconds.Valid {
+		oldestRunnableAt := time.Unix(0, oldestRunnableNanoseconds.Int64).UTC()
+		snapshot.OldestRunnableAt = &oldestRunnableAt
+	}
+	return snapshot, nil
 }
 
 func sqliteMessageActiveCapacity(

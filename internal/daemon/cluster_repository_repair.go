@@ -11,6 +11,8 @@ import (
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
+var errRepositorySessionGenerationIncomplete = errors.New("repository session generation is incomplete")
+
 var repositoryRepairRetryDelays = [...]time.Duration{
 	5 * time.Second,
 	10 * time.Second,
@@ -22,6 +24,7 @@ var repositoryRepairRetryDelays = [...]time.Duration{
 type repositoryRepair struct {
 	repository githubapp.Repository
 	statuses   []cluster.ScaleSetStatus
+	generation uint64
 	attempts   int
 	retryAfter time.Time
 }
@@ -33,29 +36,30 @@ type repositoryRepairResult struct {
 
 func (leader *clusterLeader) reconcileDesiredRepository(
 	ctx context.Context,
-	repository githubapp.Repository,
-	statuses []cluster.ScaleSetStatus,
+	desired desiredRepositoryGeneration,
 ) error {
 	repairCtx, cancelRepair := context.WithTimeout(ctx, leader.githubOperationTimeout)
 	defer cancelRepair()
-	return leader.reconcileRepositorySessions(repairCtx, repository, statuses)
+	return leader.reconcileRepositoryGeneration(repairCtx, desired)
 }
 
-func (leader *clusterLeader) recordRepositoryRepair(
+func (leader *clusterLeader) recordDesiredRepositoryRepair(
 	ctx context.Context,
-	repository githubapp.Repository,
-	statuses []cluster.ScaleSetStatus,
+	desired desiredRepositoryGeneration,
 	repairErr error,
 ) {
+	repository := desired.repository
+	statuses := desired.statuses
 	leader.repairMutex.Lock()
 	repair := leader.pendingRepositoryRepairs[repository.URL]
 	if repair.repository == repository && sameScaleSetStatuses(repair.statuses, statuses) &&
-		leader.now().Before(repair.retryAfter) {
+		repair.generation == desired.generation && leader.now().Before(repair.retryAfter) {
 		leader.repairMutex.Unlock()
 		return
 	}
 	repair.repository = repository
 	repair.statuses = append([]cluster.ScaleSetStatus(nil), statuses...)
+	repair.generation = desired.generation
 	delayIndex := min(repair.attempts, len(leader.repositoryRepairDelays)-1)
 	delay := leader.repositoryRepairDelays[delayIndex]
 	repair.attempts++
@@ -72,16 +76,17 @@ func (leader *clusterLeader) repositoryRepairAlreadyScheduled(
 	repository githubapp.Repository,
 	statuses []cluster.ScaleSetStatus,
 ) bool {
+	desired, _ := leader.currentDesiredRepository(repository.URL)
 	leader.repairMutex.Lock()
 	defer leader.repairMutex.Unlock()
 	repair, pending := leader.pendingRepositoryRepairs[repository.URL]
 	if !pending {
 		return false
 	}
-	if repair.repository == repository && sameScaleSetStatuses(repair.statuses, statuses) {
+	if repair.repository == repository && sameScaleSetStatuses(repair.statuses, statuses) &&
+		repair.generation == desired.generation {
 		return true
 	}
-	delete(leader.pendingRepositoryRepairs, repository.URL)
 	return false
 }
 
@@ -92,10 +97,10 @@ func requestRepositoryRepair(requests chan<- struct{}) {
 	}
 }
 
-func (leader *clusterLeader) completeRepositoryRepair(ctx context.Context, repository string) {
+func (leader *clusterLeader) completeRepositoryRepair(ctx context.Context, repository string, generation uint64) {
 	leader.repairMutex.Lock()
 	repair, pending := leader.pendingRepositoryRepairs[repository]
-	if !pending {
+	if !pending || repair.generation != generation {
 		leader.repairMutex.Unlock()
 		return
 	}
@@ -105,16 +110,63 @@ func (leader *clusterLeader) completeRepositoryRepair(ctx context.Context, repos
 		slog.String("repository", repository), slog.Int("attempt", repair.attempts+1))
 }
 
+func (leader *clusterLeader) cancelRepositoryRepair(ctx context.Context, repository string, generation uint64) {
+	leader.repairMutex.Lock()
+	repair, pending := leader.pendingRepositoryRepairs[repository]
+	if !pending || repair.generation != generation {
+		leader.repairMutex.Unlock()
+		return
+	}
+	delete(leader.pendingRepositoryRepairs, repository)
+	leader.repairMutex.Unlock()
+	logAction(ctx, leader.daemon.logger, slog.LevelInfo, "repository_repair", "canceled",
+		slog.String("repository", repository), slog.Int("attempt", repair.attempts))
+}
+
+func (leader *clusterLeader) supersedeRepositoryRepair(
+	ctx context.Context,
+	desired desiredRepositoryGeneration,
+) {
+	leader.repairMutex.Lock()
+	repair := leader.pendingRepositoryRepairs[desired.repository.URL]
+	repair.repository = desired.repository
+	repair.statuses = append([]cluster.ScaleSetStatus(nil), desired.statuses...)
+	repair.generation = desired.generation
+	repair.retryAfter = leader.now()
+	leader.pendingRepositoryRepairs[desired.repository.URL] = repair
+	leader.repairMutex.Unlock()
+	logAction(ctx, leader.daemon.logger, slog.LevelInfo, "repository_repair", "superseded",
+		slog.String("repository", desired.repository.URL), slog.Int("attempt", repair.attempts))
+	requestRepositoryRepair(leader.daemon.repositoryRepairRequests)
+}
+
 func (leader *clusterLeader) retainDesiredRepositoryRepairs(
 	repositories map[string]githubapp.Repository,
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 ) {
+	desiredRepairs := make(map[string]desiredRepositoryGeneration, len(repositories))
+	for repository := range repositories {
+		current, exists := leader.currentDesiredRepository(repository)
+		if exists {
+			desiredRepairs[repository] = current
+		}
+	}
 	leader.repairMutex.Lock()
 	defer leader.repairMutex.Unlock()
-	for repository := range leader.pendingRepositoryRepairs {
+	for repository, repair := range leader.pendingRepositoryRepairs {
 		_, repositoryDesired := repositories[repository]
-		if !repositoryDesired || len(desiredRepositoryStatuses(repository, desired)) == 0 {
+		current, generationDesired := desiredRepairs[repository]
+		if !repositoryDesired || len(desiredRepositoryStatuses(repository, desired)) == 0 || !generationDesired {
 			delete(leader.pendingRepositoryRepairs, repository)
+			continue
+		}
+		if repair.repository != current.repository || !sameScaleSetStatuses(repair.statuses, current.statuses) ||
+			repair.generation != current.generation {
+			repair.repository = current.repository
+			repair.statuses = append([]cluster.ScaleSetStatus(nil), current.statuses...)
+			repair.generation = current.generation
+			repair.retryAfter = leader.now()
+			leader.pendingRepositoryRepairs[repository] = repair
 		}
 	}
 }
@@ -144,7 +196,11 @@ func (leader *clusterLeader) enqueueRepositoryRepairs(
 		logAction(ctx, leader.daemon.logger, slog.LevelInfo, "repository_repair", "retrying",
 			slog.String("repository", repository), slog.Int("attempt", repair.attempts+1))
 		leader.repositoryWorkers.enqueue(repository, repositoryWorkUrgent, func(attemptCtx context.Context) error {
-			return leader.reconcileDesiredRepository(attemptCtx, repair.repository, repair.statuses)
+			return leader.reconcileDesiredRepository(attemptCtx, desiredRepositoryGeneration{
+				repository: repair.repository,
+				statuses:   repair.statuses,
+				generation: repair.generation,
+			})
 		}, func(err error) { results <- repositoryRepairResult{repair: repair, err: err} })
 	}
 	return results
@@ -169,11 +225,77 @@ func (leader *clusterLeader) awaitRepositoryRepairs(
 }
 
 func (leader *clusterLeader) applyRepositoryRepairResult(ctx context.Context, result repositoryRepairResult) {
-	if result.err != nil && !errors.Is(result.err, errRepositoryWorkObsolete) {
-		leader.recordRepositoryRepair(ctx, result.repair.repository, result.repair.statuses, result.err)
+	leader.finishRepositoryReconciliation(ctx, desiredRepositoryGeneration{
+		repository: result.repair.repository,
+		statuses:   result.repair.statuses,
+		generation: result.repair.generation,
+	}, result.err)
+}
+
+func (leader *clusterLeader) finishRepositoryReconciliation(
+	ctx context.Context,
+	expected desiredRepositoryGeneration,
+	resultErr error,
+) {
+	authority := leader.repositoryReconciliationAuthority(expected)
+	if authority.removed {
+		leader.cancelRepositoryRepair(ctx, expected.repository.URL, expected.generation)
 		return
 	}
-	leader.completeRepositoryRepair(ctx, result.repair.repository.URL)
+	if authority.superseded || errors.Is(resultErr, errRepositoryWorkObsolete) {
+		leader.supersedeRepositoryRepair(ctx, authority.desired)
+		return
+	}
+	leader.finishAuthorizedRepositoryReconciliation(ctx, authority, resultErr)
+}
+
+type repositoryReconciliationAuthority struct {
+	desired    desiredRepositoryGeneration
+	known      bool
+	removed    bool
+	superseded bool
+}
+
+func (leader *clusterLeader) repositoryReconciliationAuthority(
+	expected desiredRepositoryGeneration,
+) repositoryReconciliationAuthority {
+	desired, exists, known := leader.desiredRepositorySnapshot(expected.repository.URL)
+	if known && !exists {
+		return repositoryReconciliationAuthority{known: true, removed: true}
+	}
+	if !exists {
+		desired = expected
+	}
+	superseded := desired.generation != expected.generation || desired.repository != expected.repository ||
+		!sameScaleSetStatuses(desired.statuses, expected.statuses)
+	return repositoryReconciliationAuthority{desired: desired, known: known, superseded: superseded}
+}
+
+func (leader *clusterLeader) finishAuthorizedRepositoryReconciliation(
+	ctx context.Context,
+	authority repositoryReconciliationAuthority,
+	resultErr error,
+) {
+	desired := authority.desired
+	if resultErr != nil {
+		leader.recordDesiredRepositoryRepair(ctx, desired, resultErr)
+		return
+	}
+	if leader.repositoryGenerationReady(desired) {
+		leader.completeRepositoryRepair(ctx, desired.repository.URL, desired.generation)
+		return
+	}
+	if !authority.known && leader.repositoryRepairSupersedes(desired) {
+		return
+	}
+	leader.recordDesiredRepositoryRepair(ctx, desired, errRepositorySessionGenerationIncomplete)
+}
+
+func (leader *clusterLeader) repositoryRepairSupersedes(desired desiredRepositoryGeneration) bool {
+	leader.repairMutex.Lock()
+	defer leader.repairMutex.Unlock()
+	repair, exists := leader.pendingRepositoryRepairs[desired.repository.URL]
+	return exists && repair.generation > desired.generation
 }
 
 func (leader *clusterLeader) dueRepositoryRepairs() []repositoryRepair {

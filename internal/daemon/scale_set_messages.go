@@ -47,6 +47,8 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	for _, demand := range update.Available {
 		handler.logDemand("available", demand.RequestID, demand.QueueTime)
 	}
+	update.ControllerEpoch = result.ControllerEpoch
+	logCapacityObligationState(ctx, handler.Logger, 0, update, result)
 	if err = handler.Coordinator.Schedule(ctx); err != nil {
 		return fmt.Errorf("schedule shared runner capacity: %w", err)
 	}

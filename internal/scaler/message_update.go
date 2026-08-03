@@ -40,6 +40,18 @@ type MessageUpdate struct {
 
 type MessageUpdateResult struct {
 	AssignedObligations AssignedObligationDecision
+	QueueSnapshot       CapacityObligationQueueSnapshot
+	ControllerEpoch     int64
+}
+
+// CapacityObligationQueueSnapshot describes one repository and scale set's
+// durable queue immediately after a message update commits its effects.
+type CapacityObligationQueueSnapshot struct {
+	JobAvailable     int
+	AssignedCount    int
+	NewlyQueued      int
+	Canceled         int
+	OldestRunnableAt *time.Time
 }
 
 type MessageUpdateStore interface {

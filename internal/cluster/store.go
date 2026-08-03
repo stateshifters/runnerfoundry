@@ -148,6 +148,11 @@ type AssignedJobObservation struct {
 	ObservedAt      time.Time
 }
 
+type AssignedJobObservationResult struct {
+	Capacity    scaler.AssignedJobCapacity
+	QueueUpdate scaler.MessageUpdateResult
+}
+
 type LibvirtRunnerLifecycle struct {
 	NodeID     NodeID
 	ScaleSet   string

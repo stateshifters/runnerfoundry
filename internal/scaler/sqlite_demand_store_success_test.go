@@ -172,7 +172,9 @@ func TestSQLiteRunnerCompletionAndQueriesSucceedInMemory(t *testing.T) {
 	fixture := mockDemandStore(t)
 	now := time.Unix(1, 2).UTC()
 	fixture.mock.ExpectBegin()
-	for _, statement := range []string{"UPDATE runner_lifecycle", "UPDATE libvirt_runner_lifecycle", "DELETE FROM demand"} {
+	for _, statement := range []string{
+		"UPDATE runner_lifecycle", "UPDATE libvirt_runner_lifecycle", "DELETE FROM demand", "DELETE FROM demand",
+	} {
 		fixture.mock.ExpectExec(statement).WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	fixture.mock.ExpectCommit()
@@ -227,6 +229,7 @@ func TestSQLiteLifecycleNoOpAndIdentityFreeCompletionSucceed(t *testing.T) {
 	fixture.mock.ExpectBegin()
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectCommit()
 	if err := fixture.store.CompleteRunnerLifecycleJob(context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo"}, now); err != nil {
 		t.Fatal(err)

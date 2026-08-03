@@ -20,7 +20,7 @@ func inertAssignedJobRecovery() *clusterAssignedJobRecovery {
 			state: &fakeClusterState{}, appID: 1, repository: "repo", scaleSet: "linux",
 			controllerEpoch: 1, now: func() time.Time { return time.Unix(100, 0) },
 		},
-		logger: slog.Default(), repository: "repo", scaleSet: "linux",
+		logger: slog.Default(), repository: "repo", scaleSet: "linux", controllerEpoch: 1,
 	}
 }
 
@@ -82,6 +82,26 @@ func TestClusterAssignedJobRecoveryReportsDurableObservationFailure(t *testing.T
 		context.Background(), &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1}, "message",
 	); !errors.Is(err, persistenceFailure) {
 		t.Fatalf("observe() error = %v, want %v", err, persistenceFailure)
+	}
+}
+
+func TestInitialClusterAssignedJobObservationReportsCommittedQueueState(t *testing.T) {
+	logs := &bytes.Buffer{}
+	recovery := inertAssignedJobRecovery()
+	recovery.logger = slog.New(slog.NewJSONHandler(logs, nil))
+
+	if err := recovery.prepareInitial(
+		context.Background(), &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`"action":"capacity_obligation"`, `"phase":"reconciled"`, `"repository":"repo"`,
+		`"scaleSet":"linux"`, `"epoch":1`,
+	} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Fatalf("initial observation log %q does not contain %q", logs.String(), expected)
+		}
 	}
 }
 

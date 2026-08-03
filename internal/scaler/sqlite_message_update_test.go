@@ -24,6 +24,7 @@ func TestSQLiteMessageUpdateRejectsStaleEpochBeforeMutation(t *testing.T) {
 
 func TestSQLiteMessageUpdateRollsBackDemandFailure(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithDemand(), func(mock sqlmock.Sqlmock, failure error) {
+		expectNoExistingSQLiteExactObligation(mock)
 		mock.ExpectExec("INSERT INTO demand").WillReturnError(failure)
 	})
 }
@@ -46,12 +47,18 @@ func TestSQLiteMessageUpdateRollsBackStatisticsWithPriorEffects(t *testing.T) {
 }
 
 func expectSQLiteMessageStatisticsFailure(mock sqlmock.Sqlmock, failure error) {
+	expectNoExistingSQLiteExactObligation(mock)
 	mock.ExpectExec("INSERT INTO demand").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT controller_epoch").WillReturnRows(sqlmock.NewRows([]string{"controller_epoch", "observed_at"}))
 	mock.ExpectExec("INSERT INTO assigned_capacity_observations").WillReturnError(failure)
+}
+
+func expectNoExistingSQLiteExactObligation(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM demand").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 }
 
 func assertSQLiteMessageRollback(
@@ -83,14 +90,122 @@ func TestSQLiteMessageUpdateReconcilesStatisticsAgainstPostCompletionCapacity(t 
 		AssignedJobs: 1, ActiveCapacity: 1, ObservedAt: observedAt,
 		Completed: []RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}},
 	}
-	result, err := store.ApplyMessageUpdate(ctx, update)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := applySQLiteMessageUpdate(ctx, t, store, update)
 	if result.AssignedObligations.Create != 1 {
 		t.Fatalf("post-completion obligation decision = %#v", result.AssignedObligations)
 	}
 	assertPostCompletionObligation(ctx, t, store, observedAt)
+}
+
+func TestSQLiteMessageUpdateReturnsCommittedQueueSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := openSQLiteCapacityStore(t)
+	snapshot, err := store.StartController(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := time.Unix(300, 0).UTC()
+	update := MessageUpdate{
+		AppID: 7, Repository: "repo", ScaleSet: "linux", ControllerEpoch: snapshot.Control.ControllerEpoch,
+		AssignedJobs: 2, ObservedAt: observedAt,
+		Available: []JobDemand{
+			{Repository: "repo", RequestID: 42, QueueTime: observedAt.Add(-time.Second)},
+			{Repository: "repo", RequestID: 42, QueueTime: observedAt.Add(-time.Second)},
+		},
+	}
+	result, err := store.ApplyMessageUpdate(ctx, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSQLiteQueueSnapshot(t, result.QueueSnapshot, 1, 2, 3, 0, update.Available[0].QueueTime)
+
+	result = applySQLiteMessageUpdate(ctx, t, store, update)
+	assertSQLiteQueueSnapshot(t, result.QueueSnapshot, 1, 2, 0, 0, update.Available[0].QueueTime)
+
+	update.Available = nil
+	update.AssignedJobs = 0
+	update.ObservedAt = observedAt.Add(time.Second)
+	result = applySQLiteMessageUpdate(ctx, t, store, update)
+	assertSQLiteQueueSnapshot(t, result.QueueSnapshot, 1, 0, 0, 2, observedAt.Add(-time.Second))
+}
+
+func TestSQLiteMessageUpdateSnapshotExcludesLifecycleOwnedAggregateFromRunnableAge(t *testing.T) {
+	ctx := context.Background()
+	store := openSQLiteCapacityStore(t)
+	observedAt := time.Unix(320, 0).UTC()
+	controllerEpoch := seedLifecycleOwnedSQLiteObligation(ctx, t, store, observedAt)
+	result := applySQLiteMessageUpdate(ctx, t, store, MessageUpdate{
+		AppID: 7, Repository: "repo", ScaleSet: "linux", ControllerEpoch: controllerEpoch,
+		AssignedJobs: 1, ObservedAt: observedAt.Add(time.Second),
+	})
+	if result.QueueSnapshot.AssignedCount != 1 || result.QueueSnapshot.JobAvailable != 0 ||
+		result.QueueSnapshot.NewlyQueued != 0 || result.QueueSnapshot.Canceled != 0 ||
+		result.QueueSnapshot.OldestRunnableAt != nil {
+		t.Fatalf("lifecycle-owned queue snapshot = %#v", result.QueueSnapshot)
+	}
+}
+
+func seedLifecycleOwnedSQLiteObligation(
+	ctx context.Context,
+	t *testing.T,
+	store *SQLiteDemandStore,
+	observedAt time.Time,
+) int64 {
+	t.Helper()
+	control, err := store.StartController(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := AssignedCapacityObservation{
+		ScaleSet: "linux", Repository: "repo", ControllerEpoch: control.Control.ControllerEpoch,
+		AssignedJobs: 1, ObservedAt: observedAt,
+	}
+	if _, err = store.ObserveAssignedCapacity(ctx, observation, 0); err != nil {
+		t.Fatal(err)
+	}
+	obligations, err := store.OrderedReady(ctx, "linux", observedAt)
+	if err != nil || len(obligations) != 1 {
+		t.Fatalf("assigned obligation = %#v, %v", obligations, err)
+	}
+	if err = store.RegisterRunner(ctx, RunnerLifecycle{
+		NodeID: "local", ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderDocker,
+		RunnerName: "linux-1", AssignmentID: obligations[0].ObligationID,
+		Phase: RunnerWaitingForJob, CreatedAt: observedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return control.Control.ControllerEpoch
+}
+
+func applySQLiteMessageUpdate(
+	ctx context.Context,
+	t *testing.T,
+	store *SQLiteDemandStore,
+	update MessageUpdate,
+) MessageUpdateResult {
+	t.Helper()
+	result, err := store.ApplyMessageUpdate(ctx, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func assertSQLiteQueueSnapshot(
+	t *testing.T,
+	snapshot CapacityObligationQueueSnapshot,
+	jobAvailable int,
+	assignedCount int,
+	newlyQueued int,
+	canceled int,
+	oldestRunnableAt time.Time,
+) {
+	t.Helper()
+	if snapshot.JobAvailable != jobAvailable || snapshot.AssignedCount != assignedCount ||
+		snapshot.NewlyQueued != newlyQueued || snapshot.Canceled != canceled ||
+		snapshot.OldestRunnableAt == nil || !snapshot.OldestRunnableAt.Equal(oldestRunnableAt) {
+		t.Fatalf("queue snapshot = %#v", snapshot)
+	}
 }
 
 func seedSQLitePostCompletionState(

@@ -122,6 +122,14 @@ func completeSQLiteRunnerJob(ctx context.Context, transaction *sql.Tx, completio
 	if _, err := transaction.ExecContext(ctx, mirrorCompletedSQLiteLibvirtSQL, identity...); err != nil {
 		return fmt.Errorf("mirror completed libvirt runner reap: %w", err)
 	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM demand
+		WHERE source = 'assigned_count' AND demand_id IN (
+			SELECT assignment_id FROM runner_lifecycle
+			WHERE scale_set = ? AND repository = ?
+			AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))
+		)`, identity...); err != nil {
+		return fmt.Errorf("complete assigned capacity obligation: %w", err)
+	}
 	if completion.RequestID <= 0 {
 		return nil
 	}

@@ -52,6 +52,12 @@ func TestClusterRepositoryActivationPersistsInitialAssignedJobsBeforePolling(t *
 		completed <- fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories)
 	}()
 	<-bootstrapEntered
+	fixture.leader.sessionsMutex.Lock()
+	activeSessions := len(fixture.leader.sessions)
+	fixture.leader.sessionsMutex.Unlock()
+	if activeSessions != 0 {
+		t.Fatalf("sessions published before initial observations committed = %d", activeSessions)
+	}
 	select {
 	case <-fixture.registry.pollObserved:
 		t.Fatal("message polling started before assigned-job obligations were durable")
@@ -289,6 +295,55 @@ func TestClusterSessionMatchingAndDeclarationHelpersHandleEmptyAndPresentSets(t 
 	if !hasClusterStatus([]cluster.ScaleSetStatus{{Name: "linux"}}, "linux") {
 		t.Fatal("declared scale set was not found")
 	}
+}
+
+func TestClusterSessionMatchingRejectsPreviousControllerEpoch(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	fixture.leader.repositoryControllerEpoch = 14
+	status := cluster.ScaleSetStatus{Name: "linux", EffectiveCapacity: 1}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: status.Name}
+	session := stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{})
+	session.capacity = 1
+	session.runnerScaleSet = &upstream.RunnerScaleSet{ID: 7}
+	session.assignedJobs = &clusterAssignedJobRecovery{controllerEpoch: 13}
+	fixture.leader.sessions[key] = session
+
+	if fixture.leader.repositorySessionsMatch("repo", []cluster.ScaleSetStatus{status}, map[string]*upstream.RunnerScaleSet{
+		status.Name: {ID: 7},
+	}) {
+		t.Fatal("previous-epoch session matched current repository generation")
+	}
+	fixture.leader.stop(context.Background())
+}
+
+func TestClusterSessionMatchingRequiresInitialStatisticsAndLivePoller(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	fixture.leader.repositoryControllerEpoch = 14
+	status := cluster.ScaleSetStatus{Name: "linux", EffectiveCapacity: 1}
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: status.Name}
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	session := stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{})
+	session.capacity = 1
+	session.runnerScaleSet = &upstream.RunnerScaleSet{ID: 7}
+	session.pollerDone = done
+	session.stopPolling = func() { stopOnce.Do(func() { close(done) }) }
+	session.assignedJobs = &clusterAssignedJobRecovery{controllerEpoch: 14}
+	fixture.leader.sessions[key] = session
+	registrations := map[string]*upstream.RunnerScaleSet{status.Name: {ID: 7}}
+
+	if fixture.leader.repositorySessionsMatch("repo", []cluster.ScaleSetStatus{status}, registrations) {
+		t.Fatal("session without committed initial statistics matched current repository generation")
+	}
+	session.assignedJobs.remember(&upstream.RunnerScaleSetStatistic{})
+	if !fixture.leader.repositorySessionsMatch("repo", []cluster.ScaleSetStatus{status}, registrations) {
+		t.Fatal("ready current-term session did not match repository generation")
+	}
+	session.stopPolling()
+	if fixture.leader.repositorySessionsMatch("repo", []cluster.ScaleSetStatus{status}, registrations) {
+		t.Fatal("terminated poller matched current repository generation")
+	}
+	fixture.leader.stop(context.Background())
 }
 
 type clusterRegistrationClient struct {

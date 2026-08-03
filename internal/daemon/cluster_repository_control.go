@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -269,6 +268,7 @@ func (leader *clusterLeader) reconcileRepositorySet(
 	leader.stopUndesiredSessions(ctx, desired, statuses)
 	leader.retainDesiredRepositoryRepairs(repositoryMap, desired)
 	leader.scheduleMissingSessions(ctx, desired, repositoryMap)
+	leader.auditDesiredRepositoryCompleteness(ctx)
 }
 
 func (leader *clusterLeader) scheduleMissingSessions(
@@ -281,16 +281,18 @@ func (leader *clusterLeader) scheduleMissingSessions(
 		if len(statuses) == 0 {
 			continue
 		}
+		expected, exists := leader.currentDesiredRepository(repositoryURL)
+		if !exists {
+			expected = desiredRepositoryGeneration{repository: repository, statuses: statuses}
+		}
 		leader.repositoryWorkers.enqueue(repositoryURL, repositoryWorkRoutine, func(attemptCtx context.Context) error {
-			return leader.reconcileDesiredRepository(attemptCtx, repository, statuses)
+			return leader.reconcileDesiredRepository(attemptCtx, expected)
 		}, func(err error) {
-			if err == nil || errors.Is(err, errRepositoryWorkObsolete) {
-				leader.completeRepositoryRepair(ctx, repository.URL)
-				return
+			if err != nil {
+				leader.daemon.logger.Error("leader repository session group failed",
+					slog.String("repository", repository.URL), slog.String("error", err.Error()))
 			}
-			leader.daemon.logger.Error("leader repository session group failed",
-				slog.String("repository", repository.URL), slog.String("error", err.Error()))
-			leader.recordRepositoryRepair(ctx, repository, statuses, err)
+			leader.finishRepositoryReconciliation(ctx, expected, err)
 		})
 	}
 }
@@ -301,11 +303,54 @@ func (leader *clusterLeader) publishDesiredRepositories(
 ) {
 	leader.desiredMutex.Lock()
 	defer leader.desiredMutex.Unlock()
-	leader.desiredRepositories = make(map[string][]cluster.ScaleSetStatus, len(repositories))
-	for repositoryURL := range repositories {
-		leader.desiredRepositories[repositoryURL] = desiredRepositoryStatuses(repositoryURL, desired)
+	published := make(map[string]desiredRepositoryGeneration, len(repositories))
+	for repositoryURL, repository := range repositories {
+		statuses := desiredRepositoryStatuses(repositoryURL, desired)
+		current, exists := leader.desiredRepositories[repositoryURL]
+		if !exists || current.repository != repository || !sameScaleSetStatuses(current.statuses, statuses) {
+			leader.nextDesiredGeneration++
+			current = desiredRepositoryGeneration{repository: repository, generation: leader.nextDesiredGeneration}
+		}
+		current.statuses = append([]cluster.ScaleSetStatus(nil), statuses...)
+		published[repositoryURL] = current
 	}
+	leader.desiredRepositories = published
 	leader.desiredStateKnown = true
+}
+
+func (leader *clusterLeader) currentDesiredRepository(repository string) (desiredRepositoryGeneration, bool) {
+	desired, exists, _ := leader.desiredRepositorySnapshot(repository)
+	return desired, exists
+}
+
+func (leader *clusterLeader) desiredRepositorySnapshot(
+	repository string,
+) (desired desiredRepositoryGeneration, exists bool, known bool) {
+	leader.desiredMutex.Lock()
+	defer leader.desiredMutex.Unlock()
+	desired, exists = leader.desiredRepositories[repository]
+	desired.statuses = append([]cluster.ScaleSetStatus(nil), desired.statuses...)
+	return desired, exists, leader.desiredStateKnown
+}
+
+func (leader *clusterLeader) auditDesiredRepositoryCompleteness(ctx context.Context) {
+	leader.desiredMutex.Lock()
+	desired := make([]desiredRepositoryGeneration, 0, len(leader.desiredRepositories))
+	for _, repository := range leader.desiredRepositories {
+		repository.statuses = append([]cluster.ScaleSetStatus(nil), repository.statuses...)
+		desired = append(desired, repository)
+	}
+	leader.desiredMutex.Unlock()
+	for _, repository := range desired {
+		coverage := leader.loadRepositorySessionCoverage(repository)
+		if coverage.complete() {
+			leader.completeRepositoryRepair(ctx, repository.repository.URL, repository.generation)
+		} else {
+			leader.recordDesiredRepositoryRepair(ctx, repository, errRepositorySessionGenerationIncomplete)
+		}
+		coverage = leader.loadRepositorySessionCoverage(repository)
+		leader.logRepositorySessionCoverage(ctx, repository, coverage)
+	}
 }
 
 func repositorySnapshotRepositories(snapshot repositorystate.Snapshot) []githubapp.Repository {

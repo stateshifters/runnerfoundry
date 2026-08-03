@@ -286,6 +286,57 @@ func TestScaleSetStatusComparisonRejectsDifferentLengthAndValues(t *testing.T) {
 	}
 }
 
+func TestDesiredRepositoryGenerationIsStableUntilIdentityOrStatusChanges(t *testing.T) {
+	leader, _ := repositoryRepairTestLeader(t, nil)
+	repository := githubapp.Repository{InstallationID: 1, URL: "repo"}
+	status := cluster.ScaleSetStatus{Name: "linux", EffectiveCapacity: 1}
+	key := repositoryScaleSetSessionKey{repository: repository.URL, scaleSet: status.Name}
+	publish := func(repository githubapp.Repository, status cluster.ScaleSetStatus) desiredRepositoryGeneration {
+		leader.publishDesiredRepositories(
+			map[string]githubapp.Repository{repository.URL: repository},
+			map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{key: status},
+		)
+		desired, _ := leader.currentDesiredRepository(repository.URL)
+		return desired
+	}
+
+	first := publish(repository, status)
+	unchanged := publish(repository, status)
+	status.EffectiveCapacity = 2
+	changedStatus := publish(repository, status)
+	repository.InstallationID = 2
+	changedIdentity := publish(repository, status)
+
+	if first.generation != unchanged.generation {
+		t.Fatalf("unchanged generation advanced from %d to %d", first.generation, unchanged.generation)
+	}
+	if changedStatus.generation <= unchanged.generation || changedIdentity.generation <= changedStatus.generation {
+		t.Fatalf("generations did not advance across changes: %d, %d, %d",
+			unchanged.generation, changedStatus.generation, changedIdentity.generation)
+	}
+	leader.stop(context.Background())
+}
+
+func TestDesiredRepositoryCompletenessAuditQueuesMissingGenerationRepair(t *testing.T) {
+	leader, _ := repositoryRepairTestLeader(t, nil)
+	repository := githubapp.Repository{InstallationID: 1, URL: "repo"}
+	status := cluster.ScaleSetStatus{Name: "linux", EffectiveCapacity: 1}
+	key := repositoryScaleSetSessionKey{repository: repository.URL, scaleSet: status.Name}
+	leader.publishDesiredRepositories(
+		map[string]githubapp.Repository{repository.URL: repository},
+		map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{key: status},
+	)
+
+	leader.auditDesiredRepositoryCompleteness(context.Background())
+
+	repair, pending := leader.pendingRepositoryRepairs[repository.URL]
+	desired, _ := leader.currentDesiredRepository(repository.URL)
+	if !pending || repair.generation != desired.generation {
+		t.Fatalf("pending repair = %#v, want generation %d", repair, desired.generation)
+	}
+	leader.stop(context.Background())
+}
+
 func TestRepositorySchedulingIgnoresRepositoryWithoutDesiredScaleSets(t *testing.T) {
 	leader, _ := repositoryRepairTestLeader(t, nil)
 	leader.scheduleMissingSessions(
@@ -298,6 +349,36 @@ func TestRepositorySchedulingIgnoresRepositoryWithoutDesiredScaleSets(t *testing
 	leader.repositoryWorkers.mutex.Unlock()
 	if pendingCount != 0 {
 		t.Fatalf("scheduled repository work = %d, want none", pendingCount)
+	}
+	leader.stop(context.Background())
+}
+
+func TestRetainedRepairAdoptsChangedDesiredGenerationImmediately(t *testing.T) {
+	leader, _ := repositoryRepairTestLeader(t, nil)
+	now := time.Unix(200, 0).UTC()
+	leader.now = func() time.Time { return now }
+	repository := githubapp.Repository{InstallationID: 2, URL: "repo"}
+	status := cluster.ScaleSetStatus{Name: "linux", EffectiveCapacity: 2}
+	key := repositoryScaleSetSessionKey{repository: repository.URL, scaleSet: status.Name}
+	leader.pendingRepositoryRepairs[repository.URL] = repositoryRepair{
+		repository: githubapp.Repository{InstallationID: 1, URL: repository.URL},
+		statuses:   []cluster.ScaleSetStatus{{Name: "linux", EffectiveCapacity: 1}},
+		generation: 1, attempts: 3, retryAfter: now.Add(time.Minute),
+	}
+	leader.publishDesiredRepositories(
+		map[string]githubapp.Repository{repository.URL: repository},
+		map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{key: status},
+	)
+	desired, _ := leader.currentDesiredRepository(repository.URL)
+	leader.retainDesiredRepositoryRepairs(
+		map[string]githubapp.Repository{repository.URL: repository},
+		map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{key: status},
+	)
+
+	repair := leader.pendingRepositoryRepairs[repository.URL]
+	if repair.generation != desired.generation || repair.repository != repository || repair.attempts != 3 ||
+		!repair.retryAfter.Equal(now) {
+		t.Fatalf("retained changed repair = %#v, want immediate current generation", repair)
 	}
 	leader.stop(context.Background())
 }

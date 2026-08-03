@@ -449,16 +449,14 @@ func (state *fakeClusterState) ApplyMessageUpdate(
 			return scaler.MessageUpdateResult{}, err
 		}
 	}
-	capacity, err := state.ObserveAssignedJobs(ctx, cluster.AssignedJobObservation{
+	observationResult, err := state.ObserveAssignedJobs(ctx, cluster.AssignedJobObservation{
 		AppID: update.AppID, ScaleSet: update.ScaleSet, Repository: update.Repository,
 		ControllerEpoch: update.ControllerEpoch, AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
 	})
 	if err != nil {
 		return scaler.MessageUpdateResult{}, err
 	}
-	return scaler.MessageUpdateResult{AssignedObligations: scaler.AssignedObligationDecision{
-		Create: capacity.AvailableCapacity,
-	}}, nil
+	return observationResult.QueueUpdate, nil
 }
 
 func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, time.Duration) (*cluster.Assignment, error) {
@@ -508,7 +506,7 @@ func (state *fakeClusterState) PendingAcquisitions(context.Context) ([]cluster.A
 func (state *fakeClusterState) ObserveAssignedJobs(
 	_ context.Context,
 	observation cluster.AssignedJobObservation,
-) (scaler.AssignedJobCapacity, error) {
+) (cluster.AssignedJobObservationResult, error) {
 	state.assignedJobsMutex.Lock()
 	state.assignedJobObservations = append(state.assignedJobObservations, observation)
 	state.assignedJobEvents = append(state.assignedJobEvents, "observe-assigned")
@@ -526,7 +524,12 @@ func (state *fakeClusterState) ObserveAssignedJobs(
 	if onObserve != nil {
 		onObserve()
 	}
-	return capacity, err
+	return cluster.AssignedJobObservationResult{
+		Capacity: capacity,
+		QueueUpdate: scaler.MessageUpdateResult{AssignedObligations: scaler.AssignedObligationDecision{
+			Create: capacity.AvailableCapacity,
+		}},
+	}, err
 }
 
 func (state *fakeClusterState) assignedJobsSnapshot() (

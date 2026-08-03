@@ -45,6 +45,7 @@ func TestObserveAssignedJobsReportsCapacityAndCommitFailures(t *testing.T) {
 					*destination[int](t, destinations[1]) = 0
 				}},
 				{scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }},
+				capacityObligationQueueSnapshotRow(t, 0, 0, nil),
 			},
 			commitErr: failure,
 		},
@@ -84,6 +85,14 @@ func TestObserveAssignedJobsReportsQueuedObligationCreationFailure(t *testing.T)
 		rowResults: []fakeRow{availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0)},
 		execErrors: assignedObservationWritesThen(failure),
 	}
+	assertAssignedObservationFailure(t, transaction, assignedObservationFixture(), failure)
+}
+
+func TestObserveAssignedJobsReportsQueueSnapshotFailure(t *testing.T) {
+	failure := errors.New("failed")
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
+		availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0), {err: failure},
+	}}
 	assertAssignedObservationFailure(t, transaction, assignedObservationFixture(), failure)
 }
 

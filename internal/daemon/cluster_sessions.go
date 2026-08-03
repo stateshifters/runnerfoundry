@@ -44,7 +44,8 @@ type clusterLeader struct {
 	registrationMutex         sync.Mutex
 	confirmedRegistrations    map[repositoryScaleSetSessionKey]repositorystate.Registration
 	desiredMutex              sync.Mutex
-	desiredRepositories       map[string][]cluster.ScaleSetStatus
+	desiredRepositories       map[string]desiredRepositoryGeneration
+	nextDesiredGeneration     uint64
 	desiredStateKnown         bool
 	background                sync.WaitGroup
 	discoveryMutex            sync.Mutex
@@ -58,7 +59,14 @@ type repositoryScaleSetSessionKey struct {
 	scaleSet   string
 }
 
+type desiredRepositoryGeneration struct {
+	repository githubapp.Repository
+	statuses   []cluster.ScaleSetStatus
+	generation uint64
+}
+
 var errRepositoryWorkObsolete = errors.New("repository reconciliation is obsolete")
+var errRepositoryPollerStopped = errors.New("repository message poller stopped unexpectedly")
 
 type repositoryScaleSetSession struct {
 	key            repositoryScaleSetSessionKey
@@ -100,7 +108,7 @@ func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluste
 		pendingRepositoryRepairs: make(map[string]repositoryRepair),
 		stopRepositoryWorkers:    stopRepositoryWorkers,
 		repositoryWorkerDone:     workerCtx.Done(),
-		desiredRepositories:      map[string][]cluster.ScaleSetStatus{},
+		desiredRepositories:      map[string]desiredRepositoryGeneration{},
 		confirmedRegistrations:   map[repositoryScaleSetSessionKey]repositorystate.Registration{},
 	}
 	leader.repositoryWorkers = newRepositoryWorkerPool(workerCtx, leader.githubOperationTimeout)
@@ -260,6 +268,7 @@ func (leader *clusterLeader) startMissingSessions(
 
 type repositorySessionResult struct {
 	repository githubapp.Repository
+	expected   desiredRepositoryGeneration
 	err        error
 }
 
@@ -283,11 +292,15 @@ func (leader *clusterLeader) enqueueMissingSessions(
 		if leader.repositoryRepairAlreadyScheduled(repository, statuses) {
 			continue
 		}
+		expected, exists := leader.currentDesiredRepository(repositoryURL)
+		if !exists {
+			expected = desiredRepositoryGeneration{repository: repository, statuses: statuses}
+		}
 		submitted++
 		leader.repositoryWorkers.enqueue(repositoryURL, repositoryWorkRoutine, func(attemptCtx context.Context) error {
-			return leader.reconcileDesiredRepository(attemptCtx, repository, statuses)
+			return leader.reconcileDesiredRepository(attemptCtx, expected)
 		}, func(err error) {
-			results <- repositorySessionResult{repository: repository, err: err}
+			results <- repositorySessionResult{repository: repository, expected: expected, err: err}
 		})
 	}
 	return results, submitted
@@ -317,17 +330,23 @@ func (leader *clusterLeader) handleMissingSessionResult(
 	desired map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus,
 	result repositorySessionResult,
 ) error {
+	expected := result.expected
+	if expected.repository.URL == "" {
+		expected = desiredRepositoryGeneration{
+			repository: result.repository,
+			statuses:   desiredRepositoryStatuses(result.repository.URL, desired),
+		}
+	}
 	if result.err == nil {
-		leader.completeRepositoryRepair(ctx, result.repository.URL)
+		leader.finishRepositoryReconciliation(ctx, expected, nil)
 		return nil
 	}
 	if ctx.Err() != nil {
 		return result.err
 	}
-	statuses := desiredRepositoryStatuses(result.repository.URL, desired)
 	leader.daemon.logger.Error("leader repository session group failed",
 		slog.String("repository", result.repository.URL), slog.String("error", result.err.Error()))
-	leader.recordRepositoryRepair(ctx, result.repository, statuses, result.err)
+	leader.finishRepositoryReconciliation(ctx, expected, result.err)
 	return result.err
 }
 
@@ -350,6 +369,19 @@ func (leader *clusterLeader) reconcileRepositorySessions(
 	repository githubapp.Repository,
 	statuses []cluster.ScaleSetStatus,
 ) error {
+	desired, exists := leader.currentDesiredRepository(repository.URL)
+	if !exists {
+		desired = desiredRepositoryGeneration{repository: repository, statuses: statuses}
+	}
+	return leader.reconcileRepositoryGeneration(ctx, desired)
+}
+
+func (leader *clusterLeader) reconcileRepositoryGeneration(
+	ctx context.Context,
+	desired desiredRepositoryGeneration,
+) error {
+	repository := desired.repository
+	statuses := desired.statuses
 	audit, err := leader.auditClusterRepositoryRegistrations(ctx, repository, statuses)
 	if err != nil {
 		return err
@@ -364,7 +396,7 @@ func (leader *clusterLeader) reconcileRepositorySessions(
 	if err != nil {
 		return err
 	}
-	if err = leader.activateRepositorySessionGeneration(ctx, repository.URL, statuses, started); err != nil {
+	if err = leader.activateDesiredRepositorySessionGeneration(ctx, desired, started); err != nil {
 		return errors.Join(err, leader.closePartialSessionGeneration(ctx, started))
 	}
 	return nil
@@ -433,15 +465,6 @@ func (leader *clusterLeader) closePartialSessionGeneration(
 	return resultErr
 }
 
-func (leader *clusterLeader) detachRepositorySessionGeneration(sessions []*repositoryScaleSetSession) {
-	leader.sessionsMutex.Lock()
-	defer leader.sessionsMutex.Unlock()
-	for _, session := range sessions {
-		delete(leader.sessions, session.key)
-		leader.scheduler.remove(session.key)
-	}
-}
-
 func sameScaleSetStatuses(left []cluster.ScaleSetStatus, right []cluster.ScaleSetStatus) bool {
 	if len(left) != len(right) {
 		return false
@@ -454,22 +477,8 @@ func sameScaleSetStatuses(left []cluster.ScaleSetStatus, right []cluster.ScaleSe
 	return true
 }
 
-func (leader *clusterLeader) repositorySessionsMatch(
-	repository string,
-	statuses []cluster.ScaleSetStatus,
-	registrations map[string]*upstream.RunnerScaleSet,
-) bool {
-	leader.sessionsMutex.Lock()
-	defer leader.sessionsMutex.Unlock()
-	for _, status := range statuses {
-		session := leader.sessions[repositoryScaleSetSessionKey{repository: repository, scaleSet: status.Name}]
-		registration := registrations[status.Name]
-		if session == nil || registration == nil || session.runnerScaleSet.ID != registration.ID ||
-			session.capacity != status.EffectiveCapacity {
-			return false
-		}
-	}
-	return true
+func (leader *clusterLeader) repositoryGenerationReady(desired desiredRepositoryGeneration) bool {
+	return leader.loadRepositorySessionCoverage(desired).complete()
 }
 
 func (leader *clusterLeader) suspendRepositorySessions(ctx context.Context, repository string) error {
@@ -559,13 +568,44 @@ func (leader *clusterLeader) startSessionPoller(ctx context.Context, session *re
 	}
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
 		pollUntilShutdown(
 			ctx, leader.daemon.logger, session.key.repository, session.key.scaleSet, &poller,
 			pollRetryAfter(pollRetryDelay),
 		)
+		close(done)
+		if ctx.Err() == nil {
+			leader.handleUnexpectedSessionPollerStop(ctx, session)
+		}
 	}()
 	return done
+}
+
+func (leader *clusterLeader) handleUnexpectedSessionPollerStop(ctx context.Context, session *repositoryScaleSetSession) {
+	if leader.repositoryRepairStopped() {
+		return
+	}
+	leader.sessionsMutex.Lock()
+	if leader.sessions[session.key] != session {
+		leader.sessionsMutex.Unlock()
+		return
+	}
+	delete(leader.sessions, session.key)
+	leader.scheduler.remove(session.key)
+	leader.sessionsMutex.Unlock()
+	session.stopPolling()
+	closeCtx, cancelClose := context.WithTimeout(ctx, leader.githubOperationTimeout)
+	closeErr := session.messageClient.Close(closeCtx)
+	cancelClose()
+	if closeErr != nil {
+		leader.daemon.logger.Error("close unexpectedly stopped leader message session failed",
+			slog.String("repository", session.key.repository),
+			slog.String("scaleSet", session.key.scaleSet),
+			slog.String("error", closeErr.Error()))
+	}
+	desired, exists := leader.currentDesiredRepository(session.key.repository)
+	if exists {
+		leader.finishRepositoryReconciliation(ctx, desired, errRepositoryPollerStopped)
+	}
 }
 
 type scaleSetSessionRemoval int

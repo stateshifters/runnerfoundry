@@ -46,6 +46,16 @@ var sqliteRunnerCompletionFailureOperations = []func(demandStoreMock) error{
 		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectRollback()
+		return fixture.store.CompleteRunnerLifecycleJob(context.Background(), sqliteRunnerCompletion, time.Now())
+	},
+	func(fixture demandStoreMock) error {
+		fixture.mock.ExpectBegin()
+		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectCommit().WillReturnError(errors.New("failed"))
 		return fixture.store.CompleteRunnerLifecycleJob(context.Background(), sqliteRunnerCompletion, time.Now())
 	},

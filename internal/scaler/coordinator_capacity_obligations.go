@@ -90,9 +90,6 @@ func (coordinator *Coordinator) scheduleCapacityObligations(
 	if coordinator.provisioningSuspended.Load() {
 		return nil
 	}
-	if err := coordinator.deleteLifecycleOwnedObligations(ctx); err != nil {
-		return fmt.Errorf("complete lifecycle-owned capacity obligations: %w", err)
-	}
 	now := coordinator.now().UTC()
 	obligations, err := store.OrderedReady(ctx, coordinator.scaleSet, now)
 	if err != nil {
@@ -103,17 +100,6 @@ func (coordinator *Coordinator) scheduleCapacityObligations(
 		return err
 	}
 	coordinator.launchRunnableObligations(ctx, store, obligations, available)
-	return nil
-}
-
-func (coordinator *Coordinator) deleteLifecycleOwnedObligations(ctx context.Context) error {
-	store, supported := coordinator.store.(LifecycleOwnedObligationStore)
-	if !supported {
-		return nil
-	}
-	if err := store.DeleteLifecycleOwnedObligations(ctx, coordinator.scaleSet); err != nil {
-		return fmt.Errorf("delete lifecycle-owned capacity obligations: %w", err)
-	}
 	return nil
 }
 
@@ -266,14 +252,13 @@ func (coordinator *Coordinator) executeObligation(
 	obligation QueuedDemand,
 ) error {
 	if obligation.Source == CapacityObligationAssignedCount {
-		return coordinator.executeAssignedObligation(ctx, store, worker, obligation)
+		return coordinator.executeAssignedObligation(ctx, worker, obligation)
 	}
 	return coordinator.executeExactObligation(ctx, store, worker, obligation)
 }
 
 func (coordinator *Coordinator) executeAssignedObligation(
 	ctx context.Context,
-	store CapacityObligationStore,
 	worker RepositoryWorker,
 	obligation QueuedDemand,
 ) error {
@@ -286,12 +271,6 @@ func (coordinator *Coordinator) executeAssignedObligation(
 	cancelStart()
 	if err != nil {
 		return fmt.Errorf("start assigned runner for repository %q: %w", obligation.Repository, err)
-	}
-	deleteCtx, cancelDelete := coordinator.capacityOperationContext(ctx)
-	err = store.DeleteObligation(deleteCtx, obligation.ObligationID)
-	cancelDelete()
-	if err != nil {
-		return fmt.Errorf("complete assigned capacity obligation: %w", err)
 	}
 	return nil
 }

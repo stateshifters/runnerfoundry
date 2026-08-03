@@ -8,19 +8,21 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestObserveAssignedJobsReturnsEpochFencedCapacity(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
 		*destination[int](t, destinations[0]) = 2
 		*destination[int](t, destinations[1]) = 3
-	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }}}}
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }},
+		capacityObligationQueueSnapshotRow(t, 0, 0, nil)}}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
-	capacity, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
+	result, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAssignedCapacity(t, capacity.ActiveRunners, capacity.AvailableCapacity)
+	assertAssignedCapacity(t, result.Capacity.ActiveRunners, result.Capacity.AvailableCapacity)
 	assertAssignedObservationTransitions(t, transaction)
 	assertAssignedCapacityQuery(t, transaction.queries[0].statement)
 }
@@ -29,7 +31,8 @@ func TestObserveAssignedJobsQueuesIdentityFreeObligations(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
 		*destination[int](t, destinations[0]) = 0
 		*destination[int](t, destinations[1]) = 3
-	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }}}}
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }},
+		capacityObligationQueueSnapshotRow(t, 0, 1, nil)}}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 	if _, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture()); err != nil {
 		t.Fatal(err)
@@ -46,11 +49,60 @@ func TestObserveAssignedJobsQueuesIdentityFreeObligations(t *testing.T) {
 	}
 }
 
+func TestObserveAssignedJobsReturnsCommittedQueueReconciliation(t *testing.T) {
+	oldestRunnableAt := time.Unix(90, 0).UTC()
+	transaction := committedAssignedObservationTransaction(t, oldestRunnableAt)
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ObserveAssignedJobs(
+		context.Background(), assignedObservationFixture(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommittedAssignedObservation(t, result, oldestRunnableAt)
+}
+
+func committedAssignedObservationTransaction(t *testing.T, oldestRunnableAt time.Time) *fakeDatabaseTransaction {
+	t.Helper()
+	return &fakeDatabaseTransaction{
+		execTags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("INSERT 0 1"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("UPDATE 0"),
+			pgconn.NewCommandTag("INSERT 0 2"),
+		},
+		rowResults: []fakeRow{
+			availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0),
+			capacityObligationQueueSnapshotRow(t, 0, 2, &oldestRunnableAt),
+		},
+	}
+}
+
+func assertCommittedAssignedObservation(
+	t *testing.T,
+	result AssignedJobObservationResult,
+	oldestRunnableAt time.Time,
+) {
+	t.Helper()
+	if result.QueueUpdate.AssignedObligations != (scaler.AssignedObligationDecision{Create: 2}) ||
+		result.QueueUpdate.QueueSnapshot.AssignedCount != 2 ||
+		result.QueueUpdate.QueueSnapshot.NewlyQueued != 2 ||
+		result.QueueUpdate.QueueSnapshot.OldestRunnableAt == nil ||
+		!result.QueueUpdate.QueueSnapshot.OldestRunnableAt.Equal(oldestRunnableAt) {
+		t.Fatalf("assigned observation queue update = %#v", result.QueueUpdate)
+	}
+}
+
 func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{{scan: func(destinations ...any) {
 		*destination[int](t, destinations[0]) = 2
 		*destination[int](t, destinations[1]) = 3
-	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 3 }}}}
+	}}, {scan: func(destinations ...any) { *destination[int](t, destinations[0]) = 3 }},
+		capacityObligationQueueSnapshotRow(t, 0, 0, nil)}}
 	observation := assignedObservationFixture()
 	observation.ControllerEpoch = 14
 	observation.AssignedJobs = 2
@@ -72,6 +124,7 @@ func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
 func TestObserveAssignedJobsAdoptsQueuedObligationsAcrossControllerEpoch(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
 		availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 2),
+		capacityObligationQueueSnapshotRow(t, 0, 2, nil),
 	}}
 	observation := assignedObservationFixture()
 	observation.ControllerEpoch = 14
@@ -177,16 +230,17 @@ func TestObserveAssignedJobsDoesNotDuplicateLifecycleBackedCapacity(t *testing.T
 	}
 	queuedRow := func(destinations ...any) { *destination[int](t, destinations[0]) = 0 }
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
-		{scan: capacityRow}, {scan: queuedRow}, {scan: capacityRow}, {scan: queuedRow},
+		{scan: capacityRow}, {scan: queuedRow}, capacityObligationQueueSnapshotRow(t, 0, 0, nil),
+		{scan: capacityRow}, {scan: queuedRow}, capacityObligationQueueSnapshotRow(t, 0, 0, nil),
 	}}
 	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
 	for range 2 {
-		capacity, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
+		result, err := store.ObserveAssignedJobs(context.Background(), assignedObservationFixture())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if capacity.ActiveRunners != 3 {
-			t.Fatalf("repeated assigned active capacity = %d, want 3", capacity.ActiveRunners)
+		if result.Capacity.ActiveRunners != 3 {
+			t.Fatalf("repeated assigned active capacity = %d, want 3", result.Capacity.ActiveRunners)
 		}
 	}
 	for _, execution := range transaction.executions {
