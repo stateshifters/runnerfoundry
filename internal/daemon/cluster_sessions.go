@@ -33,6 +33,7 @@ type clusterLeader struct {
 	now                       func() time.Time
 	pendingRepositoryRepairs  map[string]repositoryRepair
 	repositoryWorkers         *repositoryWorkerPool
+	assignedJobWorkers        *assignedJobRecoveryExecutor
 	repositoryWorkerDone      <-chan struct{}
 	stopRepositoryWorkers     context.CancelFunc
 	repositorySnapshot        repositorystate.Snapshot
@@ -89,6 +90,7 @@ func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluste
 		confirmedRegistrations:   map[repositoryScaleSetSessionKey]repositorystate.Registration{},
 	}
 	leader.repositoryWorkers = newRepositoryWorkerPool(workerCtx, leader.githubOperationTimeout)
+	leader.assignedJobWorkers = newAssignedJobRecoveryExecutor(workerCtx, clusterCoordinationTimeout)
 	return leader
 }
 
@@ -249,6 +251,9 @@ func (leader *clusterLeader) enqueueMissingSessions(
 		repository := repositories[repositoryURL]
 		statuses := desiredRepositoryStatuses(repositoryURL, desired)
 		if len(statuses) == 0 {
+			continue
+		}
+		if leader.repositoryRepairAlreadyScheduled(repository, statuses) {
 			continue
 		}
 		submitted++
@@ -547,7 +552,7 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 	session.stopPolling()
 	<-session.pollerDone
 	if session.assignedJobs != nil {
-		session.assignedJobs.wait()
+		session.assignedJobs.stop()
 	}
 	closeErr := session.messageClient.Close(ctx)
 	if closeErr != nil {
@@ -566,6 +571,9 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.cancelActiveOperation()
 	leader.stopRepositoryWorkers()
+	if leader.assignedJobWorkers != nil {
+		leader.assignedJobWorkers.stop()
+	}
 	leader.background.Wait()
 	leader.repositoryWorkers.wait()
 	leader.operationMutex.Lock()
@@ -574,12 +582,7 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 	sessions := leader.sessions
 	leader.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
 	leader.sessionsMutex.Unlock()
-	for _, session := range sessions {
-		if err := leader.stopSession(ctx, session, retainGitHubScaleSet); err != nil {
-			leader.daemon.logger.Error("stop leader session failed",
-				slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
-		}
-	}
+	leader.stopLeaderSessions(ctx, sessions)
 	leader.repairMutex.Lock()
 	leader.pendingRepositoryRepairs = map[string]repositoryRepair{}
 	leader.repairMutex.Unlock()

@@ -143,7 +143,7 @@ func (daemon *clusteredDaemon) heartbeat(ctx context.Context) {
 		daemon.logger.Error("cluster heartbeat failed",
 			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 	} else if leader := daemon.currentLeader(); leader != nil {
-		leader.wakeAssignedJobRecovery()
+		leader.wakeAssignedJobRecovery(ctx)
 	}
 	leader := daemon.currentLeader()
 	leaseCtx, cancelLeaseCheck := context.WithTimeout(ctx, clusterCoordinationTimeout)

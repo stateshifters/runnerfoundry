@@ -4,7 +4,7 @@ Date: 2026-08-02
 
 ## Status
 
-Accepted
+Superseded by [9. Schedule assigned recovery through a bounded leader executor](0009-schedule-assigned-recovery-through-a-bounded-leader-executor.md)
 
 Amends [7. Persist repository control independently from message sessions](0007-persist-repository-control-independently-from-message-sessions.md)
 

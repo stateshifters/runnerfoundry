@@ -24,6 +24,10 @@ type coordinatedScaleSetHandler struct {
 	ReapLibvirt bool // retained for source compatibility; lifecycle cleanup is provider-independent
 }
 
+func jobStartedHasIdentity(startedJob *upstream.JobStarted) bool {
+	return startedJob != nil && (startedJob.RunnerRequestID > 0 || startedJob.RunnerName != "")
+}
+
 func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
 	if message.Statistics == nil {
 		return errors.New("scale set message statistics are required")
@@ -77,11 +81,11 @@ func logScaleSetSessionStatistics(
 	logger *slog.Logger,
 	repository string,
 	scaleSet string,
-	source string,
+	trigger string,
 	statistics *upstream.RunnerScaleSetStatistic,
 ) {
 	logAction(ctx, logger, slog.LevelInfo, "session_statistics", "observed",
-		slog.String("source", source), slog.String("repository", repository), slog.String("scaleSet", scaleSet),
+		slog.String("trigger", trigger), slog.String("repository", repository), slog.String("scaleSet", scaleSet),
 		slog.Int("assignedJobs", statistics.TotalAssignedJobs), slog.Int("availableJobs", statistics.TotalAvailableJobs),
 		slog.Int("acquiredJobs", statistics.TotalAcquiredJobs), slog.Int("runningJobs", statistics.TotalRunningJobs),
 		slog.Int("registeredRunners", statistics.TotalRegisteredRunners), slog.Int("busyRunners", statistics.TotalBusyRunners),
@@ -174,7 +178,7 @@ func (handler coordinatedScaleSetHandler) completeJob(ctx context.Context, compl
 
 func (handler coordinatedScaleSetHandler) markStartedRunnersBusy(ctx context.Context, messages []*upstream.JobStarted) error {
 	for _, startedJob := range messages {
-		if startedJob == nil || (startedJob.RunnerRequestID <= 0 && startedJob.RunnerName == "") {
+		if !jobStartedHasIdentity(startedJob) {
 			continue
 		}
 		err := handler.Coordinator.MarkRunnerBusy(

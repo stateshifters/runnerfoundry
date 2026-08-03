@@ -156,15 +156,15 @@ Each active session records its confirmed GitHub scale-set ID. Discovery-cadence
 
 ### Message acknowledgement boundary
 
-Every poller receives at most one message at a time. A message must include GitHub statistics. The handler validates and persists its effects, performs the applicable scheduling work, and returns success. Only then does the poller delete the GitHub message and advance its last-message ID.
+Every poller receives at most one message at a time. A message must include GitHub statistics. The handler validates and persists its durable message effects, performs positive-demand scheduling, publishes the latest statistics to leader-owned recovery state, submits assigned-recovery work, and returns success. Only then does the poller delete the GitHub message and advance its last-message ID. Assigned recovery, including PostgreSQL observation persistence, executes independently and is not part of this acknowledgement boundary.
 
-If validation, persistence, acquisition, scheduling, provider inspection, or provider startup fails, the message remains unacknowledged. GitHub may redeliver it. Demand keys and state transitions are therefore idempotent at the database boundary. A terminal `JobCompleted` message without a positive request ID is a permanent exception: clustered mode reconciles lifecycle cleanup by its stable runner name when available, warns, and acknowledges the message without changing assignment or demand state. A failure during that reconciliation remains retryable.
+If validation, message-effect persistence, positive-demand acquisition, or positive-demand scheduling fails, the message remains unacknowledged. GitHub may redeliver it. Demand keys and state transitions are therefore idempotent at the database boundary. Assigned-observation persistence, recovery inspection, or provider startup failure occurs in the bounded executor, is logged and rescheduled independently, and does not force message redelivery. A terminal `JobCompleted` message without a positive request ID is a permanent exception: clustered mode reconciles lifecycle cleanup by its stable runner name when available, warns, and acknowledges the message without changing positive demand state. A failure during that reconciliation remains retryable.
 
 Pollers issue the next receive immediately after a successful empty or handled response. A failed poll waits five seconds before retrying, and the third consecutive failure adds a sustained-degradation log entry. Cancellation interrupts both an active poll and its retry wait.
 
-Positive request identities and queue timestamps come from `JobAvailable` messages. `JobStarted` first persists the exact runner as busy. Terminal `JobCompleted` atomically requests exact runner cleanup and removes terminal demand. In clustered mode, `JobStarted` retains positive demand and assignments; only `JobCompleted` makes them terminal.
+Positive request identities and queue timestamps come from `JobAvailable` messages. `JobStarted` requires either a positive request ID or a non-empty runner name. A runner-name-only message persists the lifecycle row matching that exact name as busy without inventing a request identity. Terminal `JobCompleted` atomically requests exact runner cleanup and removes terminal demand. In clustered mode, `JobStarted` retains positive demand and assignments; only `JobCompleted` makes them terminal.
 
-GitHub's authoritative `TotalAssignedJobs` statistic represents identity-free assigned capacity. Both modes send the initial statistic from each newly created session and every subsequent message statistic through the shared assigned-job controller. The session activates only after initial reconciliation completes. One session-local thread serializes observations as single-flight work, while a five-second safety wake reconciles the latest observation even without another message. The controller never turns the aggregate count into a request identity.
+GitHub's authoritative `TotalAssignedJobs` statistic represents identity-free assigned capacity. Both modes apply the same backend-neutral controller policy, and the controller never turns the aggregate count into a request identity. In clustered mode, initial and subsequent statistics publish the latest observation to leader-owned state and trigger a separate bounded recovery executor. The worker persists the observation under the leader epoch; publication and polling do not wait for recovery execution.
 
 ### Scale-set ownership and pruning
 
@@ -330,7 +330,7 @@ Live, healthy contributors sharing a name must agree on the runner group. Compat
 
 Leadership is a session-scoped PostgreSQL advisory lock held on a dedicated direct connection. Closing or losing that connection releases the lock. Standby nodes block on the same lock instead of polling for leadership. The heartbeat loop checks the current lease; after loss, the old leader stops its sessions without deleting GitHub scale sets and returns to contention.
 
-When leadership is acquired, the leader increments the durable repository-controller epoch. It starts fresh discovery and clustered scale-set aggregation independently, then reconnects sessions from an initialized durable repository catalog without waiting for discovery to succeed. A fresh discovery transaction replaces only conclusively observed authority and advances the durable generation. The session's advertised maximum is the current effective cluster capacity. Initial session statistics are persisted under the new epoch and reconciled before polling starts; subsequent message statistics update the same observation. Full reconciliation runs after leadership acquisition, after a successful local configuration reload, and periodically at `github.discovery_interval`. Heartbeats continue publishing state independently, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
+When leadership is acquired, the leader increments the durable repository-controller epoch. It starts fresh discovery and clustered scale-set aggregation independently, then reconnects sessions from an initialized durable repository catalog without waiting for discovery to succeed. A fresh discovery transaction replaces only conclusively observed authority and advances the durable generation. The session's advertised maximum is the current effective cluster capacity. Initial session statistics publish recovery state and submit work before polling starts, but session activation does not wait for the worker to persist that observation or finish recovery. Subsequent message statistics replace the latest observation and submit another coalesced trigger. Full reconciliation runs after leadership acquisition, after a successful local configuration reload, and periodically at `github.discovery_interval`. Heartbeats continue publishing state independently, and assignment eligibility reads current PostgreSQL contributions on every scheduling transaction.
 
 Repository registration and session failures are isolated from leader health. Four repository workers run reconnect, full-pass reconciliation, and repair concurrently. At most three workers accept routine work, reserving one for urgent repair. Work is coalesced by repository and each attempt has an independent 30-second GitHub timeout. Failed repositories remain in a non-durable repair queue and retry after 5, 10, 20, 40, and then 60 seconds until their complete configured session group activates. Leadership loss cancels the active work; a successor reconstructs it from durable registrations and desired state.
 
@@ -355,8 +355,9 @@ C4Component
         Component(election, "Leader contender", "internal/daemon and internal/cluster", "Acquires and monitors the session advisory-lock lease")
         Component(leader, "Leader session manager", "internal/daemon", "Discovers repositories and maintains the union of GitHub sessions")
         Component(repository_pool, "Repository worker pool", "internal/daemon", "Runs bounded reconnect and repair with urgent capacity")
-        Component(handler, "Cluster message handler", "internal/daemon", "Persists demand and assigned observations before acknowledgement")
+        Component(handler, "Cluster message handler", "internal/daemon", "Persists demand and publishes assigned statistics before acknowledgement")
         Component(scheduler, "Cluster scheduler", "internal/daemon and internal/cluster", "Assigns global FIFO demand and confirms GitHub acquisition")
+        Component(recovery_pool, "Assigned-recovery executor", "internal/daemon and internal/scaler", "Coalesces repository and scale-set work across four workers")
         Component(executor, "Local assignment executor", "internal/daemon", "Repairs starting work and starts ready assignments for this node")
         Component(reconciler, "Runner reconciler", "internal/scaler", "Uses stable runner identity around provider startup")
         Component(migrations, "Migration service", "internal/cluster", "Applies embedded reversible PostgreSQL migrations")
@@ -372,31 +373,33 @@ C4Component
     Rel(repository_pool, github, "Audits registrations and creates sessions")
     Rel(leader, github, "Maintains leader-owned scale-set sessions")
     Rel(leader, handler, "Runs message pollers")
-    Rel(handler, postgres, "Enqueues demand and publishes assigned observations")
+    Rel(handler, postgres, "Enqueues and completes durable demand")
     Rel(handler, scheduler, "Requests scheduling")
+    Rel(handler, recovery_pool, "Publishes statistics and submits recovery trigger")
     Rel(scheduler, postgres, "Creates and transitions assignments")
     Rel(scheduler, github, "Acquires selected request")
+    Rel(recovery_pool, postgres, "Persists observations and creates identity-free assignments")
     Rel(executor, postgres, "Claims, repairs, and confirms local assignments")
     Rel(executor, reconciler, "Ensures named runner exists")
     Rel(reconciler, github, "Generates JIT configuration")
     Rel(reconciler, provider, "Inspects and starts local runner")
 ```
 
-Long-running control loops, session-local recovery threads, and the repository pool isolate failure domains:
+Long-running control loops and bounded worker pools isolate failure domains:
 
 - The heartbeat loop publishes health and checks leader-lease liveness.
 - The assignment executor loop repairs or claims host-local work once per second.
-- Each active session has one assigned-recovery thread. Initial and subsequent statistics trigger single-flight reconciliation, and a five-second safety wake retries the latest observation.
+- The leader-owned assigned-recovery executor has four workers. Repository and scale-set keys are coalesced, attempts use bounded contexts, and only submitted or dirty work is retried; clean sessions are not safety-audited.
 - The reconciliation loop serializes full leader reconciliation and repository repair attempts. Its repair timer wakes only for the earliest pending repository retry.
 - The four-worker repository pool executes bounded per-repository work. At most three workers accept routine work, preserving one worker for urgent reconnect and repair.
 
-Provider starts occur outside the heartbeat path and may take up to five minutes. Coordination database calls use five-second bounds, each repository GitHub reconciliation attempt and job acquisition uses a 30-second bound, and provider inspection uses a 30-second bound. Repository failures retry after 5, 10, 20, 40, and then at most 60 seconds. A failed leadership wait retries after two seconds. After GitHub confirms acquisition, the leader retries the database confirmation every two seconds until it succeeds or its context ends. Failed or ambiguous `starting` assignments are revisited by the one-second executor loop. These boundaries prevent a slow provider, repository, or GitHub request from consuming unrelated recovery work or the node-health failover window.
+Provider starts occur outside the heartbeat path and may take up to five minutes. Coordination database calls use five-second bounds, each repository GitHub reconciliation attempt and job acquisition uses a 30-second bound, and provider inspection uses a 30-second bound. Assigned recovery uses the same bounded operation classes and cannot occupy more than four leader workers. Repository failures retry after 5, 10, 20, 40, and then at most 60 seconds. A failed leadership wait retries after two seconds. After GitHub confirms acquisition, the leader retries the database confirmation every two seconds until it succeeds or its context ends. Failed or ambiguous `starting` assignments are revisited by the one-second executor loop. These boundaries prevent a slow provider, repository, or GitHub request from consuming unrelated recovery work or the node-health failover window.
 
 ### Global FIFO and contributor selection
 
 The leader's message handler writes each positive-identity `JobAvailable` request to `scaler_demand` before scheduling. The unique scale-set, repository, and request-ID key deduplicates redelivery. FIFO order is queue time followed by a database observation sequence.
 
-Clustered message statistics update an epoch-fenced assigned-job observation for the repository and scale set. The shared controller first publishes the count and reaps only excess waiting identity-free runners, then creates distributed assignments for any remaining deficit after positive-ID FIFO scheduling. Available and started entries still require positive request IDs; the aggregate statistics are not converted into queue rows or fabricated request IDs.
+Clustered message statistics replace the latest leader-owned observation for the repository and scale set, then submit a coalesced executor trigger. Message handling can acknowledge before the worker persists the epoch-fenced PostgreSQL observation or performs recovery. The shared controller later reaps only excess waiting identity-free runners and creates distributed assignments for any remaining deficit after positive-ID FIFO scheduling. Available entries still require positive request IDs. Started entries require either a positive request ID or a runner name; a runner-name-only entry uses that name for lifecycle correlation. Aggregate statistics are not converted into queue rows or fabricated request IDs.
 
 For the selected scale set, PostgreSQL transactionally:
 
@@ -433,7 +436,7 @@ The `acquiring` state is the boundary around GitHub's non-transactional acquisit
 
 The `starting` state is the boundary around provider startup. Before starting, and again after an ambiguous provider error, the owning node checks for the stable request-derived runner name. A process restart repairs all of its `starting` assignments before claiming new `ready` assignments. A failed or ambiguous start remains `starting` for later repair rather than returning to the ready queue.
 
-`JobStarted` persists the exact runner as busy without completing clustered demand. Terminal `JobCompleted` transactionally requests registered Docker or libvirt cleanup, marks active assignments complete, and removes demand before acknowledgement. An expired waiting lease makes the runner `reap_pending`, completes its assignment, and retains demand for a fresh assignment after capacity is safe. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
+`JobStarted` persists a lifecycle as busy without completing clustered demand. A runner-name-only message selects the exact lifecycle by name and leaves its stored request ID unchanged; a positive-request message retains the existing request-identity path. Terminal `JobCompleted` transactionally requests registered Docker or libvirt cleanup, marks active assignments complete, and removes demand before acknowledgement. An expired waiting lease makes the runner `reap_pending`, completes its assignment, and retains demand for a fresh assignment after capacity is safe. When a node expires, its active assignments are completed but their demand remains, allowing a compatible live host to receive replacement assignments.
 
 ### Clustered job sequence
 
@@ -599,9 +602,9 @@ Cluster startup inspects the schema and automatically migrates upward before con
 
 A clustered reload validates a complete replacement configuration and App key before replacing the in-memory snapshot. It cannot change PostgreSQL configuration or switch state backends. The node then republishes its complete contribution set atomically. If it is the leader, it requests immediate session reconciliation. Running assignments continue and provider configuration remains local to their owning host.
 
-When a leader lease fails, the daemon cancels active leader reconciliation and the non-durable repair queue, stops message pollers, closes message sessions, retains GitHub scale sets, releases the lease, and returns to standby. A waiting node receives the advisory lock, increments the controller epoch, and reconstructs sessions from durable repository authority and PostgreSQL declarations while discovery refreshes independently. Initial session statistics publish current assigned observations under the new epoch before polling begins. Durable repository control, demand, assigned observations, and assignments do not belong to the old leader process.
+When a leader lease fails, the daemon stops accepting assigned-recovery triggers, cancels and joins the four recovery workers, cancels active leader reconciliation and the non-durable repair queue, stops message pollers, closes message sessions, retains GitHub scale sets, releases the lease, and returns to standby. A waiting node receives the advisory lock, increments the controller epoch, and reconstructs sessions from durable repository authority and PostgreSQL declarations while discovery refreshes independently. Initial session statistics publish current assigned observations under the new epoch before polling begins. Durable repository control, demand, assigned observations, and assignments do not belong to the old leader process.
 
-On process shutdown, workers stop, any contender connection is canceled, an active leader closes its sessions without deleting scale sets, and the node publishes itself unhealthy. If that final publication fails, its heartbeat still expires after the node lifetime.
+On process shutdown, worker pools stop accepting work, active calls are canceled and joined within their operation bounds, any contender connection is canceled, an active leader closes its sessions without deleting scale sets, and the node publishes itself unhealthy. If that final publication fails, its heartbeat still expires after the node lifetime.
 
 ### Cluster deployment
 
@@ -791,7 +794,7 @@ The architecture protects the following invariants:
 | --- | --- | --- |
 | A handled message is not silently lost before durable effects | Poller acknowledges only after its handler succeeds | An acknowledgement failure can redeliver an already handled message |
 | Positive-identity demand survives process restart | SQLite or PostgreSQL stores demand before acknowledgement | Aggregate assigned recovery remains separate from FIFO demand |
-| Already-assigned capacity is recovered in both modes | Initial and subsequent session statistics drive the shared controller; PostgreSQL persists epoch-fenced observations and assignments | The aggregate count cannot restore per-job identity or order |
+| Already-assigned capacity is recovered in both modes | Initial and subsequent session statistics drive the shared controller; PostgreSQL persists epoch-fenced observations and a four-worker leader executor consumes coalesced triggers | Recovery can follow message acknowledgement; the aggregate count cannot restore per-job identity or order |
 | Repository control survives process or leader replacement | SQLite or PostgreSQL stores the last conclusive repository catalog and confirmed scale-set IDs; controller epochs fence older mutations | Message sessions remain process-local and must be recreated |
 | Redelivery does not create duplicate demand | Unique demand identity and idempotent upsert | External APIs and providers are still separate transaction domains |
 | Capacity is not exceeded | Standalone counts provider-visible runners and pending reaps; PostgreSQL counts active assignments and pending reaps per contributor | Pending cleanup deliberately retains capacity while provider state is ambiguous |

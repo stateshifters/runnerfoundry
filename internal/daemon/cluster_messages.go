@@ -39,7 +39,7 @@ func (handler clusterMessageHandler) HandleMessage(ctx context.Context, message 
 	if handler.session.assignedJobs == nil {
 		return errors.New("cluster assigned-job recovery is required")
 	}
-	return handler.session.assignedJobs.reconcile(ctx, message.Statistics, "message")
+	return handler.session.assignedJobs.observe(ctx, message.Statistics, "message")
 }
 
 func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messages []*upstream.JobAvailable) error {
@@ -70,8 +70,8 @@ func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messa
 
 func (handler clusterMessageHandler) removeStarted(ctx context.Context, messages []*upstream.JobStarted) error {
 	for _, started := range messages {
-		if started == nil || started.RunnerRequestID <= 0 {
-			return errors.New("job started message requires a positive runner request ID")
+		if !jobStartedHasIdentity(started) {
+			return errors.New("job started message requires a positive runner request ID or runner name")
 		}
 		if lifecycleStore, supported := handler.store.(scaler.RunnerLifecycleStore); supported {
 			err := lifecycleStore.MarkRunnerBusy(

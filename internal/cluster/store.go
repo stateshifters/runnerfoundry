@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -493,7 +495,7 @@ func (store *Store) connectPostgreSQL(ctx context.Context) (*databaseConnection,
 	}
 	connection, err := store.connectConfig(ctx, config)
 	if err != nil {
-		return nil, errors.New("connect to PostgreSQL")
+		return nil, newPostgreSQLConnectionError(err)
 	}
 	return newPostgreSQLDatabaseConnection(connection, store.connectionAdapter, store.transactionAdapter, role), nil
 }
@@ -509,13 +511,45 @@ func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, err
 	}
 	connection, err := store.connectConfig(ctx, config)
 	if err != nil {
-		return nil, errors.New("connect to PostgreSQL")
+		return nil, newPostgreSQLConnectionError(err)
 	}
 	if _, err = store.connectionAdapter.exec(connection, ctx, "SET ROLE "+quotePostgreSQLIdentifier(role)); err != nil {
 		discardPostgreSQLConnectionCloseError(ctx, store.connectionAdapter, connection)
 		return nil, errors.New("assume PostgreSQL role")
 	}
 	return connection, nil
+}
+
+type postgreSQLConnectionError struct {
+	cause error
+	kind  string
+}
+
+func newPostgreSQLConnectionError(cause error) error {
+	return &postgreSQLConnectionError{cause: cause, kind: postgreSQLConnectionFailureKind(cause)}
+}
+
+func (connectionErr *postgreSQLConnectionError) Error() string {
+	return "connect to PostgreSQL: " + connectionErr.kind
+}
+
+func (connectionErr *postgreSQLConnectionError) Unwrap() error { return connectionErr.cause }
+
+func postgreSQLConnectionFailureKind(cause error) string {
+	if errors.Is(cause, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var networkErr net.Error
+	if errors.As(cause, &networkErr) && networkErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(cause, syscall.ECONNREFUSED) {
+		return "refused"
+	}
+	return "unavailable"
 }
 
 func discardPostgreSQLConnectionCloseError(

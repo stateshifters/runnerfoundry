@@ -99,6 +99,88 @@ func TestRepositoryRepairRetriesOnlyPendingRepository(t *testing.T) {
 	leader.stop(context.Background())
 }
 
+func TestOrdinaryReconciliationDoesNotRepeatPendingRepositoryBeforeRetry(t *testing.T) {
+	leader, attempts := repeatedlyFailingRepositoryLeader(t)
+	assertOrdinaryReconciliationCoalesced(t, leader, attempts)
+	repair := pendingRepairSnapshot(leader, "https://github.com/acme/failing")
+	assertDuplicateRepairFailureCoalesced(t, leader, repair)
+	assertChangedDesiredStateReceivesFreshAttempt(t, leader, repair, attempts)
+	leader.stop(context.Background())
+}
+
+func repeatedlyFailingRepositoryLeader(t *testing.T) (*clusterLeader, *atomic.Int32) {
+	t.Helper()
+	leader, daemon := repositoryRepairTestLeader(t, []githubapp.Repository{{
+		InstallationID: 1, URL: "https://github.com/acme/failing",
+	}})
+	attempts := &atomic.Int32{}
+	daemon.newGitHubClient = func(
+		string,
+		githubapp.InstallationID,
+		config.GitHubAppCredentials,
+	) (scaleSetClient, error) {
+		attempts.Add(1)
+		return nil, errors.New("unavailable")
+	}
+	return leader, attempts
+}
+
+func assertOrdinaryReconciliationCoalesced(t *testing.T, leader *clusterLeader, attempts *atomic.Int32) {
+	t.Helper()
+	firstReconcile := leader.reconcile(context.Background())
+	secondReconcile := leader.reconcile(context.Background())
+	if !firstReconcile || !secondReconcile {
+		t.Fatal("repository repair degraded global reconciliation")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("ordinary reconciliation attempts = %d, want 1 before retry deadline", attempts.Load())
+	}
+}
+
+func pendingRepairSnapshot(leader *clusterLeader, repository string) repositoryRepair {
+	leader.repairMutex.Lock()
+	repair := leader.pendingRepositoryRepairs[repository]
+	leader.repairMutex.Unlock()
+	return repair
+}
+
+func assertDuplicateRepairFailureCoalesced(t *testing.T, leader *clusterLeader, repair repositoryRepair) {
+	t.Helper()
+	if repair.attempts != 1 {
+		t.Fatalf("recorded repair attempts = %d, want 1", repair.attempts)
+	}
+	leader.recordRepositoryRepair(
+		context.Background(), repair.repository, repair.statuses, errors.New("duplicate failure"),
+	)
+	repair = pendingRepairSnapshot(leader, "https://github.com/acme/failing")
+	if repair.attempts != 1 {
+		t.Fatalf("duplicate failure advanced repair attempts to %d", repair.attempts)
+	}
+}
+
+func assertChangedDesiredStateReceivesFreshAttempt(
+	t *testing.T,
+	leader *clusterLeader,
+	repair repositoryRepair,
+	attempts *atomic.Int32,
+) {
+	t.Helper()
+	changedDesired := map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{
+		{repository: "https://github.com/acme/failing", scaleSet: "linux"}: {
+			Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 2, Compatible: true,
+		},
+	}
+	if err := leader.startMissingSessions(
+		context.Background(), changedDesired,
+		map[string]githubapp.Repository{repair.repository.URL: repair.repository},
+	); err == nil {
+		t.Fatal("expected changed desired state to receive a fresh repair attempt")
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("changed desired-state attempts = %d, want 2", attempts.Load())
+	}
+}
+
 func awaitInitialRepositoryFailure(
 	t *testing.T,
 	leader *clusterLeader,
@@ -260,13 +342,12 @@ func TestRepositoryRepairLogsLifecycle(t *testing.T) {
 	}
 	now = now.Add(5 * time.Second)
 	leader.repairPendingRepositories(context.Background())
-	assertClusterLogSnapshot(t, withoutClusterLogLinesContaining(logs.String(), `"source":"wake"`),
+	assertClusterLogSnapshot(t, withoutClusterLogLinesContaining(logs.String(), `"action":"assigned_recovery"`),
 		"{\"level\":\"ERROR\",\"msg\":\"leader repository session group failed\",\"repository\":\"https://github.com/acme/retry\",\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"WARN\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"pending\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":1,\"retryAfter\":5000000000,\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"retrying\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}\n"+
-			"{\"level\":\"INFO\",\"msg\":\"session_statistics\",\"action\":\"session_statistics\",\"phase\":\"observed\",\"source\":\"session\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0}\n"+
-			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery\",\"action\":\"assigned_recovery\",\"phase\":\"started\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0,\"epoch\":0,\"installationID\":1,\"githubScaleSetID\":2,\"source\":\"session\"}\n"+
-			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery\",\"action\":\"assigned_recovery\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0,\"epoch\":0,\"installationID\":1,\"githubScaleSetID\":2,\"source\":\"session\",\"runningRunners\":0,\"startedRunners\":0}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"session_statistics\",\"action\":\"session_statistics\",\"phase\":\"observed\",\"trigger\":\"session\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery_trigger\",\"action\":\"assigned_recovery_trigger\",\"phase\":\"queued\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"trigger\":\"session\",\"epoch\":0,\"queueDepth\":1,\"activeWorkers\":0}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}")
 	leader.stop(context.Background())
 }

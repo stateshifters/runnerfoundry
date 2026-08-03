@@ -4,15 +4,57 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
+
+type blockingSessionCloseClient struct {
+	tracker *sessionCloseTracker
+}
+
+type sessionCloseTracker struct {
+	mutex   sync.Mutex
+	active  int
+	maximum int
+	entered chan struct{}
+}
+
+func (client blockingSessionCloseClient) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
+	return nil, errors.New("no message")
+}
+
+func (blockingSessionCloseClient) DeleteMessage(context.Context, int) error { return nil }
+
+func (blockingSessionCloseClient) AcquireJobs(context.Context, []int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (client blockingSessionCloseClient) Close(ctx context.Context) error {
+	client.tracker.mutex.Lock()
+	client.tracker.active++
+	client.tracker.maximum = max(client.tracker.maximum, client.tracker.active)
+	client.tracker.mutex.Unlock()
+	client.tracker.entered <- struct{}{}
+	<-ctx.Done()
+	client.tracker.mutex.Lock()
+	client.tracker.active--
+	client.tracker.mutex.Unlock()
+	return fmt.Errorf("close blocked message session: %w", ctx.Err())
+}
+
+func (blockingSessionCloseClient) Session() upstream.RunnerScaleSetSession {
+	return upstream.RunnerScaleSetSession{Statistics: &upstream.RunnerScaleSetStatistic{}}
+}
 
 func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 	leader, messageClient := activeRepositorySession(t)
@@ -197,6 +239,55 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
 			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
 			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"lease failed\"}")
+}
+
+func TestLeaderStopBoundsConcurrentSessionClosureAndUsesAggregateDeadline(t *testing.T) {
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
+	leader.githubOperationTimeout = 20 * time.Millisecond
+	tracker := &sessionCloseTracker{entered: make(chan struct{}, 5)}
+	for index := 0; index < 5; index++ {
+		key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: fmt.Sprintf("linux-%d", index)}
+		leader.sessions[key] = &repositoryScaleSetSession{
+			key: key, messageClient: scaleSetMessageClient{Client: blockingSessionCloseClient{tracker: tracker}},
+			stopPolling: func() {}, pollerDone: closedChannel(),
+		}
+	}
+	completed := make(chan struct{})
+	go func() {
+		leader.stop(context.Background())
+		close(completed)
+	}()
+	for index := 0; index < sessionCloseWorkerCount; index++ {
+		awaitCompletionSignal(t, tracker.entered)
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("leader shutdown exceeded its aggregate session-close deadline")
+	}
+	tracker.mutex.Lock()
+	maximum := tracker.maximum
+	tracker.mutex.Unlock()
+	if maximum != sessionCloseWorkerCount {
+		t.Fatalf("maximum session-close concurrency = %d", maximum)
+	}
+}
+
+func TestSessionCloseWorkerStopsBeforeTakingWorkAfterCancellation(t *testing.T) {
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	jobs := make(chan *repositoryScaleSetSession)
+	var remaining atomic.Int64
+	var workers sync.WaitGroup
+	workers.Add(1)
+	leader.runSessionCloseWorker(ctx, jobs, &remaining, &workers)
+	workers.Wait()
+	leader.stopRepositoryWorkers()
+	leader.repositoryWorkers.wait()
+	leader.assignedJobWorkers.stop()
 }
 
 func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {

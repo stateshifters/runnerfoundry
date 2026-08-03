@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/cluster"
@@ -19,19 +21,20 @@ import (
 func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFailure(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
 	leader, registry, desired, repositories := fixture.leader, fixture.registry, fixture.desired, fixture.repositories
+	now := time.Unix(100, 0)
+	leader.now = func() time.Time { return now }
 	registry.failSessionName = "windows"
 
 	if err := leader.startMissingSessions(context.Background(), desired, repositories); err == nil {
 		t.Fatal("expected partial session failure")
 	}
-	if len(leader.sessions) != 0 || len(registry.registrations) != 2 || registry.closedSessions != 1 {
-		t.Fatalf("sessions=%d registrations=%d closed=%d", len(leader.sessions), len(registry.registrations), registry.closedSessions)
+	if len(leader.sessions) != 0 || len(registry.registrations) != 2 || registry.closedSessions.Load() != 1 {
+		t.Fatalf("sessions=%d registrations=%d closed=%d", len(leader.sessions), len(registry.registrations), registry.closedSessions.Load())
 	}
 
 	registry.failSessionName = ""
-	if err := leader.startMissingSessions(context.Background(), desired, repositories); err != nil {
-		t.Fatal(err)
-	}
+	now = now.Add(5 * time.Second)
+	leader.repairPendingRepositories(context.Background())
 	if len(leader.sessions) != 2 || registry.createCalls["linux"] != 1 || registry.createCalls["windows"] != 1 {
 		t.Fatalf("sessions=%d createCalls=%#v", len(leader.sessions), registry.createCalls)
 	}
@@ -41,36 +44,54 @@ func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFail
 	leader.stop(context.Background())
 }
 
-func TestClusterRepositoryActivationRecoversInitialAssignedJobsBeforePolling(t *testing.T) {
+func TestClusterRepositoryActivationRecoversInitialAssignedJobsWithoutBlockingPolling(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
+	bootstrapEntered, releaseBootstrap := blockInitialAssignedRecovery(&fixture)
+	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err != nil {
+		t.Fatal(err)
+	}
+	<-bootstrapEntered
+	<-fixture.registry.pollObserved
+	if !fixture.registry.polledBeforeBootstrap {
+		t.Fatal("message polling waited for initial assigned-job recovery")
+	}
+	close(releaseBootstrap)
+	fixture.leader.stop(context.Background())
+	assertInitialAssignedRecovery(t, fixture.state)
+}
+
+func blockInitialAssignedRecovery(fixture *clusterRegistrationTestFixture) (<-chan struct{}, chan struct{}) {
 	linuxKey := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	fixture.desired = map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{linuxKey: fixture.desired[linuxKey]}
 	fixture.registry.initialStatistics = map[string]*upstream.RunnerScaleSetStatistic{
 		"linux": {TotalAssignedJobs: 1},
 	}
 	fixture.state.assignedJobCapacity = scaler.AssignedJobCapacity{AvailableCapacity: 1}
-	bootstrapCompleted := make(chan struct{})
+	bootstrapEntered := make(chan struct{})
+	releaseBootstrap := make(chan struct{})
 	var bootstrapOnce sync.Once
-	fixture.state.onObserveAssignedJobs = func() { bootstrapOnce.Do(func() { close(bootstrapCompleted) }) }
-	fixture.registry.bootstrapCompleted = bootstrapCompleted
-
-	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err != nil {
-		t.Fatal(err)
+	fixture.state.onObserveAssignedJobs = func() {
+		bootstrapOnce.Do(func() {
+			close(bootstrapEntered)
+			<-releaseBootstrap
+		})
 	}
-	fixture.leader.stop(context.Background())
-	observations, assignments, _ := fixture.state.assignedJobsSnapshot()
+	fixture.registry.bootstrapCompleted = releaseBootstrap
+	return bootstrapEntered, releaseBootstrap
+}
+
+func assertInitialAssignedRecovery(t *testing.T, state *fakeClusterState) {
+	t.Helper()
+	observations, assignments, _ := state.assignedJobsSnapshot()
 	if len(observations) < 1 || observations[0].AssignedJobs != 1 {
 		t.Fatalf("assigned-job observations = %#v", observations)
 	}
 	if len(assignments) != 1 {
 		t.Fatalf("assigned-job assignments = %#v", assignments)
 	}
-	if fixture.registry.polledBeforeBootstrap {
-		t.Fatal("message polling started before initial assigned-job recovery")
-	}
 }
 
-func TestClusterRepositoryActivationDoesNotPublishSessionDuringBlockedBootstrap(t *testing.T) {
+func TestClusterRepositoryActivationPublishesSessionDuringBlockedAssignedRecovery(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
 	linuxKey := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
 	fixture.desired = map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{linuxKey: fixture.desired[linuxKey]}
@@ -88,16 +109,18 @@ func TestClusterRepositoryActivationDoesNotPublishSessionDuringBlockedBootstrap(
 		completed <- fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories)
 	}()
 	<-bootstrapEntered
-	if session := fixture.leader.scheduler.session(linuxKey); session != nil {
-		t.Fatalf("scheduler published session before bootstrap completed: %#v", session)
+	if session := fixture.leader.scheduler.session(linuxKey); session == nil {
+		t.Fatal("scheduler did not publish session while assigned recovery was blocked")
+	}
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("repository activation waited for assigned recovery")
 	}
 	close(releaseBootstrap)
-	if err := <-completed; err != nil {
-		t.Fatal(err)
-	}
-	if session := fixture.leader.scheduler.session(linuxKey); session == nil {
-		t.Fatal("scheduler did not publish bootstrapped session")
-	}
 	fixture.leader.stop(context.Background())
 }
 
@@ -117,32 +140,59 @@ func TestClusterRepositoryActivationQueuesRepairWhenInitialStatisticsAreMissing(
 
 func TestClusterRepositoryAuditRepairsDriftAndRetainsSessionsOnTransientFailure(t *testing.T) {
 	fixture := clusterRegistrationFixture(t)
-	leader, registry, desired, repositories := fixture.leader, fixture.registry, fixture.desired, fixture.repositories
-	if err := leader.startMissingSessions(context.Background(), desired, repositories); err != nil {
+	var now atomic.Int64
+	now.Store(100)
+	fixture.leader.now = func() time.Time { return time.Unix(now.Load(), 0) }
+	oldLinux := startRegistrationSessions(t, fixture)
+	assertTransientRegistrationAuditRetainsSessions(t, fixture, oldLinux)
+	repairDriftedRegistration(t, fixture, oldLinux, &now)
+	fixture.leader.stop(context.Background())
+}
+
+func startRegistrationSessions(
+	t *testing.T,
+	fixture clusterRegistrationTestFixture,
+) *repositoryScaleSetSession {
+	t.Helper()
+	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err != nil {
 		t.Fatal(err)
 	}
-	oldLinux := leader.sessions[repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}]
-	registry.getErr = errors.New("audit unavailable")
-	if err := leader.startMissingSessions(context.Background(), desired, repositories); err == nil {
+	return fixture.leader.sessions[repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}]
+}
+
+func assertTransientRegistrationAuditRetainsSessions(
+	t *testing.T,
+	fixture clusterRegistrationTestFixture,
+	oldLinux *repositoryScaleSetSession,
+) {
+	t.Helper()
+	fixture.registry.getErr = errors.New("audit unavailable")
+	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err == nil {
 		t.Fatal("expected degraded audit")
 	}
-	if leader.sessions[oldLinux.key] != oldLinux || registry.closedSessions != 0 {
+	if fixture.leader.sessions[oldLinux.key] != oldLinux || fixture.registry.closedSessions.Load() != 0 {
 		t.Fatal("transient audit failure replaced healthy sessions")
 	}
+}
 
-	registry.getErr = nil
-	delete(registry.registrations, "linux")
-	if err := leader.startMissingSessions(context.Background(), desired, repositories); err != nil {
-		t.Fatal(err)
-	}
-	newLinux := leader.sessions[oldLinux.key]
+func repairDriftedRegistration(
+	t *testing.T,
+	fixture clusterRegistrationTestFixture,
+	oldLinux *repositoryScaleSetSession,
+	now *atomic.Int64,
+) {
+	t.Helper()
+	fixture.registry.getErr = nil
+	delete(fixture.registry.registrations, "linux")
+	now.Add(5)
+	fixture.leader.repairPendingRepositories(context.Background())
+	newLinux := fixture.leader.sessions[oldLinux.key]
 	if newLinux == oldLinux || newLinux.runnerScaleSet.ID == oldLinux.runnerScaleSet.ID {
 		t.Fatal("confirmed registration drift did not replace the complete session generation")
 	}
-	if registry.closedSessions != 2 || len(leader.sessions) != 2 {
-		t.Fatalf("closed=%d sessions=%d", registry.closedSessions, len(leader.sessions))
+	if fixture.registry.closedSessions.Load() != 2 || len(fixture.leader.sessions) != 2 {
+		t.Fatalf("closed=%d sessions=%d", fixture.registry.closedSessions.Load(), len(fixture.leader.sessions))
 	}
-	leader.stop(context.Background())
 }
 
 func TestClusterRepositoryAuditKeepsMatchingSessionGeneration(t *testing.T) {
@@ -212,8 +262,8 @@ func TestClusterRepositoryReconciliationLeavesFailedGenerationAbsentWhenSuspensi
 	if err == nil || !strings.Contains(err.Error(), "close failed") {
 		t.Fatalf("reconciliation error = %v", err)
 	}
-	if fixture.leader.sessions[key] != nil || fixture.registry.closedSessions != 0 {
-		t.Fatalf("session=%#v replacement close calls=%d", fixture.leader.sessions[key], fixture.registry.closedSessions)
+	if fixture.leader.sessions[key] != nil || fixture.registry.closedSessions.Load() != 0 {
+		t.Fatalf("session=%#v replacement close calls=%d", fixture.leader.sessions[key], fixture.registry.closedSessions.Load())
 	}
 }
 
@@ -230,11 +280,13 @@ func TestClusterSessionMatchingAndDeclarationHelpersHandleEmptyAndPresentSets(t 
 type clusterRegistrationClient struct {
 	*registrationReconciliationClient
 	failSessionName       string
-	closedSessions        int
+	closedSessions        atomic.Int32
 	initialStatistics     map[string]*upstream.RunnerScaleSetStatistic
 	missingStatistics     map[string]bool
 	bootstrapCompleted    <-chan struct{}
 	polledBeforeBootstrap bool
+	pollObserved          chan struct{}
+	pollOnce              sync.Once
 }
 
 type clusterRegistrationTestFixture struct {
@@ -247,7 +299,10 @@ type clusterRegistrationTestFixture struct {
 
 func clusterRegistrationFixture(t *testing.T) clusterRegistrationTestFixture {
 	t.Helper()
-	registry := &clusterRegistrationClient{registrationReconciliationClient: successfulRegistrationReconciliationClient()}
+	registry := &clusterRegistrationClient{
+		registrationReconciliationClient: successfulRegistrationReconciliationClient(),
+		pollObserved:                     make(chan struct{}),
+	}
 	registry.messageSessionClient = registry.messageSession
 	state := &fakeClusterState{}
 	daemon := clusteredDaemonForTest(state)
@@ -285,7 +340,7 @@ func (client *clusterRegistrationClient) messageSession(
 		fakeMessageClient: fakeMessageClient{
 			session: upstream.RunnerScaleSetSession{Statistics: statistics}, missingSessionStatistics: statistics == nil,
 		},
-		onClose:    func() { client.closedSessions++ },
+		onClose:    func() { client.closedSessions.Add(1) },
 		beforePoll: client.recordEarlyPoll,
 	}
 	return scaleSetMessageClient{Client: messageClient}, nil
@@ -311,6 +366,7 @@ func (client *clusterRegistrationClient) sessionStatistics(name string) *upstrea
 }
 
 func (client *clusterRegistrationClient) recordEarlyPoll() {
+	defer client.pollOnce.Do(func() { close(client.pollObserved) })
 	if client.bootstrapCompleted == nil {
 		return
 	}

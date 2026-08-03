@@ -99,7 +99,7 @@ func TestCoordinatedScaleSetHandlerLogsStatisticsBeforeReconciliation(t *testing
 	if !worker.loggedBeforeReconcile {
 		t.Fatalf("session statistics were not logged before reconciliation: %q", logs.String())
 	}
-	if !strings.Contains(logs.String(), "source=message") {
+	if !strings.Contains(logs.String(), "trigger=message") {
 		t.Fatalf("message statistics source was not logged: %q", logs.String())
 	}
 }

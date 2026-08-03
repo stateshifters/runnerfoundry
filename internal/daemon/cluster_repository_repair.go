@@ -49,6 +49,11 @@ func (leader *clusterLeader) recordRepositoryRepair(
 ) {
 	leader.repairMutex.Lock()
 	repair := leader.pendingRepositoryRepairs[repository.URL]
+	if repair.repository == repository && sameScaleSetStatuses(repair.statuses, statuses) &&
+		leader.now().Before(repair.retryAfter) {
+		leader.repairMutex.Unlock()
+		return
+	}
 	repair.repository = repository
 	repair.statuses = append([]cluster.ScaleSetStatus(nil), statuses...)
 	delayIndex := min(repair.attempts, len(leader.repositoryRepairDelays)-1)
@@ -61,6 +66,23 @@ func (leader *clusterLeader) recordRepositoryRepair(
 		slog.String("repository", repository.URL), slog.Int("attempt", repair.attempts),
 		slog.Duration("retryAfter", delay), slog.String("error", repairErr.Error()))
 	requestRepositoryRepair(leader.daemon.repositoryRepairRequests)
+}
+
+func (leader *clusterLeader) repositoryRepairAlreadyScheduled(
+	repository githubapp.Repository,
+	statuses []cluster.ScaleSetStatus,
+) bool {
+	leader.repairMutex.Lock()
+	defer leader.repairMutex.Unlock()
+	repair, pending := leader.pendingRepositoryRepairs[repository.URL]
+	if !pending {
+		return false
+	}
+	if repair.repository == repository && sameScaleSetStatuses(repair.statuses, statuses) {
+		return true
+	}
+	delete(leader.pendingRepositoryRepairs, repository.URL)
+	return false
 }
 
 func requestRepositoryRepair(requests chan<- struct{}) {

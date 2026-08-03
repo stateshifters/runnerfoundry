@@ -3,7 +3,10 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -157,6 +160,43 @@ func TestPrimaryConnectorReportsInjectedConnectionFailure(t *testing.T) {
 	}
 	if _, err := store.connectPostgreSQL(context.Background()); err == nil {
 		t.Fatal("expected connection failure")
+	}
+}
+
+func TestPrimaryConnectorPreservesSafeConnectionFailureClassification(t *testing.T) {
+	originalResolver := productionConnectionSettingResolver
+	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
+	productionConnectionSettingResolver = testConnectionResolver(nil)
+	connectionFailure := fmt.Errorf("dial postgres://runner:super-secret@database/runnerfoundry: %w", context.DeadlineExceeded)
+	store := NewStore(Settings{Role: "runnerfoundry"})
+	store.connectConfig = func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error) {
+		return nil, connectionFailure
+	}
+	_, err := store.connectPostgreSQL(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connection error = %v, want timeout classification", err)
+	}
+	if strings.Contains(err.Error(), "super-secret") || err.Error() != "connect to PostgreSQL: timeout" {
+		t.Fatalf("unsafe connection error = %q", err)
+	}
+}
+
+func TestPostgreSQLConnectionFailureKindsAreSafeAndActionable(t *testing.T) {
+	tests := map[string]struct {
+		cause error
+		want  string
+	}{
+		"canceled":        {cause: context.Canceled, want: "canceled"},
+		"network timeout": {cause: &net.DNSError{IsTimeout: true}, want: "timeout"},
+		"refused":         {cause: syscall.ECONNREFUSED, want: "refused"},
+		"unavailable":     {cause: errors.New("unknown failure"), want: "unavailable"},
+	}
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			if kind := postgreSQLConnectionFailureKind(test.cause); kind != test.want {
+				t.Fatalf("connection failure kind = %q, want %q", kind, test.want)
+			}
+		})
 	}
 }
 
