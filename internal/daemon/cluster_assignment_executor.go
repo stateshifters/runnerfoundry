@@ -245,13 +245,37 @@ func (daemon *clusteredDaemon) executeAssignment(ctx context.Context, assignment
 	} else if scaleSet.Libvirt != nil {
 		configureLegacyAssignmentLifecycle(daemon, &reconciler, assignment)
 	}
-	if err = ensureAssignedRunner(ctx, reconciler, assignment.RequestID); err != nil {
+	if assignment.IdentityFree {
+		err = ensureIdentityFreeAssignedRunner(ctx, reconciler)
+	} else {
+		err = ensureAssignedRunner(ctx, reconciler, assignment.RequestID)
+	}
+	if err != nil {
 		return err
 	}
 	if err = daemon.assignments.ConfirmRunning(ctx, assignment.ID, assignment.NodeID); err != nil {
 		return fmt.Errorf("record started runner assignment: %w", err)
 	}
 	return nil
+}
+
+func ensureIdentityFreeAssignedRunner(ctx context.Context, reconciler scaler.Reconciler) error {
+	startCtx, cancelStart := context.WithTimeout(ctx, clusterProviderStartTimeout)
+	startErr := reconciler.StartOne(startCtx)
+	cancelStart()
+	inspectCtx, cancelInspect := context.WithTimeout(ctx, clusterProviderInspectTimeout)
+	exists, inspectErr := reconciler.AssignedRunnerPresent(inspectCtx)
+	cancelInspect()
+	if inspectErr != nil {
+		return errors.Join(startErr, fmt.Errorf("verify identity-free assigned runner: %w", inspectErr))
+	}
+	if exists {
+		return nil
+	}
+	if startErr != nil {
+		return fmt.Errorf("start identity-free assigned runner: %w", startErr)
+	}
+	return errors.New("provider did not start the identity-free assigned runner")
 }
 
 func configureAssignmentRunnerLifecycle(

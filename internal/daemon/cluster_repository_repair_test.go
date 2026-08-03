@@ -81,8 +81,9 @@ func TestRepositoryRepairRetriesOnlyPendingRepository(t *testing.T) {
 		{InstallationID: 1, URL: "https://github.com/acme/a-failing"},
 		{InstallationID: 1, URL: "https://github.com/acme/b-working"},
 	})
-	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
-	leader.now = func() time.Time { return now }
+	var nowUnixNano atomic.Int64
+	nowUnixNano.Store(time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC).UnixNano())
+	leader.now = func() time.Time { return time.Unix(0, nowUnixNano.Load()).UTC() }
 	clientFactory := &transientRepositoryClientFactory{calls: map[string]int{}, failingRepository: "https://github.com/acme/a-failing"}
 	daemon.newGitHubClient = func(repository string, installationID githubapp.InstallationID, credentials config.GitHubAppCredentials) (scaleSetClient, error) {
 		return clientFactory.client(repository, installationID, credentials)
@@ -92,7 +93,7 @@ func TestRepositoryRepairRetriesOnlyPendingRepository(t *testing.T) {
 		t.Fatal("repository failure degraded global reconciliation")
 	}
 	awaitInitialRepositoryFailure(t, leader, clientFactory)
-	now = now.Add(5 * time.Second)
+	nowUnixNano.Add(int64(5 * time.Second))
 	leader.repairPendingRepositories(context.Background())
 	assertTargetedRepositoryRetry(t, leader, clientFactory)
 	leader.stop(context.Background())
@@ -235,7 +236,7 @@ func TestLeadershipLossCancelsRepositoryRepair(t *testing.T) {
 }
 
 func TestRepositoryRepairLogsLifecycle(t *testing.T) {
-	logs := &bytes.Buffer{}
+	logs := &synchronizedLogBuffer{}
 	leader, daemon := repositoryRepairTestLeader(t, []githubapp.Repository{{
 		InstallationID: 1, URL: "https://github.com/acme/retry",
 	}})
@@ -259,10 +260,13 @@ func TestRepositoryRepairLogsLifecycle(t *testing.T) {
 	}
 	now = now.Add(5 * time.Second)
 	leader.repairPendingRepositories(context.Background())
-	assertClusterLogSnapshot(t, logs,
+	assertClusterLogSnapshot(t, withoutClusterLogLinesContaining(logs.String(), `"source":"wake"`),
 		"{\"level\":\"ERROR\",\"msg\":\"leader repository session group failed\",\"repository\":\"https://github.com/acme/retry\",\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"WARN\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"pending\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":1,\"retryAfter\":5000000000,\"error\":\"unavailable\"}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"retrying\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"session_statistics\",\"action\":\"session_statistics\",\"phase\":\"observed\",\"source\":\"session\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery\",\"action\":\"assigned_recovery\",\"phase\":\"started\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0,\"epoch\":0,\"installationID\":1,\"githubScaleSetID\":2,\"source\":\"session\"}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"assigned_recovery\",\"action\":\"assigned_recovery\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"scaleSet\":\"linux\",\"assignedJobs\":0,\"availableJobs\":0,\"acquiredJobs\":0,\"runningJobs\":0,\"registeredRunners\":0,\"busyRunners\":0,\"idleRunners\":0,\"epoch\":0,\"installationID\":1,\"githubScaleSetID\":2,\"source\":\"session\",\"runningRunners\":0,\"startedRunners\":0}\n"+
 			"{\"level\":\"INFO\",\"msg\":\"repository_repair\",\"action\":\"repository_repair\",\"phase\":\"completed\",\"repository\":\"https://github.com/acme/retry\",\"attempt\":2}")
 	leader.stop(context.Background())
 }

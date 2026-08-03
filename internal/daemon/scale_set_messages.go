@@ -28,6 +28,16 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	if message.Statistics == nil {
 		return errors.New("scale set message statistics are required")
 	}
+	logScaleSetSessionStatistics(
+		ctx, handler.Logger, handler.Repository, handler.ScaleSet, "message", message.Statistics,
+	)
+	if err := handler.applyMessageLifecycle(ctx, message); err != nil {
+		return err
+	}
+	return handler.reconcileAssignedCapacity(ctx, message.Statistics.TotalAssignedJobs)
+}
+
+func (handler coordinatedScaleSetHandler) applyMessageLifecycle(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
 	if err := handler.markStartedRunnersBusy(ctx, message.JobStartedMessages); err != nil {
 		return err
 	}
@@ -41,13 +51,17 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 	if err = handler.completeJobs(ctx, message.JobCompletedMessages); err != nil {
 		return err
 	}
-	reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, message.Statistics.TotalAssignedJobs)
+	return nil
+}
+
+func (handler coordinatedScaleSetHandler) reconcileAssignedCapacity(ctx context.Context, assignedJobs int) error {
+	reconciliation, err := handler.Coordinator.ReconcileAssigned(ctx, handler.Repository, assignedJobs)
 	if err != nil {
 		return fmt.Errorf("schedule shared runner capacity: %w", err)
 	}
 	effectiveLogger(handler.Logger).Info(
 		"assigned capacity reconciled",
-		slog.String("action", "capacity_reconcile"),
+		slog.String("action", "assigned_recovery"),
 		slog.String("phase", "completed"),
 		slog.String("repository", handler.Repository),
 		slog.String("scaleSet", handler.ScaleSet),
@@ -56,6 +70,22 @@ func (handler coordinatedScaleSetHandler) HandleMessage(ctx context.Context, mes
 		slog.Int("startedRunners", reconciliation.StartedRunners),
 	)
 	return nil
+}
+
+func logScaleSetSessionStatistics(
+	ctx context.Context,
+	logger *slog.Logger,
+	repository string,
+	scaleSet string,
+	source string,
+	statistics *upstream.RunnerScaleSetStatistic,
+) {
+	logAction(ctx, logger, slog.LevelInfo, "session_statistics", "observed",
+		slog.String("source", source), slog.String("repository", repository), slog.String("scaleSet", scaleSet),
+		slog.Int("assignedJobs", statistics.TotalAssignedJobs), slog.Int("availableJobs", statistics.TotalAvailableJobs),
+		slog.Int("acquiredJobs", statistics.TotalAcquiredJobs), slog.Int("runningJobs", statistics.TotalRunningJobs),
+		slog.Int("registeredRunners", statistics.TotalRegisteredRunners), slog.Int("busyRunners", statistics.TotalBusyRunners),
+		slog.Int("idleRunners", statistics.TotalIdleRunners))
 }
 
 func (handler coordinatedScaleSetHandler) collectDemand(message *upstream.RunnerScaleSetMessage) ([]scaler.JobDemand, []scaler.DemandRemoval, error) {

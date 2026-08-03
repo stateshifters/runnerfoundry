@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -333,6 +334,7 @@ type removedClusterDemand struct {
 }
 
 type fakeClusterState struct {
+	assignedJobsMutex        sync.Mutex
 	migrations               int
 	publications             []clusterPublication
 	statuses                 []cluster.ScaleSetStatus
@@ -378,6 +380,13 @@ type fakeClusterState struct {
 	startingErr              error
 	startingCalls            int
 	scaleSetCalls            int
+	assignedJobCapacity      scaler.AssignedJobCapacity
+	assignedJobObservations  []cluster.AssignedJobObservation
+	assignedJobAssignments   []cluster.Assignment
+	observeAssignedJobsErr   error
+	assignAssignedJobErr     error
+	onObserveAssignedJobs    func()
+	assignedJobEvents        []string
 }
 
 func (state *fakeClusterState) Migrate(context.Context) error {
@@ -414,7 +423,10 @@ func (state *fakeClusterState) ScaleSets(context.Context, time.Time, time.Durati
 }
 
 func (state *fakeClusterState) Enqueue(_ context.Context, demand cluster.Demand) error {
+	state.assignedJobsMutex.Lock()
+	defer state.assignedJobsMutex.Unlock()
 	state.demand = append(state.demand, demand)
+	state.assignedJobEvents = append(state.assignedJobEvents, "enqueue")
 	return state.enqueueErr
 }
 
@@ -442,6 +454,9 @@ func (state *fakeClusterState) BeginAcquisition(
 
 func (state *fakeClusterState) ConfirmAcquisition(_ context.Context, assignmentID cluster.AssignmentID) error {
 	state.ready = append(state.ready, assignmentID)
+	state.assignedJobsMutex.Lock()
+	state.assignedJobEvents = append(state.assignedJobEvents, "confirm-exact")
+	state.assignedJobsMutex.Unlock()
 	if state.confirmFailuresRemaining > 0 {
 		state.confirmFailuresRemaining--
 		return state.confirmFailure
@@ -451,6 +466,57 @@ func (state *fakeClusterState) ConfirmAcquisition(_ context.Context, assignmentI
 
 func (state *fakeClusterState) PendingAcquisitions(context.Context) ([]cluster.Assignment, error) {
 	return append([]cluster.Assignment(nil), state.pendingAssignments...), state.pendingErr
+}
+
+func (state *fakeClusterState) ObserveAssignedJobs(
+	_ context.Context,
+	observation cluster.AssignedJobObservation,
+) (scaler.AssignedJobCapacity, error) {
+	state.assignedJobsMutex.Lock()
+	state.assignedJobObservations = append(state.assignedJobObservations, observation)
+	state.assignedJobEvents = append(state.assignedJobEvents, "observe-assigned")
+	onObserve := state.onObserveAssignedJobs
+	capacity := state.assignedJobCapacity
+	capacity.AvailableCapacity = max(capacity.AvailableCapacity-len(state.assignedJobAssignments), 0)
+	err := state.observeAssignedJobsErr
+	state.assignedJobsMutex.Unlock()
+	if onObserve != nil {
+		onObserve()
+	}
+	return capacity, err
+}
+
+func (state *fakeClusterState) AssignAssignedJob(
+	_ context.Context,
+	observation cluster.AssignedJobObservation,
+	_ time.Time,
+	_ time.Duration,
+) (*cluster.Assignment, error) {
+	state.assignedJobsMutex.Lock()
+	defer state.assignedJobsMutex.Unlock()
+	if state.assignAssignedJobErr != nil {
+		return nil, state.assignAssignedJobErr
+	}
+	assignment := cluster.Assignment{
+		ID:       cluster.AssignmentID(len(state.assignedJobAssignments) + 1),
+		ScaleSet: observation.ScaleSet, Repository: observation.Repository,
+		ControllerEpoch: observation.ControllerEpoch, IdentityFree: true,
+	}
+	state.assignedJobAssignments = append(state.assignedJobAssignments, assignment)
+	state.assignedJobEvents = append(state.assignedJobEvents, "assign-identity-free")
+	return &assignment, nil
+}
+
+func (state *fakeClusterState) assignedJobsSnapshot() (
+	[]cluster.AssignedJobObservation,
+	[]cluster.Assignment,
+	[]string,
+) {
+	state.assignedJobsMutex.Lock()
+	defer state.assignedJobsMutex.Unlock()
+	return append([]cluster.AssignedJobObservation(nil), state.assignedJobObservations...),
+		append([]cluster.Assignment(nil), state.assignedJobAssignments...),
+		append([]string(nil), state.assignedJobEvents...)
 }
 
 func (state *fakeClusterState) ConfirmRunning(

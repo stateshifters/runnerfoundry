@@ -15,6 +15,17 @@ import (
 )
 
 func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
+	leader, messageClient := activeRepositorySession(t)
+	pollerCtx := <-messageClient.contexts
+	if pollerCtx.Err() != nil {
+		t.Fatalf("repository polling ended with reconciliation: %v", pollerCtx.Err())
+	}
+	leader.stop(context.Background())
+	<-messageClient.exited
+}
+
+func activeRepositorySession(t *testing.T) (*clusterLeader, *blockingMessageClient) {
+	t.Helper()
 	messageClient := &blockingMessageClient{
 		entered: make(chan struct{}), exited: make(chan struct{}), contexts: make(chan context.Context, 1),
 	}
@@ -34,15 +45,14 @@ func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-messageClient.entered
-	pollerCtx := <-messageClient.contexts
-	cancelOperation()
-	if pollerCtx.Err() != nil {
-		t.Fatalf("repository polling ended with reconciliation: %v", pollerCtx.Err())
+	if err = leader.activateRepositorySessionGeneration(operationCtx, "repo", []cluster.ScaleSetStatus{{
+		Name: "linux", RunnerGroup: "Default", EffectiveCapacity: 1, Compatible: true,
+	}}, []*repositoryScaleSetSession{session}); err != nil {
+		t.Fatal(err)
 	}
-	leader.sessions[session.key] = session
-	leader.stop(context.Background())
-	<-messageClient.exited
+	<-messageClient.entered
+	cancelOperation()
+	return leader, messageClient
 }
 
 func TestLeadershipLossCancelsBlockedReconciliation(t *testing.T) {

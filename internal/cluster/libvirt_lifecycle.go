@@ -111,6 +111,15 @@ func completeJobInTransaction(
 		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
 		return fmt.Errorf("request clustered libvirt runner reap: %w", err)
 	}
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
+		WHERE assignment.assignment_id IN (
+			SELECT assignment_id FROM scaler_runner_lifecycle
+			WHERE scale_set = $1 AND repository = $2 AND assignment_id IS NOT NULL
+			  AND (($3 > 0 AND request_id = $3) OR ($4 <> '' AND runner_name = $4))
+		) AND assignment.assigned_observation_id IS NOT NULL AND assignment.state <> 'complete'`,
+		completion.ScaleSet, completion.Repository, completion.RequestID, completion.RunnerName); err != nil {
+		return fmt.Errorf("complete observed assignment: %w", err)
+	}
 	if completion.RequestID > 0 {
 		if err := completeDemandInTransaction(ctx, transaction, completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
 			return err

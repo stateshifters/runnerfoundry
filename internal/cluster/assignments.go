@@ -10,6 +10,60 @@ import (
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
+const claimReadyAssignmentSQL = `
+	UPDATE scaler_assignments assignment
+	SET state = 'starting'
+	FROM scaler_assignments source
+	LEFT JOIN scaler_demand demand ON demand.demand_id = source.demand_id
+	LEFT JOIN scaler_assigned_job_observations observation
+	  ON observation.assigned_observation_id = source.assigned_observation_id
+	WHERE assignment.assignment_id = (
+	    SELECT candidate.assignment_id
+	    FROM scaler_assignments candidate
+	    WHERE candidate.node_id = $1 AND candidate.state = 'ready'
+	      AND (candidate.assigned_observation_id IS NULL OR EXISTS (
+	          SELECT 1 FROM scaler_assigned_job_observations current_observation
+	          JOIN scaler_repository_controls control ON control.app_id = current_observation.app_id
+	          WHERE current_observation.assigned_observation_id = candidate.assigned_observation_id
+	            AND current_observation.controller_epoch = candidate.controller_epoch
+	            AND control.controller_epoch = candidate.controller_epoch
+	      ))
+	    ORDER BY candidate.assignment_id
+	    LIMIT 1
+	    FOR UPDATE SKIP LOCKED
+	)
+	AND source.assignment_id = assignment.assignment_id
+	RETURNING assignment.assignment_id, assignment.node_id,
+	          COALESCE(demand.scale_set, observation.scale_set),
+	          COALESCE(demand.repository, observation.repository_url),
+	          COALESCE(demand.request_id, 0), COALESCE(demand.queue_time, observation.observed_at),
+	          assignment.installation_id, assignment.github_scale_set_id,
+	          assignment.controller_epoch, assignment.assigned_observation_id IS NOT NULL, assignment.state`
+
+const loadAssignmentsSQLPrefix = `
+	SELECT assignment.assignment_id, assignment.node_id,
+	       COALESCE(demand.scale_set, observation.scale_set),
+	       COALESCE(demand.repository, observation.repository_url),
+	       COALESCE(demand.request_id, 0), COALESCE(demand.queue_time, observation.observed_at),
+	       COALESCE(assignment.installation_id, 0), COALESCE(assignment.github_scale_set_id, 0),
+	       assignment.controller_epoch, assignment.assigned_observation_id IS NOT NULL, assignment.state
+	FROM scaler_assignments assignment
+	LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+	LEFT JOIN scaler_assigned_job_observations observation
+	  ON observation.assigned_observation_id = assignment.assigned_observation_id
+	WHERE (assignment.assigned_observation_id IS NULL OR EXISTS (
+	      SELECT 1 FROM scaler_repository_controls control
+	      WHERE control.app_id = observation.app_id
+	        AND control.controller_epoch = assignment.controller_epoch
+	        AND observation.controller_epoch = assignment.controller_epoch
+	  ))`
+
+const loadPendingAcquisitionsSQL = loadAssignmentsSQLPrefix +
+	" AND assignment.state IN ('reserved', 'acquiring')"
+
+const loadStartingAssignmentsSQL = loadAssignmentsSQLPrefix +
+	" AND assignment.state = 'starting'"
+
 // BeginAcquisition records the GitHub identifiers before acquisition begins.
 // The assignment must still be reserved; stale or repeated transitions return
 // ErrAssignmentConflict.
@@ -40,25 +94,10 @@ func (store *Store) ClaimForStart(ctx context.Context, nodeID NodeID) (assignmen
 	}
 	defer finishConnection(ctx, connection, &resultErr)
 	var claimed Assignment
-	err = connection.QueryRow(ctx, `
-		UPDATE scaler_assignments assignment
-		SET state = 'starting'
-		FROM scaler_demand demand
-		WHERE assignment.assignment_id = (
-		    SELECT candidate.assignment_id
-		    FROM scaler_assignments candidate
-		    WHERE candidate.node_id = $1 AND candidate.state = 'ready'
-		    ORDER BY candidate.assignment_id
-		    LIMIT 1
-		    FOR UPDATE SKIP LOCKED
-		)
-		AND demand.demand_id = assignment.demand_id
-		RETURNING assignment.assignment_id, assignment.node_id, demand.scale_set,
-		          demand.repository, demand.request_id, demand.queue_time,
-		          assignment.installation_id, assignment.github_scale_set_id, assignment.state`, nodeID).Scan(
+	err = connection.QueryRow(ctx, claimReadyAssignmentSQL, nodeID).Scan(
 		&claimed.ID, &claimed.NodeID, &claimed.ScaleSet, &claimed.Repository,
 		&claimed.RequestID, &claimed.QueueTime, &claimed.InstallationID, &claimed.GitHubScaleSetID,
-		&claimed.State,
+		&claimed.ControllerEpoch, &claimed.IdentityFree, &claimed.State,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoReadyAssignment
@@ -72,18 +111,18 @@ func (store *Store) ClaimForStart(ctx context.Context, nodeID NodeID) (assignmen
 // PendingAcquisitions returns assignments whose GitHub acquisition has not
 // been confirmed. Reserved rows have zero-valued GitHub identifiers.
 func (store *Store) PendingAcquisitions(ctx context.Context) ([]Assignment, error) {
-	return store.loadAssignments(ctx, "assignment.state IN ('reserved', 'acquiring')", "", "load pending acquisitions")
+	return store.loadAssignments(ctx, loadPendingAcquisitionsSQL, "", "load pending acquisitions")
 }
 
 // Starting returns assignments owned by nodeID whose provider start must be
 // completed or repaired.
 func (store *Store) Starting(ctx context.Context, nodeID NodeID) ([]Assignment, error) {
-	return store.loadAssignments(ctx, "assignment.state = 'starting'", nodeID, "load starting assignments")
+	return store.loadAssignments(ctx, loadStartingAssignmentsSQL, nodeID, "load starting assignments")
 }
 
 func (store *Store) loadAssignments(
 	ctx context.Context,
-	statePredicate string,
+	statement string,
 	nodeID NodeID,
 	operation string,
 ) (assignments []Assignment, resultErr error) {
@@ -92,14 +131,6 @@ func (store *Store) loadAssignments(
 		return nil, err
 	}
 	defer finishConnection(ctx, connection, &resultErr)
-	statement := `
-		SELECT assignment.assignment_id, assignment.node_id, demand.scale_set,
-		       demand.repository, demand.request_id, demand.queue_time,
-		       COALESCE(assignment.installation_id, 0), COALESCE(assignment.github_scale_set_id, 0),
-		       assignment.state
-		FROM scaler_assignments assignment
-		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		WHERE ` + statePredicate
 	arguments := []any{}
 	if nodeID != NodeID("") {
 		statement += " AND assignment.node_id = $1"
@@ -121,7 +152,7 @@ func scanAssignments(rows *databaseRows) ([]Assignment, error) {
 		if err := rows.Scan(
 			&assignment.ID, &assignment.NodeID, &assignment.ScaleSet, &assignment.Repository,
 			&assignment.RequestID, &assignment.QueueTime, &assignment.InstallationID,
-			&assignment.GitHubScaleSetID, &assignment.State,
+			&assignment.GitHubScaleSetID, &assignment.ControllerEpoch, &assignment.IdentityFree, &assignment.State,
 		); err != nil {
 			return nil, fmt.Errorf("scan assignment recovery state: %w", err)
 		}
@@ -136,8 +167,15 @@ func scanAssignments(rows *databaseRows) ([]Assignment, error) {
 // ConfirmRunning records that the owning node has observed its named runner.
 func (store *Store) ConfirmRunning(ctx context.Context, assignmentID AssignmentID, nodeID NodeID) error {
 	return store.transitionAssignment(ctx, assignmentID, AssignmentStarting, `
-		UPDATE scaler_assignments SET state = 'running'
-		WHERE assignment_id = $1 AND node_id = $2 AND state = 'starting'`, nodeID)
+		UPDATE scaler_assignments assignment SET state = 'running'
+		WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state = 'starting'
+		  AND (assignment.assigned_observation_id IS NULL OR EXISTS (
+		      SELECT 1 FROM scaler_assigned_job_observations observation
+		      JOIN scaler_repository_controls control ON control.app_id = observation.app_id
+		      WHERE observation.assigned_observation_id = assignment.assigned_observation_id
+		        AND observation.controller_epoch = assignment.controller_epoch
+		        AND control.controller_epoch = assignment.controller_epoch
+		  ))`, nodeID)
 }
 
 // CompleteAssignment releases an assignment only when its owner and current

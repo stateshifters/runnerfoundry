@@ -14,11 +14,21 @@ const registerClusterRunnerLifecycleSQL = `
 		node_id, scale_set, repository, provider, runner_name, request_id, assignment_id,
 		installation_id, github_scale_set_id, github_runner_id, phase, created_at, updated_at
 	)
-	SELECT assignment.node_id, demand.scale_set, demand.repository, $3, $4, demand.request_id,
+	SELECT assignment.node_id, COALESCE(demand.scale_set, observation.scale_set),
+	       COALESCE(demand.repository, observation.repository_url), $3, $4,
+	       COALESCE(demand.request_id, 0),
 	       assignment.assignment_id, $5, $6, $7, 'provisioning', $8, $8
 	FROM scaler_assignments assignment
-	JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+	LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+	LEFT JOIN scaler_assigned_job_observations observation
+	  ON observation.assigned_observation_id = assignment.assigned_observation_id
 	WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state <> 'complete'
+	  AND (assignment.assigned_observation_id IS NULL OR EXISTS (
+	      SELECT 1 FROM scaler_repository_controls control
+	      WHERE control.app_id = observation.app_id
+	        AND control.controller_epoch = assignment.controller_epoch
+	        AND observation.controller_epoch = assignment.controller_epoch
+	  ))
 	ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`
 
 const verifyClusterRunnerLifecycleSQL = `SELECT EXISTS (
@@ -136,7 +146,9 @@ func (store *Store) MarkRunnerBusy(
 	}
 	defer finishConnection(ctx, connection, &resultErr)
 	commandTag, err := connection.Exec(ctx, `UPDATE scaler_runner_lifecycle
-		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END, updated_at = $2
+		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
+		    request_id = CASE WHEN request_id = 0 AND $6 > 0 AND $5 <> '' THEN $6 ELSE request_id END,
+		    updated_at = $2
 		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending'
 		  AND (($5 <> '' AND runner_name = $5) OR ($6 > 0 AND request_id = $6))`,
 		githubRunnerID, startedAt, scaleSet, repository, runnerName, requestID)
@@ -145,6 +157,12 @@ func (store *Store) MarkRunnerBusy(
 	}
 	if commandTag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
+	}
+	if _, err = connection.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle
+		SET request_id = $1
+		WHERE scale_set = $2 AND repository = $3 AND runner_name = $4
+		  AND request_id = 0 AND $1 > 0 AND $4 <> ''`, requestID, scaleSet, repository, runnerName); err != nil {
+		return fmt.Errorf("bind clustered libvirt runner request identity: %w", err)
 	}
 	return nil
 }

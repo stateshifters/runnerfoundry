@@ -65,6 +65,7 @@ type repositoryScaleSetSession struct {
 	runnerScaleSet *upstream.RunnerScaleSet
 	stopPolling    context.CancelFunc
 	pollerDone     <-chan struct{}
+	assignedJobs   *clusterAssignedJobRecovery
 }
 
 type repositorySessionRemoval struct {
@@ -331,8 +332,8 @@ func (leader *clusterLeader) reconcileRepositorySessions(
 	if err != nil {
 		return err
 	}
-	if !leader.activateRepositorySessionGeneration(repository.URL, statuses, started) {
-		return errors.Join(errRepositoryWorkObsolete, leader.closePartialSessionGeneration(ctx, started))
+	if err = leader.activateRepositorySessionGeneration(ctx, repository.URL, statuses, started); err != nil {
+		return errors.Join(err, leader.closePartialSessionGeneration(ctx, started))
 	}
 	return nil
 }
@@ -400,23 +401,13 @@ func (leader *clusterLeader) closePartialSessionGeneration(
 	return resultErr
 }
 
-func (leader *clusterLeader) activateRepositorySessionGeneration(
-	repository string,
-	statuses []cluster.ScaleSetStatus,
-	started []*repositoryScaleSetSession,
-) bool {
-	leader.desiredMutex.Lock()
-	defer leader.desiredMutex.Unlock()
-	if leader.desiredStateKnown && !sameScaleSetStatuses(leader.desiredRepositories[repository], statuses) {
-		return false
-	}
+func (leader *clusterLeader) detachRepositorySessionGeneration(sessions []*repositoryScaleSetSession) {
 	leader.sessionsMutex.Lock()
 	defer leader.sessionsMutex.Unlock()
-	for _, session := range started {
-		leader.sessions[session.key] = session
-		leader.scheduler.add(session)
+	for _, session := range sessions {
+		delete(leader.sessions, session.key)
+		leader.scheduler.remove(session.key)
 	}
-	return true
 }
 
 func sameScaleSetStatuses(left []cluster.ScaleSetStatus, right []cluster.ScaleSetStatus) bool {
@@ -502,9 +493,7 @@ func (leader *clusterLeader) startSession(
 		installationID: repository.InstallationID, capacity: status.EffectiveCapacity,
 		client: client, messageClient: messageClient, runnerScaleSet: runnerScaleSet,
 	}
-	pollerCtx, stopPolling := context.WithCancel(context.WithoutCancel(ctx))
-	session.stopPolling = stopPolling
-	session.pollerDone = leader.startSessionPoller(pollerCtx, session)
+	leader.prepareSessionRuntime(session)
 	return session, nil
 }
 
@@ -524,9 +513,7 @@ func (leader *clusterLeader) startConfirmedSession(
 		installationID: repository.InstallationID, capacity: status.EffectiveCapacity,
 		client: client, messageClient: messageClient, runnerScaleSet: runnerScaleSet,
 	}
-	pollerCtx, stopPolling := context.WithCancel(context.WithoutCancel(ctx))
-	session.stopPolling = stopPolling
-	session.pollerDone = leader.startSessionPoller(pollerCtx, session)
+	leader.prepareSessionRuntime(session)
 	return session, nil
 }
 
@@ -559,6 +546,9 @@ const (
 func (leader *clusterLeader) stopSession(ctx context.Context, session *repositoryScaleSetSession, removal scaleSetSessionRemoval) error {
 	session.stopPolling()
 	<-session.pollerDone
+	if session.assignedJobs != nil {
+		session.assignedJobs.wait()
+	}
 	closeErr := session.messageClient.Close(ctx)
 	if closeErr != nil {
 		leader.daemon.logger.Error("close leader message session failed",

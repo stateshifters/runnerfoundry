@@ -597,7 +597,7 @@ func clusterMessageHandlerForTest(state *fakeClusterState) clusterMessageHandler
 			store: state, sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
 		},
 		session: &repositoryScaleSetSession{
-			key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"},
+			key: repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}, assignedJobs: inertAssignedJobRecovery(),
 		},
 	}
 }

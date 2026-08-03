@@ -128,7 +128,20 @@ type Assignment struct {
 	QueueTime        time.Time
 	InstallationID   githubapp.InstallationID
 	GitHubScaleSetID int
+	ControllerEpoch  int64
+	IdentityFree     bool
 	State            AssignmentState
+}
+
+// AssignedJobObservation is an authoritative aggregate assigned-job count for
+// one repository scale set in the current repository-controller epoch.
+type AssignedJobObservation struct {
+	AppID           int64
+	Repository      string
+	ScaleSet        string
+	ControllerEpoch int64
+	AssignedJobs    int
+	ObservedAt      time.Time
 }
 
 type LibvirtRunnerLifecycle struct {

@@ -8,6 +8,8 @@ Accepted
 
 Supersedes [6. Continuously reconcile repository scale-set registration](0006-continuously-reconcile-repository-scale-set-registration.md)
 
+Amended by [8. Unify assigned-job recovery across runtime modes](0008-unify-assigned-job-recovery-across-runtime-modes.md)
+
 ## Context
 
 ADR 6 made repository activation atomic while retaining successful GitHub scale-set creations. It deliberately kept repository authority and confirmed registration IDs in process memory. A restart or clustered leader change therefore had to finish fresh discovery and repeat every registration audit before it could reconnect message polling. A transient discovery outage could make otherwise confirmed repository control unavailable precisely when recovery was needed.

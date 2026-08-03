@@ -11,34 +11,37 @@ import (
 )
 
 type clusterScheduler struct {
-	store                       clusterSchedulingState
-	mutex                       sync.Mutex
+	store                       clusterExactSchedulingState
+	sessionsMutex               sync.RWMutex
 	sessions                    map[repositoryScaleSetSessionKey]*repositoryScaleSetSession
+	scheduleLocksMutex          sync.Mutex
+	scheduleLocks               map[string]*sync.Mutex
 	acquisitionConfirmationWait time.Duration
 	waitBeforeConfirmationRetry func(context.Context, time.Duration) bool
 }
 
 func (scheduler *clusterScheduler) add(session *repositoryScaleSetSession) {
-	scheduler.mutex.Lock()
-	defer scheduler.mutex.Unlock()
+	scheduler.sessionsMutex.Lock()
+	defer scheduler.sessionsMutex.Unlock()
 	scheduler.sessions[session.key] = session
 }
 
 func (scheduler *clusterScheduler) remove(key repositoryScaleSetSessionKey) {
-	scheduler.mutex.Lock()
-	defer scheduler.mutex.Unlock()
+	scheduler.sessionsMutex.Lock()
+	defer scheduler.sessionsMutex.Unlock()
 	delete(scheduler.sessions, key)
 }
 
 func (scheduler *clusterScheduler) clear() {
-	scheduler.mutex.Lock()
-	defer scheduler.mutex.Unlock()
+	scheduler.sessionsMutex.Lock()
+	defer scheduler.sessionsMutex.Unlock()
 	scheduler.sessions = map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
 }
 
 func (scheduler *clusterScheduler) schedule(ctx context.Context, scaleSet string) error {
-	scheduler.mutex.Lock()
-	defer scheduler.mutex.Unlock()
+	scaleSetLock := scheduler.scheduleLock(scaleSet)
+	scaleSetLock.Lock()
+	defer scaleSetLock.Unlock()
 	if err := scheduler.repairPendingAcquisitions(ctx, scaleSet); err != nil {
 		return err
 	}
@@ -48,6 +51,26 @@ func (scheduler *clusterScheduler) schedule(ctx context.Context, scaleSet string
 			return err
 		}
 	}
+}
+
+func (scheduler *clusterScheduler) scheduleLock(scaleSet string) *sync.Mutex {
+	scheduler.scheduleLocksMutex.Lock()
+	defer scheduler.scheduleLocksMutex.Unlock()
+	if scheduler.scheduleLocks == nil {
+		scheduler.scheduleLocks = make(map[string]*sync.Mutex)
+	}
+	lock := scheduler.scheduleLocks[scaleSet]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		scheduler.scheduleLocks[scaleSet] = lock
+	}
+	return lock
+}
+
+func (scheduler *clusterScheduler) session(key repositoryScaleSetSessionKey) *repositoryScaleSetSession {
+	scheduler.sessionsMutex.RLock()
+	defer scheduler.sessionsMutex.RUnlock()
+	return scheduler.sessions[key]
 }
 
 type scheduleOutcome int
@@ -79,7 +102,7 @@ func (scheduler *clusterScheduler) repairPendingAcquisition(
 	assignment *cluster.Assignment,
 ) error {
 	key := repositoryScaleSetSessionKey{repository: assignment.Repository, scaleSet: assignment.ScaleSet}
-	session := scheduler.sessions[key]
+	session := scheduler.session(key)
 	if session != nil {
 		return scheduler.acquireAssignment(ctx, assignment, session)
 	}
@@ -99,7 +122,7 @@ func (scheduler *clusterScheduler) scheduleOne(ctx context.Context, scaleSet str
 	if err != nil {
 		return scheduleDrained, fmt.Errorf("assign oldest clustered demand: %w", err)
 	}
-	session := scheduler.sessions[repositoryScaleSetSessionKey{repository: assignment.Repository, scaleSet: scaleSet}]
+	session := scheduler.session(repositoryScaleSetSessionKey{repository: assignment.Repository, scaleSet: scaleSet})
 	if session == nil {
 		if releaseErr := scheduler.store.CompleteAssignment(
 			ctx, assignment.ID, assignment.NodeID, cluster.AssignmentReserved,

@@ -123,6 +123,9 @@ func replacePostgreSQLInstallations(ctx context.Context, transaction *databaseTr
 			return fmt.Errorf("record discovered installation: %w", err)
 		}
 	}
+	if err := withdrawRemovedInstallationAssignedObservations(ctx, transaction, update); err != nil {
+		return err
+	}
 	if _, err := transaction.Exec(ctx, `DELETE FROM scaler_installations
 		WHERE app_id = $1 AND last_seen_generation < $2`, update.appID, update.generation); err != nil {
 		return fmt.Errorf("remove undiscovered installations: %w", err)
@@ -131,6 +134,13 @@ func replacePostgreSQLInstallations(ctx context.Context, transaction *databaseTr
 }
 
 func replacePostgreSQLRepositories(ctx context.Context, transaction *databaseTransaction, update postgreSQLDiscoveryUpdate) error {
+	if err := recordDiscoveredRepositories(ctx, transaction, update); err != nil {
+		return err
+	}
+	return removeAuthoritativelyMissingRepositories(ctx, transaction, update)
+}
+
+func recordDiscoveredRepositories(ctx context.Context, transaction *databaseTransaction, update postgreSQLDiscoveryUpdate) error {
 	for _, repository := range update.repositories {
 		if _, err := transaction.Exec(ctx, `INSERT INTO scaler_repositories(app_id, repository_url, installation_id, last_seen_generation)
 			VALUES($1, $2, $3, $4) ON CONFLICT(app_id, repository_url) DO UPDATE SET
@@ -139,6 +149,14 @@ func replacePostgreSQLRepositories(ctx context.Context, transaction *databaseTra
 			return fmt.Errorf("record discovered repository: %w", err)
 		}
 	}
+	return nil
+}
+
+func removeAuthoritativelyMissingRepositories(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update postgreSQLDiscoveryUpdate,
+) error {
 	failed := make(map[githubapp.InstallationID]struct{}, len(update.failedInstallationIDs))
 	for _, installationID := range update.failedInstallationIDs {
 		failed[installationID] = struct{}{}
@@ -146,6 +164,11 @@ func replacePostgreSQLRepositories(ctx context.Context, transaction *databaseTra
 	for _, installationID := range update.installationIDs {
 		if _, retain := failed[installationID]; retain {
 			continue
+		}
+		if err := withdrawUndiscoveredAssignedObservations(
+			ctx, transaction, update.appID, installationID, update.generation, update.completedAt,
+		); err != nil {
+			return err
 		}
 		if _, err := transaction.Exec(ctx, `DELETE FROM scaler_repositories
 			WHERE app_id = $1 AND installation_id = $2 AND last_seen_generation < $3`,
@@ -169,6 +192,11 @@ func (store *Store) UpsertRegistration(ctx context.Context, appID int64, control
 
 func (store *Store) DeleteRegistration(ctx context.Context, appID int64, controllerEpoch int64, repositoryURL string, scaleSetName string) error {
 	return store.mutatePostgreSQLRegistration(ctx, appID, controllerEpoch, "delete repository registration", func(transaction *databaseTransaction) error {
+		if err := withdrawRegistrationAssignedObservation(
+			ctx, transaction, appID, repositoryURL, scaleSetName, time.Now().UTC(),
+		); err != nil {
+			return err
+		}
 		_, err := transaction.Exec(ctx, `DELETE FROM scaler_registrations
 			WHERE app_id = $1 AND repository_url = $2 AND scale_set_name = $3`, appID, repositoryURL, scaleSetName)
 		return err

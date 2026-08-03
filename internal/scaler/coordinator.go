@@ -60,15 +60,10 @@ type Coordinator struct {
 	store                 DemandStore
 	workers               map[string]RepositoryWorker
 	assigned              map[string]int
+	assignedControllers   map[string]*AssignedJobController
 	provisioningGate      chan struct{}
 	provisioningSuspended atomic.Bool
 	mutex                 sync.Mutex
-}
-
-type AssignedReconciliation struct {
-	AssignedJobs   int
-	RunningRunners int
-	StartedRunners int
 }
 
 func NewCoordinator(maxRunners int) *Coordinator {
@@ -77,12 +72,13 @@ func NewCoordinator(maxRunners int) *Coordinator {
 
 func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *Coordinator {
 	coordinator := &Coordinator{
-		maxRunners:       maxRunners,
-		scaleSet:         scaleSet,
-		store:            store,
-		workers:          map[string]RepositoryWorker{},
-		assigned:         map[string]int{},
-		provisioningGate: make(chan struct{}, 1),
+		maxRunners:          maxRunners,
+		scaleSet:            scaleSet,
+		store:               store,
+		workers:             map[string]RepositoryWorker{},
+		assigned:            map[string]int{},
+		assignedControllers: map[string]*AssignedJobController{},
+		provisioningGate:    make(chan struct{}, 1),
 	}
 	coordinator.provisioningGate <- struct{}{}
 	return coordinator
@@ -92,6 +88,7 @@ func (coordinator *Coordinator) AddRepository(repository string, worker Reposito
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	coordinator.workers[repository] = worker
+	coordinator.assignedController(repository)
 }
 
 // DetachRepository stops scheduling through the repository worker while retaining
@@ -107,6 +104,7 @@ func (coordinator *Coordinator) RemoveRepository(ctx context.Context, repository
 	defer coordinator.mutex.Unlock()
 	delete(coordinator.workers, repository)
 	delete(coordinator.assigned, repository)
+	delete(coordinator.assignedControllers, repository)
 	if err := coordinator.store.RemoveRepository(ctx, coordinator.scaleSet, repository); err != nil {
 		return fmt.Errorf("remove repository demand: %w", err)
 	}
@@ -208,11 +206,11 @@ func (coordinator *Coordinator) reconcileCapacity(ctx context.Context) (map[stri
 		return nil, err
 	}
 	remainingDemand = fencePendingRunnerRequests(remainingDemand, pendingReaps)
-	runningCount, err = coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount, repositoryRunningCounts)
+	_, err = coordinator.admitRemainingDemand(ctx, remainingDemand, runningCount, repositoryRunningCounts)
 	if err != nil {
 		return nil, err
 	}
-	return coordinator.reconcileRetainedAssigned(ctx, runningCount, repositoryRunningCounts)
+	return coordinator.reconcileRetainedAssigned(ctx)
 }
 
 func (coordinator *Coordinator) countPendingRunnerCapacity(
@@ -306,13 +304,6 @@ func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repositor
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
 	coordinator.assigned[repository] = assignedJobs
-	if store, supported := coordinator.store.(RunnerLifecycleStore); supported {
-		if _, err := store.RequestExcessWaitingRunnerReaps(
-			ctx, coordinator.scaleSet, repository, assignedJobs, "assigned_jobs_decreased", time.Now().UTC(),
-		); err != nil {
-			return AssignedReconciliation{}, fmt.Errorf("request excess waiting runner cleanup: %w", err)
-		}
-	}
 	reconciliations, provisioningEnabled, err := coordinator.reconcileProvisioning(ctx)
 	if !provisioningEnabled || err != nil {
 		if err != nil {
@@ -321,37 +312,6 @@ func (coordinator *Coordinator) ReconcileAssigned(ctx context.Context, repositor
 		return AssignedReconciliation{AssignedJobs: assignedJobs}, nil
 	}
 	return reconciliations[repository], nil
-}
-
-func (coordinator *Coordinator) provisionAssignedForRepository(
-	ctx context.Context,
-	repository string,
-	assignedJobs int,
-	runningCount int,
-	repositoryRunningCounts map[string]int,
-) (AssignedReconciliation, error) {
-	worker := coordinator.workers[repository]
-	if worker == nil {
-		return AssignedReconciliation{AssignedJobs: assignedJobs}, nil
-	}
-	repositoryRunningCount := repositoryRunningCounts[repository]
-	missingAssignedRunners := assignedJobs - repositoryRunningCount
-	availableCapacity := coordinator.maxRunners - runningCount
-	result := AssignedReconciliation{AssignedJobs: assignedJobs, RunningRunners: repositoryRunningCount}
-	if err := reconcileBlockedRepositoryCapacity(ctx, worker, repository, missingAssignedRunners, availableCapacity); err != nil {
-		return AssignedReconciliation{}, err
-	}
-	for missingAssignedRunners > 0 && availableCapacity > 0 {
-		if err := worker.StartAssigned(ctx); err != nil {
-			return AssignedReconciliation{}, fmt.Errorf("start assigned runner for repository %q: %w", repository, err)
-		}
-		missingAssignedRunners--
-		availableCapacity--
-		repositoryRunningCount++
-		repositoryRunningCounts[repository] = repositoryRunningCount
-		result.StartedRunners++
-	}
-	return result, nil
 }
 
 func reconcileBlockedRepositoryCapacity(
@@ -375,8 +335,6 @@ func reconcileBlockedRepositoryCapacity(
 
 func (coordinator *Coordinator) reconcileRetainedAssigned(
 	ctx context.Context,
-	runningCount int,
-	repositoryRunningCounts map[string]int,
 ) (map[string]AssignedReconciliation, error) {
 	repositories := make([]string, 0, len(coordinator.assigned))
 	for repository := range coordinator.assigned {
@@ -385,14 +343,15 @@ func (coordinator *Coordinator) reconcileRetainedAssigned(
 	sort.Strings(repositories)
 	reconciliations := make(map[string]AssignedReconciliation, len(repositories))
 	for _, repository := range repositories {
-		result, err := coordinator.provisionAssignedForRepository(
-			ctx, repository, coordinator.assigned[repository], runningCount, repositoryRunningCounts,
-		)
+		if coordinator.workers[repository] == nil {
+			reconciliations[repository] = AssignedReconciliation{AssignedJobs: coordinator.assigned[repository]}
+			continue
+		}
+		result, err := coordinator.assignedController(repository).Reconcile(ctx, coordinator.assigned[repository])
 		if err != nil {
 			return nil, err
 		}
 		reconciliations[repository] = result
-		runningCount += result.StartedRunners
 	}
 	return reconciliations, nil
 }

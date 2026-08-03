@@ -199,17 +199,18 @@ func (client fakeScaleSetJITClient) RemoveRunner(ctx context.Context, runnerID i
 }
 
 type fakeMessageClient struct {
-	getMessageErr error
-	deleteErr     error
-	closeErr      error
-	closed        bool
-	onGetMessage  func()
-	polled        chan struct{}
-	pollOnce      sync.Once
-	message       *upstream.RunnerScaleSetMessage
-	acquireErr    error
-	acquiredIDs   []int64
-	session       upstream.RunnerScaleSetSession
+	getMessageErr            error
+	deleteErr                error
+	closeErr                 error
+	closed                   bool
+	onGetMessage             func()
+	polled                   chan struct{}
+	pollOnce                 sync.Once
+	message                  *upstream.RunnerScaleSetMessage
+	acquireErr               error
+	acquiredIDs              []int64
+	session                  upstream.RunnerScaleSetSession
+	missingSessionStatistics bool
 }
 
 type blockingMessageClient struct {
@@ -251,7 +252,7 @@ func (client *blockingMessageClient) Close(ctx context.Context) error {
 }
 
 func (client *blockingMessageClient) Session() upstream.RunnerScaleSetSession {
-	return upstream.RunnerScaleSetSession{}
+	return upstream.RunnerScaleSetSession{Statistics: &upstream.RunnerScaleSetStatistic{}}
 }
 
 func (client *fakeMessageClient) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
@@ -300,6 +301,9 @@ func (client *fakeMessageClient) Close(ctx context.Context) error {
 }
 
 func (client *fakeMessageClient) Session() upstream.RunnerScaleSetSession {
+	if client.session.Statistics == nil && !client.missingSessionStatistics {
+		client.session.Statistics = &upstream.RunnerScaleSetStatistic{}
+	}
 	return client.session
 }
 

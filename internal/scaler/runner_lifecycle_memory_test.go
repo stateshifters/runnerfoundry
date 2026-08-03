@@ -59,6 +59,26 @@ func TestMemoryRunnerLifecycleBusyAndExpirationTransitions(t *testing.T) {
 	}
 }
 
+func TestMemoryRunnerLifecycleBindsIdentityFreeRunnerWhenJobStarts(t *testing.T) {
+	ctx := context.Background()
+	store := createMemoryDemandStore()
+	mustRegisterMemoryRunner(t, store, RunnerLifecycle{
+		ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker,
+		RunnerName: "assigned", RequestID: 0, Phase: RunnerWaitingForJob,
+	})
+
+	if err := store.MarkRunnerBusy(ctx, "set", "repo", 42, "assigned", 101, memoryLifecycleTestTime); err != nil {
+		t.Fatal(err)
+	}
+	lifecycles, err := store.RunnerLifecycles(ctx, "set", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lifecycles) != 1 || lifecycles[0].RequestID != 42 || lifecycles[0].Phase != RunnerBusy {
+		t.Fatalf("bound lifecycle = %#v, want request ID 42 in busy phase", lifecycles)
+	}
+}
+
 func TestMemoryRunnerLifecyclePendingAndConfirmation(t *testing.T) {
 	ctx := context.Background()
 	store := createMemoryDemandStore()

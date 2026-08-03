@@ -55,8 +55,14 @@ func TestPostgreSQLDiscoveryUsesGenerationForAuthoritativeDeletion(t *testing.T)
 	if err != nil || snapshot.Control.DiscoveryGeneration != 5 {
 		t.Fatalf("snapshot = %#v, %v", snapshot, err)
 	}
-	if len(transaction.executions) != 6 {
+	if len(transaction.executions) != 14 {
 		t.Fatalf("discovery executions = %#v", transaction.executions)
+	}
+	cleanup := transaction.executions[9]
+	if len(cleanup.arguments) != 4 || cleanup.arguments[0] != int64(7) ||
+		cleanup.arguments[1] != githubapp.InstallationID(11) || cleanup.arguments[2] != int64(5) ||
+		cleanup.arguments[3] != completedAt {
+		t.Fatalf("assigned cleanup arguments = %#v", cleanup.arguments)
 	}
 	last := transaction.executions[len(transaction.executions)-1]
 	if len(last.arguments) != 3 || last.arguments[1] != githubapp.InstallationID(11) || last.arguments[2] != int64(5) {
@@ -153,6 +159,23 @@ func TestPostgreSQLRepositoryDiscoveryReportsEveryWriteFailure(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLDiscoveryReportsRepositoryReplacementFailure(t *testing.T) {
+	failure := errors.New("failed")
+	executionErrors := make([]error, 7)
+	executionErrors[6] = failure
+	transaction := &fakeDatabaseTransaction{
+		execErrors: executionErrors,
+		rowResults: []fakeRow{repositoryControlRow(t, 1, 2, true)},
+	}
+	_, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyDiscovery(
+		context.Background(), 7, 2, nil, nil,
+		[]repositorystate.Repository{{URL: "repo", InstallationID: 11}}, time.Unix(1, 0),
+	)
+	if !errors.Is(err, failure) {
+		t.Fatalf("repository replacement error = %v", err)
+	}
+}
+
 func TestPostgreSQLRepositoryDiscoveryReportsLifecycleFailures(t *testing.T) {
 	failure := errors.New("failed")
 	for name, transaction := range map[string]*fakeDatabaseTransaction{
@@ -184,6 +207,27 @@ func TestPostgreSQLRegistrationMutationsSucceedAndReportFailures(t *testing.T) {
 		"delete": func(store *Store) error { return store.DeleteRegistration(context.Background(), 7, 2, "repo", "linux") },
 	} {
 		t.Run(name, func(t *testing.T) { assertPostgreSQLRegistrationMutation(t, operation) })
+	}
+}
+
+func TestDeleteRegistrationWithdrawsAssignedRunnersBeforeRegistration(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{repositoryControlRow(t, 1, 2, true)}}
+	store := storeWithConnection(&fakeDatabaseConnection{transaction: transaction})
+	if err := store.DeleteRegistration(context.Background(), 7, 2, "repo", "linux"); err != nil {
+		t.Fatal(err)
+	}
+	if len(transaction.executions) != 5 {
+		t.Fatalf("registration withdrawal executions = %#v", transaction.executions)
+	}
+	cleanup := transaction.executions[0]
+	if len(cleanup.arguments) != 4 || cleanup.arguments[1] != int64(7) ||
+		cleanup.arguments[2] != "repo" || cleanup.arguments[3] != "linux" {
+		t.Fatalf("registration cleanup arguments = %#v", cleanup.arguments)
+	}
+	deletion := transaction.executions[4]
+	if len(deletion.arguments) != 3 || deletion.arguments[0] != int64(7) ||
+		deletion.arguments[1] != "repo" || deletion.arguments[2] != "linux" {
+		t.Fatalf("registration deletion arguments = %#v", deletion.arguments)
 	}
 }
 

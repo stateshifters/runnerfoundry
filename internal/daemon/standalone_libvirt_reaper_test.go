@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
@@ -45,14 +46,19 @@ func TestStandaloneLibvirtLifecycleRegistersBeforeStartingRunner(t *testing.T) {
 	}
 	provider := &fakeScalerProvider{}
 	ctx, cancel := context.WithCancel(context.Background())
-	lifecycle := startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
+	lifecycle, err := startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
 		Logger: slog.Default(), RepositoryURL: "repo",
 		ScaleSetConfig: config.ScaleSetConfig{Name: "linux", MaxRunners: 1, Libvirt: &config.LibvirtConfig{}},
-		Coordinator:    coordinator, MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+		Coordinator:    coordinator, MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{
+			session: upstream.RunnerScaleSetSession{Statistics: &upstream.RunnerScaleSetStatistic{}},
+		}},
 		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 			Name: "linux", MaxRunners: 1, Provider: provider, JITConfig: fakeJITConfigGenerator{},
 		}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := coordinator.Schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -66,11 +72,16 @@ func TestStandaloneLibvirtLifecycleRegistersBeforeStartingRunner(t *testing.T) {
 func TestStandaloneLifecycleContinuesWhenStoreCannotPersistRunnerLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	coordinator := scaler.NewDurableCoordinator("linux", 1, lifecycleUnsupportedDemandStore{})
-	lifecycle := startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
+	lifecycle, err := startCoordinatedLifecycle(ctx, coordinatedLifecycleConfig{
 		Logger: slog.Default(), RepositoryURL: "repo", ScaleSetConfig: config.ScaleSetConfig{Name: "linux", JobStartTimeout: "10m"},
-		Coordinator: coordinator, MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+		Coordinator: coordinator, MessageClient: scaleSetMessageClient{Client: &fakeMessageClient{
+			session: upstream.RunnerScaleSetSession{Statistics: &upstream.RunnerScaleSetStatistic{}},
+		}},
 		Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &fakeScalerProvider{}, JITConfig: fakeJITConfigGenerator{}}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	cancel()
 	lifecycle.StopPolling()
 }

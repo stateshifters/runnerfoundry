@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,6 +142,7 @@ func newExistingScaleSetSessionFixture(t *testing.T) (*existingScaleSetSessionFi
 		Name: "linux", RunnerGroup: "default", MaxRunners: 2,
 	}}
 	fixture.messageClient = newFakeMessageClient(cancel)
+	fixture.messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{}
 	fixture.operations = scaleSetSessionOperations{
 		RunnerHostname:  func() string { return "host" },
 		BuildReconciler: fixture.buildReconciler,
@@ -236,6 +238,103 @@ func TestRunCoordinatedScaleSetSeedsAssignedDemandFromSessionStatistics(t *testi
 	if len(provider.started) != 1 {
 		t.Fatalf("expected initial session statistics to restore assigned demand, got %#v", provider.started)
 	}
+}
+
+func TestRunCoordinatedScaleSetRejectsMissingInitialSessionStatistics(t *testing.T) {
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	fixture.messageClient.session.Statistics = nil
+	fixture.messageClient.missingSessionStatistics = true
+
+	_, err := runCoordinatedScaleSet(
+		ctx, slog.Default(), fixture.client, "https://github.com/acme/repo",
+		fixture.config, scaler.NewCoordinator(1), fixture.operations,
+	)
+	if err == nil || !strings.Contains(err.Error(), "initial scale set session statistics are required") {
+		t.Fatalf("startup error = %v", err)
+	}
+	if !fixture.messageClient.closed {
+		t.Fatal("missing statistics did not close message session")
+	}
+}
+
+func TestRunCoordinatedScaleSetReportsMissingStatisticsSessionCloseFailure(t *testing.T) {
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	fixture.messageClient.session.Statistics = nil
+	fixture.messageClient.missingSessionStatistics = true
+	closeErr := errors.New("close failed")
+	fixture.messageClient.closeErr = closeErr
+
+	_, err := runCoordinatedScaleSet(
+		ctx, slog.Default(), fixture.client, "https://github.com/acme/repo",
+		fixture.config, scaler.NewCoordinator(1), fixture.operations,
+	)
+	if !errors.Is(err, closeErr) || !strings.Contains(err.Error(), "initial scale set session statistics are required") {
+		t.Fatalf("startup error = %v", err)
+	}
+}
+
+func TestRunCoordinatedScaleSetTreatsInitialZeroAssignedJobsAsAuthoritative(t *testing.T) {
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	fixture.messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{}
+	provider := &fakeScalerProvider{trackStarted: true}
+	fixture.operations.BuildReconciler = reconcilerBuilderForProvider(provider)
+	coordinator := scaler.NewCoordinator(1)
+	coordinator.ObserveAssigned("https://github.com/acme/repo", 1)
+
+	lifecycle, err := runCoordinatedScaleSet(
+		ctx, slog.Default(), fixture.client, "https://github.com/acme/repo",
+		fixture.config, coordinator, fixture.operations,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.StopPolling()
+	if err = coordinator.Schedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.started) != 0 {
+		t.Fatalf("initial zero statistics started runners: %#v", provider.started)
+	}
+}
+
+func TestRunCoordinatedScaleSetLogsInitialStatisticsBeforePolling(t *testing.T) {
+	fixture, ctx := newExistingScaleSetSessionFixture(t)
+	fixture.messageClient.session.Statistics = &upstream.RunnerScaleSetStatistic{
+		TotalAvailableJobs: 1, TotalAcquiredJobs: 2, TotalAssignedJobs: 3, TotalRunningJobs: 4,
+		TotalRegisteredRunners: 5, TotalBusyRunners: 6, TotalIdleRunners: 7,
+	}
+	logs := &bytes.Buffer{}
+	loggedBeforePoll := make(chan bool, 1)
+	var observeLog sync.Once
+	fixture.messageClient.onGetMessage = func() {
+		observeLog.Do(func() {
+			loggedBeforePoll <- containsStandaloneSessionStatistics(logs.String())
+		})
+	}
+
+	lifecycle, err := runCoordinatedScaleSet(
+		ctx, slog.New(slog.NewTextHandler(logs, nil)), fixture.client, "https://github.com/acme/repo",
+		fixture.config, scaler.NewCoordinator(3), fixture.operations,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.StopPolling()
+	if logged := <-loggedBeforePoll; !logged {
+		t.Fatalf("session statistics were not logged before polling: %q", logs.String())
+	}
+}
+
+func containsStandaloneSessionStatistics(output string) bool {
+	for _, expected := range []string{
+		"action=session_statistics", "assignedJobs=3", "availableJobs=1", "acquiredJobs=2",
+		"runningJobs=4", "registeredRunners=5", "busyRunners=6", "idleRunners=7",
+	} {
+		if !strings.Contains(output, expected) {
+			return false
+		}
+	}
+	return true
 }
 
 func reconcilerBuilderForProvider(provider *fakeScalerProvider) func(

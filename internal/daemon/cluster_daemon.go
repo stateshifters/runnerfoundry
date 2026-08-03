@@ -90,7 +90,7 @@ type clusterDemandState interface {
 	CompleteJob(ctx context.Context, completion cluster.JobCompletion) error
 }
 
-type clusterSchedulingState interface {
+type clusterExactSchedulingState interface {
 	AssignOldest(ctx context.Context, scaleSet string, now time.Time, liveFor time.Duration) (*cluster.Assignment, error)
 	BeginAcquisition(ctx context.Context, assignmentID cluster.AssignmentID, installationID githubapp.InstallationID, githubScaleSetID int) error
 	ConfirmAcquisition(ctx context.Context, assignmentID cluster.AssignmentID) error
@@ -98,9 +98,15 @@ type clusterSchedulingState interface {
 	CompleteAssignment(ctx context.Context, assignmentID cluster.AssignmentID, nodeID cluster.NodeID, expectedState cluster.AssignmentState) error
 }
 
+type clusterAssignedJobState interface {
+	ObserveAssignedJobs(ctx context.Context, observation cluster.AssignedJobObservation) (scaler.AssignedJobCapacity, error)
+	AssignAssignedJob(ctx context.Context, observation cluster.AssignedJobObservation, now time.Time, liveFor time.Duration) (*cluster.Assignment, error)
+}
+
 type clusterAssignmentState interface {
 	clusterDemandState
-	clusterSchedulingState
+	clusterExactSchedulingState
+	clusterAssignedJobState
 	clusterAssignmentExecutionState
 	clusterLibvirtLifecycleState
 }

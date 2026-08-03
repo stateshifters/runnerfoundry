@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFailure(t *testing.T) {
@@ -37,6 +39,80 @@ func TestClusterRepositoryActivationRetainsRegistrationsAcrossPartialSessionFail
 		t.Fatalf("registration lists=%d, want 0", registry.listCalls)
 	}
 	leader.stop(context.Background())
+}
+
+func TestClusterRepositoryActivationRecoversInitialAssignedJobsBeforePolling(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	linuxKey := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	fixture.desired = map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{linuxKey: fixture.desired[linuxKey]}
+	fixture.registry.initialStatistics = map[string]*upstream.RunnerScaleSetStatistic{
+		"linux": {TotalAssignedJobs: 1},
+	}
+	fixture.state.assignedJobCapacity = scaler.AssignedJobCapacity{AvailableCapacity: 1}
+	bootstrapCompleted := make(chan struct{})
+	var bootstrapOnce sync.Once
+	fixture.state.onObserveAssignedJobs = func() { bootstrapOnce.Do(func() { close(bootstrapCompleted) }) }
+	fixture.registry.bootstrapCompleted = bootstrapCompleted
+
+	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err != nil {
+		t.Fatal(err)
+	}
+	fixture.leader.stop(context.Background())
+	observations, assignments, _ := fixture.state.assignedJobsSnapshot()
+	if len(observations) < 1 || observations[0].AssignedJobs != 1 {
+		t.Fatalf("assigned-job observations = %#v", observations)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("assigned-job assignments = %#v", assignments)
+	}
+	if fixture.registry.polledBeforeBootstrap {
+		t.Fatal("message polling started before initial assigned-job recovery")
+	}
+}
+
+func TestClusterRepositoryActivationDoesNotPublishSessionDuringBlockedBootstrap(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	linuxKey := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	fixture.desired = map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus{linuxKey: fixture.desired[linuxKey]}
+	bootstrapEntered := make(chan struct{})
+	releaseBootstrap := make(chan struct{})
+	var bootstrapOnce sync.Once
+	fixture.state.onObserveAssignedJobs = func() {
+		bootstrapOnce.Do(func() {
+			close(bootstrapEntered)
+			<-releaseBootstrap
+		})
+	}
+	completed := make(chan error, 1)
+	go func() {
+		completed <- fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories)
+	}()
+	<-bootstrapEntered
+	if session := fixture.leader.scheduler.session(linuxKey); session != nil {
+		t.Fatalf("scheduler published session before bootstrap completed: %#v", session)
+	}
+	close(releaseBootstrap)
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	if session := fixture.leader.scheduler.session(linuxKey); session == nil {
+		t.Fatal("scheduler did not publish bootstrapped session")
+	}
+	fixture.leader.stop(context.Background())
+}
+
+func TestClusterRepositoryActivationQueuesRepairWhenInitialStatisticsAreMissing(t *testing.T) {
+	fixture := clusterRegistrationFixture(t)
+	fixture.registry.missingStatistics = map[string]bool{"linux": true}
+	if err := fixture.leader.startMissingSessions(context.Background(), fixture.desired, fixture.repositories); err == nil {
+		t.Fatal("expected missing initial statistics failure")
+	}
+	if len(fixture.leader.sessions) != 0 {
+		t.Fatalf("sessions activated without initial statistics = %#v", fixture.leader.sessions)
+	}
+	if _, pending := fixture.leader.pendingRepositoryRepairs["repo"]; !pending {
+		t.Fatal("repository repair was not queued")
+	}
 }
 
 func TestClusterRepositoryAuditRepairsDriftAndRetainsSessionsOnTransientFailure(t *testing.T) {
@@ -153,13 +229,18 @@ func TestClusterSessionMatchingAndDeclarationHelpersHandleEmptyAndPresentSets(t 
 
 type clusterRegistrationClient struct {
 	*registrationReconciliationClient
-	failSessionName string
-	closedSessions  int
+	failSessionName       string
+	closedSessions        int
+	initialStatistics     map[string]*upstream.RunnerScaleSetStatistic
+	missingStatistics     map[string]bool
+	bootstrapCompleted    <-chan struct{}
+	polledBeforeBootstrap bool
 }
 
 type clusterRegistrationTestFixture struct {
 	leader       *clusterLeader
 	registry     *clusterRegistrationClient
+	state        *fakeClusterState
 	desired      map[repositoryScaleSetSessionKey]cluster.ScaleSetStatus
 	repositories map[string]githubapp.Repository
 }
@@ -172,6 +253,7 @@ func clusterRegistrationFixture(t *testing.T) clusterRegistrationTestFixture {
 	daemon := clusteredDaemonForTest(state)
 	daemon.config = clusteredConfig(t)
 	daemon.logger = slog.Default()
+	daemon.assignments = state
 	daemon.newGitHubClient = func(string, githubapp.InstallationID, config.GitHubAppCredentials) (scaleSetClient, error) {
 		return registry, nil
 	}
@@ -184,7 +266,7 @@ func clusterRegistrationFixture(t *testing.T) clusterRegistrationTestFixture {
 		},
 	}
 	return clusterRegistrationTestFixture{
-		leader: newClusterLeader(context.Background(), daemon, &fakeClusterLease{}), registry: registry, desired: desired,
+		leader: newClusterLeader(context.Background(), daemon, &fakeClusterLease{}), registry: registry, state: state, desired: desired,
 		repositories: map[string]githubapp.Repository{"repo": {URL: "repo", InstallationID: 1}},
 	}
 }
@@ -194,26 +276,61 @@ func (client *clusterRegistrationClient) messageSession(
 	runnerScaleSetID int,
 	_ string,
 ) (scaleSetMessageClient, error) {
-	name := ""
-	for registrationName, registration := range client.registrations {
-		if registration.ID == runnerScaleSetID {
-			name = registrationName
-			break
-		}
-	}
+	name := client.registrationName(runnerScaleSetID)
 	if name == client.failSessionName {
 		return scaleSetMessageClient{}, errors.New("session unavailable")
 	}
-	messageClient := &registrationMessageClient{onClose: func() { client.closedSessions++ }}
+	statistics := client.sessionStatistics(name)
+	messageClient := &registrationMessageClient{
+		fakeMessageClient: fakeMessageClient{
+			session: upstream.RunnerScaleSetSession{Statistics: statistics}, missingSessionStatistics: statistics == nil,
+		},
+		onClose:    func() { client.closedSessions++ },
+		beforePoll: client.recordEarlyPoll,
+	}
 	return scaleSetMessageClient{Client: messageClient}, nil
+}
+
+func (client *clusterRegistrationClient) registrationName(runnerScaleSetID int) string {
+	for registrationName, registration := range client.registrations {
+		if registration.ID == runnerScaleSetID {
+			return registrationName
+		}
+	}
+	return ""
+}
+
+func (client *clusterRegistrationClient) sessionStatistics(name string) *upstream.RunnerScaleSetStatistic {
+	if !client.missingStatistics[name] {
+		if configured := client.initialStatistics[name]; configured != nil {
+			return configured
+		}
+		return &upstream.RunnerScaleSetStatistic{}
+	}
+	return nil
+}
+
+func (client *clusterRegistrationClient) recordEarlyPoll() {
+	if client.bootstrapCompleted == nil {
+		return
+	}
+	select {
+	case <-client.bootstrapCompleted:
+	default:
+		client.polledBeforeBootstrap = true
+	}
 }
 
 type registrationMessageClient struct {
 	fakeMessageClient
-	onClose func()
+	onClose    func()
+	beforePoll func()
 }
 
 func (client *registrationMessageClient) GetMessage(ctx context.Context, _, _ int) (*upstream.RunnerScaleSetMessage, error) {
+	if client.beforePoll != nil {
+		client.beforePoll()
+	}
 	<-ctx.Done()
 	return nil, fmt.Errorf("wait for registration message: %w", ctx.Err())
 }

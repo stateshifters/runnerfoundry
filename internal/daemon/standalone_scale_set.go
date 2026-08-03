@@ -119,7 +119,7 @@ func runPreparedCoordinatedScaleSet(ctx context.Context, prepared preparedCoordi
 		ScaleSetConfig: prepared.scaleSetConfig, Coordinator: prepared.coordinator, RunnerScaleSet: prepared.runnerScaleSet,
 		MessageClient: prepared.messageClient, Reconciler: reconciler, RetryDelay: prepared.operations.PollRetryDelay,
 		RunnerReapRetries: newRunnerReapRetryTracker(time.Now),
-	}), nil
+	})
 }
 
 type coordinatedLifecycleConfig struct {
@@ -135,7 +135,37 @@ type coordinatedLifecycleConfig struct {
 	RunnerReapRetries *runnerReapRetryTracker
 }
 
-func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) scaleSetLifecycle {
+func startCoordinatedLifecycle(
+	ctx context.Context,
+	lifecycleConfig coordinatedLifecycleConfig,
+) (scaleSetLifecycle, error) {
+	statistics, err := requireInitialSessionStatistics(ctx, lifecycleConfig.MessageClient)
+	if err != nil {
+		return scaleSetLifecycle{}, err
+	}
+	prepareCoordinatedLifecycle(ctx, &lifecycleConfig)
+	registerCoordinatedRepository(ctx, lifecycleConfig, statistics)
+	pollerCtx, stopPolling := context.WithCancel(ctx)
+	pollerDone := startCoordinatedPoller(pollerCtx, lifecycleConfig)
+	return coordinatedScaleSetLifecycle(lifecycleConfig, stopPolling, pollerDone), nil
+}
+
+func requireInitialSessionStatistics(
+	ctx context.Context,
+	messageClient scaleSetMessageClient,
+) (*upstream.RunnerScaleSetStatistic, error) {
+	statistics := messageClient.initialStatistics()
+	if statistics != nil {
+		return statistics, nil
+	}
+	statisticsErr := errors.New("initial scale set session statistics are required")
+	if closeErr := messageClient.Close(context.WithoutCancel(ctx)); closeErr != nil {
+		statisticsErr = errors.Join(statisticsErr, fmt.Errorf("close message session: %w", closeErr))
+	}
+	return nil, statisticsErr
+}
+
+func prepareCoordinatedLifecycle(ctx context.Context, lifecycleConfig *coordinatedLifecycleConfig) {
 	if lifecycleConfig.RunnerReapRetries == nil {
 		lifecycleConfig.RunnerReapRetries = newRunnerReapRetryTracker(time.Now)
 	}
@@ -149,6 +179,13 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		logActionFailure(ctx, lifecycleConfig.Logger, "runner_lifecycle_configure", err,
 			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
 	}
+}
+
+func registerCoordinatedRepository(
+	ctx context.Context,
+	lifecycleConfig coordinatedLifecycleConfig,
+	statistics *upstream.RunnerScaleSetStatistic,
+) {
 	worker := coordinatedRepositoryWorker{
 		Reconciler:    lifecycleConfig.Reconciler,
 		MessageClient: lifecycleConfig.MessageClient,
@@ -157,12 +194,10 @@ func startCoordinatedLifecycle(ctx context.Context, lifecycleConfig coordinatedL
 		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	}
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, worker)
-	if statistics := lifecycleConfig.MessageClient.initialStatistics(); statistics != nil {
-		lifecycleConfig.Coordinator.ObserveAssigned(lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs)
-	}
-	pollerCtx, stopPolling := context.WithCancel(ctx)
-	pollerDone := startCoordinatedPoller(pollerCtx, lifecycleConfig)
-	return coordinatedScaleSetLifecycle(lifecycleConfig, stopPolling, pollerDone)
+	lifecycleConfig.Coordinator.ObserveAssigned(lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs)
+	logScaleSetSessionStatistics(
+		ctx, lifecycleConfig.Logger, lifecycleConfig.RepositoryURL, lifecycleConfig.ScaleSetConfig.Name, "session", statistics,
+	)
 }
 
 func startCoordinatedPoller(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) <-chan struct{} {

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,26 @@ func TestRunnerLifecycleRowsDecodeEpochAsUnset(t *testing.T) {
 	}
 }
 
+func TestMarkRunnerBusyBindsIdentityFreeRunnerToStartedRequest(t *testing.T) {
+	connection := &fakeDatabaseConnection{}
+	store := storeWithConnection(connection)
+	if err := store.MarkRunnerBusy(
+		context.Background(), "linux", "repo", 42, "linux-1", 99, time.Unix(10, 0).UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(connection.executions) != 2 {
+		t.Fatalf("busy binding executions = %#v", connection.executions)
+	}
+	if !strings.Contains(connection.executions[0].statement, "request_id = CASE") ||
+		connection.executions[0].arguments[5] != int64(42) {
+		t.Fatalf("runner request binding = %#v", connection.executions[0])
+	}
+	if connection.executions[1].arguments[0] != int64(42) {
+		t.Fatalf("legacy runner request binding = %#v", connection.executions[1])
+	}
+}
+
 func TestPrimaryConnectorReportsInjectedConnectionFailure(t *testing.T) {
 	originalResolver := productionConnectionSettingResolver
 	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
@@ -164,16 +185,26 @@ func scriptedRows(scans ...func(...any)) *scriptedDatabaseRows {
 
 func scanClaimedAssignment(t *testing.T, queueTime time.Time) func(...any) {
 	t.Helper()
+	return scanAssignment(t, Assignment{
+		ID: 1, NodeID: "node", ScaleSet: "set", Repository: "repo", RequestID: 2,
+		QueueTime: queueTime, InstallationID: 3, GitHubScaleSetID: 4, State: AssignmentReady,
+	})
+}
+
+func scanAssignment(t *testing.T, assignment Assignment) func(...any) {
+	t.Helper()
 	return func(destinations ...any) {
-		*destination[AssignmentID](t, destinations[0]) = 1
-		*destination[NodeID](t, destinations[1]) = "node"
-		*destination[string](t, destinations[2]) = "set"
-		*destination[string](t, destinations[3]) = "repo"
-		*destination[int64](t, destinations[4]) = 2
-		*destination[time.Time](t, destinations[5]) = queueTime
-		*destination[githubapp.InstallationID](t, destinations[6]) = 3
-		*destination[int](t, destinations[7]) = 4
-		*destination[AssignmentState](t, destinations[8]) = AssignmentReady
+		*destination[AssignmentID](t, destinations[0]) = assignment.ID
+		*destination[NodeID](t, destinations[1]) = assignment.NodeID
+		*destination[string](t, destinations[2]) = assignment.ScaleSet
+		*destination[string](t, destinations[3]) = assignment.Repository
+		*destination[int64](t, destinations[4]) = assignment.RequestID
+		*destination[time.Time](t, destinations[5]) = assignment.QueueTime
+		*destination[githubapp.InstallationID](t, destinations[6]) = assignment.InstallationID
+		*destination[int](t, destinations[7]) = assignment.GitHubScaleSetID
+		*destination[int64](t, destinations[8]) = assignment.ControllerEpoch
+		*destination[bool](t, destinations[9]) = assignment.IdentityFree
+		*destination[AssignmentState](t, destinations[10]) = assignment.State
 	}
 }
 

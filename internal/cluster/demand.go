@@ -159,9 +159,11 @@ func selectContributor(
 		  AND contribution.max_runners > (
 		      SELECT COUNT(*)
 		      FROM scaler_assignments assignment
-		      JOIN scaler_demand assignment_demand ON assignment_demand.demand_id = assignment.demand_id
+		      LEFT JOIN scaler_demand assignment_demand ON assignment_demand.demand_id = assignment.demand_id
+		      LEFT JOIN scaler_assigned_job_observations assigned
+		        ON assigned.assigned_observation_id = assignment.assigned_observation_id
 		      WHERE assignment.node_id = contribution.node_id
-		        AND assignment_demand.scale_set = contribution.scale_set
+		        AND COALESCE(assignment_demand.scale_set, assigned.scale_set) = contribution.scale_set
 		        AND assignment.state <> 'complete'
 		  ) + (
 		      SELECT COUNT(*)

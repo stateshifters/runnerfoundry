@@ -631,6 +631,8 @@ type fakeDatabaseConnection struct {
 	beginErr    error
 	execErrors  []error
 	execTag     pgconn.CommandTag
+	executions  []fakeDatabaseExecution
+	queries     []fakeDatabaseExecution
 	queryErr    error
 	queryErrors []error
 	rowsResult  rowIterator
@@ -656,7 +658,10 @@ func (connection *fakeDatabaseConnection) Close(context.Context) error {
 	return connection.closeErr
 }
 
-func (connection *fakeDatabaseConnection) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+func (connection *fakeDatabaseConnection) Exec(_ context.Context, statement string, arguments ...any) (pgconn.CommandTag, error) {
+	connection.executions = append(connection.executions, fakeDatabaseExecution{
+		statement: statement, arguments: append([]any(nil), arguments...),
+	})
 	if err := nextScriptedError(&connection.execErrors); err != nil {
 		return pgconn.CommandTag{}, err
 	}
@@ -689,7 +694,10 @@ func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any)
 	return newDatabaseRows(connection.rowsResult), nil
 }
 
-func (connection *fakeDatabaseConnection) QueryRow(context.Context, string, ...any) databaseRow {
+func (connection *fakeDatabaseConnection) QueryRow(_ context.Context, statement string, arguments ...any) databaseRow {
+	connection.queries = append(connection.queries, fakeDatabaseExecution{
+		statement: statement, arguments: append([]any(nil), arguments...),
+	})
 	return databaseRow{scanner: nextScriptedRow(&connection.rowResults)}
 }
 

@@ -69,6 +69,9 @@ func (store *MemoryDemandStore) MarkRunnerBusy(
 			continue
 		}
 		runner.Phase = RunnerBusy
+		if runner.RequestID == 0 && requestID > 0 {
+			runner.RequestID = requestID
+		}
 		if githubRunnerID > 0 {
 			runner.GitHubRunnerID = githubRunnerID
 		}

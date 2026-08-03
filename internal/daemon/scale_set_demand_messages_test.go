@@ -77,6 +77,48 @@ func TestCoordinatedScaleSetHandlerUsesStatisticsForZeroIdentityAssignedJobs(t *
 	}
 }
 
+func TestCoordinatedScaleSetHandlerLogsStatisticsBeforeReconciliation(t *testing.T) {
+	logs := &bytes.Buffer{}
+	worker := &statisticsLogObservingWorker{logs: logs}
+	coordinator := scaler.NewCoordinator(3)
+	coordinator.AddRepository("repo", worker)
+	handler := coordinatedScaleSetHandler{
+		Coordinator: coordinator,
+		Repository:  "repo",
+		ScaleSet:    "linux",
+		Logger:      slog.New(slog.NewTextHandler(logs, nil)),
+	}
+	message := &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{
+		TotalAvailableJobs: 1, TotalAcquiredJobs: 2, TotalAssignedJobs: 3, TotalRunningJobs: 4,
+		TotalRegisteredRunners: 5, TotalBusyRunners: 6, TotalIdleRunners: 7,
+	}}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if !worker.loggedBeforeReconcile {
+		t.Fatalf("session statistics were not logged before reconciliation: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "source=message") {
+		t.Fatalf("message statistics source was not logged: %q", logs.String())
+	}
+}
+
+type statisticsLogObservingWorker struct {
+	recordingRecoveryWorker
+	logs                  *bytes.Buffer
+	runningCalls          int
+	loggedBeforeReconcile bool
+}
+
+func (worker *statisticsLogObservingWorker) Running(ctx context.Context) (int, error) {
+	if worker.runningCalls == 0 {
+		worker.loggedBeforeReconcile = containsStandaloneSessionStatistics(worker.logs.String())
+	}
+	worker.runningCalls++
+	return worker.recordingRecoveryWorker.Running(ctx)
+}
+
 type assignedStatisticsFixture struct {
 	logs     *bytes.Buffer
 	provider *fakeScalerProvider

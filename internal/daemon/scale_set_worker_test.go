@@ -27,10 +27,7 @@ func TestCoordinatedRepositoryWorkerWrapsRunnerStartFailure(t *testing.T) {
 }
 
 func TestCoordinatedRepositoryWorkerUsesRepositoryQualifiedRunnerName(t *testing.T) {
-	provider := &fakeScalerProvider{instances: []scaler.RunnerInstance{{
-		RunnerName: "github-com-meza-repo-a-self-hosted-42",
-		State:      scaler.RunnerStateRunning,
-	}}}
+	provider := &fakeScalerProvider{}
 	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 		Name: "github-com-meza-repo-a-self-hosted", MaxRunners: 2, Provider: provider, JITConfig: fakeJITConfigGenerator{},
 	}}}
@@ -41,6 +38,10 @@ func TestCoordinatedRepositoryWorkerUsesRepositoryQualifiedRunnerName(t *testing
 	if len(provider.started) != 1 || provider.started[0].RunnerName != "github-com-meza-repo-a-self-hosted-42" {
 		t.Fatalf("expected repository-qualified runner name, got %#v", provider.started)
 	}
+	provider.instances = []scaler.RunnerInstance{{
+		RunnerName: provider.started[0].RunnerName,
+		State:      scaler.RunnerStateRunning,
+	}}
 	exists, err := worker.Exists(context.Background(), 42)
 	if err != nil || !exists {
 		t.Fatalf("expected repository-qualified runner lookup to find the runner, got exists=%t err=%v", exists, err)
@@ -50,10 +51,7 @@ func TestCoordinatedRepositoryWorkerUsesRepositoryQualifiedRunnerName(t *testing
 func TestCoordinatedRepositoryWorkerUsesCompactedRunnerNameForStartAndRecovery(t *testing.T) {
 	baseName := "github-com-meza-mezas-conventional-changelog-meza-ubuntu-latest"
 	expectedRunnerName := "github-com-meza-mezas-conventional-changelog-ee540047238cb46a-42"
-	provider := &fakeScalerProvider{instances: []scaler.RunnerInstance{{
-		RunnerName: expectedRunnerName,
-		State:      scaler.RunnerStateRunning,
-	}}}
+	provider := &fakeScalerProvider{}
 	jitGenerator := &recordingRunnerNameJITGenerator{}
 	worker := coordinatedRepositoryWorker{Reconciler: scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{
 		Name: baseName, MaxRunners: 2, Provider: provider, JITConfig: jitGenerator,
@@ -68,6 +66,10 @@ func TestCoordinatedRepositoryWorkerUsesCompactedRunnerNameForStartAndRecovery(t
 	if len(jitGenerator.runnerNames) != 1 || jitGenerator.runnerNames[0] != expectedRunnerName {
 		t.Fatalf("expected compacted JIT runner name, got %#v", jitGenerator.runnerNames)
 	}
+	provider.instances = []scaler.RunnerInstance{{
+		RunnerName: provider.started[0].RunnerName,
+		State:      scaler.RunnerStateRunning,
+	}}
 	exists, err := worker.Exists(context.Background(), 42)
 	if err != nil || !exists {
 		t.Fatalf("expected compacted runner lookup to find the runner, got exists=%t err=%v", exists, err)

@@ -10,6 +10,7 @@ type fakeDatabaseTransaction struct {
 	execErrors    []error
 	execTags      []pgconn.CommandTag
 	executions    []fakeDatabaseExecution
+	queries       []fakeDatabaseExecution
 	queryResults  []rowIterator
 	queryErrors   []error
 	rowResults    []fakeRow
@@ -65,7 +66,10 @@ type fakeDatabaseExecution struct {
 	arguments []any
 }
 
-func (transaction *fakeDatabaseTransaction) QueryRow(context.Context, string, ...any) databaseRow {
+func (transaction *fakeDatabaseTransaction) QueryRow(_ context.Context, statement string, arguments ...any) databaseRow {
+	transaction.queries = append(transaction.queries, fakeDatabaseExecution{
+		statement: statement, arguments: append([]any(nil), arguments...),
+	})
 	return databaseRow{scanner: nextScriptedRow(&transaction.rowResults)}
 }
 

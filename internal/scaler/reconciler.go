@@ -87,6 +87,13 @@ func (reconciler Reconciler) Running(ctx context.Context) (int, error) {
 }
 
 func (reconciler Reconciler) StartOne(ctx context.Context) error {
+	if reconciler.ScaleSet.AssignmentID > 0 {
+		return reconciler.startRequestedRunner(
+			ctx,
+			runnerName(reconciler.ScaleSet.Name, reconciler.ScaleSet.AssignmentID),
+			0,
+		)
+	}
 	return reconciler.startRequestedRunner(ctx, "", 0)
 }
 
@@ -103,6 +110,9 @@ func (reconciler Reconciler) startRequestedRunner(ctx context.Context, runnerNam
 	runningCount, usedRunnerNames, err := reconciler.cleanupCompletedRunners(ctx, instances)
 	if err != nil {
 		return err
+	}
+	if runnerName != "" && runningRunnerExists(instances, runnerName) {
+		return nil
 	}
 	if runningCount >= reconciler.ScaleSet.MaxRunners {
 		return reconciler.reconcileBlockedCapacity(ctx)

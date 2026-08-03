@@ -90,6 +90,13 @@ func TestClusterRunnerLifecycleSimpleTransitionFailures(t *testing.T) {
 	}
 }
 
+func TestClusterRunnerBusyReportsMirroredIdentityFailure(t *testing.T) {
+	if err := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{nil, databaseFailure()}}).
+		MarkRunnerBusy(context.Background(), "linux", "repo", 42, "runner", 1, time.Now()); err == nil {
+		t.Fatal("expected mirrored busy identity failure")
+	}
+}
+
 func TestClusterExpiredRunnerLifecycleReportsTransactionFailures(t *testing.T) {
 	connections := []*fakeDatabaseConnection{
 		{beginErr: databaseFailure()},

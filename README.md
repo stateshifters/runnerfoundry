@@ -194,6 +194,8 @@ For libvirt pools, a runner whose cleanup is still pending continues to consume 
 
 Jobs enter one FIFO admission queue per configured runner pool, ordered by GitHub queue time across repositories and hosts. RunnerFoundry gives the oldest repository demand the next available capacity. GitHub selects the exact job within that repository.
 
+Jobs already assigned by GitHub are recovered from the initial statistics of each new message session and from every later statistics update in both runtime modes. Positive-request-ID FIFO demand remains distinct and receives capacity first. Aggregate recovery uses only the remaining capacity and never invents a request ID; because the statistic is a count, it cannot restore individual job identity or ordering.
+
 ## Compatibility and supported versions
 
 RunnerFoundry publishes pre-1.0 releases. The project does not currently publish a supported-version window. Review [GitHub Releases](https://github.com/meza/RunnerFoundry/releases) for current packages and release notes before upgrading.
@@ -235,7 +237,7 @@ Standalone mode is the simplest operating shape, but it has no control-plane fai
 
 Use clustered mode when capacity spans multiple hosts or the control plane needs leader failover. Every node publishes local capacity to PostgreSQL and contends for leadership. One active leader owns GitHub-facing discovery and scale-set sessions. Every live host can execute assignments directed to its operating-system hostname.
 
-PostgreSQL retains the last conclusive repository catalog, confirmed scale-set registrations, global demand, host contributions, and assignment state. A replacement leader can reconnect GitHub-facing sessions from that catalog while fresh discovery runs independently. PostgreSQL availability is required for shared scheduling and leadership.
+PostgreSQL retains the last conclusive repository catalog, confirmed scale-set registrations, global demand, assigned-job observations, host contributions, and assignment state. A replacement leader can reconnect GitHub-facing sessions from that catalog while fresh discovery runs independently. PostgreSQL availability is required for shared scheduling and leadership.
 
 ### Docker Compose or libvirt
 
@@ -547,7 +549,7 @@ Together they advertise capacity of six. Neither host receives more assignments 
 
 ### 4. Start and verify the cluster
 
-Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations.
+Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 004 adds the durable controller epoch, discovery catalog, and confirmed repository scale-set registrations. Migration 005 persists epoch-fenced assigned-job observations and allows distributed assignments to represent identity-free recovery.
 
 ```sh
 sudo systemctl enable --now runnerfoundry
@@ -709,11 +711,13 @@ To drain one clustered host, remove its scale-set contributions from that host's
 
 RunnerFoundry commits identifiable GitHub demand to SQLite or PostgreSQL before acknowledging the message that delivered it. Duplicate delivery updates the existing demand instead of creating another queue entry.
 
+Every recreated GitHub message session reports initial assigned-job statistics before polling starts. RunnerFoundry feeds that count and every subsequent statistics update through the shared assigned-job controller. Positive-ID FIFO demand remains higher priority; aggregate recovery starts only the missing capacity, never fabricates request IDs, and periodically rechecks the latest observation even when no new message arrives. A lower count reaps only excess waiting runners, while busy runners remain protected.
+
 On standalone restart, RunnerFoundry reopens SQLite and increments a controller epoch that fences late writes from the previous controller. It reconnects process-local message sessions from durable repository and registration records while fresh discovery runs independently, then schedules the retained queue. A runner visible through the local infrastructure provider with the stable request-derived name suppresses duplicate provisioning without falsely completing the demand.
 
 Standalone runner cleanup is checked once per second and before new provisioning. If GitHub reports that a runner still has a job running, RunnerFoundry retains the durable cleanup record and retries that runner after 5, 10, 20, 40, and then at most 60 seconds. The retained lifecycle continues to consume capacity and reserve its runner name across repositories until provider and GitHub absence are confirmed. Other repositories can use remaining capacity without attempting to replace the busy registration. The owning host must regain the matching scale-set configuration and provider access, and GitHub must become reachable, before RunnerFoundry can release the retained capacity and name.
 
-In clustered mode, each assignment moves through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`. PostgreSQL separately retains provider-independent runner states through process and leader failure. `JobStarted` marks the exact runner busy before acknowledgement. Terminal `JobCompleted` atomically records exact Docker or libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
+In clustered mode, PostgreSQL persists assigned-job observations under the active controller epoch and distributes their missing capacity as assignments. Positive-ID assignments move through `reserved`, `acquiring`, `ready`, `starting`, `running`, and `complete`; identity-free assignments begin at `ready` because there is no request to acquire. Their provider runner names derive from the durable assignment identity, while lifecycle request ID `0` records that no GitHub request identity exists. PostgreSQL separately retains provider-independent runner states through process and leader failure. `JobStarted` marks the exact runner busy before acknowledgement. Terminal `JobCompleted` atomically records exact Docker or libvirt cleanup and completes demand and assignments before acknowledgement. A replacement leader retries interrupted positive-ID acquisition only when GitHub confirms the requested identity. An unconfirmed acquisition does not become executable.
 
 Before starting a `starting` assignment, the selected host checks for its stable runner name. It checks again after an ambiguous infrastructure-provider error. A process restart repairs local `starting` assignments before claiming new work.
 
@@ -731,7 +735,7 @@ On a normal standalone shutdown, active jobs remain running while message sessio
 
 For a normal standalone package upgrade, review release notes, stop the service, install the new package, and start the service.
 
-The project does not publish a mixed-version cluster compatibility policy. Use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration and `leader operational`, then start and verify the remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically.
+The project does not publish a mixed-version cluster compatibility policy. Migration 005 advances the schema compatibility floor, so use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, install the new package on every node, start one node and verify migration and `leader operational`, then start and verify the remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
 
 Before downgrading a cluster:
 

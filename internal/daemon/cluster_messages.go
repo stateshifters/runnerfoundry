@@ -33,7 +33,13 @@ func (handler clusterMessageHandler) HandleMessage(ctx context.Context, message 
 	if err := handler.removeCompleted(ctx, message.JobCompletedMessages); err != nil {
 		return err
 	}
-	return handler.scheduler.schedule(ctx, handler.session.key.scaleSet)
+	if err := handler.scheduler.schedule(ctx, handler.session.key.scaleSet); err != nil {
+		return err
+	}
+	if handler.session.assignedJobs == nil {
+		return errors.New("cluster assigned-job recovery is required")
+	}
+	return handler.session.assignedJobs.reconcile(ctx, message.Statistics, "message")
 }
 
 func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messages []*upstream.JobAvailable) error {
@@ -47,6 +53,17 @@ func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messa
 		}); err != nil {
 			return fmt.Errorf("persist clustered job demand: %w", err)
 		}
+		epoch := int64(0)
+		if handler.session.assignedJobs != nil {
+			epoch = handler.session.assignedJobs.controllerEpoch
+		}
+		logAction(ctx, handler.logger, slog.LevelInfo, "demand_observe", "completed",
+			slog.String("repository", handler.session.key.repository),
+			slog.String("scaleSet", handler.session.key.scaleSet),
+			slog.Int64("requestID", available.RunnerRequestID),
+			slog.Time("queueTime", available.QueueTime),
+			slog.Int64("epoch", epoch),
+		)
 	}
 	return nil
 }

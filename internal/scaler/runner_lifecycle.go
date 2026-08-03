@@ -209,10 +209,11 @@ func (store *SQLiteDemandStore) MarkRunnerBusy(
 	startedAt time.Time,
 ) error {
 	result, err := store.database.ExecContext(ctx, `UPDATE runner_lifecycle
-		SET phase = 'busy', github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END, updated_at = ?
+		SET phase = 'busy', request_id = CASE WHEN request_id = 0 AND ? > 0 THEN ? ELSE request_id END,
+		github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END, updated_at = ?
 		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
 		AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`,
-		githubRunnerID, githubRunnerID, startedAt.UnixNano(), scaleSet, repository,
+		requestID, requestID, githubRunnerID, githubRunnerID, startedAt.UnixNano(), scaleSet, repository,
 		runnerName, runnerName, requestID, requestID)
 	if err != nil {
 		return fmt.Errorf("mark runner busy: %w", err)
