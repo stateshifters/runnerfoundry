@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -121,7 +122,7 @@ func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
 	}
 }
 
-func TestObserveAssignedJobsAdoptsQueuedObligationsAcrossControllerEpoch(t *testing.T) {
+func TestObserveAssignedJobsAdoptsLifecycleBackedObligationsAcrossControllerEpoch(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
 		availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 2),
 		capacityObligationQueueSnapshotRow(t, 0, 2, nil),
@@ -155,20 +156,69 @@ func findQueuedObligationAdoption(t *testing.T, executions []fakeDatabaseExecuti
 func assertQueuedObligationAdoption(t *testing.T, adoption fakeDatabaseExecution, expectedEpoch int64) {
 	t.Helper()
 	for _, required := range []string{
-		"SET controller_epoch = $4", "NOT EXISTS", "demand.app_id = $1",
+		"SET controller_epoch = $4", "NOT EXISTS", "assignment.controller_epoch <> $4", "demand.app_id = $1",
 		"demand.repository = $2", "demand.scale_set = $3",
 	} {
 		if !strings.Contains(adoption.statement, required) {
 			t.Fatalf("queued obligation adoption missing %q: %s", required, adoption.statement)
 		}
 	}
-	for _, forbidden := range []string{"queue_time =", "attempt =", "next_attempt_at ="} {
-		if strings.Contains(adoption.statement, forbidden) {
-			t.Fatalf("queued obligation adoption changed durable FIFO or retry field %q: %s", forbidden, adoption.statement)
-		}
+	setClause := strings.TrimSpace(strings.SplitN(adoption.statement, "FROM", 2)[0])
+	if strings.Join(strings.Fields(setClause), " ") != "UPDATE scaler_demand demand SET controller_epoch = $4" {
+		t.Fatalf("queued obligation adoption changed fields besides controller epoch: %s", adoption.statement)
 	}
 	if adoption.arguments[3] != expectedEpoch {
 		t.Fatalf("queued obligation adopted epoch = %#v, want %d", adoption.arguments[3], expectedEpoch)
+	}
+}
+
+func TestAdoptedLifecycleBackedObligationRunsAfterAssignmentCompletes(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
+		{scan: func(destinations ...any) {
+			*destination[int](t, destinations[0]) = 1
+			*destination[int](t, destinations[1]) = 2
+		}},
+		queuedObligationCountRow(t, 0), capacityObligationQueueSnapshotRow(t, 0, 1, nil),
+	}}
+	connection := &fakeDatabaseConnection{transaction: transaction}
+	store := storeWithConnection(connection)
+	observation := assignedObservationFixture()
+	observation.ControllerEpoch = 17
+	observation.AssignedJobs = 1
+	if _, err := store.ObserveAssignedJobs(context.Background(), observation); err != nil {
+		t.Fatal(err)
+	}
+	assertQueuedObligationAdoption(t, findQueuedObligationAdoption(t, transaction.executions), 17)
+	if err := store.CompleteAssignment(context.Background(), 41, "node-a", AssignmentRunning); err != nil {
+		t.Fatal(err)
+	}
+	transaction.rowResults = append(transaction.rowResults, adoptedAssignedObligationRows(t)...)
+	assignment, err := store.AssignOldest(context.Background(), "linux", observation.ObservedAt, NodeLifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.ID != 42 || !assignment.IdentityFree || assignment.ControllerEpoch != 17 ||
+		assignment.QueueTime != time.Unix(80, 0).UTC() || assignment.State != AssignmentReady {
+		t.Fatalf("reassigned adopted obligation = %#v", assignment)
+	}
+}
+
+func adoptedAssignedObligationRows(t *testing.T) []fakeRow {
+	t.Helper()
+	return []fakeRow{
+		{scan: func(destinations ...any) {
+			*destination[int64](t, destinations[0]) = 1
+			*destination[string](t, destinations[1]) = "repo"
+			*destination[int64](t, destinations[2]) = 0
+			*destination[time.Time](t, destinations[3]) = time.Unix(80, 0).UTC()
+			*destination[string](t, destinations[4]) = "assigned_count"
+			*destination[int64](t, destinations[5]) = 9
+			*destination[githubapp.InstallationID](t, destinations[6]) = 7
+			*destination[int](t, destinations[7]) = 11
+			*destination[int64](t, destinations[8]) = 17
+		}},
+		{scan: func(destinations ...any) { *destination[NodeID](t, destinations[0]) = "node-b" }},
+		{scan: func(destinations ...any) { *destination[AssignmentID](t, destinations[0]) = 42 }},
 	}
 }
 

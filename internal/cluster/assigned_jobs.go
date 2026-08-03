@@ -163,7 +163,8 @@ func adoptQueuedAssignedObligations(
 		  AND assigned.controller_epoch = $4 AND demand.controller_epoch <> $4
 		  AND demand.source = 'assigned_count'
 		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
-		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')`,
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete'
+		        AND assignment.controller_epoch <> $4)`,
 		observation.AppID, observation.Repository, observation.ScaleSet, observation.ControllerEpoch); err != nil {
 		return fmt.Errorf("adopt queued assigned obligations: %w", err)
 	}
