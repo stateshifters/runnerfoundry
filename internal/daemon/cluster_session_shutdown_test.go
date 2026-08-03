@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +84,54 @@ func TestRepositorySessionLivesUntilLeadershipEnds(t *testing.T) {
 	}
 	leader.stop(context.Background())
 	<-messageClient.exited
+}
+
+func TestLeadershipEndStopsRepositoryPollingBeforeWorkerDrain(t *testing.T) {
+	leader, messageClient := activeRepositorySession(t)
+	workerStarted := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	leader.repositoryWorkers.enqueue("blocked", repositoryWorkRoutine, func(context.Context) error {
+		close(workerStarted)
+		<-releaseWorker
+		return nil
+	}, nil)
+	<-workerStarted
+
+	stopped := make(chan struct{})
+	go func() {
+		leader.stop(context.Background())
+		close(stopped)
+	}()
+	select {
+	case <-messageClient.exited:
+	case <-time.After(time.Second):
+		close(releaseWorker)
+		<-stopped
+		t.Fatal("repository polling continued while leadership workers drained")
+	}
+	close(releaseWorker)
+	<-stopped
+}
+
+func TestAcceptLeadershipStopsPreviousTermBeforeReplacement(t *testing.T) {
+	previous, messageClient := activeRepositorySession(t)
+	previous.daemon.leader = previous
+	replacementLease := &fakeClusterLease{alive: true}
+
+	previous.daemon.acceptLeadership(context.Background(), replacementLease)
+	replacement := previous.daemon.currentLeader()
+	if replacement == nil || replacement == previous {
+		previous.stop(context.Background())
+		t.Fatal("leadership replacement was not installed")
+	}
+	select {
+	case <-messageClient.exited:
+	case <-time.After(time.Second):
+		previous.stop(context.Background())
+		replacement.stop(context.Background())
+		t.Fatal("previous leadership term continued polling after replacement")
+	}
+	replacement.stop(context.Background())
 }
 
 func activeRepositorySession(t *testing.T) (*clusterLeader, *blockingMessageClient) {
@@ -222,6 +269,33 @@ func TestLeaderSessionCloseFailureLogsNodeIdentity(t *testing.T) {
 		`{"level":"ERROR","msg":"close leader message session failed","hostname":"runner-host-1","error":"close message session: close failed"}`)
 }
 
+func TestLeaderSessionShutdownReportsTermSummary(t *testing.T) {
+	logs := &bytes.Buffer{}
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	daemon.logger = newClusterLogSnapshotLogger(logs)
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
+	leader.repositoryControllerEpoch = 14
+	sessions := map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{}
+	for index, closeErr := range []error{nil, errors.New("close failed")} {
+		key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: fmt.Sprintf("linux-%d", index)}
+		sessions[key] = stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{closeErr: closeErr})
+	}
+
+	leader.stopLeaderSessions(context.Background(), sessions)
+
+	assertStructuredAction(t, logs.Bytes(), "leader_shutdown", "session_close_summary")
+	for _, expected := range []string{
+		`"epoch":14`, `"totalSessions":2`, `"canceledPollers":2`, `"remotelyClosedSessions":1`,
+		`"failures":1`, `"remainingCleanup":1`,
+	} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Fatalf("leader shutdown summary missing %s: %s", expected, logs.String())
+		}
+	}
+	leader.stopRepositoryWorkers()
+	leader.repositoryWorkers.wait()
+}
+
 func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 	logs := &bytes.Buffer{}
 	state := &fakeClusterState{}
@@ -238,7 +312,8 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 		t.Fatalf("sessions=%v scheduled=%v leaseClosed=%t", leader.sessions, leader.scheduler.sessions, lease.closed)
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close leader lease failed","hostname":"runner-host-1","error":"failed"}`)
+		"{\"level\":\"INFO\",\"msg\":\"leader_shutdown\",\"action\":\"leader_shutdown\",\"phase\":\"session_close_summary\",\"epoch\":0,\"totalSessions\":1,\"canceledPollers\":1,\"remotelyClosedSessions\":1,\"failures\":0,\"remainingCleanup\":0}\n"+
+			`{"level":"WARN","msg":"close leader lease failed","hostname":"runner-host-1","error":"failed"}`)
 }
 
 func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
@@ -259,40 +334,73 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	assertClusterLogSnapshot(t, logs,
 		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
 			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"leader_shutdown\",\"action\":\"leader_shutdown\",\"phase\":\"session_close_summary\",\"epoch\":0,\"totalSessions\":1,\"canceledPollers\":1,\"remotelyClosedSessions\":0,\"failures\":1,\"remainingCleanup\":1}\n"+
 			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"lease failed\"}")
 }
 
 func TestLeaderStopBoundsConcurrentSessionClosureAndUsesAggregateDeadline(t *testing.T) {
-	daemon := activeClusteredDaemon(t, &fakeClusterState{})
-	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
-	leader.githubOperationTimeout = 20 * time.Millisecond
-	tracker := &sessionCloseTracker{entered: make(chan struct{}, 5)}
-	for index := 0; index < 5; index++ {
-		key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: fmt.Sprintf("linux-%d", index)}
-		leader.sessions[key] = &repositoryScaleSetSession{
-			key: key, messageClient: scaleSetMessageClient{Client: blockingSessionCloseClient{tracker: tracker}},
-			stopPolling: func() {}, pollerDone: closedChannel(),
-		}
+	fixture := newBlockedSessionShutdownFixture(t)
+	completed := fixture.stopLeader()
+	for workerIndex := 0; workerIndex < sessionCloseWorkerCount; workerIndex++ {
+		awaitCompletionSignal(t, fixture.tracker.entered)
 	}
-	completed := make(chan struct{})
-	go func() {
-		leader.stop(context.Background())
-		close(completed)
-	}()
-	for index := 0; index < sessionCloseWorkerCount; index++ {
-		awaitCompletionSignal(t, tracker.entered)
-	}
-	select {
-	case <-completed:
-	case <-time.After(time.Second):
-		t.Fatal("leader shutdown exceeded its aggregate session-close deadline")
-	}
-	tracker.mutex.Lock()
-	maximum := tracker.maximum
-	tracker.mutex.Unlock()
-	if maximum != sessionCloseWorkerCount {
+	assertSessionPollingStopped(t, fixture.pollingStopped)
+	awaitCompletionSignal(t, completed)
+	if maximum := fixture.maximumConcurrentCloses(); maximum != sessionCloseWorkerCount {
 		t.Fatalf("maximum session-close concurrency = %d", maximum)
 	}
+}
+
+type blockedSessionShutdownFixture struct {
+	leader         *clusterLeader
+	tracker        *sessionCloseTracker
+	pollingStopped []<-chan struct{}
+}
+
+func newBlockedSessionShutdownFixture(t *testing.T) blockedSessionShutdownFixture {
+	t.Helper()
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	leader := newClusterLeader(context.Background(), &daemon, &fakeClusterLease{})
+	leader.githubOperationTimeout = 100 * time.Millisecond
+	tracker := &sessionCloseTracker{entered: make(chan struct{}, 5)}
+	pollingStopped := make([]<-chan struct{}, 0, 5)
+	for index := 0; index < 5; index++ {
+		key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: fmt.Sprintf("linux-%d", index)}
+		stopped := make(chan struct{})
+		var stopOnce sync.Once
+		pollingStopped = append(pollingStopped, stopped)
+		leader.sessions[key] = &repositoryScaleSetSession{
+			key: key, messageClient: scaleSetMessageClient{Client: blockingSessionCloseClient{tracker: tracker}},
+			stopPolling: func() { stopOnce.Do(func() { close(stopped) }) }, pollerDone: closedChannel(),
+		}
+	}
+	return blockedSessionShutdownFixture{leader: leader, tracker: tracker, pollingStopped: pollingStopped}
+}
+
+func (fixture blockedSessionShutdownFixture) stopLeader() <-chan struct{} {
+	completed := make(chan struct{})
+	go func() {
+		fixture.leader.stop(context.Background())
+		close(completed)
+	}()
+	return completed
+}
+
+func assertSessionPollingStopped(t *testing.T, pollingStopped []<-chan struct{}) {
+	t.Helper()
+	for index, stopped := range pollingStopped {
+		select {
+		case <-stopped:
+		default:
+			t.Fatalf("session %d polling was not stopped before bounded remote cleanup", index)
+		}
+	}
+}
+
+func (fixture blockedSessionShutdownFixture) maximumConcurrentCloses() int {
+	fixture.tracker.mutex.Lock()
+	defer fixture.tracker.mutex.Unlock()
+	return fixture.tracker.maximum
 }
 
 func TestSessionCloseWorkerStopsBeforeTakingWorkAfterCancellation(t *testing.T) {
@@ -301,10 +409,10 @@ func TestSessionCloseWorkerStopsBeforeTakingWorkAfterCancellation(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	jobs := make(chan *repositoryScaleSetSession)
-	var remaining atomic.Int64
+	progress := newSessionShutdownProgress(0)
 	var workers sync.WaitGroup
 	workers.Add(1)
-	leader.runSessionCloseWorker(ctx, jobs, &remaining, &workers)
+	leader.runSessionCloseWorker(ctx, jobs, progress, &workers)
 	workers.Wait()
 	leader.stopRepositoryWorkers()
 	leader.repositoryWorkers.wait()

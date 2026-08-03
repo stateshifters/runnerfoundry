@@ -84,6 +84,7 @@ type Coordinator struct {
 	workers                 map[string]RepositoryWorker
 	assigned                map[string]int
 	assignedControllers     map[string]*AssignedJobController
+	controllerAppID         int64
 	controllerEpoch         int64
 	inFlightObligations     map[int64]struct{}
 	background              sync.WaitGroup
@@ -122,6 +123,15 @@ func NewDurableCoordinator(scaleSet string, maxRunners int, store DemandStore) *
 func (coordinator *Coordinator) SetControllerEpoch(epoch int64) {
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
+	coordinator.controllerEpoch = epoch
+}
+
+// SetControllerIdentity fences durable message ingestion to the active
+// repository-controller term.
+func (coordinator *Coordinator) SetControllerIdentity(appID int64, epoch int64) {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	coordinator.controllerAppID = appID
 	coordinator.controllerEpoch = epoch
 }
 

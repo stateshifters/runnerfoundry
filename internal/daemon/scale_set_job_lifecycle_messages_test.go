@@ -177,7 +177,6 @@ func TestCoordinatedScaleSetHandlerIgnoresZeroIdentityCompletion(t *testing.T) {
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
 	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
 		Statistics:           &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
-		JobStartedMessages:   []*upstream.JobStarted{{}},
 		JobCompletedMessages: []*upstream.JobCompleted{{}},
 	}); err != nil {
 		t.Fatal(err)
@@ -344,6 +343,20 @@ func (store *failingCompletionLifecycleStore) CompleteJob(ctx context.Context, c
 		return fmt.Errorf("complete in-memory job: %w", err)
 	}
 	return nil
+}
+
+func (store *failingCompletionLifecycleStore) ApplyMessageUpdate(
+	ctx context.Context,
+	update scaler.MessageUpdate,
+) (scaler.MessageUpdateResult, error) {
+	if store.fail && len(update.Completed) > 0 {
+		return scaler.MessageUpdateResult{}, errors.New("persistence failed")
+	}
+	result, err := store.MemoryDemandStore.ApplyMessageUpdate(ctx, update)
+	if err != nil {
+		return scaler.MessageUpdateResult{}, fmt.Errorf("apply in-memory message update: %w", err)
+	}
+	return result, nil
 }
 
 type ackRecordingMessageClient struct {

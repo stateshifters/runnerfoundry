@@ -81,6 +81,9 @@ func reconcileAssignedCapacityObservation(
 	if err != nil {
 		return AssignedObligationDecision{}, err
 	}
+	if err = adoptRetainedAssignedCapacity(ctx, transaction, observation, observationID); err != nil {
+		return AssignedObligationDecision{}, err
+	}
 	if err = removeObsoleteAssignedCapacity(ctx, transaction, observation); err != nil {
 		return AssignedObligationDecision{}, err
 	}
@@ -92,6 +95,25 @@ func reconcileAssignedCapacityObservation(
 		AssignedJobs: observation.AssignedJobs, ActiveCapacity: activeCapacity, QueuedObligations: queued,
 	})
 	return decision, applyAssignedObligationDecision(ctx, transaction, observation, observationID, decision)
+}
+
+func adoptRetainedAssignedCapacity(
+	ctx context.Context,
+	transaction *sql.Tx,
+	observation AssignedCapacityObservation,
+	observationID int64,
+) error {
+	_, err := transaction.ExecContext(ctx, `UPDATE demand
+		SET assigned_observation_id = ?, controller_epoch = ?
+		WHERE source = 'assigned_count' AND assigned_observation_id IN (
+			SELECT assigned_observation_id FROM assigned_capacity_observations
+			WHERE scale_set = ? AND repository = ? AND controller_epoch < ?
+		)`, observationID, observation.ControllerEpoch, observation.ScaleSet,
+		observation.Repository, observation.ControllerEpoch)
+	if err != nil {
+		return fmt.Errorf("adopt retained assigned capacity obligations: %w", err)
+	}
+	return nil
 }
 
 func applyAssignedObligationDecision(

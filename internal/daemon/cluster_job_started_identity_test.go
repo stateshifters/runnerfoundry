@@ -17,9 +17,10 @@ func TestClusterMessageHandlerMarksIdentityFreeRunnerBusyByName(t *testing.T) {
 	if err := state.store.RegisterRunner(context.Background(), identityFreeRunner); err != nil {
 		t.Fatal(err)
 	}
-	if err := handler.removeStarted(context.Background(), []*upstream.JobStarted{{
-		RunnerName: "linux-assigned-1", RunnerID: 100,
-	}}); err != nil {
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:         &upstream.RunnerScaleSetStatistic{},
+		JobStartedMessages: []*upstream.JobStarted{{RunnerName: "linux-assigned-1", RunnerID: 100}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertIdentityFreeRunnerBusy(t, state)

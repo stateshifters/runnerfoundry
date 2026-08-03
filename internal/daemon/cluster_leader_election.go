@@ -25,9 +25,17 @@ func (daemon *clusteredDaemon) tryLeadership(ctx context.Context) {
 }
 
 func (daemon *clusteredDaemon) acceptLeadership(ctx context.Context, lease cluster.Lease) {
+	replacement := newClusterLeader(ctx, daemon, lease)
 	daemon.leadershipMutex.Lock()
-	daemon.leader = newClusterLeader(ctx, daemon, lease)
+	previous := daemon.leader
+	if previous != nil {
+		previous.stopTerm()
+	}
+	daemon.leader = replacement
 	daemon.leadershipMutex.Unlock()
+	if previous != nil {
+		previous.stop(context.WithoutCancel(ctx))
+	}
 	logAction(ctx, daemon.logger, slog.LevelInfo, "leader_election", "acquired",
 		slog.String("hostname", string(daemon.nodeID)))
 }

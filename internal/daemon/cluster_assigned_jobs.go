@@ -67,7 +67,7 @@ func (leader *clusterLeader) prepareSessionRuntime(session *repositoryScaleSetSe
 }
 
 func (leader *clusterLeader) startSessionRuntime(ctx context.Context, session *repositoryScaleSetSession) {
-	runtimeCtx, stopRuntime := context.WithCancel(context.WithoutCancel(ctx))
+	runtimeCtx, stopRuntime := leader.newTermContext(ctx)
 	session.stopPolling = stopRuntime
 	session.assignedJobs.start(runtimeCtx)
 	session.pollerDone = leader.startSessionPoller(runtimeCtx, session)
@@ -135,9 +135,6 @@ func (recovery *clusterAssignedJobRecovery) start(ctx context.Context) {
 	if recovery.latest() != nil && recovery.scheduler != nil {
 		recovery.scheduler.wake(ctx, recovery.scaleSet)
 	}
-}
-
-func (recovery *clusterAssignedJobRecovery) stop() {
 }
 
 func (recovery *clusterAssignedJobRecovery) observe(

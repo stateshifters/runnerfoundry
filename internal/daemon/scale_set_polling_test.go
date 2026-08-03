@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/meza/RunnerFoundry/internal/scaler"
 	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
@@ -41,6 +43,24 @@ func TestPollUntilShutdownStopsWhenPollFailureCancelsContext(t *testing.T) {
 		t.Fatal("canceled poll failure invoked retry wait")
 		return true
 	}))
+}
+
+func TestPollUntilShutdownStopsWhenControllerIsFenced(t *testing.T) {
+	pollCount := 0
+	retryCalled := false
+	poller := &scalesetpoller.Poller{Client: &fakeMessageClient{
+		getMessageErr: fmt.Errorf("observe assigned jobs: %w", scaler.ErrNotLeader),
+		onGetMessage:  func() { pollCount++ },
+	}, Handler: scaleSetHandler{}}
+
+	pollUntilShutdown(context.Background(), slog.Default(), "repo", "linux", poller, controlledPollRetry(func(context.Context) bool {
+		retryCalled = true
+		return false
+	}))
+
+	if pollCount != 1 || retryCalled {
+		t.Fatalf("fenced polling attempts = %d, retry called = %t", pollCount, retryCalled)
+	}
 }
 
 func TestPollUntilShutdownExitsWhenCanceledDuringRetryDelay(t *testing.T) {

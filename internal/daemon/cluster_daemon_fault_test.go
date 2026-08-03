@@ -344,7 +344,8 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 		t.Fatalf("leader=%#v leaseClosed=%t", daemon.currentLeader(), lease.closed)
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"leader_election","action":"leader_election","phase":"lost","hostname":"runner-host-1"}`)
+		"{\"level\":\"WARN\",\"msg\":\"leader_election\",\"action\":\"leader_election\",\"phase\":\"lost\",\"hostname\":\"runner-host-1\"}\n"+
+			`{"level":"INFO","msg":"leader_shutdown","action":"leader_shutdown","phase":"session_close_summary","epoch":0,"totalSessions":0,"canceledPollers":0,"remotelyClosedSessions":0,"failures":0,"remainingCleanup":0}`)
 }
 
 func TestClusterReloadValidatesAuthorityAndPublishesReplacement(t *testing.T) {

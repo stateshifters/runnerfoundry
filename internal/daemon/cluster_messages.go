@@ -8,8 +8,6 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/jackc/pgx/v5"
-	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
@@ -20,103 +18,68 @@ type clusterMessageHandler struct {
 	logger    *slog.Logger
 }
 
+const messageUpdateTimeout = 30 * time.Second
+
 func (handler clusterMessageHandler) HandleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
 	if message.Statistics == nil {
 		return errors.New("scale set message statistics are required")
 	}
-	if err := handler.enqueueAvailable(ctx, message.JobAvailableMessages); err != nil {
-		return err
-	}
-	if err := handler.removeStarted(ctx, message.JobStartedMessages); err != nil {
-		return err
-	}
-	if err := handler.removeCompleted(ctx, message.JobCompletedMessages); err != nil {
-		return err
-	}
-	if err := handler.scheduler.schedule(ctx, handler.session.key.scaleSet); err != nil {
-		return err
-	}
 	if handler.session.assignedJobs == nil {
 		return errors.New("cluster assigned-job recovery is required")
 	}
-	return handler.session.assignedJobs.observe(ctx, message.Statistics, "message")
+	update, err := scaleSetMessageUpdate(
+		handler.session.key.repository, handler.session.key.scaleSet, message, handler.observedAt(),
+	)
+	if err != nil {
+		return err
+	}
+	update.AppID = handler.session.assignedJobs.appID
+	update.ControllerEpoch = handler.session.assignedJobs.controllerEpoch
+	updateCtx, cancelUpdate := context.WithTimeout(ctx, messageUpdateTimeout)
+	_, err = handler.store.ApplyMessageUpdate(updateCtx, update)
+	cancelUpdate()
+	if err != nil {
+		return fmt.Errorf("persist clustered scale-set message: %w", err)
+	}
+	handler.logCommittedDemand(ctx, update)
+	handler.logCommittedCompletions(ctx, message.JobCompletedMessages)
+	handler.session.assignedJobs.remember(message.Statistics)
+	return handler.scheduler.schedule(ctx, update.ScaleSet)
 }
 
-func (handler clusterMessageHandler) enqueueAvailable(ctx context.Context, messages []*upstream.JobAvailable) error {
-	for _, available := range messages {
-		if available == nil || available.RunnerRequestID <= 0 || available.QueueTime.IsZero() {
-			return errors.New("job available message requires a positive runner request ID and queue time")
-		}
-		if err := handler.store.Enqueue(ctx, cluster.Demand{
-			AppID:    handler.session.assignedJobs.appID,
-			ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
-			RequestID: available.RunnerRequestID, QueueTime: available.QueueTime,
-		}); err != nil {
-			return fmt.Errorf("persist clustered job demand: %w", err)
-		}
-		epoch := int64(0)
-		if handler.session.assignedJobs != nil {
-			epoch = handler.session.assignedJobs.controllerEpoch
-		}
+func (handler clusterMessageHandler) observedAt() time.Time {
+	if handler.session != nil && handler.session.assignedJobs != nil && handler.session.assignedJobs.backend != nil &&
+		handler.session.assignedJobs.backend.now != nil {
+		return handler.session.assignedJobs.backend.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (handler clusterMessageHandler) logCommittedDemand(ctx context.Context, update scaler.MessageUpdate) {
+	for _, demand := range update.Available {
 		logAction(ctx, handler.logger, slog.LevelInfo, "demand_observe", "completed",
-			slog.String("repository", handler.session.key.repository),
-			slog.String("scaleSet", handler.session.key.scaleSet),
-			slog.Int64("requestID", available.RunnerRequestID),
-			slog.Time("queueTime", available.QueueTime),
-			slog.Int64("epoch", epoch),
+			slog.String("repository", update.Repository),
+			slog.String("scaleSet", update.ScaleSet),
+			slog.Int64("requestID", demand.RequestID),
+			slog.Time("queueTime", demand.QueueTime),
+			slog.Int64("epoch", update.ControllerEpoch),
 		)
 	}
-	return nil
 }
 
-func (handler clusterMessageHandler) removeStarted(ctx context.Context, messages []*upstream.JobStarted) error {
-	for _, started := range messages {
-		if !jobStartedHasIdentity(started) {
-			return errors.New("job started message requires a positive runner request ID or runner name")
+func (handler clusterMessageHandler) logCommittedCompletions(
+	ctx context.Context,
+	completedMessages []*upstream.JobCompleted,
+) {
+	for _, completed := range completedMessages {
+		if completed == nil || (completed.RunnerRequestID <= 0 && completed.RunnerName == "") {
+			handler.warnInvalidCompletion(ctx, completed)
+			continue
 		}
-		if lifecycleStore, supported := handler.store.(scaler.RunnerLifecycleStore); supported {
-			err := lifecycleStore.MarkRunnerBusy(
-				ctx, handler.session.key.scaleSet, handler.session.key.repository,
-				started.RunnerRequestID, started.RunnerName, int64(started.RunnerID), time.Now().UTC(),
-			)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("persist clustered started runner lifecycle: %w", err)
-			}
+		if completed.RunnerRequestID <= 0 {
+			handler.logRunnerNameCompletion(ctx, completed)
 		}
 	}
-	return nil
-}
-
-func (handler clusterMessageHandler) removeCompleted(ctx context.Context, messages []*upstream.JobCompleted) error {
-	for _, completed := range messages {
-		if err := handler.handleCompleted(ctx, completed); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (handler clusterMessageHandler) handleCompleted(ctx context.Context, completed *upstream.JobCompleted) error {
-	if completed == nil {
-		handler.warnInvalidCompletion(ctx, nil)
-		return nil
-	}
-	if completed.RunnerRequestID > 0 {
-		return handler.completeJob(ctx, completed)
-	}
-	return handler.reconcileIdentityFreeCompletion(ctx, completed)
-}
-
-func (handler clusterMessageHandler) reconcileIdentityFreeCompletion(ctx context.Context, completed *upstream.JobCompleted) error {
-	if completed.RunnerName != "" {
-		if err := handler.completeJob(ctx, completed); err != nil {
-			return err
-		}
-		handler.logRunnerNameCompletion(ctx, completed)
-		return nil
-	}
-	handler.warnInvalidCompletion(ctx, completed)
-	return nil
 }
 
 func (handler clusterMessageHandler) logRunnerNameCompletion(ctx context.Context, completed *upstream.JobCompleted) {
@@ -129,16 +92,6 @@ func (handler clusterMessageHandler) logRunnerNameCompletion(ctx context.Context
 		slog.Int("runnerID", completed.RunnerID),
 		slog.String("identity", "runner_name"),
 	)
-}
-
-func (handler clusterMessageHandler) completeJob(ctx context.Context, completed *upstream.JobCompleted) error {
-	if err := handler.store.CompleteJob(ctx, cluster.JobCompletion{
-		ScaleSet: handler.session.key.scaleSet, Repository: handler.session.key.repository,
-		RequestID: completed.RunnerRequestID, RunnerName: completed.RunnerName,
-	}); err != nil {
-		return fmt.Errorf("complete clustered job: %w", err)
-	}
-	return nil
 }
 
 func (handler clusterMessageHandler) warnInvalidCompletion(ctx context.Context, completed *upstream.JobCompleted) {

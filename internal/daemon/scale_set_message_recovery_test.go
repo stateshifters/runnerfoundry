@@ -171,7 +171,7 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t 
 		Statistics:           &upstream.RunnerScaleSetStatistic{},
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 1, QueueTime: time.Now()}}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "persist GitHub job demand") {
+	if err == nil || !strings.Contains(err.Error(), "persist scale-set message update") {
 		t.Fatalf("expected persistence failure, got %v", err)
 	}
 }
@@ -179,15 +179,22 @@ func TestCoordinatedScaleSetHandlerLeavesMessageRetryableWhenPersistenceFails(t 
 func TestCoordinatedScaleSetHandlerReportsCompletedDemandRemovalFailure(t *testing.T) {
 	coordinator := scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{})
 	handler := coordinatedScaleSetHandler{Coordinator: coordinator, Repository: "repo"}
-	err := handler.completeJob(context.Background(), &upstream.JobCompleted{
-		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+	err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics: &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{{
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "remove completed GitHub demand") {
+	if err == nil || !strings.Contains(err.Error(), "persist atomic scale-set message") {
 		t.Fatalf("completion error = %v", err)
 	}
 }
 
 type failingDaemonDemandStore struct{}
+
+func (failingDaemonDemandStore) ApplyMessageUpdate(context.Context, scaler.MessageUpdate) (scaler.MessageUpdateResult, error) {
+	return scaler.MessageUpdateResult{}, errors.New("persist failed")
+}
 
 func (failingDaemonDemandStore) Apply(context.Context, string, []scaler.JobDemand, []scaler.DemandRemoval) error {
 	return errors.New("persist failed")

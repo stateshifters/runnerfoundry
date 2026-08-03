@@ -429,6 +429,38 @@ func (state *fakeClusterState) Enqueue(_ context.Context, demand cluster.Demand)
 	return state.enqueueErr
 }
 
+func (state *fakeClusterState) ApplyMessageUpdate(
+	ctx context.Context,
+	update scaler.MessageUpdate,
+) (scaler.MessageUpdateResult, error) {
+	for _, demand := range update.Available {
+		if err := state.Enqueue(ctx, cluster.Demand{
+			AppID: update.AppID, ScaleSet: update.ScaleSet, Repository: update.Repository,
+			RequestID: demand.RequestID, QueueTime: demand.QueueTime,
+		}); err != nil {
+			return scaler.MessageUpdateResult{}, err
+		}
+	}
+	for _, completed := range update.Completed {
+		if err := state.CompleteJob(ctx, cluster.JobCompletion{
+			ScaleSet: update.ScaleSet, Repository: update.Repository,
+			RequestID: completed.RequestID, RunnerName: completed.RunnerName,
+		}); err != nil {
+			return scaler.MessageUpdateResult{}, err
+		}
+	}
+	capacity, err := state.ObserveAssignedJobs(ctx, cluster.AssignedJobObservation{
+		AppID: update.AppID, ScaleSet: update.ScaleSet, Repository: update.Repository,
+		ControllerEpoch: update.ControllerEpoch, AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
+	})
+	if err != nil {
+		return scaler.MessageUpdateResult{}, err
+	}
+	return scaler.MessageUpdateResult{AssignedObligations: scaler.AssignedObligationDecision{
+		Create: capacity.AvailableCapacity,
+	}}, nil
+}
+
 func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, time.Duration) (*cluster.Assignment, error) {
 	state.assignedJobsMutex.Lock()
 	defer state.assignedJobsMutex.Unlock()

@@ -254,6 +254,23 @@ type faultLifecycleDemandStore struct {
 	inventoryErr error
 }
 
+func (store *faultLifecycleDemandStore) ApplyMessageUpdate(
+	ctx context.Context,
+	update scaler.MessageUpdate,
+) (scaler.MessageUpdateResult, error) {
+	if store.busyErr != nil && len(update.Started) > 0 {
+		return scaler.MessageUpdateResult{}, store.busyErr
+	}
+	if store.completeErr != nil && len(update.Completed) > 0 {
+		return scaler.MessageUpdateResult{}, store.completeErr
+	}
+	result, err := store.MemoryDemandStore.ApplyMessageUpdate(ctx, update)
+	if err != nil {
+		return scaler.MessageUpdateResult{}, fmt.Errorf("apply in-memory message update: %w", err)
+	}
+	return result, nil
+}
+
 func (store *faultLifecycleDemandStore) RequestExpiredRunnerReaps(ctx context.Context, scaleSet, repository string, deadline, at time.Time) (int, error) {
 	if store.expireErr != nil {
 		return 0, store.expireErr

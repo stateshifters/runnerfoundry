@@ -27,6 +27,8 @@ type clusterLeader struct {
 	repairMutex               sync.Mutex
 	cancelMutex               sync.Mutex
 	cancelOperation           context.CancelFunc
+	newTermContext            termContextFactory
+	stopTerm                  context.CancelFunc
 	stopped                   bool
 	githubOperationTimeout    time.Duration
 	repositoryRepairDelays    []time.Duration
@@ -48,6 +50,8 @@ type clusterLeader struct {
 	discoveryMutex            sync.Mutex
 	discoveryRunning          bool
 }
+
+type termContextFactory func(context.Context) (context.Context, context.CancelFunc)
 
 type repositoryScaleSetSessionKey struct {
 	repository string
@@ -75,7 +79,9 @@ type repositorySessionRemoval struct {
 }
 
 func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluster.Lease) *clusterLeader {
-	workerCtx, stopRepositoryWorkers := context.WithCancel(ctx)
+	termContext, stopTerm := context.WithCancel(ctx)
+	newTermContext := newTermContextFactory(termContext)
+	workerCtx, stopRepositoryWorkers := context.WithCancel(termContext)
 	scheduler := &clusterScheduler{
 		store: daemon.assignments, workerDone: workerCtx.Done(),
 		sessions: map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
@@ -87,6 +93,7 @@ func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluste
 	}
 	leader := &clusterLeader{
 		daemon: daemon, lease: lease, scheduler: scheduler,
+		newTermContext: newTermContext, stopTerm: stopTerm,
 		sessions:               map[repositoryScaleSetSessionKey]*repositoryScaleSetSession{},
 		githubOperationTimeout: clusterGitHubTimeout,
 		repositoryRepairDelays: repositoryRepairRetryDelays[:], now: time.Now,
@@ -98,6 +105,20 @@ func newClusterLeader(ctx context.Context, daemon *clusteredDaemon, lease cluste
 	}
 	leader.repositoryWorkers = newRepositoryWorkerPool(workerCtx, leader.githubOperationTimeout)
 	return leader
+}
+
+func newTermContextFactory(termContext context.Context) termContextFactory {
+	return func(parent context.Context) (context.Context, context.CancelFunc) {
+		runtimeContext, stopRuntime := context.WithCancel(context.WithoutCancel(parent))
+		stopTermCancellation := context.AfterFunc(termContext, stopRuntime)
+		if termContext.Err() != nil {
+			stopRuntime()
+		}
+		return runtimeContext, func() {
+			stopTermCancellation()
+			stopRuntime()
+		}
+	}
 }
 
 func (leader *clusterLeader) reconcile(ctx context.Context) bool {
@@ -557,9 +578,6 @@ const (
 func (leader *clusterLeader) stopSession(ctx context.Context, session *repositoryScaleSetSession, removal scaleSetSessionRemoval) error {
 	session.stopPolling()
 	<-session.pollerDone
-	if session.assignedJobs != nil {
-		session.assignedJobs.stop()
-	}
 	closeErr := session.messageClient.Close(ctx)
 	if closeErr != nil {
 		leader.daemon.logger.Error("close leader message session failed",
@@ -575,6 +593,7 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 }
 
 func (leader *clusterLeader) stop(ctx context.Context) {
+	leader.stopTerm()
 	leader.cancelActiveOperation()
 	leader.stopRepositoryWorkers()
 	leader.background.Wait()

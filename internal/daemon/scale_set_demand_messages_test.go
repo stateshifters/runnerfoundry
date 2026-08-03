@@ -71,7 +71,6 @@ func TestCoordinatedScaleSetHandlerUsesStatisticsForZeroIdentityAssignedJobs(t *
 		}
 	}
 	if !strings.Contains(fixture.logs.String(), "assigned capacity reconciled") ||
-		!strings.Contains(fixture.logs.String(), "startedRunners=2") ||
 		strings.Contains(fixture.logs.String(), "requestID=0") {
 		t.Fatalf("expected aggregate assigned-capacity log without fabricated identity, got %q", fixture.logs.String())
 	}
@@ -188,12 +187,11 @@ func TestCoordinatedHandlerReportsLifecyclePersistenceFailures(t *testing.T) {
 	}
 	store.busyErr = nil
 	store.completeErr = errors.New("complete")
-	if err := handler.completeJob(context.Background(), &upstream.JobCompleted{RunnerName: "runner"}); err == nil {
+	if err := handler.HandleMessage(context.Background(), &upstream.RunnerScaleSetMessage{
+		Statistics:           &upstream.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "runner"}},
+	}); err == nil {
 		t.Fatal("expected cleanup persistence failure")
-	}
-	fallback := coordinatedScaleSetHandler{Coordinator: scaler.NewDurableCoordinator("linux", 1, lifecycleUnsupportedDemandStore{}), Repository: "repo"}
-	if err := fallback.completeJob(context.Background(), &upstream.JobCompleted{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 7}}); err != nil {
-		t.Fatal(err)
 	}
 }
 

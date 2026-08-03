@@ -281,7 +281,7 @@ func awaitAssignedJobEventCount(t *testing.T, state *fakeClusterState, expected 
 func assertExactDemandPrecedesRecovery(t *testing.T, state *fakeClusterState, messageClient *fakeMessageClient) {
 	t.Helper()
 	_, _, assignedJobEvents := state.assignedJobsSnapshot()
-	if events := strings.Join(assignedJobEvents, ","); events != "enqueue,confirm-exact,observe-assigned,assign-identity-free" {
+	if events := strings.Join(assignedJobEvents, ","); events != "enqueue,observe-assigned,confirm-exact,assign-identity-free" {
 		t.Fatalf("cluster scheduling order = %q", events)
 	}
 	if len(messageClient.acquiredIDs) != 1 || messageClient.acquiredIDs[0] != 42 {

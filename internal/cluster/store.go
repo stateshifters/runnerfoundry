@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/tern/v2/migrate"
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 const leaderAdvisoryLockKey int64 = 0x6769746875627363
@@ -26,7 +27,7 @@ const NodeLifetime = 30 * time.Second
 var (
 	ErrNoAssignment      = errors.New("no schedulable demand")
 	ErrNoReadyAssignment = errors.New("no local assignment is ready")
-	ErrNotLeader         = errors.New("cluster leader lease is held elsewhere")
+	ErrNotLeader         = scaler.ErrNotLeader
 	// ErrInvalidDemand reports invalid demand input. Callers should use
 	// errors.Is and correct or discard the input rather than retry it unchanged.
 	ErrInvalidDemand = errors.New("invalid scale-set demand")

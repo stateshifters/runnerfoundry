@@ -111,6 +111,7 @@ func applyAssignedJobObservation(
 		upsertAssignedJobObservation,
 		adoptLifecycleBackedAssignedAssignments,
 		fenceObsoleteAssignedAssignments,
+		adoptQueuedAssignedObligations,
 		reconcileExcessAssignedRunners,
 	}
 	for _, operation := range operations {
@@ -122,6 +123,27 @@ func applyAssignedJobObservation(
 		return err
 	}
 	return reconcileQueuedAssignedObligations(ctx, transaction, observation, capacity.ActiveRunners)
+}
+
+func adoptQueuedAssignedObligations(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	observation AssignedJobObservation,
+) error {
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_demand demand
+		SET controller_epoch = $4
+		FROM scaler_assigned_job_observations assigned
+		WHERE assigned.assigned_observation_id = demand.assigned_observation_id
+		  AND demand.app_id = $1 AND demand.repository = $2 AND demand.scale_set = $3
+		  AND assigned.app_id = $1 AND assigned.repository_url = $2 AND assigned.scale_set = $3
+		  AND assigned.controller_epoch = $4 AND demand.controller_epoch <> $4
+		  AND demand.source = 'assigned_count'
+		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')`,
+		observation.AppID, observation.Repository, observation.ScaleSet, observation.ControllerEpoch); err != nil {
+		return fmt.Errorf("adopt queued assigned obligations: %w", err)
+	}
+	return nil
 }
 
 func reconcileQueuedAssignedObligations(

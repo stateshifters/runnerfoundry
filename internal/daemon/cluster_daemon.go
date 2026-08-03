@@ -85,6 +85,7 @@ type clusterNodeState interface {
 }
 
 type clusterDemandState interface {
+	ApplyMessageUpdate(ctx context.Context, update scaler.MessageUpdate) (scaler.MessageUpdateResult, error)
 	Enqueue(ctx context.Context, demand cluster.Demand) error
 	CompleteDemand(ctx context.Context, scaleSet string, repository string, requestID int64) error
 	CompleteJob(ctx context.Context, completion cluster.JobCompletion) error

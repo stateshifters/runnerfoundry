@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
+	"github.com/meza/RunnerFoundry/internal/scaler"
 	scalesetpoller "github.com/meza/RunnerFoundry/internal/scaleset"
 )
 
@@ -14,6 +16,16 @@ const sustainedPollFailureThreshold = 3
 type pollRetryPolicy struct {
 	delay time.Duration
 	wait  func(context.Context, time.Duration) bool
+}
+
+type failedPoll struct {
+	logger              *slog.Logger
+	repositoryURL       string
+	scaleSetName        string
+	startedAt           time.Time
+	lastMessageID       int
+	err                 error
+	consecutiveFailures int
 }
 
 func pollRetryAfter(delay time.Duration) pollRetryPolicy {
@@ -36,20 +48,45 @@ func pollUntilShutdown(
 	for ctx.Err() == nil {
 		pollStartedAt := time.Now()
 		logMessagePoll(ctx, logger, repositoryURL, scaleSetName, "started")
-		if err := poller.PollOnce(ctx); err != nil {
-			if ctx.Err() != nil {
-				logMessagePollFinished(ctx, logger, repositoryURL, scaleSetName, "canceled", pollStartedAt, poller.LastMessageID)
-				return
-			}
-			consecutiveFailures = logPollFailure(logger, repositoryURL, scaleSetName, err, consecutiveFailures)
-			if !retry.waitBeforeNext(ctx) {
-				return
-			}
+		pollErr := poller.PollOnce(ctx)
+		if pollErr == nil {
+			consecutiveFailures = 0
+			logMessagePollFinished(ctx, logger, repositoryURL, scaleSetName, "completed", pollStartedAt, poller.LastMessageID)
 			continue
 		}
-		consecutiveFailures = 0
-		logMessagePollFinished(ctx, logger, repositoryURL, scaleSetName, "completed", pollStartedAt, poller.LastMessageID)
+		var continuePolling bool
+		consecutiveFailures, continuePolling = handlePollFailure(
+			ctx,
+			failedPoll{
+				logger: logger, repositoryURL: repositoryURL, scaleSetName: scaleSetName,
+				startedAt: pollStartedAt, lastMessageID: poller.LastMessageID,
+				err: pollErr, consecutiveFailures: consecutiveFailures,
+			},
+			retry,
+		)
+		if !continuePolling {
+			return
+		}
 	}
+}
+
+func handlePollFailure(
+	ctx context.Context,
+	failure failedPoll,
+	retry pollRetryPolicy,
+) (int, bool) {
+	if ctx.Err() != nil {
+		logMessagePollFinished(ctx, failure.logger, failure.repositoryURL, failure.scaleSetName,
+			"canceled", failure.startedAt, failure.lastMessageID)
+		return failure.consecutiveFailures, false
+	}
+	consecutiveFailures := logPollFailure(
+		failure.logger, failure.repositoryURL, failure.scaleSetName, failure.err, failure.consecutiveFailures,
+	)
+	if errors.Is(failure.err, scaler.ErrNotLeader) {
+		return consecutiveFailures, false
+	}
+	return consecutiveFailures, retry.waitBeforeNext(ctx)
 }
 
 func logMessagePoll(ctx context.Context, logger *slog.Logger, repositoryURL string, scaleSetName string, phase string) {

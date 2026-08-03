@@ -65,7 +65,15 @@ func TestSQLiteAssignedCapacityObservationReportsRecordedObservationFailure(t *t
 func TestSQLiteAssignedCapacityObservationReportsObsoleteRemovalFailure(t *testing.T) {
 	assertConfiguredAssignedObservationFailure(t, 0, func(mock sqlmock.Sqlmock, failure error) {
 		expectAssignedObservationThroughRecord(mock)
+		expectAssignedObligationAdoption(mock)
 		mock.ExpectExec("DELETE FROM assigned_capacity_observations").WillReturnError(failure)
+	})
+}
+
+func TestSQLiteAssignedCapacityObservationReportsAdoptionFailure(t *testing.T) {
+	assertConfiguredAssignedObservationFailure(t, 0, func(mock sqlmock.Sqlmock, failure error) {
+		expectAssignedObservationThroughRecord(mock)
+		mock.ExpectExec("UPDATE demand").WillReturnError(failure)
 	})
 }
 
@@ -122,7 +130,12 @@ func expectAssignedObservationThroughRecord(mock sqlmock.Sqlmock) {
 
 func expectAssignedObservationThroughObsoleteRemoval(mock sqlmock.Sqlmock) {
 	expectAssignedObservationThroughRecord(mock)
+	expectAssignedObligationAdoption(mock)
 	mock.ExpectExec("DELETE FROM assigned_capacity_observations").WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectAssignedObligationAdoption(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("UPDATE demand").WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 func expectAssignedObservationThroughCount(mock sqlmock.Sqlmock, queued int) {

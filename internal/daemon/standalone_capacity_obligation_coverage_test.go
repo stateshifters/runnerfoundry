@@ -13,56 +13,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-func TestCoordinatedHandlerPersistsAndSchedulesDurableAssignedCapacity(t *testing.T) {
-	store := newDaemonCapacityObligationStore()
-	store.decision = scaler.AssignedObligationDecision{Create: 2, Cancel: 1}
-	logs := &bytes.Buffer{}
-	coordinator := scaler.NewDurableCoordinator("linux", 3, store)
-	handler := coordinatedScaleSetHandler{
-		Coordinator: coordinator,
-		Repository:  "repo",
-		ScaleSet:    "linux",
-		Logger:      slog.New(slog.NewTextHandler(logs, nil)),
-	}
-
-	if err := handler.reconcileAssignedCapacity(context.Background(), 2); err != nil {
-		t.Fatal(err)
-	}
-	if store.observation.AssignedJobs != 2 || store.orderedCalls != 1 {
-		t.Fatalf("observation = %#v, schedule calls = %d", store.observation, store.orderedCalls)
-	}
-	if !strings.Contains(logs.String(), "queuedObligations=2") ||
-		!strings.Contains(logs.String(), "canceledObligations=1") {
-		t.Fatalf("assigned-capacity log = %q", logs.String())
-	}
-}
-
-func TestCoordinatedHandlerReportsDurableAssignedCapacityFailures(t *testing.T) {
-	t.Run("observation", func(t *testing.T) {
-		store := newDaemonCapacityObligationStore()
-		store.observeErr = errors.New("observation unavailable")
-		handler := coordinatedScaleSetHandler{
-			Coordinator: scaler.NewDurableCoordinator("linux", 1, store), Repository: "repo",
-		}
-		err := handler.reconcileAssignedCapacity(context.Background(), 1)
-		if err == nil || !strings.Contains(err.Error(), "persist assigned runner capacity") {
-			t.Fatalf("error = %v", err)
-		}
-	})
-
-	t.Run("scheduling", func(t *testing.T) {
-		store := newDaemonCapacityObligationStore()
-		store.orderedErr = errors.New("queue unavailable")
-		handler := coordinatedScaleSetHandler{
-			Coordinator: scaler.NewDurableCoordinator("linux", 1, store), Repository: "repo",
-		}
-		err := handler.reconcileAssignedCapacity(context.Background(), 1)
-		if err == nil || !strings.Contains(err.Error(), "schedule shared runner capacity") {
-			t.Fatalf("error = %v", err)
-		}
-	})
-}
-
 func TestStandaloneControlInitializesDurableCapacityCoordinator(t *testing.T) {
 	store := newDaemonCapacityObligationStore()
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)

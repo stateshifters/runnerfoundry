@@ -19,9 +19,9 @@ func TestObserveAssignedJobsReportsEveryPersistenceFailure(t *testing.T) {
 func TestObserveAssignedJobsReportsEveryWriteFailure(t *testing.T) {
 	failure := errors.New("failed")
 	observation := assignedObservationFixture()
-	for failureIndex := range 7 {
+	for failureIndex := range 8 {
 		t.Run(fmt.Sprintf("write %d", failureIndex), func(t *testing.T) {
-			executionErrors := make([]error, 7)
+			executionErrors := make([]error, 8)
 			executionErrors[failureIndex] = failure
 			transaction := &fakeDatabaseTransaction{execErrors: executionErrors}
 			_, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ObserveAssignedJobs(
@@ -62,7 +62,7 @@ func TestObserveAssignedJobsReportsCapacityAndCommitFailures(t *testing.T) {
 func TestObserveAssignedJobsReportsQueuedObligationCountFailure(t *testing.T) {
 	failure := errors.New("failed")
 	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
-		assignedJobCapacityRow(t, 0, 3), {err: failure},
+		availableAssignedJobCapacityRow(t), {err: failure},
 	}}
 	assertAssignedObservationFailure(t, transaction, assignedObservationFixture(), failure)
 }
@@ -70,7 +70,7 @@ func TestObserveAssignedJobsReportsQueuedObligationCountFailure(t *testing.T) {
 func TestObserveAssignedJobsReportsQueuedObligationCancellationFailure(t *testing.T) {
 	failure := errors.New("failed")
 	transaction := &fakeDatabaseTransaction{
-		rowResults: []fakeRow{assignedJobCapacityRow(t, 0, 3), queuedObligationCountRow(t, 3)},
+		rowResults: []fakeRow{availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 3)},
 		execErrors: assignedObservationWritesThen(failure),
 	}
 	observation := assignedObservationFixture()
@@ -81,17 +81,17 @@ func TestObserveAssignedJobsReportsQueuedObligationCancellationFailure(t *testin
 func TestObserveAssignedJobsReportsQueuedObligationCreationFailure(t *testing.T) {
 	failure := errors.New("failed")
 	transaction := &fakeDatabaseTransaction{
-		rowResults: []fakeRow{assignedJobCapacityRow(t, 0, 3), queuedObligationCountRow(t, 0)},
+		rowResults: []fakeRow{availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0)},
 		execErrors: assignedObservationWritesThen(failure),
 	}
 	assertAssignedObservationFailure(t, transaction, assignedObservationFixture(), failure)
 }
 
-func assignedJobCapacityRow(t *testing.T, active int, available int) fakeRow {
+func availableAssignedJobCapacityRow(t *testing.T) fakeRow {
 	t.Helper()
 	return fakeRow{scan: func(destinations ...any) {
-		*destination[int](t, destinations[0]) = active
-		*destination[int](t, destinations[1]) = available
+		*destination[int](t, destinations[0]) = 0
+		*destination[int](t, destinations[1]) = 3
 	}}
 }
 
@@ -103,7 +103,7 @@ func queuedObligationCountRow(t *testing.T, count int) fakeRow {
 }
 
 func assignedObservationWritesThen(failure error) []error {
-	return append(make([]error, 7), failure)
+	return append(make([]error, 8), failure)
 }
 
 func assertAssignedObservationFailure(

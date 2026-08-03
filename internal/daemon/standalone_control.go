@@ -62,7 +62,7 @@ func startStandaloneControl(
 	}
 	control := newStandaloneControl(controlCtx, cancel, daemon, active, snapshot, options)
 	for _, coordinator := range active.Coordinators {
-		coordinator.SetControllerEpoch(snapshot.Control.ControllerEpoch)
+		coordinator.SetControllerIdentity(snapshot.Control.AppID, snapshot.Control.ControllerEpoch)
 		coordinator.SetSchedulingErrorHandler(func(err error) {
 			active.Logger.Error("standalone capacity obligation failed", slog.String("error", err.Error()))
 		})
