@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/cluster"
 )
@@ -104,7 +105,10 @@ func (daemon *clusteredDaemon) contendForLeadership(
 ) {
 	defer close(done)
 	for {
-		result, err := daemon.waitForLeader(ctx)
+		waitCtx, cancelWait := context.WithTimeout(ctx, daemon.leadershipWaitDuration())
+		result, err := daemon.waitForLeader(waitCtx)
+		waitExpired := errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancelWait()
 		if err == nil {
 			daemon.deliverLeadership(ctx, results, result.lease)
 			return
@@ -112,12 +116,22 @@ func (daemon *clusteredDaemon) contendForLeadership(
 		if ctx.Err() != nil {
 			return
 		}
+		if waitExpired {
+			continue
+		}
 		daemon.logger.Error("leader contender failed",
 			slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		if !daemon.waitForLeadershipRetry(ctx) {
 			return
 		}
 	}
+}
+
+func (daemon *clusteredDaemon) leadershipWaitDuration() time.Duration {
+	if daemon.leadershipWaitTimeout > 0 {
+		return daemon.leadershipWaitTimeout
+	}
+	return clusterLeadershipWaitTimeout
 }
 
 func (daemon *clusteredDaemon) deliverLeadership(

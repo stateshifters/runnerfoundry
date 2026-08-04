@@ -10,3 +10,4 @@
 - [8. Unify assigned-job recovery across runtime modes](0008-unify-assigned-job-recovery-across-runtime-modes.md)
 - [9. Schedule assigned recovery through a bounded leader executor](0009-schedule-assigned-recovery-through-a-bounded-leader-executor.md)
 - [10. Persist unified capacity obligations for FIFO scheduling](0010-persist-unified-capacity-obligations-for-fifo-scheduling.md)
+- [11. Bound PostgreSQL leadership waits](0011-bound-postgresql-leadership-waits.md)

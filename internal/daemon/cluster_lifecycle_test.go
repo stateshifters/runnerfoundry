@@ -254,6 +254,37 @@ func TestLeadershipContenderRetriesThenAcquires(t *testing.T) {
 	}
 }
 
+func TestLeadershipContenderRenewsExpiredWaitThenAcquires(t *testing.T) {
+	logs := &bytes.Buffer{}
+	attempts := 0
+	state := &fakeClusterState{waitForLeader: func(ctx context.Context) (cluster.Lease, error) {
+		attempts++
+		if attempts == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return &cluster.LeaderLease{}, nil
+	}}
+	results := make(chan leadershipResult, 1)
+	daemon := clusteredDaemon{
+		waitForLeader: fakeWaitForLeader(state), logger: newClusterLogSnapshotLogger(logs),
+		leadershipWaitTimeout: time.Nanosecond,
+		waitBeforeLeadershipRetry: func(context.Context, time.Duration) bool {
+			t.Fatal("expired leadership wait invoked failure backoff")
+			return false
+		},
+	}
+
+	daemon.contendForLeadership(context.Background(), results, make(chan struct{}))
+
+	if result := <-results; result.lease == nil || attempts != 2 {
+		t.Fatalf("result=%#v attempts=%d", result, attempts)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expired leadership wait logged an error: %s", logs.String())
+	}
+}
+
 func TestCanceledLeadershipContenderStopsWithoutAcquiring(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

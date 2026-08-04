@@ -806,6 +806,8 @@ The RunnerFoundry control plane does not impose a guest job timeout or watchdog.
 
 Confirm that the login identity can connect, belongs to the stable role, and can assume it. Check file-reference ownership and permissions as the `runnerfoundry` service account. If a pooler is used, verify that migrations and advisory locks use a session-affine connection.
 
+A transient transport failure may leave every node reporting `standby` while PostgreSQL recovers. Each standby abandons an unresponsive advisory-lock wait after 30 seconds and opens a fresh contender, so leadership should recover without restarting the nodes. If no node reports a leader after that interval, inspect `leader contender failed` logs and verify the direct endpoint rather than restarting or manually changing advisory locks.
+
 ### PostgreSQL rollback is refused
 
 A leader lease, live node heartbeat, or Docker cleanup obligation that the older schema cannot represent still exists. Stop all nodes, wait at least 30 seconds, run `migrate status`, and inspect `runner_reap` failures. Retry with the currently deployed executable only after durable cleanup completes.

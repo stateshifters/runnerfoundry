@@ -376,9 +376,13 @@ func TestFakeDatabaseOperationsFollowScriptedCallOrder(t *testing.T) {
 func TestWaitForLeaderReportsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	store := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{errors.New("database failed")}})
+	connection := &fakeDatabaseConnection{execErrors: []error{errors.New("database failed")}}
+	store := storeWithConnection(connection)
 	if _, err := store.WaitForLeader(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait error = %v", err)
+	}
+	if !errors.Is(connection.closeContextErr, context.Canceled) {
+		t.Fatalf("close context error = %v, want canceled", connection.closeContextErr)
 	}
 }
 
@@ -639,20 +643,21 @@ func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnecti
 }
 
 type fakeDatabaseConnection struct {
-	transaction *fakeDatabaseTransaction
-	beginErr    error
-	execErrors  []error
-	execTag     pgconn.CommandTag
-	executions  []fakeDatabaseExecution
-	queries     []fakeDatabaseExecution
-	queryErr    error
-	queryErrors []error
-	rowsResult  rowIterator
-	rowsResults []rowIterator
-	rowResults  []fakeRow
-	closeErr    error
-	pingErr     error
-	closed      bool
+	transaction     *fakeDatabaseTransaction
+	beginErr        error
+	execErrors      []error
+	execTag         pgconn.CommandTag
+	executions      []fakeDatabaseExecution
+	queries         []fakeDatabaseExecution
+	queryErr        error
+	queryErrors     []error
+	rowsResult      rowIterator
+	rowsResults     []rowIterator
+	rowResults      []fakeRow
+	closeErr        error
+	closeContextErr error
+	pingErr         error
+	closed          bool
 }
 
 func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTransaction, error) {
@@ -665,8 +670,9 @@ func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTrans
 	return connection.transaction.databaseTransaction(), nil
 }
 
-func (connection *fakeDatabaseConnection) Close(context.Context) error {
+func (connection *fakeDatabaseConnection) Close(ctx context.Context) error {
 	connection.closed = true
+	connection.closeContextErr = ctx.Err()
 	return connection.closeErr
 }
 

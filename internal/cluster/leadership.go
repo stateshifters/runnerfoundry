@@ -41,7 +41,9 @@ func (store *Store) TryLeader(ctx context.Context) (*LeaderLease, error) {
 }
 
 // WaitForLeader blocks on PostgreSQL's session advisory lock. Canceling ctx
-// closes the waiting connection; a returned lease owns its connection until Close.
+// aborts the wait and closes the dedicated connection with the same canceled
+// context so an unresponsive connection cannot extend the caller's deadline.
+// A returned lease owns its connection until Close.
 func (store *Store) WaitForLeader(ctx context.Context) (*LeaderLease, error) {
 	connection, err := store.directConnector(ctx)
 	if err != nil {
@@ -49,7 +51,10 @@ func (store *Store) WaitForLeader(ctx context.Context) (*LeaderLease, error) {
 	}
 	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, leaderAdvisoryLockKey); err != nil {
 		if ctx.Err() != nil {
-			return nil, errors.Join(fmt.Errorf("wait for clustered leader lease: %w", ctx.Err()), closeConnection(ctx, connection))
+			return nil, errors.Join(
+				fmt.Errorf("wait for clustered leader lease: %w", ctx.Err()),
+				closeConnectionWithContext(ctx, connection),
+			)
 		}
 		return nil, errors.Join(fmt.Errorf("wait for clustered leader lease: %w", err), closeConnection(ctx, connection))
 	}
@@ -71,7 +76,13 @@ func (lease *LeaderLease) Close(ctx context.Context) error {
 func closeConnection(ctx context.Context, connection interface {
 	Close(ctx context.Context) error
 }) error {
-	if err := connection.Close(context.WithoutCancel(ctx)); err != nil {
+	return closeConnectionWithContext(context.WithoutCancel(ctx), connection)
+}
+
+func closeConnectionWithContext(ctx context.Context, connection interface {
+	Close(ctx context.Context) error
+}) error {
+	if err := connection.Close(ctx); err != nil {
 		return fmt.Errorf("close PostgreSQL connection: %w", err)
 	}
 	return nil

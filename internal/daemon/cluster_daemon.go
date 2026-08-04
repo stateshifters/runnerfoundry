@@ -26,6 +26,7 @@ const (
 	clusterHeartbeatInterval      = 10 * time.Second
 	clusterNodeLifetime           = cluster.NodeLifetime
 	clusterLeadershipRetryDelay   = 2 * time.Second
+	clusterLeadershipWaitTimeout  = 30 * time.Second
 	clusterExecutorInterval       = time.Second
 	clusterCoordinationTimeout    = 5 * time.Second
 	clusterGitHubTimeout          = 30 * time.Second
@@ -64,6 +65,7 @@ type clusteredDaemon struct {
 	leadershipMutex           sync.Mutex
 	workers                   sync.WaitGroup
 	leadershipRetryDelay      time.Duration
+	leadershipWaitTimeout     time.Duration
 	waitBeforeLeadershipRetry func(context.Context, time.Duration) bool
 	runnerReapRetries         *runnerReapRetryTracker
 	repositoryRepairRequests  chan struct{}
@@ -167,6 +169,7 @@ func newClusteredDaemon() *clusteredDaemon {
 		buildReconciler:           buildReconciler,
 		notifier:                  newSystemdNotifier(),
 		leadershipRetryDelay:      clusterLeadershipRetryDelay,
+		leadershipWaitTimeout:     clusterLeadershipWaitTimeout,
 		waitBeforeLeadershipRetry: waitForRetryDelay,
 		runnerReapRetries:         newRunnerReapRetryTracker(time.Now),
 	}

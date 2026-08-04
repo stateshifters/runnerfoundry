@@ -12,6 +12,8 @@ Amended by [5. Own runner lifecycle with a bounded waiting lease](0005-own-runne
 
 Amended by [10. Persist unified capacity obligations for FIFO scheduling](0010-persist-unified-capacity-obligations-for-fifo-scheduling.md)
 
+Amended by [11. Bound PostgreSQL leadership waits](0011-bound-postgresql-leadership-waits.md)
+
 ## Context
 
 ADR 3 made queued demand durable but intentionally retained a single-writer SQLite boundary. One daemon therefore owned Github discovery, message polling, provider execution, and the full capacity limit. It could not combine capacity from multiple provider hosts or fail leadership over without moving the SQLite database and stopping the original writer.
