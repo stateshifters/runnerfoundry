@@ -55,13 +55,6 @@ const releaseExpiredClusterAssignmentsSQL = `UPDATE scaler_assignments SET state
 		  AND phase = 'reap_pending' AND reap_reason = 'job_start_timeout' AND updated_at = $3
 	) AND state <> 'complete'`
 
-const confirmClusterRunnerReapedSQL = `DELETE FROM scaler_runner_lifecycle
-	WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4
-	  AND phase = 'reap_pending'`
-
-const confirmClusterLibvirtRunnerReapedSQL = `DELETE FROM scaler_libvirt_runner_lifecycle
-	WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4 AND reap_requested`
-
 func (store *Store) RegisterRunner(ctx context.Context, runner scaler.RunnerLifecycle) (resultErr error) {
 	connection, err := store.connector(ctx)
 	if err != nil {
@@ -128,70 +121,6 @@ func (store *Store) ConfirmRunnerWaiting(
 	}
 	if commandTag.RowsAffected() != 1 {
 		return pgx.ErrNoRows
-	}
-	return nil
-}
-
-func (store *Store) MarkRunnerBusy(
-	ctx context.Context,
-	scaleSet, repository string,
-	requestID int64,
-	runnerName string,
-	githubRunnerID int64,
-	startedAt time.Time,
-) (resultErr error) {
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	commandTag, err := connection.Exec(ctx, `UPDATE scaler_runner_lifecycle
-		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		    request_id = CASE WHEN request_id = 0 AND $6 > 0 AND $5 <> '' THEN $6 ELSE request_id END,
-		    updated_at = $2
-		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending'
-		  AND (($5 <> '' AND runner_name = $5) OR ($6 > 0 AND request_id = $6))`,
-		githubRunnerID, startedAt, scaleSet, repository, runnerName, requestID)
-	if err != nil {
-		return fmt.Errorf("mark clustered runner busy: %w", err)
-	}
-	if commandTag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	if _, err = connection.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle
-		SET request_id = $1
-		WHERE scale_set = $2 AND repository = $3 AND runner_name = $4
-		  AND request_id = 0 AND $1 > 0 AND $4 <> ''`, requestID, scaleSet, repository, runnerName); err != nil {
-		return fmt.Errorf("bind clustered libvirt runner request identity: %w", err)
-	}
-	return nil
-}
-
-func (store *Store) RequestRunnerReap(
-	ctx context.Context,
-	scaleSet, repository string,
-	requestID int64,
-	runnerName, reason string,
-	requestedAt time.Time,
-) (resultErr error) {
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	_, err = connection.Exec(ctx, `UPDATE scaler_runner_lifecycle
-		SET phase = 'reap_pending', reap_reason = $1, updated_at = $2
-		WHERE scale_set = $3 AND repository = $4
-		  AND (($5 <> '' AND runner_name = $5) OR ($6 > 0 AND request_id = $6))`,
-		reason, requestedAt, scaleSet, repository, runnerName, requestID)
-	if err != nil {
-		return fmt.Errorf("request clustered runner reap: %w", err)
-	}
-	if _, err = connection.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-		WHERE scale_set = $1 AND repository = $2
-		  AND (($3 <> '' AND runner_name = $3) OR ($4 > 0 AND request_id = $4))`,
-		scaleSet, repository, runnerName, requestID); err != nil {
-		return fmt.Errorf("mirror clustered libvirt runner reap: %w", err)
 	}
 	return nil
 }
@@ -333,6 +262,11 @@ func scanClusterRunnerLifecycle(rows *databaseRows) (scaler.RunnerLifecycle, err
 }
 
 func (store *Store) ConfirmRunnerReaped(ctx context.Context, runner scaler.RunnerLifecycle) (resultErr error) {
+	identity := scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
+	predicate, err := newClusterRunnerIdentityPredicate(identity, 4)
+	if err != nil {
+		return err
+	}
 	connection, err := store.connector(ctx)
 	if err != nil {
 		return err
@@ -344,18 +278,12 @@ func (store *Store) ConfirmRunnerReaped(ctx context.Context, runner scaler.Runne
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	commandTag, err := transaction.Exec(ctx, confirmClusterRunnerReapedSQL,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName)
-	if err != nil {
-		return fmt.Errorf("confirm clustered runner reaped: %w", err)
-	}
-	if commandTag.RowsAffected() != 1 {
-		return pgx.ErrNoRows
+	if err = deleteClusterRunnerLifecycle(ctx, transaction, runner, identity, predicate); err != nil {
+		return err
 	}
 	if runner.Provider == scaler.RunnerProviderLibvirt {
-		if _, err = transaction.Exec(ctx, confirmClusterLibvirtRunnerReapedSQL,
-			runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName); err != nil {
-			return fmt.Errorf("confirm mirrored clustered libvirt runner reap: %w", err)
+		if err = deleteClusterLibvirtRunnerLifecycle(ctx, transaction, runner, identity, predicate); err != nil {
+			return err
 		}
 	}
 	transactionOpen = false
@@ -363,6 +291,52 @@ func (store *Store) ConfirmRunnerReaped(ctx context.Context, runner scaler.Runne
 		return fmt.Errorf("commit clustered runner reap confirmation: %w", err)
 	}
 	return nil
+}
+
+func deleteClusterRunnerLifecycle(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	runner scaler.RunnerLifecycle,
+	identity scaler.RunnerIdentity,
+	predicate clusterRunnerIdentityPredicate,
+) error {
+	return deleteClusterReapedLifecycle(ctx, transaction, runner, identity, predicate,
+		"scaler_runner_lifecycle", "phase = 'reap_pending'", "confirm clustered runner reaped")
+}
+
+func deleteClusterLibvirtRunnerLifecycle(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	runner scaler.RunnerLifecycle,
+	identity scaler.RunnerIdentity,
+	predicate clusterRunnerIdentityPredicate,
+) error {
+	return deleteClusterReapedLifecycle(ctx, transaction, runner, identity, predicate,
+		"scaler_libvirt_runner_lifecycle", "reap_requested", "confirm mirrored clustered libvirt runner reap")
+}
+
+func deleteClusterReapedLifecycle(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	runner scaler.RunnerLifecycle,
+	identity scaler.RunnerIdentity,
+	predicate clusterRunnerIdentityPredicate,
+	table, eligibility, failure string,
+) error {
+	statement := fmt.Sprintf(`DELETE FROM %s
+		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND %s AND %s`,
+		table, eligibility, predicate.condition)
+	arguments := append([]any{runner.NodeID, runner.ScaleSet, runner.Repository}, predicate.arguments...)
+	commandTag, err := transaction.Exec(ctx, statement, arguments...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", failure, err)
+	}
+	scope := clusterRunnerIdentityScope{
+		table:     table,
+		condition: fmt.Sprintf("node_id = $1 AND scale_set = $2 AND repository = $3 AND %s", eligibility),
+		arguments: []any{runner.NodeID, runner.ScaleSet, runner.Repository},
+	}
+	return requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected())
 }
 
 var _ scaler.RunnerLifecycleStore = (*Store)(nil)

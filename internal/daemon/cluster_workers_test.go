@@ -444,7 +444,7 @@ func (state *fakeClusterState) ApplyMessageUpdate(
 	for _, completed := range update.Completed {
 		if err := state.CompleteJob(ctx, cluster.JobCompletion{
 			ScaleSet: update.ScaleSet, Repository: update.Repository,
-			RequestID: completed.RequestID, RunnerName: completed.RunnerName,
+			RunnerIdentity: completed.RunnerIdentity,
 		}); err != nil {
 			return scaler.MessageUpdateResult{}, err
 		}

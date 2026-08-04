@@ -131,7 +131,7 @@ var capacityObligationMigrationSteps = []sqliteMigrationStep{
 }
 
 func (store *SQLiteDemandStore) addCapacityObligations(ctx context.Context) error {
-	return store.runMigration(ctx, "capacity-obligation migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "capacity-obligation migration", func(transaction *sql.Tx) error {
 		for _, step := range capacityObligationMigrationSteps {
 			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
 				return fmt.Errorf("%s: %w", step.operation, err)
@@ -178,7 +178,7 @@ var repositoryStateMigrationSteps = []sqliteMigrationStep{
 }
 
 func (store *SQLiteDemandStore) addRepositoryState(ctx context.Context) error {
-	return store.runMigration(ctx, "repository state migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "repository state migration", func(transaction *sql.Tx) error {
 		for _, step := range repositoryStateMigrationSteps {
 			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
 				return fmt.Errorf("%s: %w", step.operation, err)
@@ -260,7 +260,7 @@ var runnerLifecycleMigrationSteps = []sqliteMigrationStep{
 }
 
 func (store *SQLiteDemandStore) addRunnerLifecycle(ctx context.Context) error {
-	return store.runMigration(ctx, "generic runner lifecycle migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "generic runner lifecycle migration", func(transaction *sql.Tx) error {
 		for _, step := range runnerLifecycleMigrationSteps {
 			if _, err := transaction.ExecContext(ctx, step.statement); err != nil {
 				return fmt.Errorf("%s: %w", step.operation, err)
@@ -282,7 +282,7 @@ func (store *SQLiteDemandStore) schemaVersion(ctx context.Context) (int, error) 
 }
 
 func (store *SQLiteDemandStore) createSchema(ctx context.Context) error {
-	return store.runMigration(ctx, "state migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "state migration", func(transaction *sql.Tx) error {
 		if _, err := transaction.ExecContext(ctx, `CREATE TABLE demand (
 		observation_order INTEGER PRIMARY KEY AUTOINCREMENT,
 		scale_set TEXT NOT NULL,
@@ -302,7 +302,7 @@ func (store *SQLiteDemandStore) createSchema(ctx context.Context) error {
 }
 
 func (store *SQLiteDemandStore) removeLegacyZeroIdentityDemand(ctx context.Context) error {
-	return store.runMigration(ctx, "legacy demand migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "legacy demand migration", func(transaction *sql.Tx) error {
 		if _, err := transaction.ExecContext(ctx, "DELETE FROM demand WHERE request_id <= 0"); err != nil {
 			return fmt.Errorf("remove legacy zero-identity demand: %w", err)
 		}
@@ -314,7 +314,7 @@ func (store *SQLiteDemandStore) removeLegacyZeroIdentityDemand(ctx context.Conte
 }
 
 func (store *SQLiteDemandStore) addLibvirtRunnerLifecycle(ctx context.Context) error {
-	return store.runMigration(ctx, "libvirt runner lifecycle migration", func(transaction *sql.Tx) error {
+	return store.runSQLiteTransaction(ctx, "libvirt runner lifecycle migration", func(transaction *sql.Tx) error {
 		if _, err := transaction.ExecContext(ctx, `CREATE TABLE libvirt_runner_lifecycle (
 			scale_set TEXT NOT NULL,
 			repository TEXT NOT NULL,
@@ -332,14 +332,18 @@ func (store *SQLiteDemandStore) addLibvirtRunnerLifecycle(ctx context.Context) e
 	})
 }
 
-func (store *SQLiteDemandStore) runMigration(ctx context.Context, description string, migrate func(*sql.Tx) error) (resultErr error) {
+func (store *SQLiteDemandStore) runSQLiteTransaction(
+	ctx context.Context,
+	description string,
+	apply func(*sql.Tx) error,
+) (resultErr error) {
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin %s: %w", description, err)
 	}
 	transactionOpen := true
 	defer finishSQLiteTransaction(transaction, &transactionOpen, description, &resultErr)
-	if err := migrate(transaction); err != nil {
+	if err := apply(transaction); err != nil {
 		return err
 	}
 	transactionOpen = false

@@ -47,10 +47,10 @@ func TestMemoryRunnerLifecycleBusyAndExpirationTransitions(t *testing.T) {
 		Phase: RunnerWaitingForJob, WaitingSince: memoryLifecycleTestTime}
 	mustRegisterMemoryRunner(t, store, docker)
 	mustRegisterMemoryRunner(t, store, libvirt)
-	if err := store.MarkRunnerBusy(ctx, "set", "repo", 0, "docker", 101, memoryLifecycleTestTime); err != nil {
+	if err := store.MarkRunnerBusy(ctx, "set", "repo", RunnerIdentity{RunnerName: "docker"}, 101, memoryLifecycleTestTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkRunnerBusy(ctx, "set", "repo", 404, "", 0, memoryLifecycleTestTime); !errors.Is(err, sql.ErrNoRows) {
+	if err := store.MarkRunnerBusy(ctx, "set", "repo", RunnerIdentity{RequestID: 404}, 0, memoryLifecycleTestTime); !errors.Is(err, ErrRunnerIdentityNotFound) {
 		t.Fatalf("missing busy transition error = %v", err)
 	}
 	changed, err := store.RequestExpiredRunnerReaps(ctx, "set", "", memoryLifecycleTestTime, memoryLifecycleTestTime)
@@ -67,7 +67,7 @@ func TestMemoryRunnerLifecycleBindsIdentityFreeRunnerWhenJobStarts(t *testing.T)
 		RunnerName: "assigned", RequestID: 0, Phase: RunnerWaitingForJob,
 	})
 
-	if err := store.MarkRunnerBusy(ctx, "set", "repo", 42, "assigned", 101, memoryLifecycleTestTime); err != nil {
+	if err := store.BindRunnerIdentity(ctx, "set", "repo", RunnerIdentity{RequestID: 42, RunnerName: "assigned"}, 101, memoryLifecycleTestTime); err != nil {
 		t.Fatal(err)
 	}
 	lifecycles, err := store.RunnerLifecycles(ctx, "set", "repo")
@@ -99,7 +99,7 @@ func TestMemoryRunnerLifecyclePendingAndConfirmation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err = store.ConfirmRunnerReaped(ctx, pending[0]); !errors.Is(err, sql.ErrNoRows) {
+	if err = store.ConfirmRunnerReaped(ctx, pending[0]); !errors.Is(err, ErrRunnerIdentityNotFound) {
 		t.Fatalf("missing confirmation error = %v", err)
 	}
 }
@@ -109,7 +109,7 @@ func TestMemoryRunnerLifecycleExactReapAndReservedIdentity(t *testing.T) {
 	store := createMemoryDemandStore()
 	runner := RunnerLifecycle{ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker, RunnerName: "runner", RequestID: 1}
 	mustRegisterMemoryRunner(t, store, runner)
-	if err := store.RequestRunnerReap(ctx, "set", "repo", 1, "", "job_completed", memoryLifecycleTestTime); err != nil {
+	if err := store.RequestRunnerReap(ctx, "set", "repo", RunnerIdentity{RequestID: 1}, "job_completed", memoryLifecycleTestTime); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RegisterRunner(ctx, runner); err == nil {
@@ -170,13 +170,17 @@ func TestMemoryRunnerLifecycleCompletionRemovesDemand(t *testing.T) {
 	store.demand[key] = QueuedDemand{JobDemand: JobDemand{Repository: "repo", RequestID: 42}}
 	mustRegisterMemoryRunner(t, store, RunnerLifecycle{ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker,
 		RunnerName: "bound", RequestID: 42})
-	if err := store.CompleteRunnerLifecycleJob(ctx, JobCompletion{ScaleSet: "set", Repository: "repo", RequestID: 42}, memoryLifecycleTestTime); err != nil {
+	if err := store.CompleteRunnerLifecycleJob(ctx, JobCompletion{
+		ScaleSet: "set", Repository: "repo", RunnerIdentity: RunnerIdentity{RequestID: 42},
+	}, memoryLifecycleTestTime); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists := store.demand[key]; exists {
 		t.Fatal("completed demand was retained")
 	}
-	if err := store.CompleteRunnerLifecycleJob(ctx, JobCompletion{ScaleSet: "set", Repository: "repo", RunnerName: "missing"}, memoryLifecycleTestTime); err != nil {
-		t.Fatal(err)
+	if err := store.CompleteRunnerLifecycleJob(ctx, JobCompletion{
+		ScaleSet: "set", Repository: "repo", RunnerIdentity: RunnerIdentity{RunnerName: "missing"},
+	}, memoryLifecycleTestTime); !errors.Is(err, ErrRunnerIdentityNotFound) {
+		t.Fatalf("missing completion error = %v", err)
 	}
 }

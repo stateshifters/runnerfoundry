@@ -13,7 +13,9 @@ func TestCoordinatorDelegatesLibvirtLifecycle(t *testing.T) {
 	if err := coordinator.RegisterLibvirtRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.CompleteJob(context.Background(), JobCompletion(runner)); err != nil {
+	if err := coordinator.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := coordinator.PendingLibvirtReaps(context.Background(), runner.Repository)
@@ -31,7 +33,9 @@ func TestCoordinatorReportsUnsupportedLibvirtLifecycle(t *testing.T) {
 	if err := unsupported.RegisterLibvirtRunner(context.Background(), runner); err == nil {
 		t.Fatal("expected unsupported registration")
 	}
-	if err := unsupported.CompleteJob(context.Background(), JobCompletion(runner)); err == nil {
+	if err := unsupported.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
+	}); err == nil {
 		t.Fatal("expected unsupported completion")
 	}
 	if _, err := unsupported.PendingLibvirtReaps(context.Background(), "repo"); err == nil {
@@ -50,7 +54,9 @@ func TestCoordinatorReportsFailingLibvirtLifecycle(t *testing.T) {
 	if err := failing.RegisterLibvirtRunner(context.Background(), runner); err == nil {
 		t.Fatal("expected registration failure")
 	}
-	if err := failing.CompleteJob(context.Background(), JobCompletion(runner)); err == nil {
+	if err := failing.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
+	}); err == nil {
 		t.Fatal("expected completion failure")
 	}
 	if _, err := failing.PendingLibvirtReaps(context.Background(), "repo"); err == nil {

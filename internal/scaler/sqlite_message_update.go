@@ -71,21 +71,36 @@ func applySQLiteMessageEffects(
 }
 
 func applySQLiteMessageLifecycleEffects(ctx context.Context, transaction *sql.Tx, update MessageUpdate) error {
-	removals := startedDemandRemovals(update)
+	removals := messageDemandRemovals(update)
 	if err := applyDemandChanges(ctx, transaction, update.ScaleSet, update.Available, removals); err != nil {
 		return err
 	}
+	if err := applySQLiteMessageStarts(ctx, transaction, update); err != nil {
+		return err
+	}
+	return applySQLiteMessageCompletions(ctx, transaction, update)
+}
+
+func applySQLiteMessageStarts(ctx context.Context, transaction *sql.Tx, update MessageUpdate) error {
 	for _, started := range update.Started {
 		if err := markSQLiteMessageRunnerBusy(ctx, transaction, update, started); err != nil {
-			return err
+			if !errors.Is(err, ErrRunnerIdentityNotFound) {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func applySQLiteMessageCompletions(ctx context.Context, transaction *sql.Tx, update MessageUpdate) error {
 	for _, completed := range update.Completed {
 		if err := completeSQLiteRunnerJob(ctx, transaction, JobCompletion{
 			ScaleSet: update.ScaleSet, Repository: update.Repository,
-			RequestID: completed.RequestID, RunnerName: completed.RunnerName,
+			RunnerIdentity: completed.RunnerIdentity,
 		}, update.ObservedAt); err != nil {
-			return err
+			if !errors.Is(err, ErrRunnerIdentityNotFound) {
+				return err
+			}
 		}
 	}
 	return nil
@@ -193,11 +208,16 @@ func sqliteMessageActiveCapacity(
 	return active, nil
 }
 
-func startedDemandRemovals(update MessageUpdate) []DemandRemoval {
-	removals := make([]DemandRemoval, 0, len(update.Started))
+func messageDemandRemovals(update MessageUpdate) []DemandRemoval {
+	removals := make([]DemandRemoval, 0, len(update.Started)+len(update.Completed))
 	for _, started := range update.Started {
 		if started.RequestID > 0 {
 			removals = append(removals, DemandRemoval{Repository: update.Repository, RequestID: started.RequestID})
+		}
+	}
+	for _, completed := range update.Completed {
+		if completed.RequestID > 0 {
+			removals = append(removals, DemandRemoval{Repository: update.Repository, RequestID: completed.RequestID})
 		}
 	}
 	return removals
@@ -209,16 +229,18 @@ func markSQLiteMessageRunnerBusy(
 	update MessageUpdate,
 	started RunnerMessageIdentity,
 ) error {
-	_, err := transaction.ExecContext(ctx, `UPDATE runner_lifecycle
-		SET phase = 'busy', request_id = CASE WHEN request_id = 0 AND ? > 0 THEN ? ELSE request_id END,
-		github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END, updated_at = ?
-		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
-		AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`,
-		started.RequestID, started.RequestID, started.GitHubRunnerID, started.GitHubRunnerID,
-		update.ObservedAt.UnixNano(), update.ScaleSet, update.Repository,
-		started.RunnerName, started.RunnerName, started.RequestID, started.RequestID)
-	if err != nil {
-		return fmt.Errorf("mark message runner busy: %w", err)
+	identity := started.RunnerIdentity
+	resolveErr := resolveSQLiteRunnerIdentity(
+		ctx, transaction, update.ScaleSet, update.Repository, activeSQLiteRunner, identity,
+	)
+	if resolveErr == nil {
+		return updateSQLiteRunnerBusy(ctx, transaction, update.ScaleSet, update.Repository,
+			identity, started.GitHubRunnerID, update.ObservedAt)
 	}
-	return nil
+	if identity.isPair() && (errors.Is(resolveErr, ErrRunnerIdentityMismatch) ||
+		errors.Is(resolveErr, ErrRunnerIdentityNotFound)) {
+		return bindSQLiteIdentityFreeRunner(ctx, transaction, update.ScaleSet, update.Repository,
+			identity, started.GitHubRunnerID, update.ObservedAt)
+	}
+	return resolveErr
 }

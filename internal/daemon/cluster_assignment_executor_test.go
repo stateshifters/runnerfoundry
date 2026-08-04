@@ -42,17 +42,23 @@ func (state *lifecycleClusterState) ConfirmRunnerWaiting(ctx context.Context, ru
 	}
 	return nil
 }
-func (state *lifecycleClusterState) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, runnerID int64, at time.Time) error {
+func (state *lifecycleClusterState) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, identity scaler.RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
 	if state.busyErr != nil {
 		return state.busyErr
 	}
-	if err := state.store.MarkRunnerBusy(ctx, scaleSet, repository, requestID, runnerName, runnerID, at); err != nil {
+	if err := state.store.MarkRunnerBusy(ctx, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
 		return fmt.Errorf("mark runner busy: %w", err)
 	}
 	return nil
 }
-func (state *lifecycleClusterState) RequestRunnerReap(ctx context.Context, scaleSet, repository string, requestID int64, runnerName, reason string, at time.Time) error {
-	if err := state.store.RequestRunnerReap(ctx, scaleSet, repository, requestID, runnerName, reason, at); err != nil {
+func (state *lifecycleClusterState) BindRunnerIdentity(ctx context.Context, scaleSet, repository string, identity scaler.RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
+	if err := state.store.BindRunnerIdentity(ctx, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
+		return fmt.Errorf("bind runner identity: %w", err)
+	}
+	return nil
+}
+func (state *lifecycleClusterState) RequestRunnerReap(ctx context.Context, scaleSet, repository string, identity scaler.RunnerIdentity, reason string, requestedAt time.Time) error {
+	if err := state.store.RequestRunnerReap(ctx, scaleSet, repository, identity, reason, requestedAt); err != nil {
 		return fmt.Errorf("request runner reap: %w", err)
 	}
 	return nil

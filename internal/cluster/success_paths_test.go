@@ -119,7 +119,7 @@ func TestLibvirtLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	runner := LibvirtRunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", RequestID: 1, RunnerName: "runner"}
 	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).RegisterLibvirtRunner(context.Background(), 1, runner))
 	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: "set", Repository: "repo", RequestID: 1,
+		ScaleSet: "set", Repository: "repo", RunnerIdentity: scaler.RunnerIdentity{RequestID: 1},
 	}))
 	rows := scriptedRows(scanLibvirtRunner(t, runner))
 	reaps, err := storeWithConnection(&fakeDatabaseConnection{rowsResult: rows}).PendingLibvirtReaps(context.Background(), "node")
@@ -136,8 +136,9 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	store := storeWithConnection(&fakeDatabaseConnection{})
 	assertNoError(t, store.RegisterRunner(context.Background(), runner))
 	assertNoError(t, store.ConfirmRunnerWaiting(context.Background(), runner, now))
-	assertNoError(t, store.MarkRunnerBusy(context.Background(), "set", "repo", 1, "runner", 3, now))
-	assertNoError(t, store.RequestRunnerReap(context.Background(), "set", "repo", 1, "runner", "done", now))
+	identity := scaler.RunnerIdentity{RequestID: 1, RunnerName: "runner"}
+	assertNoError(t, store.MarkRunnerBusy(context.Background(), "set", "repo", identity, 3, now))
+	assertNoError(t, store.RequestRunnerReap(context.Background(), "set", "repo", identity, "done", now))
 	changed, err := store.RequestExpiredRunnerReaps(context.Background(), "set", "repo", now, now)
 	if err != nil || changed != 1 {
 		t.Fatalf("expired = %d, %v", changed, err)
@@ -187,22 +188,29 @@ func TestRunnerLifecycleRowsDecodeEpochAsUnset(t *testing.T) {
 }
 
 func TestMarkRunnerBusyBindsIdentityFreeRunnerToStartedRequest(t *testing.T) {
-	connection := &fakeDatabaseConnection{}
+	transaction := &fakeDatabaseTransaction{
+		execTags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("UPDATE 0"), pgconn.NewCommandTag("UPDATE 1"), pgconn.NewCommandTag("UPDATE 1"),
+		},
+		rowResults: []fakeRow{integerCountRow(t, 0), integerCountRow(t, 1)},
+	}
+	connection := &fakeDatabaseConnection{transaction: transaction}
 	store := storeWithConnection(connection)
-	if err := store.MarkRunnerBusy(
-		context.Background(), "linux", "repo", 42, "linux-1", 99, time.Unix(10, 0).UTC(),
+	if err := store.BindRunnerIdentity(
+		context.Background(), "linux", "repo", scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-1"},
+		99, time.Unix(10, 0).UTC(),
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(connection.executions) != 2 {
-		t.Fatalf("busy binding executions = %#v", connection.executions)
+	if len(transaction.executions) != 3 {
+		t.Fatalf("busy binding executions = %#v", transaction.executions)
 	}
-	if !strings.Contains(connection.executions[0].statement, "request_id = CASE") ||
-		connection.executions[0].arguments[5] != int64(42) {
-		t.Fatalf("runner request binding = %#v", connection.executions[0])
+	if !strings.Contains(transaction.executions[1].statement, "request_id = $1") ||
+		transaction.executions[1].arguments[0] != int64(42) {
+		t.Fatalf("runner request binding = %#v", transaction.executions[1])
 	}
-	if connection.executions[1].arguments[0] != int64(42) {
-		t.Fatalf("legacy runner request binding = %#v", connection.executions[1])
+	if transaction.executions[2].arguments[0] != int64(42) {
+		t.Fatalf("legacy runner request binding = %#v", transaction.executions[2])
 	}
 }
 

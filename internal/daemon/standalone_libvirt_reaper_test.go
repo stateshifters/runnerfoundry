@@ -148,7 +148,9 @@ func pendingStandaloneLifecycleStore(
 	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteJob(context.Background(), scaler.JobCompletion(runner)); err != nil {
+	if err := store.CompleteJob(context.Background(), scaler.JobCompletion{
+		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -196,7 +198,8 @@ func prepareStandaloneLibvirtLifecycle(
 		t.Fatal(err)
 	}
 	if err := coordinator.CompleteJob(context.Background(), scaler.JobCompletion{
-		Repository: runner.Repository, RequestID: runner.RequestID, RunnerName: runner.RunnerName,
+		Repository:     runner.Repository,
+		RunnerIdentity: scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName},
 	}); err != nil {
 		t.Fatal(err)
 	}

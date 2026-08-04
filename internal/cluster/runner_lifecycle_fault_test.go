@@ -23,8 +23,12 @@ func TestClusterRunnerLifecycleReportsConnectionFailures(t *testing.T) {
 	checks := []func() error{
 		func() error { return store.RegisterRunner(ctx, runner) },
 		func() error { return store.ConfirmRunnerWaiting(ctx, runner, time.Now()) },
-		func() error { return store.MarkRunnerBusy(ctx, "linux", "repo", 42, "runner", 1, time.Now()) },
-		func() error { return store.RequestRunnerReap(ctx, "linux", "repo", 42, "runner", "reason", time.Now()) },
+		func() error {
+			return store.MarkRunnerBusy(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, 1, time.Now())
+		},
+		func() error {
+			return store.RequestRunnerReap(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, "reason", time.Now())
+		},
 		func() error {
 			_, err := store.RequestExpiredRunnerReaps(ctx, "linux", "repo", time.Now(), time.Now())
 			return err
@@ -65,34 +69,64 @@ func TestClusterRunnerLifecycleRegistrationFailures(t *testing.T) {
 func TestClusterRunnerLifecycleSimpleTransitionFailures(t *testing.T) {
 	ctx := context.Background()
 	runner := testRunnerLifecycle()
-	for name, operation := range map[string]func(*Store) error{
-		"confirm exec": func(store *Store) error { return store.ConfirmRunnerWaiting(ctx, runner, time.Now()) },
-		"busy exec": func(store *Store) error {
-			return store.MarkRunnerBusy(ctx, "linux", "repo", 42, "runner", 1, time.Now())
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := operation(storeWithConnection(&fakeDatabaseConnection{execErrors: []error{databaseFailure()}})); err == nil {
-				t.Fatal("expected exec failure")
-			}
-			if err := operation(storeWithConnection(&fakeDatabaseConnection{execTag: pgconn.NewCommandTag("UPDATE 0")})); err == nil {
-				t.Fatal("expected missing transition failure")
-			}
-		})
+	assertDirectTransitionFailures(t, func(store *Store) error {
+		return store.ConfirmRunnerWaiting(ctx, runner, time.Now())
+	})
+	assertTransactionalTransitionFailures(t, func(store *Store) error {
+		return store.MarkRunnerBusy(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, 1, time.Now())
+	})
+	assertRunnerReapTransitionFailures(ctx, t)
+}
+
+func assertDirectTransitionFailures(t *testing.T, operation func(*Store) error) {
+	t.Helper()
+	connections := []*fakeDatabaseConnection{
+		{execErrors: []error{databaseFailure()}},
+		{execTag: pgconn.NewCommandTag("UPDATE 0")},
 	}
-	if err := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{databaseFailure()}}).
-		RequestRunnerReap(ctx, "linux", "repo", 42, "runner", "reason", time.Now()); err == nil {
+	assertStoreOperationsFail(t, operation, connections)
+}
+
+func assertTransactionalTransitionFailures(t *testing.T, operation func(*Store) error) {
+	t.Helper()
+	connections := []*fakeDatabaseConnection{
+		{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}},
+		{transaction: &fakeDatabaseTransaction{execTags: []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 0")}}},
+	}
+	assertStoreOperationsFail(t, operation, connections)
+}
+
+func assertStoreOperationsFail(
+	t *testing.T,
+	operation func(*Store) error,
+	connections []*fakeDatabaseConnection,
+) {
+	t.Helper()
+	for _, connection := range connections {
+		if err := operation(storeWithConnection(connection)); err == nil {
+			t.Fatal("expected transition failure")
+		}
+	}
+}
+
+func assertRunnerReapTransitionFailures(ctx context.Context, t *testing.T) {
+	t.Helper()
+	if err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}}).
+		RequestRunnerReap(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, "reason", time.Now()); err == nil {
 		t.Fatal("expected reap update failure")
 	}
-	if err := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{nil, databaseFailure()}}).
-		RequestRunnerReap(ctx, "linux", "repo", 42, "runner", "reason", time.Now()); err == nil {
+	if err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}}).
+		RequestRunnerReap(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, "reason", time.Now()); err == nil {
 		t.Fatal("expected mirrored reap failure")
 	}
 }
 
 func TestClusterRunnerBusyReportsMirroredIdentityFailure(t *testing.T) {
-	if err := storeWithConnection(&fakeDatabaseConnection{execErrors: []error{nil, databaseFailure()}}).
-		MarkRunnerBusy(context.Background(), "linux", "repo", 42, "runner", 1, time.Now()); err == nil {
+	if err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{
+		execErrors: []error{nil, databaseFailure()},
+	}}).
+		BindRunnerIdentity(context.Background(), "linux", "repo",
+			scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner"}, 1, time.Now()); err == nil {
 		t.Fatal("expected mirrored busy identity failure")
 	}
 }

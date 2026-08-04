@@ -364,7 +364,8 @@ func (reconciler Reconciler) cleanupFailedRegistration(
 
 func (reconciler Reconciler) retainFailedStart(ctx context.Context, runnerName string, requestID int64, startErr error) error {
 	reapErr := reconciler.ScaleSet.Lifecycle.RequestRunnerReap(
-		ctx, reconciler.lifecycleScaleSet(), reconciler.ScaleSet.Repository, requestID, runnerName,
+		ctx, reconciler.lifecycleScaleSet(), reconciler.ScaleSet.Repository,
+		RunnerIdentity{RequestID: requestID, RunnerName: runnerName},
 		"provider_start_failed", reconciler.now(),
 	)
 	if reapErr != nil {

@@ -17,8 +17,7 @@ var (
 // RunnerMessageIdentity identifies a started or completed runner without
 // inventing a request identity when GitHub supplies only the runner name.
 type RunnerMessageIdentity struct {
-	RequestID      int64
-	RunnerName     string
+	RunnerIdentity
 	GitHubRunnerID int64
 }
 
@@ -79,7 +78,7 @@ func validMessageDemands(update MessageUpdate) bool {
 
 func validMessageIdentities(identities []RunnerMessageIdentity) bool {
 	for _, identity := range identities {
-		if identity.RequestID <= 0 && identity.RunnerName == "" {
+		if identity.Validate() != nil {
 			return false
 		}
 	}

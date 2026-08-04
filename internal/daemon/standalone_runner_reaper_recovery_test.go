@@ -314,12 +314,19 @@ func (store *faultLifecycleDemandStore) Ordered(ctx context.Context, scaleSet st
 	return demand, nil
 }
 
-func (store *faultLifecycleDemandStore) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, runnerID int64, at time.Time) error {
+func (store *faultLifecycleDemandStore) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, identity scaler.RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
 	if store.busyErr != nil {
 		return store.busyErr
 	}
-	if err := store.MemoryDemandStore.MarkRunnerBusy(ctx, scaleSet, repository, requestID, runnerName, runnerID, at); err != nil {
+	if err := store.MemoryDemandStore.MarkRunnerBusy(ctx, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
 		return fmt.Errorf("mark runner busy: %w", err)
+	}
+	return nil
+}
+
+func (store *faultLifecycleDemandStore) BindRunnerIdentity(ctx context.Context, scaleSet, repository string, identity scaler.RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
+	if err := store.MemoryDemandStore.BindRunnerIdentity(ctx, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
+		return fmt.Errorf("bind runner identity: %w", err)
 	}
 	return nil
 }

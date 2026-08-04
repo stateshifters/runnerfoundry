@@ -8,15 +8,6 @@ import (
 	"time"
 )
 
-const completeSQLiteRunnerLifecycleSQL = `UPDATE runner_lifecycle
-	SET phase = 'reap_pending', reap_reason = 'job_completed', updated_at = ?
-	WHERE scale_set = ? AND repository = ?
-	AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`
-
-const mirrorCompletedSQLiteLibvirtSQL = `UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-	WHERE scale_set = ? AND repository = ?
-	AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`
-
 const registerSQLiteRunnerLifecycleSQL = `INSERT INTO runner_lifecycle(
 	node_id, scale_set, repository, provider, runner_name, request_id, assignment_id, installation_id, github_scale_set_id,
 	github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason)
@@ -65,11 +56,30 @@ type RunnerLifecycle struct {
 	ReapReason       string
 }
 
+// Identity returns the persisted request/name pair used for exact mutations.
+func (runner RunnerLifecycle) Identity() RunnerIdentity {
+	return RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
+}
+
+// RunnerLifecycleTransitions owns validated selection for single-runner state changes.
+// ID-only and name-only identities select by that value. A pair requires both
+// values on the same eligible row. BindRunnerIdentity is the only exception:
+// it may atomically attach a positive request ID to the uniquely name-matched
+// identity-free row, and an already-bound pair succeeds idempotently.
+//
+// Implementations return ErrInvalidRunnerIdentity for unusable input,
+// ErrRunnerIdentityNotFound when no eligible row exists,
+// ErrRunnerIdentityMismatch when either field of a pair exists on another row,
+// and ErrRunnerIdentityInvariant when an identity observes multiple rows. No
+// mutation may commit for mismatch or invariant outcomes. Existing exact
+// transitions are idempotent; callers handling at-least-once messages may treat
+// not-found as an already-applied event.
 type RunnerLifecycleTransitions interface {
 	RegisterRunner(ctx context.Context, runner RunnerLifecycle) error
 	ConfirmRunnerWaiting(ctx context.Context, runner RunnerLifecycle, confirmedAt time.Time) error
-	MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, githubRunnerID int64, startedAt time.Time) error
-	RequestRunnerReap(ctx context.Context, scaleSet, repository string, requestID int64, runnerName, reason string, requestedAt time.Time) error
+	MarkRunnerBusy(ctx context.Context, scaleSet, repository string, identity RunnerIdentity, githubRunnerID int64, startedAt time.Time) error
+	BindRunnerIdentity(ctx context.Context, scaleSet, repository string, identity RunnerIdentity, githubRunnerID int64, startedAt time.Time) error
+	RequestRunnerReap(ctx context.Context, scaleSet, repository string, identity RunnerIdentity, reason string, requestedAt time.Time) error
 }
 
 type RunnerLifecycleCleanupStore interface {
@@ -89,56 +99,9 @@ type RunnerLifecycleInventory interface {
 }
 
 type RunnerJobCompletionStore interface {
+	// CompleteRunnerLifecycleJob atomically requests cleanup and removes demand
+	// for exactly one runner selected by completion.RunnerIdentity.
 	CompleteRunnerLifecycleJob(ctx context.Context, completion JobCompletion, completedAt time.Time) error
-}
-
-func (store *SQLiteDemandStore) CompleteRunnerLifecycleJob(
-	ctx context.Context,
-	completion JobCompletion,
-	completedAt time.Time,
-) (resultErr error) {
-	transaction, err := store.database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin runner job completion: %w", err)
-	}
-	transactionOpen := true
-	defer finishSQLiteTransaction(transaction, &transactionOpen, "runner job completion", &resultErr)
-	if err = completeSQLiteRunnerJob(ctx, transaction, completion, completedAt); err != nil {
-		return err
-	}
-	transactionOpen = false
-	if err = transaction.Commit(); err != nil {
-		return fmt.Errorf("commit runner job completion: %w", err)
-	}
-	return nil
-}
-
-func completeSQLiteRunnerJob(ctx context.Context, transaction *sql.Tx, completion JobCompletion, completedAt time.Time) error {
-	identity := []any{completion.ScaleSet, completion.Repository, completion.RunnerName, completion.RunnerName,
-		completion.RequestID, completion.RequestID}
-	if _, err := transaction.ExecContext(ctx, completeSQLiteRunnerLifecycleSQL, append([]any{completedAt.UnixNano()}, identity...)...); err != nil {
-		return fmt.Errorf("request completed runner reap: %w", err)
-	}
-	if _, err := transaction.ExecContext(ctx, mirrorCompletedSQLiteLibvirtSQL, identity...); err != nil {
-		return fmt.Errorf("mirror completed libvirt runner reap: %w", err)
-	}
-	if _, err := transaction.ExecContext(ctx, `DELETE FROM demand
-		WHERE source = 'assigned_count' AND demand_id IN (
-			SELECT assignment_id FROM runner_lifecycle
-			WHERE scale_set = ? AND repository = ?
-			AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))
-		)`, identity...); err != nil {
-		return fmt.Errorf("complete assigned capacity obligation: %w", err)
-	}
-	if completion.RequestID <= 0 {
-		return nil
-	}
-	if _, err := transaction.ExecContext(ctx, `DELETE FROM demand
-		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
-		completion.ScaleSet, completion.Repository, completion.RequestID); err != nil {
-		return fmt.Errorf("remove completed demand: %w", err)
-	}
-	return nil
 }
 
 func (store *SQLiteDemandStore) RegisterRunner(ctx context.Context, runner RunnerLifecycle) error {
@@ -211,53 +174,106 @@ func (store *SQLiteDemandStore) ConfirmRunnerWaiting(ctx context.Context, runner
 func (store *SQLiteDemandStore) MarkRunnerBusy(
 	ctx context.Context,
 	scaleSet, repository string,
-	requestID int64,
-	runnerName string,
+	identity RunnerIdentity,
 	githubRunnerID int64,
 	startedAt time.Time,
-) error {
-	result, err := store.database.ExecContext(ctx, `UPDATE runner_lifecycle
-		SET phase = 'busy', request_id = CASE WHEN request_id = 0 AND ? > 0 THEN ? ELSE request_id END,
-		github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END, updated_at = ?
-		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
-		AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`,
-		requestID, requestID, githubRunnerID, githubRunnerID, startedAt.UnixNano(), scaleSet, repository,
-		runnerName, runnerName, requestID, requestID)
+) (resultErr error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("mark runner busy: %w", err)
+		return fmt.Errorf("begin mark runner busy: %w", err)
 	}
-	return requireLifecycleChange(result, "mark runner busy")
+	transactionOpen := true
+	defer finishSQLiteTransaction(transaction, &transactionOpen, "mark runner busy", &resultErr)
+	if err = resolveSQLiteRunnerIdentity(ctx, transaction, scaleSet, repository, activeSQLiteRunner, identity); err != nil {
+		return err
+	}
+	if err = updateSQLiteRunnerBusy(ctx, transaction, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
+		return err
+	}
+	transactionOpen = false
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit mark runner busy: %w", err)
+	}
+	return nil
 }
 
 func (store *SQLiteDemandStore) RequestRunnerReap(
 	ctx context.Context,
 	scaleSet, repository string,
-	requestID int64,
-	runnerName, reason string,
+	identity RunnerIdentity,
+	reason string,
 	requestedAt time.Time,
 ) error {
-	result, err := store.database.ExecContext(ctx, `UPDATE runner_lifecycle
-		SET phase = 'reap_pending', reap_reason = ?, updated_at = ?
-		WHERE scale_set = ? AND repository = ?
-		AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`,
-		reason, requestedAt.UnixNano(), scaleSet, repository, runnerName, runnerName, requestID, requestID)
+	return store.runSQLiteTransaction(ctx, "request runner reap", func(transaction *sql.Tx) error {
+		return requestSQLiteRunnerReap(ctx, transaction, scaleSet, repository, identity, reason, requestedAt)
+	})
+}
+
+func requestSQLiteRunnerReap(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	identity RunnerIdentity,
+	reason string,
+	requestedAt time.Time,
+) error {
+	var err error
+	if err = resolveSQLiteRunnerIdentity(ctx, transaction, scaleSet, repository, anySQLiteRunner, identity); err != nil {
+		return err
+	}
+	if err = updateSQLiteRunnerReapRequest(
+		ctx, transaction, scaleSet, repository, identity, reason, requestedAt,
+	); err != nil {
+		return err
+	}
+	return mirrorSQLiteRunnerReapRequest(ctx, transaction, scaleSet, repository, identity)
+}
+
+func updateSQLiteRunnerReapRequest(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	identity RunnerIdentity,
+	reason string,
+	requestedAt time.Time,
+) error {
+	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
+		[]any{reason, requestedAt.UnixNano(), scaleSet, repository},
+		`UPDATE runner_lifecycle SET phase = 'reap_pending', reap_reason = ?, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
+		`UPDATE runner_lifecycle SET phase = 'reap_pending', reap_reason = ?, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND runner_name = ?`,
+		`UPDATE runner_lifecycle SET phase = 'reap_pending', reap_reason = ?, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name = ?`,
+		"request runner reap")
 	if err != nil {
-		return fmt.Errorf("request runner reap: %w", err)
+		return err
 	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count requested runner reaps: %w", err)
-	}
-	if changed == 0 {
-		return nil
-	}
-	if _, err = store.database.ExecContext(ctx, `UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ?
-		AND ((? <> '' AND runner_name = ?) OR (? > 0 AND request_id = ?))`,
-		scaleSet, repository, runnerName, runnerName, requestID, requestID); err != nil {
-		return fmt.Errorf("mirror requested libvirt runner reap: %w", err)
+	if err = requireSingleSQLiteIdentityChange(result, identity, "count requested runner reap"); err != nil {
+		return err
 	}
 	return nil
+}
+
+func mirrorSQLiteRunnerReapRequest(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	identity RunnerIdentity,
+) error {
+	mirrorResult, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
+		[]any{scaleSet, repository},
+		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
+		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
+		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
+		WHERE scale_set = ? AND repository = ? AND runner_name = ?`,
+		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
+		WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name = ?`,
+		"mirror requested libvirt runner reap")
+	if err != nil {
+		return err
+	}
+	return requireAtMostOneSQLiteIdentityChange(mirrorResult, identity, "count mirrored runner reap")
 }
 
 func (store *SQLiteDemandStore) RequestExpiredRunnerReaps(
@@ -394,34 +410,62 @@ func scanSQLiteRunnerLifecycle(row sqliteRowScanner) (RunnerLifecycle, error) {
 	return runner, nil
 }
 
-func (store *SQLiteDemandStore) ConfirmRunnerReaped(ctx context.Context, runner RunnerLifecycle) (resultErr error) {
-	transaction, err := store.database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin runner reap confirmation: %w", err)
+func (store *SQLiteDemandStore) ConfirmRunnerReaped(ctx context.Context, runner RunnerLifecycle) error {
+	return store.runSQLiteTransaction(ctx, "runner reap confirmation", func(transaction *sql.Tx) error {
+		return confirmSQLiteRunnerReaped(ctx, transaction, runner)
+	})
+}
+
+func confirmSQLiteRunnerReaped(ctx context.Context, transaction *sql.Tx, runner RunnerLifecycle) error {
+	identity := runner.Identity()
+	if err := resolveSQLiteRunnerIdentity(
+		ctx, transaction, runner.ScaleSet, runner.Repository, pendingSQLiteRunner, identity,
+	); err != nil {
+		return err
 	}
-	transactionOpen := true
-	defer finishSQLiteTransaction(transaction, &transactionOpen, "runner reap confirmation", &resultErr)
-	result, err := transaction.ExecContext(ctx, `DELETE FROM runner_lifecycle
-		WHERE scale_set = ? AND repository = ? AND runner_name = ? AND phase = 'reap_pending'`,
-		runner.ScaleSet, runner.Repository, runner.RunnerName)
+	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
+		[]any{runner.ScaleSet, runner.Repository},
+		`DELETE FROM runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND phase = 'reap_pending' AND request_id = ?`,
+		`DELETE FROM runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND phase = 'reap_pending' AND runner_name = ?`,
+		`DELETE FROM runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND phase = 'reap_pending' AND request_id = ? AND runner_name = ?`,
+		"confirm runner reaped")
 	if err != nil {
-		return fmt.Errorf("confirm runner reaped: %w", err)
+		return err
 	}
-	if err = requireLifecycleChange(result, "confirm runner reaped"); err != nil {
+	if err = requireSingleSQLiteIdentityChange(result, identity, "count confirmed runner reap"); err != nil {
 		return err
 	}
 	if runner.Provider == RunnerProviderLibvirt {
-		if _, err = transaction.ExecContext(ctx, `DELETE FROM libvirt_runner_lifecycle
-			WHERE scale_set = ? AND repository = ? AND runner_name = ? AND reap_requested = 1`,
-			runner.ScaleSet, runner.Repository, runner.RunnerName); err != nil {
-			return fmt.Errorf("confirm mirrored libvirt runner reap: %w", err)
+		if err = confirmSQLiteMirroredRunnerReaped(ctx, transaction, runner); err != nil {
+			return err
 		}
 	}
-	transactionOpen = false
-	if err = transaction.Commit(); err != nil {
-		return fmt.Errorf("commit runner reap confirmation: %w", err)
-	}
 	return nil
+}
+
+func confirmSQLiteMirroredRunnerReaped(
+	ctx context.Context,
+	transaction *sql.Tx,
+	runner RunnerLifecycle,
+) error {
+	identity := runner.Identity()
+	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
+		[]any{runner.ScaleSet, runner.Repository},
+		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND reap_requested = 1 AND request_id = ?`,
+		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND reap_requested = 1 AND runner_name = ?`,
+		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
+		AND reap_requested = 1 AND request_id = ? AND runner_name = ?`,
+		"confirm mirrored libvirt runner reap")
+	if err != nil {
+		return err
+	}
+	return requireAtMostOneSQLiteIdentityChange(result, identity,
+		"count confirmed mirrored libvirt runner reap")
 }
 
 func requireLifecycleChange(result sql.Result, operation string) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/meza/RunnerFoundry/internal/scaler"
@@ -136,14 +137,31 @@ func applyClusterMessageStarts(ctx context.Context, transaction *databaseTransac
 
 func applyClusterMessageCompletions(ctx context.Context, transaction *databaseTransaction, update scaler.MessageUpdate) error {
 	for _, completed := range update.Completed {
-		if err := completeJobInTransaction(ctx, transaction, JobCompletion{
-			ScaleSet: update.ScaleSet, Repository: update.Repository,
-			RequestID: completed.RequestID, RunnerName: completed.RunnerName,
-		}); err != nil {
+		if err := applyClusterMessageCompletion(ctx, transaction, update, completed); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func applyClusterMessageCompletion(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	update scaler.MessageUpdate,
+	completed scaler.RunnerMessageIdentity,
+) error {
+	completion := JobCompletion{
+		ScaleSet: update.ScaleSet, Repository: update.Repository,
+		RunnerIdentity: scaler.RunnerIdentity{RequestID: completed.RequestID, RunnerName: completed.RunnerName},
+	}
+	err := completeJobInTransaction(ctx, transaction, completion)
+	if !errors.Is(err, scaler.ErrRunnerIdentityNotFound) {
+		return err
+	}
+	if completion.RequestID <= 0 {
+		return nil
+	}
+	return completeClusterRequestDemand(ctx, transaction, completion)
 }
 
 func applyClusterMessageStatistics(
@@ -203,21 +221,20 @@ func applyClusterMessageStart(
 	update scaler.MessageUpdate,
 	started scaler.RunnerMessageIdentity,
 ) error {
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
-		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		request_id = CASE WHEN request_id = 0 AND $4 > 0 AND $3 <> '' THEN $4 ELSE request_id END,
-		updated_at = $2
-		WHERE scale_set = $5 AND repository = $6 AND phase <> 'reap_pending'
-		AND (($3 <> '' AND runner_name = $3) OR ($4 > 0 AND request_id = $4))`,
-		started.GitHubRunnerID, update.ObservedAt, started.RunnerName, started.RequestID,
-		update.ScaleSet, update.Repository); err != nil {
-		return fmt.Errorf("mark clustered message runner busy: %w", err)
+	identity := scaler.RunnerIdentity{RequestID: started.RequestID, RunnerName: started.RunnerName}
+	var err error
+	if identity.RequestID > 0 && strings.TrimSpace(identity.RunnerName) != "" {
+		err = bindClusterRunnerIdentityInTransaction(ctx, transaction, update.ScaleSet, update.Repository,
+			identity, started.GitHubRunnerID, update.ObservedAt)
+	} else {
+		err = markClusterRunnerBusyInTransaction(ctx, transaction, update.ScaleSet, update.Repository,
+			identity, started.GitHubRunnerID, update.ObservedAt)
 	}
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle
-		SET request_id = $1 WHERE scale_set = $2 AND repository = $3 AND runner_name = $4
-		AND request_id = 0 AND $1 > 0 AND $4 <> ''`,
-		started.RequestID, update.ScaleSet, update.Repository, started.RunnerName); err != nil {
-		return fmt.Errorf("bind clustered message libvirt identity: %w", err)
+	if errors.Is(err, scaler.ErrRunnerIdentityNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("mark clustered message runner busy: %w", err)
 	}
 	return nil
 }

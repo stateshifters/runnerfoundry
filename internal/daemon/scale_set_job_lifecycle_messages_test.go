@@ -220,6 +220,7 @@ func TestCoordinatedScaleSetHandlerRemovesRepeatedPositiveIdentityCompletionIdem
 
 func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t *testing.T) {
 	store := scaler.NewMemoryDemandStore()
+	registerLibvirtLifecycle(t, store, 42, "repo-linux-42")
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
 	handler := coordinatedScaleSetHandler{
@@ -251,6 +252,7 @@ func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t
 
 func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunnerName(t *testing.T) {
 	store := scaler.NewMemoryDemandStore()
+	registerLibvirtLifecycle(t, store, 0, "repo-linux-1")
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
 	handler := coordinatedScaleSetHandler{
@@ -271,7 +273,7 @@ func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunner
 }
 
 func TestLibvirtCompletionIsNotAcknowledgedUntilCleanupIntentPersists(t *testing.T) {
-	harness := newLibvirtCompletionAcknowledgementHarness()
+	harness := newLibvirtCompletionAcknowledgementHarness(t)
 	harness.expectPersistenceFailureWithoutAcknowledgement(t)
 	harness.retryWithDurablePersistence(t)
 	harness.expectPendingReapAcknowledged(t)
@@ -284,8 +286,10 @@ type libvirtCompletionAcknowledgementHarness struct {
 	message *upstream.RunnerScaleSetMessage
 }
 
-func newLibvirtCompletionAcknowledgementHarness() libvirtCompletionAcknowledgementHarness {
+func newLibvirtCompletionAcknowledgementHarness(t *testing.T) libvirtCompletionAcknowledgementHarness {
+	t.Helper()
 	store := &failingCompletionLifecycleStore{MemoryDemandStore: scaler.NewMemoryDemandStore(), fail: true}
+	registerLibvirtLifecycle(t, store.MemoryDemandStore, 42, "linux-42")
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
 	handler := coordinatedScaleSetHandler{
@@ -300,6 +304,16 @@ func newLibvirtCompletionAcknowledgementHarness() libvirtCompletionAcknowledgeme
 	client := &ackRecordingMessageClient{message: message}
 	poller := scalesetpoller.Poller{Client: client, Handler: handler}
 	return libvirtCompletionAcknowledgementHarness{store: store, client: client, poller: poller, message: message}
+}
+
+func registerLibvirtLifecycle(t *testing.T, store *scaler.MemoryDemandStore, requestID int64, runnerName string) {
+	t.Helper()
+	if err := store.RegisterRunner(context.Background(), scaler.RunnerLifecycle{
+		ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
+		RequestID: requestID, RunnerName: runnerName,
+	}); err != nil {
+		t.Fatalf("register libvirt lifecycle: %v", err)
+	}
 }
 
 func (harness libvirtCompletionAcknowledgementHarness) expectPersistenceFailureWithoutAcknowledgement(t *testing.T) {

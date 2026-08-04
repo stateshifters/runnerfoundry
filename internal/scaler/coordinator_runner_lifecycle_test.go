@@ -17,11 +17,15 @@ type coordinatorLifecycleFaultStore struct {
 	confirmErr  error
 }
 
-func (store *coordinatorLifecycleFaultStore) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, requestID int64, runnerName string, githubRunnerID int64, startedAt time.Time) error {
+func (store *coordinatorLifecycleFaultStore) MarkRunnerBusy(ctx context.Context, scaleSet, repository string, identity RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
 	if store.busyErr != nil {
 		return store.busyErr
 	}
-	return store.MemoryDemandStore.MarkRunnerBusy(ctx, scaleSet, repository, requestID, runnerName, githubRunnerID, startedAt)
+	return store.MemoryDemandStore.MarkRunnerBusy(ctx, scaleSet, repository, identity, githubRunnerID, startedAt)
+}
+
+func (store *coordinatorLifecycleFaultStore) BindRunnerIdentity(ctx context.Context, scaleSet, repository string, identity RunnerIdentity, githubRunnerID int64, startedAt time.Time) error {
+	return store.MemoryDemandStore.BindRunnerIdentity(ctx, scaleSet, repository, identity, githubRunnerID, startedAt)
 }
 
 func (store *coordinatorLifecycleFaultStore) CompleteRunnerLifecycleJob(ctx context.Context, completion JobCompletion, completedAt time.Time) error {
@@ -94,10 +98,12 @@ func TestCoordinatorRunnerLifecycleTransitions(t *testing.T) {
 	if err := store.RegisterRunner(ctx, runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.MarkRunnerBusy(ctx, "repo", 7, "", 11, now); err != nil {
+	if err := coordinator.MarkRunnerBusy(ctx, "repo", RunnerIdentity{RequestID: 7}, 11, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.CompleteRunnerLifecycleJob(ctx, JobCompletion{Repository: "repo", RequestID: 7}, now); err != nil {
+	if err := coordinator.CompleteRunnerLifecycleJob(ctx, JobCompletion{
+		Repository: "repo", RunnerIdentity: RunnerIdentity{RequestID: 7},
+	}, now); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := coordinator.PendingRunnerReaps(ctx, "repo")
@@ -132,7 +138,8 @@ func TestCoordinatorRunnerLifecycleFacadeRejectsUnsupportedStore(t *testing.T) {
 	}
 	checks := []error{
 		coordinator.ConfigureRunnerLifecycle(&Reconciler{}, "repo", RunnerProviderDocker),
-		coordinator.MarkRunnerBusy(ctx, "repo", 1, "runner", 1, time.Time{}),
+		coordinator.MarkRunnerBusy(ctx, "repo", RunnerIdentity{RequestID: 1, RunnerName: "runner"}, 1, time.Time{}),
+		coordinator.BindRunnerIdentity(ctx, "repo", RunnerIdentity{RequestID: 1, RunnerName: "runner"}, 1, time.Time{}),
 		coordinator.CompleteRunnerLifecycleJob(ctx, JobCompletion{}, time.Time{}),
 	}
 	if _, err := coordinator.RequestExpiredRunnerReaps(ctx, "repo", time.Minute, time.Time{}); err == nil {
@@ -209,7 +216,7 @@ func TestCoordinatorRunnerLifecycleFacadeWrapsStoreFailures(t *testing.T) {
 		completeErr: errors.New("complete"), expireErr: errors.New("expire"), pendingErr: errors.New("pending"), confirmErr: errors.New("confirm")}
 	coordinator := NewDurableCoordinator("set", 1, store)
 	ctx := context.Background()
-	if err := coordinator.MarkRunnerBusy(ctx, "repo", 1, "runner", 1, time.Time{}); err == nil {
+	if err := coordinator.MarkRunnerBusy(ctx, "repo", RunnerIdentity{RequestID: 1, RunnerName: "runner"}, 1, time.Time{}); err == nil {
 		t.Fatal("expected busy failure")
 	}
 	if err := coordinator.CompleteRunnerLifecycleJob(ctx, JobCompletion{}, time.Time{}); err == nil {
