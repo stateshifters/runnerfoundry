@@ -51,7 +51,7 @@ func TestClusterJobCompletionPreservesPositiveRequestIdentity(t *testing.T) {
 	if len(transaction.executions) != 6 {
 		t.Fatalf("positive completion statements = %d, want lifecycle, assignment, and demand updates", len(transaction.executions))
 	}
-	if !strings.Contains(transaction.executions[2].statement, "assigned_observation_id") ||
+	if !strings.Contains(transaction.executions[2].statement, "demand.source = 'assigned_count'") ||
 		!strings.Contains(transaction.executions[4].statement, "scaler_assignments") ||
 		!strings.Contains(transaction.executions[5].statement, "DELETE FROM scaler_demand") {
 		t.Fatalf("positive completion did not retain assignment and demand updates: %#v", transaction.executions)

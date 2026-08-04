@@ -8,44 +8,56 @@ import (
 	"github.com/meza/RunnerFoundry/internal/githubapp"
 )
 
+const requestRemovedInstallationAssignedRunnerReapsSQL = `UPDATE scaler_runner_lifecycle lifecycle
+	SET phase = 'reap_pending', reap_reason = 'installation_withdrawn', updated_at = $3
+	WHERE lifecycle.assignment_id IN (SELECT assignment.assignment_id
+		FROM scaler_assignments assignment
+		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+		JOIN scaler_assigned_job_observations observation
+		  ON observation.assigned_observation_id = demand.assigned_observation_id
+		JOIN scaler_repositories repository
+		  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
+		JOIN scaler_installations installation
+		  ON installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
+		WHERE installation.app_id = $1 AND installation.last_seen_generation < $2)
+	  AND lifecycle.phase <> 'reap_pending'`
+
+const completeRemovedInstallationAssignmentsSQL = `UPDATE scaler_assignments assignment SET state = 'complete'
+	FROM scaler_demand demand
+	WHERE demand.demand_id = assignment.demand_id
+	  AND demand.assigned_observation_id IN (SELECT observation.assigned_observation_id
+		FROM scaler_assigned_job_observations observation
+		JOIN scaler_repositories repository
+		  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
+		JOIN scaler_installations installation
+		  ON installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
+		WHERE installation.app_id = $1 AND installation.last_seen_generation < $2)
+	  AND assignment.state <> 'complete'`
+
+const removeRemovedInstallationAssignedObservationsSQL = `DELETE FROM scaler_assigned_job_observations observation
+	USING scaler_repositories repository, scaler_installations installation
+	WHERE repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
+	  AND installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
+	  AND installation.app_id = $1 AND installation.last_seen_generation < $2`
+
 func withdrawRemovedInstallationAssignedObservations(
 	ctx context.Context,
 	transaction *databaseTransaction,
 	update postgreSQLDiscoveryUpdate,
 ) error {
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle lifecycle
-		SET phase = 'reap_pending', reap_reason = 'installation_withdrawn', updated_at = $3
-		WHERE lifecycle.assignment_id IN (SELECT assignment.assignment_id
-			FROM scaler_assignments assignment
-			JOIN scaler_assigned_job_observations observation
-			  ON observation.assigned_observation_id = assignment.assigned_observation_id
-			JOIN scaler_repositories repository
-			  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
-			JOIN scaler_installations installation
-			  ON installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
-			WHERE installation.app_id = $1 AND installation.last_seen_generation < $2)
-		  AND lifecycle.phase <> 'reap_pending'`, update.appID, update.generation, update.completedAt); err != nil {
+	if _, err := transaction.Exec(ctx, requestRemovedInstallationAssignedRunnerReapsSQL,
+		update.appID, update.generation, update.completedAt); err != nil {
 		return fmt.Errorf("request removed-installation assigned runner reaps: %w", err)
 	}
 	if err := mirrorWithdrawnLibvirtRunners(ctx, transaction); err != nil {
 		return err
 	}
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
-		WHERE assignment.assigned_observation_id IN (SELECT observation.assigned_observation_id
-			FROM scaler_assigned_job_observations observation
-			JOIN scaler_repositories repository
-			  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
-			JOIN scaler_installations installation
-			  ON installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
-			WHERE installation.app_id = $1 AND installation.last_seen_generation < $2)
-		  AND assignment.state <> 'complete'`, update.appID, update.generation); err != nil {
+	if _, err := transaction.Exec(ctx, completeRemovedInstallationAssignmentsSQL,
+		update.appID, update.generation); err != nil {
 		return fmt.Errorf("complete removed-installation assigned assignments: %w", err)
 	}
-	if _, err := transaction.Exec(ctx, `DELETE FROM scaler_assigned_job_observations observation
-		USING scaler_repositories repository, scaler_installations installation
-		WHERE repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
-		  AND installation.app_id = repository.app_id AND installation.installation_id = repository.installation_id
-		  AND installation.app_id = $1 AND installation.last_seen_generation < $2`, update.appID, update.generation); err != nil {
+	if _, err := transaction.Exec(ctx, removeRemovedInstallationAssignedObservationsSQL,
+		update.appID, update.generation); err != nil {
 		return fmt.Errorf("remove removed-installation assigned observations: %w", err)
 	}
 	return nil
@@ -63,8 +75,9 @@ func withdrawUndiscoveredAssignedObservations(
 		SET phase = 'reap_pending', reap_reason = 'repository_withdrawn', updated_at = $4
 		WHERE lifecycle.assignment_id IN (SELECT assignment.assignment_id
 			FROM scaler_assignments assignment
+			JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 			JOIN scaler_assigned_job_observations observation
-			  ON observation.assigned_observation_id = assignment.assigned_observation_id
+			  ON observation.assigned_observation_id = demand.assigned_observation_id
 			JOIN scaler_repositories repository
 			  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
 			WHERE repository.app_id = $1 AND repository.installation_id = $2
@@ -86,7 +99,9 @@ func removeUndiscoveredAssignedObservations(
 	generation int64,
 ) error {
 	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
-		WHERE assignment.assigned_observation_id IN (SELECT observation.assigned_observation_id
+		FROM scaler_demand demand
+		WHERE demand.demand_id = assignment.demand_id
+		  AND demand.assigned_observation_id IN (SELECT observation.assigned_observation_id
 			FROM scaler_assigned_job_observations observation
 			JOIN scaler_repositories repository
 			  ON repository.app_id = observation.app_id AND repository.repository_url = observation.repository_url
@@ -117,8 +132,9 @@ func withdrawRegistrationAssignedObservation(
 		SET phase = 'reap_pending', reap_reason = 'registration_withdrawn', updated_at = $1
 		WHERE lifecycle.assignment_id IN (
 			SELECT assignment.assignment_id FROM scaler_assignments assignment
+			JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 			JOIN scaler_assigned_job_observations observation
-			  ON observation.assigned_observation_id = assignment.assigned_observation_id
+			  ON observation.assigned_observation_id = demand.assigned_observation_id
 			WHERE observation.app_id = $2 AND observation.repository_url = $3 AND observation.scale_set = $4
 		) AND lifecycle.phase <> 'reap_pending'`, withdrawnAt, appID, repositoryURL, scaleSetName); err != nil {
 		return fmt.Errorf("request withdrawn assigned runner reaps: %w", err)
@@ -126,10 +142,12 @@ func withdrawRegistrationAssignedObservation(
 	if err := mirrorWithdrawnLibvirtRunners(ctx, transaction); err != nil {
 		return err
 	}
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments SET state = 'complete'
-		WHERE assigned_observation_id IN (SELECT assigned_observation_id FROM scaler_assigned_job_observations
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
+		FROM scaler_demand demand
+		WHERE demand.demand_id = assignment.demand_id
+		  AND demand.assigned_observation_id IN (SELECT assigned_observation_id FROM scaler_assigned_job_observations
 			WHERE app_id = $1 AND repository_url = $2 AND scale_set = $3)
-		  AND state <> 'complete'`, appID, repositoryURL, scaleSetName); err != nil {
+		  AND assignment.state <> 'complete'`, appID, repositoryURL, scaleSetName); err != nil {
 		return fmt.Errorf("complete withdrawn assigned assignments: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `DELETE FROM scaler_assigned_job_observations

@@ -177,10 +177,12 @@ func clusterAssignmentCompletionOperation(
 ) clusterJobCompletionAssociationOperation {
 	return clusterJobCompletionAssociationOperation{
 		statement: fmt.Sprintf(`UPDATE scaler_assignments assignment SET state = 'complete'
-			WHERE assignment.assignment_id IN (
+			FROM scaler_demand demand
+			WHERE demand.demand_id = assignment.demand_id
+			  AND assignment.assignment_id IN (
 				SELECT assignment_id FROM scaler_runner_lifecycle
 				WHERE scale_set = $1 AND repository = $2 AND assignment_id IS NOT NULL AND %s
-			) AND assignment.assigned_observation_id IS NOT NULL AND assignment.state <> 'complete'`, predicate.condition),
+			) AND demand.source = 'assigned_count' AND assignment.state <> 'complete'`, predicate.condition),
 		failure: "complete observed assignment",
 	}
 }

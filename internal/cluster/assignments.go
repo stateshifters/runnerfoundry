@@ -15,19 +15,20 @@ const claimReadyAssignmentSQL = `
 	UPDATE scaler_assignments assignment
 	SET state = 'starting'
 	FROM scaler_assignments source
-	LEFT JOIN scaler_demand demand ON demand.demand_id = source.demand_id
+	JOIN scaler_demand demand ON demand.demand_id = source.demand_id
 	LEFT JOIN scaler_assigned_job_observations observation
-	  ON observation.assigned_observation_id = source.assigned_observation_id
+	  ON observation.assigned_observation_id = demand.assigned_observation_id
 	WHERE assignment.assignment_id = (
 	    SELECT candidate.assignment_id
 	    FROM scaler_assignments candidate
+	    JOIN scaler_demand candidate_demand ON candidate_demand.demand_id = candidate.demand_id
 	    WHERE candidate.node_id = $1 AND candidate.state = 'ready'
-	      AND (candidate.assigned_observation_id IS NULL OR EXISTS (
+	      AND (candidate_demand.source = 'job_available' OR EXISTS (
 	          SELECT 1 FROM scaler_assigned_job_observations current_observation
 	          JOIN scaler_repository_controls control ON control.app_id = current_observation.app_id
-	          WHERE current_observation.assigned_observation_id = candidate.assigned_observation_id
-	            AND current_observation.controller_epoch = candidate.controller_epoch
-	            AND control.controller_epoch = candidate.controller_epoch
+	          WHERE current_observation.assigned_observation_id = candidate_demand.assigned_observation_id
+	            AND current_observation.controller_epoch = candidate_demand.controller_epoch
+	            AND control.controller_epoch = candidate_demand.controller_epoch
 	      ))
 	    ORDER BY candidate.assignment_id
 	    LIMIT 1
@@ -39,7 +40,7 @@ const claimReadyAssignmentSQL = `
 	          COALESCE(demand.repository, observation.repository_url),
 	          COALESCE(demand.request_id, 0), COALESCE(demand.queue_time, observation.observed_at),
 	          assignment.installation_id, assignment.github_scale_set_id,
-	          assignment.controller_epoch, assignment.assigned_observation_id IS NOT NULL, assignment.state`
+	          demand.controller_epoch, demand.source = 'assigned_count', assignment.state`
 
 const loadAssignmentsSQLPrefix = `
 	SELECT assignment.assignment_id, assignment.node_id,
@@ -47,16 +48,16 @@ const loadAssignmentsSQLPrefix = `
 	       COALESCE(demand.repository, observation.repository_url),
 	       COALESCE(demand.request_id, 0), COALESCE(demand.queue_time, observation.observed_at),
 	       COALESCE(assignment.installation_id, 0), COALESCE(assignment.github_scale_set_id, 0),
-	       assignment.controller_epoch, assignment.assigned_observation_id IS NOT NULL, assignment.state
+	       demand.controller_epoch, demand.source = 'assigned_count', assignment.state
 	FROM scaler_assignments assignment
-	LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+	JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 	LEFT JOIN scaler_assigned_job_observations observation
-	  ON observation.assigned_observation_id = assignment.assigned_observation_id
-	WHERE (assignment.assigned_observation_id IS NULL OR EXISTS (
+	  ON observation.assigned_observation_id = demand.assigned_observation_id
+	WHERE (demand.source = 'job_available' OR EXISTS (
 	      SELECT 1 FROM scaler_repository_controls control
 	      WHERE control.app_id = observation.app_id
-	        AND control.controller_epoch = assignment.controller_epoch
-	        AND observation.controller_epoch = assignment.controller_epoch
+	        AND control.controller_epoch = demand.controller_epoch
+	        AND observation.controller_epoch = demand.controller_epoch
 	  ))`
 
 const loadPendingAcquisitionsSQL = loadAssignmentsSQLPrefix +
@@ -170,13 +171,15 @@ func (store *Store) ConfirmRunning(ctx context.Context, assignmentID AssignmentI
 	return store.transitionAssignment(ctx, assignmentID, AssignmentStarting, `
 		UPDATE scaler_assignments assignment SET state = 'running'
 		WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state = 'starting'
-		  AND (assignment.assigned_observation_id IS NULL OR EXISTS (
+		  AND EXISTS (SELECT 1 FROM scaler_demand demand
+		      WHERE demand.demand_id = assignment.demand_id
+		        AND (demand.source = 'job_available' OR EXISTS (
 		      SELECT 1 FROM scaler_assigned_job_observations observation
 		      JOIN scaler_repository_controls control ON control.app_id = observation.app_id
-		      WHERE observation.assigned_observation_id = assignment.assigned_observation_id
-		        AND observation.controller_epoch = assignment.controller_epoch
-		        AND control.controller_epoch = assignment.controller_epoch
-		  ))`, nodeID)
+		      WHERE observation.assigned_observation_id = demand.assigned_observation_id
+		        AND observation.controller_epoch = demand.controller_epoch
+		        AND control.controller_epoch = demand.controller_epoch
+		  )))`, nodeID)
 }
 
 // CompleteAssignment releases an assignment only when its owner and current

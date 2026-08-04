@@ -14,20 +14,20 @@ const registerClusterRunnerLifecycleSQL = `
 		node_id, scale_set, repository, provider, runner_name, request_id, assignment_id,
 		installation_id, github_scale_set_id, github_runner_id, phase, created_at, updated_at
 	)
-	SELECT assignment.node_id, COALESCE(demand.scale_set, observation.scale_set),
-	       COALESCE(demand.repository, observation.repository_url), $3, $4,
+	SELECT assignment.node_id, demand.scale_set,
+	       demand.repository, $3, $4,
 	       COALESCE(demand.request_id, 0),
 	       assignment.assignment_id, $5, $6, $7, 'provisioning', $8, $8
 	FROM scaler_assignments assignment
-	LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+	JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 	LEFT JOIN scaler_assigned_job_observations observation
-	  ON observation.assigned_observation_id = assignment.assigned_observation_id
+	  ON observation.assigned_observation_id = demand.assigned_observation_id
 	WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state <> 'complete'
-	  AND (assignment.assigned_observation_id IS NULL OR EXISTS (
+	  AND (demand.source = 'job_available' OR EXISTS (
 	      SELECT 1 FROM scaler_repository_controls control
 	      WHERE control.app_id = observation.app_id
-	        AND control.controller_epoch = assignment.controller_epoch
-	        AND observation.controller_epoch = assignment.controller_epoch
+	        AND control.controller_epoch = demand.controller_epoch
+	        AND observation.controller_epoch = demand.controller_epoch
 	  ))
 	ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`
 

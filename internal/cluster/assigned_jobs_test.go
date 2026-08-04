@@ -156,7 +156,7 @@ func findQueuedObligationAdoption(t *testing.T, executions []fakeDatabaseExecuti
 func assertQueuedObligationAdoption(t *testing.T, adoption fakeDatabaseExecution, expectedEpoch int64) {
 	t.Helper()
 	for _, required := range []string{
-		"SET controller_epoch = $4", "NOT EXISTS", "assignment.controller_epoch <> $4", "demand.app_id = $1",
+		"SET controller_epoch = $4", "NOT EXISTS", "demand.controller_epoch <> $4", "demand.app_id = $1",
 		"demand.repository = $2", "demand.scale_set = $3",
 	} {
 		if !strings.Contains(adoption.statement, required) {
@@ -248,7 +248,7 @@ func assertAssignedObservationTransitions(t *testing.T, transaction *fakeDatabas
 		!strings.Contains(transaction.executions[1].statement, "EXISTS") {
 		t.Fatalf("assigned epoch rollover did not adopt lifecycle-backed work: %s", transaction.executions[1].statement)
 	}
-	if !strings.Contains(transaction.executions[2].statement, "assignment.controller_epoch <> $4") ||
+	if !strings.Contains(transaction.executions[2].statement, "demand.controller_epoch <> $4") ||
 		!strings.Contains(transaction.executions[2].statement, "NOT EXISTS") {
 		t.Fatalf("assigned epoch rollover did not fence only unstarted work: %s", transaction.executions[2].statement)
 	}

@@ -104,17 +104,16 @@ func assignOldestInTransaction(
 
 func persistAssignment(ctx context.Context, transaction *databaseTransaction, obligation oldestDemand) error {
 	assignment := obligation.assignment
-	insertStatement := `INSERT INTO scaler_assignments (demand_id, node_id, state)
-		VALUES ($1, $2, 'reserved') RETURNING assignment_id`
+	insertStatement := `INSERT INTO scaler_assignments (demand_id, node_id, state, source)
+		VALUES ($1, $2, 'reserved', 'job_available') RETURNING assignment_id`
 	insertArguments := []any{obligation.demandID, assignment.NodeID}
 	assignment.State = AssignmentReserved
 	if assignment.IdentityFree {
 		insertStatement = `INSERT INTO scaler_assignments
-			(demand_id, assigned_observation_id, node_id, installation_id,
-			 github_scale_set_id, controller_epoch, state)
-			VALUES ($1, $2, $3, $4, $5, $6, 'ready') RETURNING assignment_id`
-		insertArguments = []any{obligation.demandID, obligation.assignedObservationID, assignment.NodeID,
-			assignment.InstallationID, assignment.GitHubScaleSetID, assignment.ControllerEpoch}
+			(demand_id, node_id, installation_id, github_scale_set_id, state, source)
+			VALUES ($1, $2, $3, $4, 'ready', 'assigned_count') RETURNING assignment_id`
+		insertArguments = []any{obligation.demandID, assignment.NodeID,
+			assignment.InstallationID, assignment.GitHubScaleSetID}
 		assignment.State = AssignmentReady
 	}
 	if err := transaction.QueryRow(ctx, insertStatement, insertArguments...).Scan(&assignment.ID); err != nil {
@@ -222,10 +221,8 @@ func selectContributor(
 		      SELECT COUNT(*)
 		      FROM scaler_assignments assignment
 		      LEFT JOIN scaler_demand assignment_demand ON assignment_demand.demand_id = assignment.demand_id
-		      LEFT JOIN scaler_assigned_job_observations assigned
-		        ON assigned.assigned_observation_id = assignment.assigned_observation_id
 		      WHERE assignment.node_id = contribution.node_id
-		        AND COALESCE(assignment_demand.scale_set, assigned.scale_set) = contribution.scale_set
+		        AND assignment_demand.scale_set = contribution.scale_set
 		        AND assignment.state <> 'complete'
 		  ) + (
 		      SELECT COUNT(*)

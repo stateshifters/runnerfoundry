@@ -13,17 +13,16 @@ const cancelExcessReadyAssignedJobsSQL = `WITH ranked_ready AS (
 	       ROW_NUMBER() OVER (ORDER BY assignment.assignment_id) AS position,
 	       GREATEST(observation.assigned_jobs - (SELECT COUNT(*)
 	           FROM scaler_assignments active
-	           LEFT JOIN scaler_demand active_demand ON active_demand.demand_id = active.demand_id
-	           LEFT JOIN scaler_assigned_job_observations active_observation
-	             ON active_observation.assigned_observation_id = active.assigned_observation_id
-	           WHERE COALESCE(active_demand.scale_set, active_observation.scale_set) = observation.scale_set
-	             AND COALESCE(active_demand.repository, active_observation.repository_url) = observation.repository_url
+	           JOIN scaler_demand active_demand ON active_demand.demand_id = active.demand_id
+	           WHERE active_demand.scale_set = observation.scale_set
+	             AND active_demand.repository = observation.repository_url
 	             AND active.state <> 'complete'
-	             AND NOT (active.assigned_observation_id = observation.assigned_observation_id
+	             AND NOT (active_demand.assigned_observation_id = observation.assigned_observation_id
 	                      AND active.state = 'ready')), 0) AS retain
 	FROM scaler_assignments assignment
+	JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
 	JOIN scaler_assigned_job_observations observation
-	  ON observation.assigned_observation_id = assignment.assigned_observation_id
+	  ON observation.assigned_observation_id = demand.assigned_observation_id
 	WHERE observation.app_id = $1 AND observation.repository_url = $2
 	  AND observation.scale_set = $3 AND observation.controller_epoch = $4
 	  AND assignment.state = 'ready'
@@ -163,8 +162,7 @@ func adoptQueuedAssignedObligations(
 		  AND assigned.controller_epoch = $4 AND demand.controller_epoch <> $4
 		  AND demand.source = 'assigned_count'
 		  AND NOT EXISTS (SELECT 1 FROM scaler_assignments assignment
-		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete'
-		        AND assignment.controller_epoch <> $4)`,
+		      WHERE assignment.demand_id = demand.demand_id AND assignment.state <> 'complete')`,
 		observation.AppID, observation.Repository, observation.ScaleSet, observation.ControllerEpoch); err != nil {
 		return fmt.Errorf("adopt queued assigned obligations: %w", err)
 	}
@@ -280,15 +278,16 @@ func adoptLifecycleBackedAssignedAssignments(
 	transaction *databaseTransaction,
 	observation AssignedJobObservation,
 ) error {
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment
+	if _, err := transaction.Exec(ctx, `UPDATE scaler_demand demand
 		SET controller_epoch = $4
 		FROM scaler_assigned_job_observations assigned
-		WHERE assigned.assigned_observation_id = assignment.assigned_observation_id
+		WHERE assigned.assigned_observation_id = demand.assigned_observation_id
 		  AND assigned.app_id = $1 AND assigned.repository_url = $2 AND assigned.scale_set = $3
-		  AND assigned.controller_epoch = $4 AND assignment.controller_epoch <> $4
-		  AND assignment.state IN ('starting', 'running')
-		  AND EXISTS (SELECT 1 FROM scaler_runner_lifecycle lifecycle
-		      WHERE lifecycle.assignment_id = assignment.assignment_id)`, observation.AppID,
+		  AND assigned.controller_epoch = $4 AND demand.controller_epoch <> $4
+		  AND EXISTS (SELECT 1 FROM scaler_assignments assignment
+		      JOIN scaler_runner_lifecycle lifecycle ON lifecycle.assignment_id = assignment.assignment_id
+		      WHERE assignment.demand_id = demand.demand_id
+		        AND assignment.state IN ('starting', 'running'))`, observation.AppID,
 		observation.Repository, observation.ScaleSet, observation.ControllerEpoch); err != nil {
 		return fmt.Errorf("adopt lifecycle-backed assigned assignments: %w", err)
 	}
@@ -301,10 +300,12 @@ func fenceObsoleteAssignedAssignments(
 	observation AssignedJobObservation,
 ) error {
 	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
-		FROM scaler_assigned_job_observations assigned
-		WHERE assigned.assigned_observation_id = assignment.assigned_observation_id
+		FROM scaler_demand demand,
+		     scaler_assigned_job_observations assigned
+		WHERE demand.demand_id = assignment.demand_id
+		  AND assigned.assigned_observation_id = demand.assigned_observation_id
 		  AND assigned.app_id = $1 AND assigned.repository_url = $2 AND assigned.scale_set = $3
-		  AND assigned.controller_epoch = $4 AND assignment.controller_epoch <> $4
+		  AND assigned.controller_epoch = $4 AND demand.controller_epoch <> $4
 		  AND (assignment.state = 'ready' OR (
 		      assignment.state = 'starting' AND NOT EXISTS (
 		          SELECT 1 FROM scaler_runner_lifecycle lifecycle
@@ -384,11 +385,9 @@ func loadAssignedJobCapacity(
 ) error {
 	err := transaction.QueryRow(ctx, contributorEligibilitySQL+`, repository_assignments AS (
 		SELECT COUNT(*) AS runners FROM scaler_assignments assignment
-		LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		LEFT JOIN scaler_assigned_job_observations assigned
-		  ON assigned.assigned_observation_id = assignment.assigned_observation_id
-		WHERE COALESCE(demand.scale_set, assigned.scale_set) = $2
-		  AND COALESCE(demand.repository, assigned.repository_url) = $3
+		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+		WHERE demand.scale_set = $2
+		  AND demand.repository = $3
 		  AND assignment.state <> 'complete'
 	), repository_unassigned_lifecycle AS (
 		SELECT COUNT(*) AS runners FROM scaler_runner_lifecycle lifecycle
@@ -404,10 +403,8 @@ func loadAssignedJobCapacity(
 		WHERE contribution.scale_set = $2
 	), occupied AS (
 		SELECT COUNT(*) AS runners FROM scaler_assignments assignment
-		LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		LEFT JOIN scaler_assigned_job_observations assigned
-		  ON assigned.assigned_observation_id = assignment.assigned_observation_id
-		WHERE COALESCE(demand.scale_set, assigned.scale_set) = $2 AND assignment.state <> 'complete'
+		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
+		WHERE demand.scale_set = $2 AND assignment.state <> 'complete'
 	), pending_reaps AS (
 		SELECT COUNT(*) AS runners FROM scaler_runner_lifecycle
 		WHERE scale_set = $2 AND phase = 'reap_pending'

@@ -42,7 +42,7 @@ func markClusterRunnerBusyInTransaction(
 	}
 	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
 		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		    updated_at = $2
+		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
 		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending'
 		  AND %s`, predicate.condition)
 	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
@@ -117,7 +117,7 @@ func markExactClusterRunnerBusy(
 ) (int64, error) {
 	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
 		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		    updated_at = $2
+		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
 		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending' AND %s`, predicate.condition)
 	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
@@ -261,7 +261,8 @@ func updateBoundClusterRunner(
 ) error {
 	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
 		SET request_id = $1, phase = 'busy',
-		    github_runner_id = CASE WHEN $2 > 0 THEN $2 ELSE github_runner_id END, updated_at = $3
+		    github_runner_id = CASE WHEN $2 > 0 THEN $2 ELSE github_runner_id END,
+		    waiting_since = COALESCE(waiting_since, $3), updated_at = $3
 		WHERE scale_set = $4 AND repository = $5 AND runner_name = $6 AND request_id = 0
 		  AND phase <> 'reap_pending'`, identity.RequestID, githubRunnerID, startedAt,
 		scaleSet, repository, identity.RunnerName)

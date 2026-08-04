@@ -11,15 +11,36 @@ import (
 const registerSQLiteRunnerLifecycleSQL = `INSERT INTO runner_lifecycle(
 	node_id, scale_set, repository, provider, runner_name, request_id, assignment_id, installation_id, github_scale_set_id,
 	github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason)
-	VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	SELECT ?, demand.scale_set, demand.repository, ?, ?, COALESCE(demand.request_id, 0),
+		demand.demand_id, ?, ?, ?, ?, ?, ?, ?, ?
+	FROM demand WHERE demand.demand_id = ?
+	ON CONFLICT(scale_set, repository, runner_name) DO NOTHING`
+
+const registerUnassignedSQLiteRunnerLifecycleSQL = `INSERT INTO runner_lifecycle(
+	node_id, scale_set, repository, provider, runner_name, request_id, assignment_id, installation_id, github_scale_set_id,
+	github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason)
+	VALUES(?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(scale_set, repository, runner_name) DO NOTHING`
 
 const inspectSQLiteRunnerLifecycleSQL = `SELECT provider, request_id, assignment_id, phase
 	FROM runner_lifecycle WHERE scale_set = ? AND repository = ? AND runner_name = ?`
 
 const pendingSQLiteRunnerLifecyclesSQL = `SELECT node_id, scale_set, repository, provider, runner_name,
-	request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason
-	FROM runner_lifecycle WHERE scale_set = ? AND (? = '' OR repository = ?) AND phase = 'reap_pending'
+	request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase,
+	created_at, waiting_since, updated_at, reap_reason
+	FROM (
+		SELECT lifecycle.node_id,
+			COALESCE(demand.scale_set, lifecycle.scale_set) AS scale_set,
+			COALESCE(demand.repository, lifecycle.repository) AS repository,
+			lifecycle.provider, lifecycle.runner_name,
+			COALESCE(demand.request_id, lifecycle.request_id) AS request_id,
+			COALESCE(lifecycle.assignment_id, 0) AS assignment_id,
+			lifecycle.installation_id, lifecycle.github_scale_set_id, lifecycle.github_runner_id,
+			lifecycle.phase, lifecycle.created_at, lifecycle.waiting_since, lifecycle.updated_at,
+			lifecycle.reap_reason
+		FROM runner_lifecycle lifecycle LEFT JOIN demand ON demand.demand_id = lifecycle.assignment_id
+	) authoritative_lifecycle
+	WHERE scale_set = ? AND (? = '' OR repository = ?) AND phase = 'reap_pending'
 	ORDER BY repository, runner_name`
 
 type RunnerProvider string
@@ -105,18 +126,8 @@ type RunnerJobCompletionStore interface {
 }
 
 func (store *SQLiteDemandStore) RegisterRunner(ctx context.Context, runner RunnerLifecycle) error {
-	createdAt := runner.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
-	phase := runner.Phase
-	if phase == "" {
-		phase = RunnerProvisioning
-	}
-	result, err := store.database.ExecContext(ctx, registerSQLiteRunnerLifecycleSQL,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.Provider, runner.RunnerName,
-		runner.RequestID, runner.AssignmentID, runner.InstallationID, runner.GitHubScaleSetID, runner.GitHubRunnerID, phase,
-		createdAt.UnixNano(), unixNanoOrZero(runner.WaitingSince), createdAt.UnixNano(), runner.ReapReason)
+	registration := normalizeSQLiteRunnerRegistration(runner)
+	result, err := store.insertSQLiteRunnerRegistration(ctx, registration)
 	if err != nil {
 		return fmt.Errorf("register runner lifecycle: %w", err)
 	}
@@ -125,9 +136,9 @@ func (store *SQLiteDemandStore) RegisterRunner(ctx context.Context, runner Runne
 		return fmt.Errorf("count registered runner lifecycle: %w", err)
 	}
 	if inserted == 1 {
-		return store.mirrorLibvirtRegistration(ctx, runner)
+		return store.mirrorLibvirtRegistration(ctx, registration)
 	}
-	return store.verifyMatchingRunnerRegistration(ctx, runner)
+	return store.verifyMatchingRunnerRegistration(ctx, registration)
 }
 
 func (store *SQLiteDemandStore) verifyMatchingRunnerRegistration(ctx context.Context, runner RunnerLifecycle) error {
@@ -370,7 +381,19 @@ func (store *SQLiteDemandStore) RunnerLifecycles(
 	rows, err := store.database.QueryContext(ctx, `SELECT node_id, scale_set, repository, provider, runner_name,
 		request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase,
 		created_at, waiting_since, updated_at, reap_reason
-		FROM runner_lifecycle WHERE scale_set = ? AND (? = '' OR repository = ?)
+		FROM (
+			SELECT lifecycle.node_id,
+				COALESCE(demand.scale_set, lifecycle.scale_set) AS scale_set,
+				COALESCE(demand.repository, lifecycle.repository) AS repository,
+				lifecycle.provider, lifecycle.runner_name,
+				COALESCE(demand.request_id, lifecycle.request_id) AS request_id,
+				COALESCE(lifecycle.assignment_id, 0) AS assignment_id,
+				lifecycle.installation_id, lifecycle.github_scale_set_id, lifecycle.github_runner_id,
+				lifecycle.phase, lifecycle.created_at, lifecycle.waiting_since, lifecycle.updated_at,
+				lifecycle.reap_reason
+			FROM runner_lifecycle lifecycle LEFT JOIN demand ON demand.demand_id = lifecycle.assignment_id
+		) authoritative_lifecycle
+		WHERE scale_set = ? AND (? = '' OR repository = ?)
 		ORDER BY repository, runner_name`, scaleSet, repository, repository)
 	if err != nil {
 		return nil, fmt.Errorf("load runner lifecycles: %w", err)

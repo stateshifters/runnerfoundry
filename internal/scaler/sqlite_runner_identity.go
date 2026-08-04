@@ -302,9 +302,10 @@ func bindSQLiteIdentityFreeRunner(
 	}
 	result, err := transaction.ExecContext(ctx, `UPDATE runner_lifecycle
 		SET phase = 'busy', request_id = ?, github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END,
-		updated_at = ? WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
+		waiting_since = CASE WHEN waiting_since = 0 THEN ? ELSE waiting_since END, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
 		AND runner_name = ? AND request_id = 0`, identity.RequestID, githubRunnerID, githubRunnerID,
-		startedAt.UnixNano(), scaleSet, repository, identity.RunnerName)
+		startedAt.UnixNano(), startedAt.UnixNano(), scaleSet, repository, identity.RunnerName)
 	if err != nil {
 		return fmt.Errorf("bind runner identity: %w", err)
 	}
@@ -438,16 +439,19 @@ func updateSQLiteRunnerBusy(
 ) error {
 	query, identityArguments, err := sqliteIdentityStatement(identity,
 		`UPDATE runner_lifecycle SET phase = 'busy', github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END,
-		updated_at = ? WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending' AND request_id = ?`,
+		waiting_since = CASE WHEN waiting_since = 0 THEN ? ELSE waiting_since END, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending' AND request_id = ?`,
 		`UPDATE runner_lifecycle SET phase = 'busy', github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END,
-		updated_at = ? WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending' AND runner_name = ?`,
+		waiting_since = CASE WHEN waiting_since = 0 THEN ? ELSE waiting_since END, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending' AND runner_name = ?`,
 		`UPDATE runner_lifecycle SET phase = 'busy', github_runner_id = CASE WHEN ? > 0 THEN ? ELSE github_runner_id END,
-		updated_at = ? WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
+		waiting_since = CASE WHEN waiting_since = 0 THEN ? ELSE waiting_since END, updated_at = ?
+		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
 		AND request_id = ? AND runner_name = ?`)
 	if err != nil {
 		return err
 	}
-	arguments := []any{githubRunnerID, githubRunnerID, startedAt.UnixNano(), scaleSet, repository}
+	arguments := []any{githubRunnerID, githubRunnerID, startedAt.UnixNano(), startedAt.UnixNano(), scaleSet, repository}
 	result, err := transaction.ExecContext(ctx, query, append(arguments, identityArguments...)...)
 	if err != nil {
 		return fmt.Errorf("mark runner busy: %w", err)

@@ -3,6 +3,7 @@ package scaler
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"time"
@@ -12,7 +13,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 6
+const currentStateSchemaVersion = 7
+
+//go:embed migrations/007_normalize_assignment_source.sql
+var sqliteAssignmentSourceMigrationSQL string
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -65,12 +69,16 @@ func createSQLiteDemandStore(path string, dependencies sqliteStoreDependencies) 
 }
 
 func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
+	return store.migrateTo(ctx, currentStateSchemaVersion)
+}
+
+func (store *SQLiteDemandStore) migrateTo(ctx context.Context, targetVersion int) error {
 	version, err := store.schemaVersion(ctx)
 	if err != nil {
 		return err
 	}
-	if version > currentStateSchemaVersion {
-		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentStateSchemaVersion)
+	if version > targetVersion {
+		return fmt.Errorf("state schema version %d is newer than supported version %d", version, targetVersion)
 	}
 	migrations := []func(context.Context) error{
 		store.createSchema,
@@ -79,13 +87,83 @@ func (store *SQLiteDemandStore) migrate(ctx context.Context) error {
 		store.addRunnerLifecycle,
 		store.addRepositoryState,
 		store.addCapacityObligations,
+		store.normalizeAssignmentSource,
 	}
-	for ; version < currentStateSchemaVersion; version++ {
+	for ; version < targetVersion; version++ {
 		if err = migrations[version](ctx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (store *SQLiteDemandStore) normalizeAssignmentSource(ctx context.Context) error {
+	return store.runSQLiteTransaction(ctx, "assignment-source migration", func(transaction *sql.Tx) error {
+		counts, err := loadSQLiteAssignmentPreflightCounts(ctx, transaction)
+		if err != nil {
+			return err
+		}
+		if counts.invalid() {
+			return fmt.Errorf("refuse assignment-source normalization: missing_demand=%d scope=%d identity=%d provider=%d phase_timestamp=%d source=%d",
+				counts.missingDemand, counts.scope, counts.identity, counts.provider, counts.phaseTimestamp, counts.source)
+		}
+		if _, err = transaction.ExecContext(ctx, sqliteAssignmentSourceMigrationSQL); err != nil {
+			return fmt.Errorf("normalize assignment source: %w", err)
+		}
+		return nil
+	})
+}
+
+type sqliteAssignmentPreflightCounts struct {
+	missingDemand  int
+	scope          int
+	identity       int
+	provider       int
+	phaseTimestamp int
+	source         int
+}
+
+func (counts sqliteAssignmentPreflightCounts) invalid() bool {
+	return counts.missingDemand+counts.scope+counts.identity+counts.provider+counts.phaseTimestamp+counts.source > 0
+}
+
+func loadSQLiteAssignmentPreflightCounts(
+	ctx context.Context,
+	transaction *sql.Tx,
+) (sqliteAssignmentPreflightCounts, error) {
+	var counts sqliteAssignmentPreflightCounts
+	err := transaction.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN lifecycle.assignment_id > 0 AND demand.demand_id IS NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN demand.demand_id IS NOT NULL AND
+			(lifecycle.scale_set <> demand.scale_set OR lifecycle.repository <> demand.repository) THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN demand.demand_id IS NOT NULL AND
+			((demand.source = 'job_available' AND lifecycle.request_id <> demand.request_id)
+			 OR (demand.source = 'assigned_count' AND
+				NOT (lifecycle.request_id = 0 OR
+					(lifecycle.request_id > 0 AND lifecycle.phase IN ('busy', 'reap_pending')))))
+			THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN lifecycle.provider NOT IN ('docker', 'libvirt') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN lifecycle.created_at <= 0 OR lifecycle.updated_at < lifecycle.created_at
+			OR lifecycle.github_runner_id < 0
+			OR (lifecycle.phase = 'provisioning' AND lifecycle.waiting_since <> 0)
+			OR (lifecycle.phase IN ('waiting_for_job', 'busy') AND
+				(lifecycle.waiting_since < lifecycle.created_at OR lifecycle.waiting_since > lifecycle.updated_at))
+			OR (lifecycle.phase = 'reap_pending' AND lifecycle.waiting_since <> 0 AND
+				(lifecycle.waiting_since < lifecycle.created_at OR lifecycle.waiting_since > lifecycle.updated_at))
+			OR (lifecycle.phase = 'reap_pending') <> (lifecycle.reap_reason <> '')
+			THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN demand.demand_id IS NOT NULL AND
+			((demand.source = 'job_available' AND lifecycle.request_id <= 0)
+			 OR (demand.source = 'assigned_count' AND lifecycle.request_id < 0)) THEN 1 ELSE 0 END), 0)
+		FROM runner_lifecycle lifecycle
+		LEFT JOIN demand ON demand.demand_id = lifecycle.assignment_id`).Scan(
+		&counts.missingDemand, &counts.scope, &counts.identity, &counts.provider,
+		&counts.phaseTimestamp, &counts.source,
+	)
+	if err != nil {
+		return sqliteAssignmentPreflightCounts{}, fmt.Errorf("inspect assignment-source aggregates: %w", err)
+	}
+	return counts, nil
 }
 
 var capacityObligationMigrationSteps = []sqliteMigrationStep{

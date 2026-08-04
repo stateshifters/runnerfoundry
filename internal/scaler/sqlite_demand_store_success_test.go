@@ -66,6 +66,12 @@ func TestSQLiteStoreRunsEveryMigrationInMemory(t *testing.T) {
 		}
 		fixture.mock.ExpectCommit()
 	}
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows(
+		[]string{"missing_demand", "scope", "identity", "provider", "phase_timestamp", "source"},
+	).AddRow(0, 0, 0, 0, 0, 0))
+	fixture.mock.ExpectExec("DROP TRIGGER").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectCommit()
 	if err := fixture.store.migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
