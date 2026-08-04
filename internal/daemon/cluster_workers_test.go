@@ -660,9 +660,11 @@ func fakeWaitForLeader(state *fakeClusterState) func(context.Context) (leadershi
 }
 
 type fakeClusterLease struct {
-	alive    bool
-	closed   bool
-	closeErr error
+	alive      bool
+	closed     bool
+	closeErr   error
+	closeCalls int
+	onClose    func(context.Context) error
 }
 
 type clusterLifecycleNotifier struct {
@@ -690,8 +692,12 @@ func (failingStatusNotifier) Status(context.Context, clusterServiceStatus) error
 
 func (lease *fakeClusterLease) Alive(context.Context) bool { return lease.alive }
 
-func (lease *fakeClusterLease) Close(context.Context) error {
+func (lease *fakeClusterLease) Close(ctx context.Context) error {
 	lease.closed = true
+	lease.closeCalls++
+	if lease.onClose != nil {
+		return lease.onClose(ctx)
+	}
 	return lease.closeErr
 }
 

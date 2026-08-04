@@ -279,7 +279,8 @@ func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
 	}
 	daemon.heartbeat(context.Background())
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"ERROR","msg":"cluster heartbeat failed","hostname":"runner-host-1","error":"publish clustered node contributions: heartbeat failed"}`)
+		"{\"level\":\"ERROR\",\"msg\":\"cluster heartbeat failed\",\"hostname\":\"runner-host-1\",\"error\":\"publish clustered node contributions: heartbeat failed\"}\n"+
+			`{"level":"INFO","msg":"leader_election","action":"leader_election","phase":"contending","hostname":"runner-host-1"}`)
 }
 
 func TestClusterLeadershipFailureRemainsRetryable(t *testing.T) {
@@ -345,6 +346,91 @@ func TestClusterHeartbeatLogsInvoluntaryLeadershipLoss(t *testing.T) {
 	}
 	assertClusterLogSnapshot(t, logs,
 		"{\"level\":\"WARN\",\"msg\":\"leader_election\",\"action\":\"leader_election\",\"phase\":\"lost\",\"hostname\":\"runner-host-1\"}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"leader_election\",\"action\":\"leader_election\",\"phase\":\"contending\",\"hostname\":\"runner-host-1\"}\n"+
+			`{"level":"INFO","msg":"leader_shutdown","action":"leader_shutdown","phase":"session_close_summary","epoch":0,"totalSessions":0,"canceledPollers":0,"remotelyClosedSessions":0,"failures":0,"remainingCleanup":0}`)
+}
+
+func TestLeadershipLossStartsContentionBeforeSessionCleanup(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.nodeID = "runner-host-1"
+	daemon.logger = slog.Default()
+	daemon.waitForLeader = fakeWaitForLeader(state)
+	lease := &fakeClusterLease{alive: false}
+	leader := newClusterLeader(context.Background(), &daemon, lease)
+	contentionRegisteredBeforeCleanup := false
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	leader.sessions[key] = stoppedSession(key, fakeScaleSetDeletionClient{}, &fakeMessageClient{
+		onClose: func(context.Context) error {
+			contentionRegisteredBeforeCleanup = daemon.contenderDone != nil
+			return nil
+		},
+	})
+	daemon.leader = leader
+	ctx, cancel := context.WithCancel(context.Background())
+
+	daemon.heartbeat(ctx)
+	cancel()
+	daemon.stopLeadershipContender(context.Background())
+
+	if !contentionRegisteredBeforeCleanup {
+		t.Fatal("leadership contention was not registered before old session cleanup")
+	}
+}
+
+func TestLeadershipLossFencesPollersBeforeLeaseRelease(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	pollerCtx, stopPolling := context.WithCancel(context.Background())
+	termFencedBeforeRelease := false
+	var leader *clusterLeader
+	lease := &fakeClusterLease{alive: false, onClose: func(context.Context) error {
+		termFencedBeforeRelease = pollerCtx.Err() != nil && leader.stopped
+		return nil
+	}}
+	leader = newClusterLeader(context.Background(), &daemon, lease)
+	key := repositoryScaleSetSessionKey{repository: "repo", scaleSet: "linux"}
+	leader.sessions[key] = &repositoryScaleSetSession{
+		key: key, messageClient: scaleSetMessageClient{Client: &fakeMessageClient{}},
+		stopPolling: stopPolling, pollerDone: closedChannel(),
+	}
+	daemon.leader = leader
+	ctx, cancel := context.WithCancel(context.Background())
+
+	daemon.heartbeat(ctx)
+	cancel()
+	daemon.stopLeadershipContender(context.Background())
+
+	if !termFencedBeforeRelease {
+		t.Fatal("leadership pollers remained active while the lease was released")
+	}
+}
+
+func TestLeadershipLossContinuesContentionAfterLeaseCloseTimeout(t *testing.T) {
+	logs := &bytes.Buffer{}
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.nodeID = "runner-host-1"
+	daemon.logger = newClusterLogSnapshotLogger(logs)
+	daemon.leadershipReleaseTimeout = time.Nanosecond
+	lease := &fakeClusterLease{alive: false, onClose: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	daemon.leader = newClusterLeader(context.Background(), &daemon, lease)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	daemon.heartbeat(ctx)
+	if daemon.currentLeader() != nil || daemon.contenderDone == nil || lease.closeCalls != 1 {
+		t.Fatalf("leader=%#v contender=%v leaseCloseCalls=%d", daemon.currentLeader(), daemon.contenderDone, lease.closeCalls)
+	}
+	cancel()
+	daemon.stopLeadershipContender(context.Background())
+
+	assertClusterLogSnapshot(t, logs,
+		"{\"level\":\"WARN\",\"msg\":\"leader_election\",\"action\":\"leader_election\",\"phase\":\"lost\",\"hostname\":\"runner-host-1\"}\n"+
+			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"close leadership lease: context deadline exceeded\"}\n"+
+			"{\"level\":\"INFO\",\"msg\":\"leader_election\",\"action\":\"leader_election\",\"phase\":\"contending\",\"hostname\":\"runner-host-1\"}\n"+
 			`{"level":"INFO","msg":"leader_shutdown","action":"leader_shutdown","phase":"session_close_summary","epoch":0,"totalSessions":0,"canceledPollers":0,"remotelyClosedSessions":0,"failures":0,"remainingCleanup":0}`)
 }
 

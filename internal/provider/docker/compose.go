@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -44,56 +45,120 @@ type CommandRunner interface {
 }
 
 type ExecCommandRunner struct {
-	newCommand     func(context.Context, string, ...string) *exec.Cmd
-	combinedOutput func(*exec.Cmd) ([]byte, error)
+	newCommand           func(context.Context, string, ...string) *exec.Cmd
+	combinedOutput       func(*exec.Cmd) ([]byte, error)
+	inheritedEnvironment func() []string
 }
 
 func NewExecCommandRunner() ExecCommandRunner {
-	return ExecCommandRunner{newCommand: exec.CommandContext, combinedOutput: (*exec.Cmd).CombinedOutput}
+	return ExecCommandRunner{
+		newCommand:           exec.CommandContext,
+		combinedOutput:       (*exec.Cmd).CombinedOutput,
+		inheritedEnvironment: os.Environ,
+	}
 }
 
 func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error {
-	args := append(composeArgs(config),
-		"run", "--detach", "--rm",
-		"--name", request.RunnerName,
-		"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
-		"--label", contract.OwnershipRunner+"="+request.RunnerName,
-		"--env", JITConfigEnvironment+"="+request.JITConfig,
-		config.Service,
-	)
-	_, err := runner.runDocker(ctx, args, request.JITConfig)
+	invocation := dockerInvocation{
+		arguments: append(composeArgs(config),
+			"run", "--detach", "--rm",
+			"--name", request.RunnerName,
+			"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+			"--label", contract.OwnershipRunner+"="+request.RunnerName,
+			"--env", JITConfigEnvironment,
+			config.Service,
+		),
+		privateEnvironment: []privateEnvironmentVariable{{name: JITConfigEnvironment, value: request.JITConfig}},
+	}
+	_, err := runner.runDocker(ctx, invocation)
 	return err
 }
 
 func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, scaleSetName string) (string, error) {
-	return runner.runDocker(ctx, []string{
+	return runner.runDocker(ctx, dockerInvocation{arguments: []string{
 		"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName,
-	}, "")
+	}})
 }
 
 func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
-	_, err := runner.runDocker(ctx, []string{"rm", "--force", containerID}, "")
+	_, err := runner.runDocker(ctx, dockerInvocation{arguments: []string{"rm", "--force", containerID}})
 	return err
 }
 
 func (runner ExecCommandRunner) ListComposeServices(ctx context.Context, config ComposeConfig) (string, error) {
-	return runner.runDocker(ctx, append(composeArgs(config), "config", "--services"), "")
+	return runner.runDocker(ctx, dockerInvocation{arguments: append(composeArgs(config), "config", "--services")})
 }
 
-func (runner ExecCommandRunner) runDocker(ctx context.Context, args []string, jitConfig string) (string, error) {
-	execCommand := runner.newCommand(ctx, "docker", args...)
+func (runner ExecCommandRunner) runDocker(ctx context.Context, invocation dockerInvocation) (string, error) {
+	execCommand := runner.newCommand(ctx, "docker", invocation.arguments...)
+	if len(invocation.privateEnvironment) > 0 {
+		execCommand.Env = replaceEnvironment(runner.inheritedEnvironment(), invocation.privateEnvironment)
+	}
 	outputBytes, err := runner.combinedOutput(execCommand)
 	if err != nil {
-		diagnostic := strings.TrimSpace(string(outputBytes))
-		if jitConfig != "" {
-			diagnostic = strings.ReplaceAll(diagnostic, jitConfig, "[REDACTED]")
-		}
+		diagnostic := redactPrivateValues(strings.TrimSpace(string(outputBytes)), invocation.privateEnvironment)
+		executionError := redactCommandError(err, invocation.privateEnvironment)
 		if diagnostic != "" {
-			return "", fmt.Errorf("docker command failed: %w: %s", err, diagnostic)
+			return "", fmt.Errorf("docker command failed: %w: %s", executionError, diagnostic)
 		}
-		return "", fmt.Errorf("docker command failed: %w", err)
+		return "", fmt.Errorf("docker command failed: %w", executionError)
 	}
 	return string(outputBytes), nil
+}
+
+type dockerInvocation struct {
+	arguments          []string
+	privateEnvironment []privateEnvironmentVariable
+}
+
+type privateEnvironmentVariable struct {
+	name  string
+	value string
+}
+
+type redactedExecutionError struct {
+	message string
+}
+
+func (executionError redactedExecutionError) Error() string {
+	return executionError.message
+}
+
+func replaceEnvironment(inherited []string, replacements []privateEnvironmentVariable) []string {
+	replacedNames := make(map[string]struct{}, len(replacements))
+	for _, replacement := range replacements {
+		replacedNames[replacement.name] = struct{}{}
+	}
+	environment := make([]string, 0, len(inherited)+len(replacements))
+	for _, entry := range inherited {
+		name, _, hasValue := strings.Cut(entry, "=")
+		if _, replaced := replacedNames[name]; hasValue && replaced {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	for _, replacement := range replacements {
+		environment = append(environment, replacement.name+"="+replacement.value)
+	}
+	return environment
+}
+
+func redactCommandError(err error, privateEnvironment []privateEnvironmentVariable) error {
+	redactedMessage := redactPrivateValues(err.Error(), privateEnvironment)
+	if redactedMessage == err.Error() {
+		return err
+	}
+	return redactedExecutionError{message: redactedMessage}
+}
+
+func redactPrivateValues(value string, privateEnvironment []privateEnvironmentVariable) string {
+	redactedValue := value
+	for _, environmentVariable := range privateEnvironment {
+		if environmentVariable.value != "" {
+			redactedValue = strings.ReplaceAll(redactedValue, environmentVariable.value, "[REDACTED]")
+		}
+	}
+	return redactedValue
 }
 
 type ComposeProvider struct {

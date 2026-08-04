@@ -153,12 +153,14 @@ func (daemon *clusteredDaemon) heartbeat(ctx context.Context) {
 		if daemon.clearLeadership(leader) {
 			logAction(context.WithoutCancel(ctx), daemon.logger, slog.LevelWarn, "leader_election", "lost",
 				slog.String("hostname", string(daemon.nodeID)))
-			leader.stop(context.WithoutCancel(ctx))
+			leader.relinquish(ctx)
+			daemon.enterStandby(ctx)
+			leader.finishStop(context.WithoutCancel(ctx))
+			return
 		}
 		leader = nil
 	}
 	if leader == nil {
-		daemon.notifyStatus(ctx, clusterServiceStatusStandby)
-		daemon.startContender(ctx)
+		daemon.enterStandby(ctx)
 	}
 }

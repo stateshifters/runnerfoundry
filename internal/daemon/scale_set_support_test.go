@@ -202,6 +202,7 @@ type fakeMessageClient struct {
 	getMessageErr            error
 	deleteErr                error
 	closeErr                 error
+	onClose                  func(context.Context) error
 	closed                   bool
 	onGetMessage             func()
 	polled                   chan struct{}
@@ -293,6 +294,9 @@ func (client *fakeMessageClient) DeleteMessage(ctx context.Context, messageID in
 }
 
 func (client *fakeMessageClient) Close(ctx context.Context) error {
+	if client.onClose != nil {
+		return client.onClose(ctx)
+	}
 	if client.closeErr != nil {
 		return client.closeErr
 	}

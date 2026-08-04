@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -41,6 +42,22 @@ func (daemon *clusteredDaemon) acceptLeadership(ctx context.Context, lease clust
 		slog.String("hostname", string(daemon.nodeID)))
 }
 
+func (daemon *clusteredDaemon) closeLeadershipLease(ctx context.Context, lease cluster.Lease) error {
+	closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), daemon.leadershipReleaseDuration())
+	defer cancelClose()
+	if err := lease.Close(closeCtx); err != nil {
+		return fmt.Errorf("close leadership lease: %w", err)
+	}
+	return nil
+}
+
+func (daemon *clusteredDaemon) leadershipReleaseDuration() time.Duration {
+	if daemon.leadershipReleaseTimeout > 0 {
+		return daemon.leadershipReleaseTimeout
+	}
+	return clusterCoordinationTimeout
+}
+
 func (daemon *clusteredDaemon) currentLeader() *clusterLeader {
 	daemon.leadershipMutex.Lock()
 	defer daemon.leadershipMutex.Unlock()
@@ -72,11 +89,11 @@ func (daemon *clusteredDaemon) notifyStatus(ctx context.Context, status clusterS
 	}
 }
 
-func (daemon *clusteredDaemon) startContender(ctx context.Context) {
+func (daemon *clusteredDaemon) startContender(ctx context.Context) bool {
 	daemon.leadershipMutex.Lock()
 	if daemon.contenderDone != nil {
 		daemon.leadershipMutex.Unlock()
-		return
+		return false
 	}
 	contenderCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -89,6 +106,15 @@ func (daemon *clusteredDaemon) startContender(ctx context.Context) {
 	}
 	daemon.leadershipMutex.Unlock()
 	go daemon.contendForLeadership(contenderCtx, results, done)
+	return true
+}
+
+func (daemon *clusteredDaemon) enterStandby(ctx context.Context) {
+	if daemon.startContender(ctx) {
+		logAction(ctx, daemon.logger, slog.LevelInfo, "leader_election", "contending",
+			slog.String("hostname", string(daemon.nodeID)))
+	}
+	daemon.notifyStatus(ctx, clusterServiceStatusStandby)
 }
 
 func (daemon *clusteredDaemon) clearContenderRegistration() {
@@ -142,7 +168,7 @@ func (daemon *clusteredDaemon) deliverLeadership(
 	select {
 	case results <- leadershipResult{lease: lease}:
 	case <-ctx.Done():
-		if err := lease.Close(context.WithoutCancel(ctx)); err != nil {
+		if err := daemon.closeLeadershipLease(ctx, lease); err != nil {
 			daemon.logger.Warn("close canceled leader lease failed",
 				slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		}
@@ -175,7 +201,7 @@ func (daemon *clusteredDaemon) stopLeadershipContender(ctx context.Context) {
 	<-contenderDone
 	select {
 	case result := <-results:
-		if err := result.lease.Close(context.WithoutCancel(ctx)); err != nil {
+		if err := daemon.closeLeadershipLease(ctx, result.lease); err != nil {
 			daemon.logger.Warn("close unclaimed leader lease failed",
 				slog.String("hostname", string(daemon.nodeID)), slog.String("error", err.Error()))
 		}

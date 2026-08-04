@@ -61,13 +61,15 @@ func (store *Store) WaitForLeader(ctx context.Context) (*LeaderLease, error) {
 	return &LeaderLease{connection: connection}, nil
 }
 
-// Close releases leadership by closing the lease's dedicated connection. A nil
-// or empty lease is already closed and returns nil.
+// Close releases leadership by closing the lease's dedicated connection. The
+// caller's context bounds graceful PostgreSQL shutdown; pgx still closes the
+// underlying network connection when that context expires. A nil or empty
+// lease is already closed and returns nil.
 func (lease *LeaderLease) Close(ctx context.Context) error {
 	if lease == nil || lease.connection == nil {
 		return nil
 	}
-	if err := lease.connection.Close(context.WithoutCancel(ctx)); err != nil {
+	if err := lease.connection.Close(ctx); err != nil {
 		return fmt.Errorf("close PostgreSQL leader lease: %w", err)
 	}
 	return nil

@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -30,22 +32,71 @@ func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
 	assertDockerArguments(t, recording.arguments, "rm", "--force", "runner-id")
 }
 
-func TestExecCommandRunnerBuildsStartCommandAndRedactsFailure(t *testing.T) {
-	recording := &recordingDockerExecution{
-		output: []byte("docker diagnostic: opaque-jit-value"),
-		err:    errors.New("failed"),
+func TestExecCommandRunnerKeepsJITConfigPrivate(t *testing.T) {
+	testCases := []jitPrivacyTestCase{
+		{name: "ordinary", jitConfig: "opaque-jit-value"},
+		{name: "empty", jitConfig: ""},
+		{name: "multiline", jitConfig: "first line\nsecond line"},
+		{name: "shell significant", jitConfig: `$(echo exposed); '&|%PATH%' "quoted"`},
 	}
-	err := recording.runner().StartComposeRunner(context.Background(), ComposeConfig{Service: "runner"}, StartRequest{
-		ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: "opaque-jit-value",
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertJITConfigPrivacy(t, testCase.jitConfig)
+		})
+	}
+}
+
+type jitPrivacyTestCase struct {
+	name      string
+	jitConfig string
+}
+
+func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
+	t.Helper()
+	t.Setenv("RUNNERFOUNDRY_PRESERVED", "inherited")
+	t.Setenv(JITConfigEnvironment, "parent-jit-value")
+	parentEnvironment := os.Environ()
+	recording := &recordingDockerExecution{echoCommandEnvironment: true}
+	provider := ComposeProvider{CommandRunner: recording.runner(), Config: ComposeConfig{Service: "runner"}}
+
+	err := provider.Start(context.Background(), StartRequest{
+		ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: jitConfig,
 	})
-	if err == nil || strings.Contains(err.Error(), "opaque-jit-value") || !strings.Contains(err.Error(), "docker diagnostic: [REDACTED]") {
-		t.Fatalf("docker failure = %v", err)
+	if err == nil {
+		t.Fatal("expected docker failure")
 	}
-	assertDockerArguments(t, recording.arguments,
+	assertPrivateJITArguments(t, recording.arguments, jitConfig)
+	assertPrivateJITEnvironment(t, recording.commandEnvironment, parentEnvironment, jitConfig)
+	if !slices.Equal(os.Environ(), parentEnvironment) {
+		t.Fatal("docker invocation mutated the parent environment")
+	}
+	assertJITFailureRedacted(t, err, jitConfig)
+}
+
+func assertPrivateJITArguments(t *testing.T, arguments []string, jitConfig string) {
+	t.Helper()
+	assertDockerArguments(t, arguments,
 		"compose", "-f", "", "run", "--detach", "--rm", "--name", "linux-1",
 		"--label", "runnerfoundry.scale-set=linux", "--label", "runnerfoundry.runner=linux-1",
-		"--env", "ACTIONS_RUNNER_INPUT_JITCONFIG=opaque-jit-value", "runner",
+		"--env", JITConfigEnvironment, "runner",
 	)
+	if jitConfig != "" && strings.Contains(fmt.Sprint(arguments), jitConfig) {
+		t.Fatalf("docker arguments disclosed JIT config: %#v", arguments)
+	}
+}
+
+func assertJITFailureRedacted(t *testing.T, err error, jitConfig string) {
+	t.Helper()
+	if jitConfig == "" {
+		return
+	}
+	if strings.Contains(err.Error(), jitConfig) {
+		t.Fatalf("docker failure disclosed JIT config: %q", err.Error())
+	}
+	if strings.Count(err.Error(), "[REDACTED]") < 2 {
+		t.Fatalf("docker failure did not redact diagnostic and execution errors: %q", err.Error())
+	}
 }
 
 func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
@@ -57,15 +108,17 @@ func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
 
 func TestNewExecCommandRunnerProvidesProductionDependencies(t *testing.T) {
 	runner := NewExecCommandRunner()
-	if runner.newCommand == nil || runner.combinedOutput == nil {
+	if runner.newCommand == nil || runner.combinedOutput == nil || runner.inheritedEnvironment == nil {
 		t.Fatal("production command dependencies are incomplete")
 	}
 }
 
 type recordingDockerExecution struct {
-	arguments []string
-	output    []byte
-	err       error
+	arguments              []string
+	commandEnvironment     []string
+	output                 []byte
+	err                    error
+	echoCommandEnvironment bool
 }
 
 func (recording *recordingDockerExecution) runner() ExecCommandRunner {
@@ -74,7 +127,30 @@ func (recording *recordingDockerExecution) runner() ExecCommandRunner {
 			recording.arguments = append([]string{name}, arguments...)
 			return &exec.Cmd{}
 		},
-		combinedOutput: func(*exec.Cmd) ([]byte, error) { return recording.output, recording.err },
+		inheritedEnvironment: os.Environ,
+		combinedOutput: func(command *exec.Cmd) ([]byte, error) {
+			recording.commandEnvironment = slices.Clone(command.Env)
+			if recording.echoCommandEnvironment {
+				environment := strings.Join(command.Env, "\n")
+				return []byte("docker diagnostic: " + environment), errors.New("docker execution failed: " + environment)
+			}
+			return recording.output, recording.err
+		},
+	}
+}
+
+func assertPrivateJITEnvironment(t *testing.T, actual []string, inherited []string, jitConfig string) {
+	t.Helper()
+	expected := make([]string, 0, len(inherited))
+	prefix := JITConfigEnvironment + "="
+	for _, entry := range inherited {
+		if !strings.HasPrefix(entry, prefix) {
+			expected = append(expected, entry)
+		}
+	}
+	expected = append(expected, prefix+jitConfig)
+	if !slices.Equal(actual, expected) {
+		t.Fatalf("docker environment = %#v, want %#v", actual, expected)
 	}
 }
 

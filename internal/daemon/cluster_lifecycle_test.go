@@ -304,7 +304,7 @@ func TestCanceledLeadershipDeliveryClosesLease(t *testing.T) {
 		t.Fatal("canceled delivery did not close lease")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close canceled leader lease failed","hostname":"runner-host-1","error":"close failed"}`)
+		`{"level":"WARN","msg":"close canceled leader lease failed","hostname":"runner-host-1","error":"close leadership lease: close failed"}`)
 }
 
 func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
@@ -323,7 +323,7 @@ func TestLeadershipContenderShutdownClosesUnclaimedLease(t *testing.T) {
 		t.Fatal("unclaimed lease was not closed")
 	}
 	assertClusterLogSnapshot(t, logs,
-		`{"level":"WARN","msg":"close unclaimed leader lease failed","hostname":"runner-host-1","error":"close failed"}`)
+		`{"level":"WARN","msg":"close unclaimed leader lease failed","hostname":"runner-host-1","error":"close leadership lease: close failed"}`)
 	daemon.stopLeadershipContender(context.Background())
 }
 
