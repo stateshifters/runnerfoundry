@@ -9,7 +9,7 @@ import (
 	"github.com/meza/RunnerFoundry/internal/provider/contract"
 )
 
-func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) {
+func TestStartDelegatesComposeConfigAndRunnerRequest(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := ComposeProvider{
 		CommandRunner: commandRunner,
@@ -27,16 +27,13 @@ func TestStartUsesDockerComposeRunWithJITConfigAndOwnershipLabels(t *testing.T) 
 	if err != nil {
 		t.Fatalf("expected start success, got %v", err)
 	}
-	expected := []string{
-		"compose", "-f", "compose.yaml",
-		"run", "--detach", "--rm", "--name", "linux-1",
-		"--label", "runnerfoundry.scale-set=linux",
-		"--label", "runnerfoundry.runner=linux-1",
-		"--env", "ACTIONS_RUNNER_INPUT_JITCONFIG=secret",
-		"runner",
+	expectedConfig := ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"}
+	expectedRequest := StartRequest{ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: "secret"}
+	if !reflect.DeepEqual(commandRunner.startConfig, expectedConfig) {
+		t.Fatalf("unexpected compose config: %#v", commandRunner.startConfig)
 	}
-	if !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {
-		t.Fatalf("unexpected docker command\nwant %#v\ngot  %#v", expected, commandRunner.commands[0].Args)
+	if !reflect.DeepEqual(commandRunner.startRequest, expectedRequest) {
+		t.Fatalf("unexpected runner request: %#v", commandRunner.startRequest)
 	}
 }
 
@@ -218,8 +215,10 @@ func TestDestroyRemovesDeadRunner(t *testing.T) {
 }
 
 type recordingCommandRunner struct {
-	commands []Command
-	output   string
+	commands     []Command
+	output       string
+	startConfig  ComposeConfig
+	startRequest StartRequest
 }
 
 type Command struct {
@@ -232,12 +231,9 @@ func (runner *recordingCommandRunner) record(command Command) (string, error) {
 }
 
 func (runner *recordingCommandRunner) StartComposeRunner(_ context.Context, config ComposeConfig, request StartRequest) error {
-	_, err := runner.record(Command{Args: append(composeArgs(config),
-		"run", "--detach", "--rm", "--name", request.RunnerName,
-		"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
-		"--label", contract.OwnershipRunner+"="+request.RunnerName,
-		"--env", JITConfigEnvironment+"="+request.JITConfig, config.Service)})
-	return err
+	runner.startConfig = config
+	runner.startRequest = request
+	return nil
 }
 
 func (runner *recordingCommandRunner) ListComposeRunners(_ context.Context, scaleSetName string) (string, error) {
