@@ -632,10 +632,26 @@ func (leader *clusterLeader) stopSession(ctx context.Context, session *repositor
 	return errors.Join(closeErr, deleteErr)
 }
 
-func (leader *clusterLeader) stop(ctx context.Context) {
+func (leader *clusterLeader) relinquish(ctx context.Context) {
 	leader.stopTerm()
 	leader.cancelActiveOperation()
 	leader.stopRepositoryWorkers()
+	leader.stopSessionPolling()
+	if err := leader.daemon.closeLeadershipLease(ctx, leader.lease); err != nil {
+		leader.daemon.logger.Warn("close leader lease failed",
+			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
+	}
+}
+
+func (leader *clusterLeader) stopSessionPolling() {
+	leader.sessionsMutex.Lock()
+	defer leader.sessionsMutex.Unlock()
+	for _, session := range leader.sessions {
+		session.stopPolling()
+	}
+}
+
+func (leader *clusterLeader) finishStop(ctx context.Context) {
 	leader.background.Wait()
 	leader.scheduler.wait()
 	leader.repositoryWorkers.wait()
@@ -650,10 +666,11 @@ func (leader *clusterLeader) stop(ctx context.Context) {
 	leader.pendingRepositoryRepairs = map[string]repositoryRepair{}
 	leader.repairMutex.Unlock()
 	leader.scheduler.clear()
-	if err := leader.lease.Close(ctx); err != nil {
-		leader.daemon.logger.Warn("close leader lease failed",
-			slog.String("hostname", string(leader.daemon.nodeID)), slog.String("error", err.Error()))
-	}
+}
+
+func (leader *clusterLeader) stop(ctx context.Context) {
+	leader.relinquish(ctx)
+	leader.finishStop(ctx)
 }
 
 func (leader *clusterLeader) setOperationCancellation(cancel context.CancelFunc) bool {

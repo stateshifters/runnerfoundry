@@ -643,21 +643,23 @@ func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnecti
 }
 
 type fakeDatabaseConnection struct {
-	transaction     *fakeDatabaseTransaction
-	beginErr        error
-	execErrors      []error
-	execTag         pgconn.CommandTag
-	executions      []fakeDatabaseExecution
-	queries         []fakeDatabaseExecution
-	queryErr        error
-	queryErrors     []error
-	rowsResult      rowIterator
-	rowsResults     []rowIterator
-	rowResults      []fakeRow
-	closeErr        error
-	closeContextErr error
-	pingErr         error
-	closed          bool
+	transaction      *fakeDatabaseTransaction
+	beginErr         error
+	execErrors       []error
+	execTag          pgconn.CommandTag
+	executions       []fakeDatabaseExecution
+	queries          []fakeDatabaseExecution
+	queryErr         error
+	queryErrors      []error
+	rowsResult       rowIterator
+	rowsResults      []rowIterator
+	rowResults       []fakeRow
+	closeErr         error
+	closeContextErr  error
+	closeDeadline    time.Time
+	closeHasDeadline bool
+	pingErr          error
+	closed           bool
 }
 
 func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTransaction, error) {
@@ -673,6 +675,7 @@ func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTrans
 func (connection *fakeDatabaseConnection) Close(ctx context.Context) error {
 	connection.closed = true
 	connection.closeContextErr = ctx.Err()
+	connection.closeDeadline, connection.closeHasDeadline = ctx.Deadline()
 	return connection.closeErr
 }
 

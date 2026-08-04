@@ -66,6 +66,7 @@ type clusteredDaemon struct {
 	workers                   sync.WaitGroup
 	leadershipRetryDelay      time.Duration
 	leadershipWaitTimeout     time.Duration
+	leadershipReleaseTimeout  time.Duration
 	waitBeforeLeadershipRetry func(context.Context, time.Duration) bool
 	runnerReapRetries         *runnerReapRetryTracker
 	repositoryRepairRequests  chan struct{}
@@ -170,6 +171,7 @@ func newClusteredDaemon() *clusteredDaemon {
 		notifier:                  newSystemdNotifier(),
 		leadershipRetryDelay:      clusterLeadershipRetryDelay,
 		leadershipWaitTimeout:     clusterLeadershipWaitTimeout,
+		leadershipReleaseTimeout:  clusterCoordinationTimeout,
 		waitBeforeLeadershipRetry: waitForRetryDelay,
 		runnerReapRetries:         newRunnerReapRetryTracker(time.Now),
 	}
@@ -224,8 +226,7 @@ func runClusteredDaemon(
 	}()
 	daemon.tryLeadership(ctx)
 	if daemon.currentLeader() == nil {
-		daemon.startContender(ctx)
-		daemon.notifyStatus(ctx, clusterServiceStatusStandby)
+		daemon.enterStandby(ctx)
 	}
 	if err = daemon.notifier.Ready(ctx); err != nil {
 		return fmt.Errorf("notify ready: %w", err)

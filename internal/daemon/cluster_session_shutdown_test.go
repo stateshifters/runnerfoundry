@@ -312,8 +312,8 @@ func TestLeaderStopClearsSessionsAfterLeaseCloseFailure(t *testing.T) {
 		t.Fatalf("sessions=%v scheduled=%v leaseClosed=%t", leader.sessions, leader.scheduler.sessions, lease.closed)
 	}
 	assertClusterLogSnapshot(t, logs,
-		"{\"level\":\"INFO\",\"msg\":\"leader_shutdown\",\"action\":\"leader_shutdown\",\"phase\":\"session_close_summary\",\"epoch\":0,\"totalSessions\":1,\"canceledPollers\":1,\"remotelyClosedSessions\":1,\"failures\":0,\"remainingCleanup\":0}\n"+
-			`{"level":"WARN","msg":"close leader lease failed","hostname":"runner-host-1","error":"failed"}`)
+		"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"close leadership lease: failed\"}\n"+
+			`{"level":"INFO","msg":"leader_shutdown","action":"leader_shutdown","phase":"session_close_summary","epoch":0,"totalSessions":1,"canceledPollers":1,"remotelyClosedSessions":1,"failures":0,"remainingCleanup":0}`)
 }
 
 func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
@@ -332,10 +332,10 @@ func TestLeaderStopLogsSessionAndLeaseCloseFailuresSeparately(t *testing.T) {
 	leader.stop(context.Background())
 
 	assertClusterLogSnapshot(t, logs,
-		"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
+		"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"close leadership lease: lease failed\"}\n"+
+			"{\"level\":\"ERROR\",\"msg\":\"close leader message session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
 			"{\"level\":\"ERROR\",\"msg\":\"stop leader session failed\",\"hostname\":\"runner-host-1\",\"error\":\"close message session: session failed\"}\n"+
-			"{\"level\":\"INFO\",\"msg\":\"leader_shutdown\",\"action\":\"leader_shutdown\",\"phase\":\"session_close_summary\",\"epoch\":0,\"totalSessions\":1,\"canceledPollers\":1,\"remotelyClosedSessions\":0,\"failures\":1,\"remainingCleanup\":1}\n"+
-			"{\"level\":\"WARN\",\"msg\":\"close leader lease failed\",\"hostname\":\"runner-host-1\",\"error\":\"lease failed\"}")
+			"{\"level\":\"INFO\",\"msg\":\"leader_shutdown\",\"action\":\"leader_shutdown\",\"phase\":\"session_close_summary\",\"epoch\":0,\"totalSessions\":1,\"canceledPollers\":1,\"remotelyClosedSessions\":0,\"failures\":1,\"remainingCleanup\":1}")
 }
 
 func TestLeaderStopBoundsConcurrentSessionClosureAndUsesAggregateDeadline(t *testing.T) {
@@ -426,6 +426,17 @@ func TestClusterShutdownLogsContributionWithdrawalFailure(t *testing.T) {
 	daemon.shutdown(context.Background())
 	if !strings.Contains(logs.String(), "publish node shutdown failed") {
 		t.Fatalf("withdrawal failure was not logged: %q", logs.String())
+	}
+}
+
+func TestClusterShutdownDoesNotStartLeadershipContender(t *testing.T) {
+	daemon := activeClusteredDaemon(t, &fakeClusterState{})
+	daemon.leader = newClusterLeader(context.Background(), &daemon, &fakeClusterLease{alive: true})
+
+	daemon.shutdown(context.Background())
+
+	if daemon.contenderDone != nil {
+		t.Fatal("normal shutdown started a leadership contender")
 	}
 }
 

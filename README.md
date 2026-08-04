@@ -731,7 +731,7 @@ When a host heartbeat expires, its active assignments complete while their deman
 
 When a successful discovery confirms that a repository or installation is no longer exposed to the GitHub App, RunnerFoundry updates durable authority and schedules scoped removal of queued demand, active local runners, message sessions, and managed scale sets. A failed installation repository listing retains that installation's previous authority and does not trigger broad cleanup. A confirmed access change can interrupt active jobs, so drain or schedule it accordingly.
 
-On a normal standalone shutdown, active jobs remain running while message sessions close and scale sets unregister. On leadership loss or clustered shutdown, the leader immediately cancels every leadership-term poller before attempting bounded remote session close, then stops scheduling new obligations and cancels its other bounded active calls. Active jobs remain running, and the node publishes itself unhealthy on shutdown. A clustered leader does not delete the shared scale sets when its term ends.
+On a normal standalone shutdown, active jobs remain running while message sessions close and scale sets unregister. On leadership loss, the old term is fenced immediately: RunnerFoundry stops scheduling new obligations, cancels reconciliation, pollers, repository workers, and other bounded active calls, and releases the PostgreSQL leader lease within five seconds. It then starts a fresh contender, reports `standby`, and drains the old term's GitHub sessions. That cleanup may overlap successor reconciliation because controller epochs reject obsolete mutations. A normal clustered shutdown performs the same bounded release and cleanup without starting another contender. Active jobs remain running, the node publishes itself unhealthy on shutdown, and a clustered leader does not delete the shared scale sets when its term ends.
 
 ### Upgrade and downgrade
 
@@ -806,7 +806,7 @@ The RunnerFoundry control plane does not impose a guest job timeout or watchdog.
 
 Confirm that the login identity can connect, belongs to the stable role, and can assume it. Check file-reference ownership and permissions as the `runnerfoundry` service account. If a pooler is used, verify that migrations and advisory locks use a session-affine connection.
 
-A transient transport failure may leave every node reporting `standby` while PostgreSQL recovers. Each standby abandons an unresponsive advisory-lock wait after 30 seconds and opens a fresh contender, so leadership should recover without restarting the nodes. If no node reports a leader after that interval, inspect `leader contender failed` logs and verify the direct endpoint rather than restarting or manually changing advisory locks.
+A transient transport failure may leave every node reporting `standby` while PostgreSQL recovers. A node that loses leadership emits `leader_election` phases `lost` and then `contending`; release of its PostgreSQL lease is bounded to five seconds, and fresh contention starts before old GitHub-session cleanup finishes. Each standby also abandons an unresponsive advisory-lock wait after 30 seconds and opens a fresh contender, so leadership should recover without restarting the nodes. Expect `lost` -> `contending` -> `acquired`, followed by current-epoch `repository_session_coverage`. If progress stops, inspect `close leader lease failed` and `leader contender failed` logs and verify the direct endpoint rather than restarting or manually changing advisory locks.
 
 ### PostgreSQL rollback is refused
 
