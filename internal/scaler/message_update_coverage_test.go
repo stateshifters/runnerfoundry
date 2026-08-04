@@ -47,8 +47,13 @@ func TestMemoryMessageUpdateAppliesAllEffects(t *testing.T) {
 	update := MessageUpdate{
 		ScaleSet: "linux", Repository: "repo", ObservedAt: now,
 		Available: []JobDemand{{Repository: "repo", RequestID: 2, QueueTime: now}},
-		Started:   []RunnerMessageIdentity{{RequestID: 1, RunnerName: "linux-1"}, {RequestID: 404}},
-		Completed: []RunnerMessageIdentity{{RequestID: 1, RunnerName: "linux-1"}},
+		Started: []RunnerMessageIdentity{
+			{RunnerIdentity: RunnerIdentity{RequestID: 1, RunnerName: "linux-1"}},
+			{RunnerIdentity: RunnerIdentity{RequestID: 404}},
+		},
+		Completed: []RunnerMessageIdentity{{
+			RunnerIdentity: RunnerIdentity{RequestID: 1, RunnerName: "linux-1"},
+		}},
 	}
 	if _, err := store.ApplyMessageUpdate(ctx, update); err != nil {
 		t.Fatal(err)
@@ -60,7 +65,8 @@ func TestMemoryMessageUpdatePropagatesStateFailures(t *testing.T) {
 	failure := errors.New("failed")
 	update := MessageUpdate{
 		ScaleSet: "linux", Repository: "repo", ObservedAt: time.Unix(300, 0).UTC(),
-		Started: []RunnerMessageIdentity{{RequestID: 1}}, Completed: []RunnerMessageIdentity{{RequestID: 1}},
+		Started:   []RunnerMessageIdentity{{RunnerIdentity: RunnerIdentity{RequestID: 1}}},
+		Completed: []RunnerMessageIdentity{{RunnerIdentity: RunnerIdentity{RequestID: 1}}},
 	}
 	tests := []struct {
 		name  string
@@ -73,7 +79,7 @@ func TestMemoryMessageUpdatePropagatesStateFailures(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := applyMemoryMessageUpdate(context.Background(), test.state, update); !errors.Is(err, failure) {
+			if err := applyMemoryMessageUpdate(context.Background(), test.state, update); !errors.Is(err, failure) {
 				t.Fatalf("message update error = %v, want %v", err, failure)
 			}
 		})
@@ -92,7 +98,13 @@ func (state *faultingMemoryMessageState) Apply(context.Context, string, []JobDem
 }
 
 func (state *faultingMemoryMessageState) MarkRunnerBusy(
-	context.Context, string, string, int64, string, int64, time.Time,
+	context.Context, string, string, RunnerIdentity, int64, time.Time,
+) error {
+	return state.busyErr
+}
+
+func (state *faultingMemoryMessageState) BindRunnerIdentity(
+	context.Context, string, string, RunnerIdentity, int64, time.Time,
 ) error {
 	return state.busyErr
 }

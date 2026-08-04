@@ -205,7 +205,9 @@ func coordinatorWithPendingLibvirtReap(
 	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteJob(context.Background(), JobCompletion(runner)); err != nil {
+	if err := store.CompleteJob(context.Background(), JobCompletion{
+		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return pendingLibvirtReapFixture{coordinator: coordinator, store: store, worker: worker, runner: runner}
@@ -229,7 +231,8 @@ func TestCoordinatorFencesRequeuedRequestWhileAdmittingAnotherIdentity(t *testin
 		t.Fatal(err)
 	}
 	if err := store.CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: runner.RunnerName,
+		ScaleSet: "linux", Repository: "repo",
+		RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: runner.RunnerName},
 	}); err != nil {
 		t.Fatal(err)
 	}

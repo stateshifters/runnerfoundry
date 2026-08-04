@@ -31,8 +31,7 @@ func (coordinator *Coordinator) HasRunnerLifecycle() bool {
 func (coordinator *Coordinator) MarkRunnerBusy(
 	ctx context.Context,
 	repository string,
-	requestID int64,
-	runnerName string,
+	identity RunnerIdentity,
 	githubRunnerID int64,
 	startedAt time.Time,
 ) error {
@@ -40,8 +39,27 @@ func (coordinator *Coordinator) MarkRunnerBusy(
 	if !supported {
 		return errors.New("demand store does not support runner lifecycle")
 	}
-	if err := store.MarkRunnerBusy(ctx, coordinator.scaleSet, repository, requestID, runnerName, githubRunnerID, startedAt); err != nil {
+	if err := store.MarkRunnerBusy(ctx, coordinator.scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
 		return fmt.Errorf("mark runner busy: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *Coordinator) BindRunnerIdentity(
+	ctx context.Context,
+	repository string,
+	identity RunnerIdentity,
+	githubRunnerID int64,
+	startedAt time.Time,
+) error {
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return errors.New("demand store does not support runner lifecycle")
+	}
+	if err := store.BindRunnerIdentity(
+		ctx, coordinator.scaleSet, repository, identity, githubRunnerID, startedAt,
+	); err != nil {
+		return fmt.Errorf("bind runner identity: %w", err)
 	}
 	return nil
 }

@@ -161,11 +161,14 @@ type LibvirtRunnerLifecycle struct {
 	RunnerName string
 }
 
+func (runner LibvirtRunnerLifecycle) Identity() scaler.RunnerIdentity {
+	return scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
+}
+
 type JobCompletion struct {
 	ScaleSet   string
 	Repository string
-	RequestID  int64
-	RunnerName string
+	scaler.RunnerIdentity
 }
 
 type Store struct {

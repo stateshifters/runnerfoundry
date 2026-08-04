@@ -40,6 +40,70 @@ func TestClusterMessageUpdateRollsBackCompletionFailure(t *testing.T) {
 	assertClusterMessageRollback(t, clusterMessageUpdateWithCompletion(), 0, "UPDATE scaler_runner_lifecycle")
 }
 
+func TestClusterMessageUpdateTreatsMissingLifecycleMessagesAsNoOps(t *testing.T) {
+	tests := []struct {
+		name   string
+		update scaler.MessageUpdate
+	}{
+		{name: "start", update: clusterMessageUpdateWithNameOnlyStart("missing")},
+		{name: "completion", update: clusterMessageUpdateWithNameOnlyCompletion("missing")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := successfulClusterMessageTransaction(t)
+			transaction.execTags = []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 0")}
+			if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+				context.Background(), test.update,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if transaction.rollbackCalls != 0 {
+				t.Fatalf("rollback calls = %d", transaction.rollbackCalls)
+			}
+		})
+	}
+}
+
+func TestClusterMessageUpdateCompletesDemandWhenPositiveLifecycleIsMissing(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{rowResults: []fakeRow{
+		clusterEpochRow(t, 3), integerCountRow(t, 0), integerCountRow(t, 0),
+		availableAssignedJobCapacityRow(t), queuedObligationCountRow(t, 0),
+		capacityObligationQueueSnapshotRow(t, 0, 0, nil),
+	}, execTags: []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 0")}}
+	update := clusterMessageUpdateWithCompletion()
+
+	if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), update,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var removed bool
+	for _, execution := range transaction.executions {
+		if strings.Contains(execution.statement, "DELETE FROM scaler_demand") {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Fatalf("message executions = %#v, want completed demand removal", transaction.executions)
+	}
+}
+
+func TestClusterMessageUpdateRollsBackMismatchedCompletionIdentity(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{
+		execTags:   []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 0")},
+		rowResults: []fakeRow{clusterEpochRow(t, 3), integerCountRow(t, 1), integerCountRow(t, 1)},
+	}
+	_, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
+		context.Background(), clusterMessageUpdateWithCompletion(),
+	)
+	if !errors.Is(err, scaler.ErrRunnerIdentityMismatch) {
+		t.Fatalf("completion error = %v, want mismatch", err)
+	}
+	if transaction.rollbackCalls != 1 {
+		t.Fatalf("rollback calls = %d, want 1", transaction.rollbackCalls)
+	}
+}
+
 func TestClusterMessageUpdateRollsBackStatisticsWithPriorEffects(t *testing.T) {
 	assertClusterMessageRollback(
 		t, clusterMessageUpdateWithDemandAndStart(), 3, "INSERT INTO scaler_assigned_job_observations",
@@ -221,18 +285,30 @@ func clusterMessageUpdateWithDemand() scaler.MessageUpdate {
 
 func clusterMessageUpdateWithStart() scaler.MessageUpdate {
 	update := validClusterMessageUpdate()
-	update.Started = []scaler.RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Started = []scaler.RunnerMessageIdentity{{RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}}}
 	return update
 }
 
 func clusterMessageUpdateWithCompletion() scaler.MessageUpdate {
 	update := validClusterMessageUpdate()
-	update.Completed = []scaler.RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Completed = []scaler.RunnerMessageIdentity{{RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}}}
+	return update
+}
+
+func clusterMessageUpdateWithNameOnlyStart(runnerName string) scaler.MessageUpdate {
+	update := validClusterMessageUpdate()
+	update.Started = []scaler.RunnerMessageIdentity{{RunnerIdentity: scaler.RunnerIdentity{RunnerName: runnerName}}}
+	return update
+}
+
+func clusterMessageUpdateWithNameOnlyCompletion(runnerName string) scaler.MessageUpdate {
+	update := validClusterMessageUpdate()
+	update.Completed = []scaler.RunnerMessageIdentity{{RunnerIdentity: scaler.RunnerIdentity{RunnerName: runnerName}}}
 	return update
 }
 
 func clusterMessageUpdateWithDemandAndStart() scaler.MessageUpdate {
 	update := clusterMessageUpdateWithDemand()
-	update.Started = []scaler.RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Started = []scaler.RunnerMessageIdentity{{RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}}}
 	return update
 }

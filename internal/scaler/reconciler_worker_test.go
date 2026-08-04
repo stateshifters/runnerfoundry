@@ -269,11 +269,15 @@ func (store *recordingRunnerLifecycleStore) ConfirmRunnerWaiting(_ context.Conte
 	return nil
 }
 
-func (*recordingRunnerLifecycleStore) MarkRunnerBusy(context.Context, string, string, int64, string, int64, time.Time) error {
+func (*recordingRunnerLifecycleStore) MarkRunnerBusy(context.Context, string, string, RunnerIdentity, int64, time.Time) error {
 	return nil
 }
 
-func (*recordingRunnerLifecycleStore) RequestRunnerReap(context.Context, string, string, int64, string, string, time.Time) error {
+func (*recordingRunnerLifecycleStore) BindRunnerIdentity(context.Context, string, string, RunnerIdentity, int64, time.Time) error {
+	return nil
+}
+
+func (*recordingRunnerLifecycleStore) RequestRunnerReap(context.Context, string, string, RunnerIdentity, string, time.Time) error {
 	return nil
 }
 

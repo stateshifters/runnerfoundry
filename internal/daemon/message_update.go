@@ -51,7 +51,8 @@ func startedMessageIdentities(messages []*upstream.JobStarted) ([]scaler.RunnerM
 			return nil, errors.New("job started message requires a positive runner request ID or runner name")
 		}
 		identities = append(identities, scaler.RunnerMessageIdentity{
-			RequestID: started.RunnerRequestID, RunnerName: started.RunnerName, GitHubRunnerID: int64(started.RunnerID),
+			RunnerIdentity: scaler.RunnerIdentity{RequestID: started.RunnerRequestID, RunnerName: started.RunnerName},
+			GitHubRunnerID: int64(started.RunnerID),
 		})
 	}
 	return identities, nil
@@ -64,7 +65,8 @@ func completedMessageIdentities(messages []*upstream.JobCompleted) []scaler.Runn
 			continue
 		}
 		identities = append(identities, scaler.RunnerMessageIdentity{
-			RequestID: completed.RunnerRequestID, RunnerName: completed.RunnerName, GitHubRunnerID: int64(completed.RunnerID),
+			RunnerIdentity: scaler.RunnerIdentity{RequestID: completed.RunnerRequestID, RunnerName: completed.RunnerName},
+			GitHubRunnerID: int64(completed.RunnerID),
 		})
 	}
 	return identities

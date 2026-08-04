@@ -32,12 +32,15 @@ func TestSQLiteMessageUpdateRollsBackDemandFailure(t *testing.T) {
 func TestSQLiteMessageUpdateRollsBackLifecycleFailure(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithStart(), func(mock sqlmock.Sqlmock, failure error) {
 		mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 0))
+		expectSQLiteIdentityMatch(mock, "runner_lifecycle")
 		mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(failure)
 	})
 }
 
 func TestSQLiteMessageUpdateRollsBackCompletionFailure(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithCompletion(), func(mock sqlmock.Sqlmock, failure error) {
+		mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 0))
+		expectSQLiteIdentityMatch(mock, "runner_lifecycle")
 		mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(failure)
 	})
 }
@@ -46,10 +49,151 @@ func TestSQLiteMessageUpdateRollsBackStatisticsWithPriorEffects(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithDemandAndStart(), expectSQLiteMessageStatisticsFailure)
 }
 
+func TestSQLiteMessageUpdateTreatsMissingLifecycleAsIdempotent(t *testing.T) {
+	for name, applyIdentity := range map[string]func(*MessageUpdate, RunnerMessageIdentity){
+		"started": func(update *MessageUpdate, identity RunnerMessageIdentity) {
+			update.Started = []RunnerMessageIdentity{identity}
+		},
+		"completed": func(update *MessageUpdate, identity RunnerMessageIdentity) {
+			update.Completed = []RunnerMessageIdentity{identity}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openSQLiteCapacityStore(t)
+			control, err := store.StartController(ctx, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			update := validSQLiteMessageUpdate()
+			update.ControllerEpoch = control.Control.ControllerEpoch
+			applyIdentity(&update, RunnerMessageIdentity{
+				RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: "missing-runner"},
+			})
+			if _, err = store.ApplyMessageUpdate(ctx, update); err != nil {
+				t.Fatalf("missing %s lifecycle error = %v", name, err)
+			}
+		})
+	}
+}
+
+func TestSQLiteMessageUpdateRollsBackRejectedIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		runners  []RunnerIdentity
+		identity RunnerIdentity
+		want     error
+	}{
+		{
+			name: "mismatch",
+			runners: []RunnerIdentity{
+				{RequestID: 42, RunnerName: "runner-one"},
+				{RequestID: 43, RunnerName: "runner-two"},
+			},
+			identity: RunnerIdentity{RequestID: 42, RunnerName: "runner-two"},
+			want:     ErrRunnerIdentityMismatch,
+		},
+		{
+			name: "invariant",
+			runners: []RunnerIdentity{
+				{RequestID: 42, RunnerName: "runner-one"},
+				{RequestID: 42, RunnerName: "runner-two"},
+			},
+			identity: RunnerIdentity{RequestID: 42},
+			want:     ErrRunnerIdentityInvariant,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertSQLiteMessageRejectedIdentityRollsBack(t, test.runners, test.identity, test.want)
+		})
+	}
+}
+
+func assertSQLiteMessageRejectedIdentityRollsBack(
+	t *testing.T,
+	runnerIdentities []RunnerIdentity,
+	messageIdentity RunnerIdentity,
+	wantedError error,
+) {
+	t.Helper()
+	store, controllerEpoch, observedAt := seedSQLiteRejectedIdentityMessageState(t, runnerIdentities)
+	update := validSQLiteMessageUpdate()
+	update.ControllerEpoch = controllerEpoch
+	update.Started = []RunnerMessageIdentity{{RunnerIdentity: messageIdentity}}
+	_, err := store.ApplyMessageUpdate(context.Background(), update)
+	if !errors.Is(err, wantedError) {
+		t.Fatalf("message identity error = %v, want %v", err, wantedError)
+	}
+	assertSQLiteMessageDemandUnchanged(t, store, observedAt)
+	assertSQLiteMessageRunnersRemainWaiting(t, store)
+}
+
+func seedSQLiteRejectedIdentityMessageState(
+	t *testing.T,
+	runnerIdentities []RunnerIdentity,
+) (*SQLiteDemandStore, int64, time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	store := openSQLiteCapacityStore(t)
+	control, err := store.StartController(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := time.Unix(100, 0).UTC()
+	if err = store.Apply(ctx, "linux", []JobDemand{{
+		Repository: "repo", RequestID: 42, QueueTime: observedAt,
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range runnerIdentities {
+		registerSQLiteMessageIdentityRunner(t, store, identity, observedAt)
+	}
+	return store, control.Control.ControllerEpoch, observedAt
+}
+
+func assertSQLiteMessageDemandUnchanged(t *testing.T, store *SQLiteDemandStore, observedAt time.Time) {
+	t.Helper()
+	demand, err := store.Ordered(context.Background(), "linux")
+	if err != nil || len(demand) != 1 || demand[0].RequestID != 42 || !demand[0].QueueTime.Equal(observedAt) {
+		t.Fatalf("rolled-back demand = %#v, %v", demand, err)
+	}
+}
+
+func assertSQLiteMessageRunnersRemainWaiting(t *testing.T, store *SQLiteDemandStore) {
+	t.Helper()
+	runners, err := store.RunnerLifecycles(context.Background(), "linux", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range runners {
+		if runner.Phase != RunnerWaitingForJob {
+			t.Fatalf("runner mutated after rejected identity: %#v", runner)
+		}
+	}
+}
+
+func registerSQLiteMessageIdentityRunner(
+	t *testing.T,
+	store *SQLiteDemandStore,
+	identity RunnerIdentity,
+	createdAt time.Time,
+) {
+	t.Helper()
+	if err := store.RegisterRunner(context.Background(), RunnerLifecycle{
+		ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderDocker,
+		RunnerName: identity.RunnerName, RequestID: identity.RequestID,
+		Phase: RunnerWaitingForJob, CreatedAt: createdAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func expectSQLiteMessageStatisticsFailure(mock sqlmock.Sqlmock, failure error) {
 	expectNoExistingSQLiteExactObligation(mock)
 	mock.ExpectExec("INSERT INTO demand").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectSQLiteIdentityMatch(mock, "runner_lifecycle")
 	mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT controller_epoch").WillReturnRows(sqlmock.NewRows([]string{"controller_epoch", "observed_at"}))
@@ -88,7 +232,9 @@ func TestSQLiteMessageUpdateReconcilesStatisticsAgainstPostCompletionCapacity(t 
 	update := MessageUpdate{
 		AppID: 7, Repository: "repo", ScaleSet: "linux", ControllerEpoch: controllerEpoch,
 		AssignedJobs: 1, ActiveCapacity: 1, ObservedAt: observedAt,
-		Completed: []RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}},
+		Completed: []RunnerMessageIdentity{{
+			RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: "linux-42"},
+		}},
 	}
 	result := applySQLiteMessageUpdate(ctx, t, store, update)
 	if result.AssignedObligations.Create != 1 {
@@ -295,18 +441,24 @@ func sqliteMessageUpdateWithDemand() MessageUpdate {
 
 func sqliteMessageUpdateWithStart() MessageUpdate {
 	update := validSQLiteMessageUpdate()
-	update.Started = []RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Started = []RunnerMessageIdentity{{
+		RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: "linux-42"},
+	}}
 	return update
 }
 
 func sqliteMessageUpdateWithCompletion() MessageUpdate {
 	update := validSQLiteMessageUpdate()
-	update.Completed = []RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Completed = []RunnerMessageIdentity{{
+		RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: "linux-42"},
+	}}
 	return update
 }
 
 func sqliteMessageUpdateWithDemandAndStart() MessageUpdate {
 	update := sqliteMessageUpdateWithDemand()
-	update.Started = []RunnerMessageIdentity{{RequestID: 42, RunnerName: "linux-42"}}
+	update.Started = []RunnerMessageIdentity{{
+		RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: "linux-42"},
+	}}
 	return update
 }

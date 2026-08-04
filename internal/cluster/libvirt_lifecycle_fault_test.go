@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestRegisterLibvirtRunnerReportsDatabaseFailures(t *testing.T) {
@@ -33,7 +34,8 @@ func TestRegisterLibvirtRunnerReportsDatabaseFailures(t *testing.T) {
 }
 
 func TestCompleteLibvirtJobReportsDatabaseFailures(t *testing.T) {
-	completion := JobCompletion{ScaleSet: "linux", Repository: "repo", RequestID: 42}
+	completion := JobCompletion{ScaleSet: "linux", Repository: "repo",
+		RunnerIdentity: scaler.RunnerIdentity{RequestID: 42}}
 	connections := []*fakeDatabaseConnection{
 		{beginErr: databaseFailure()},
 		{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}},
@@ -81,7 +83,10 @@ func TestPendingLibvirtReapsReportsDatabaseFailures(t *testing.T) {
 
 func TestConfirmLibvirtReapedReportsDatabaseFailures(t *testing.T) {
 	runner := testClusterLibvirtRunner()
-	for _, connection := range []*fakeDatabaseConnection{{execErrors: []error{databaseFailure()}}, {execTag: pgconn.NewCommandTag("DELETE 0")}} {
+	for _, connection := range []*fakeDatabaseConnection{
+		{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}},
+		{transaction: &fakeDatabaseTransaction{execTags: []pgconn.CommandTag{pgconn.NewCommandTag("DELETE 0")}}},
+	} {
 		if err := storeWithConnection(connection).ConfirmLibvirtReaped(context.Background(), runner); err == nil {
 			t.Fatal("expected failure")
 		}

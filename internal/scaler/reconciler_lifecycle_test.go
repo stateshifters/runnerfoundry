@@ -65,12 +65,18 @@ func (store *lifecycleErrorStore) RunnerLifecycles(ctx context.Context, scaleSet
 }
 
 func (store *lifecycleErrorStore) RequestRunnerReap(
-	ctx context.Context, scaleSet, repository string, requestID int64, runnerName, reason string, requestedAt time.Time,
+	ctx context.Context, scaleSet, repository string, identity RunnerIdentity, reason string, requestedAt time.Time,
 ) error {
 	if store.reapErr != nil {
 		return store.reapErr
 	}
-	return store.MemoryDemandStore.RequestRunnerReap(ctx, scaleSet, repository, requestID, runnerName, reason, requestedAt)
+	return store.MemoryDemandStore.RequestRunnerReap(ctx, scaleSet, repository, identity, reason, requestedAt)
+}
+
+func (store *lifecycleErrorStore) BindRunnerIdentity(
+	ctx context.Context, scaleSet, repository string, identity RunnerIdentity, githubRunnerID int64, startedAt time.Time,
+) error {
+	return store.MemoryDemandStore.BindRunnerIdentity(ctx, scaleSet, repository, identity, githubRunnerID, startedAt)
 }
 
 func (store *lifecycleErrorStore) RegisterRunner(ctx context.Context, runner RunnerLifecycle) error {

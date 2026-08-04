@@ -135,7 +135,8 @@ func (reconciler Reconciler) reapUnregisteredWaiting(
 			continue
 		}
 		if err = reconciler.ScaleSet.Lifecycle.RequestRunnerReap(ctx, runner.ScaleSet, runner.Repository,
-			runner.RequestID, runner.RunnerName, "github_registration_absent", reconciler.now()); err != nil {
+			RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName},
+			"github_registration_absent", reconciler.now()); err != nil {
 			return nil, reapRequests, fmt.Errorf("request orphaned runner reap %q: %w", runner.RunnerName, err)
 		}
 		reapRequests++
@@ -181,7 +182,8 @@ func (reconciler Reconciler) requestAbsentBusyRunnerReaps(
 			continue
 		}
 		if err := reconciler.ScaleSet.Lifecycle.RequestRunnerReap(
-			ctx, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName,
+			ctx, runner.ScaleSet, runner.Repository,
+			RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName},
 			"provider_instance_absent", reconciler.now(),
 		); err != nil {
 			return reapRequests, fmt.Errorf("request absent busy runner reap %q: %w", runner.RunnerName, err)

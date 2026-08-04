@@ -5,13 +5,15 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestClusterJobCompletionReconcilesInvalidRequestByRunnerNameOnly(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{}
 	connection := &fakeDatabaseConnection{transaction: transaction}
 	completion := JobCompletion{
-		ScaleSet: "linux", Repository: "repo", RequestID: 0, RunnerName: "linux-legacy",
+		ScaleSet: "linux", Repository: "repo", RunnerIdentity: scaler.RunnerIdentity{RunnerName: "linux-legacy"},
 	}
 
 	if err := storeWithConnection(connection).CompleteJob(context.Background(), completion); err != nil {
@@ -21,7 +23,7 @@ func TestClusterJobCompletionReconcilesInvalidRequestByRunnerNameOnly(t *testing
 		t.Fatalf("invalid completion statements = %d, want lifecycle and assignment statements", len(transaction.executions))
 	}
 	for _, execution := range transaction.executions[:2] {
-		if len(execution.arguments) != 4 || execution.arguments[2] != int64(0) || execution.arguments[3] != "linux-legacy" {
+		if len(execution.arguments) != 3 || execution.arguments[2] != "linux-legacy" {
 			t.Fatalf("invalid completion identity arguments = %#v", execution.arguments)
 		}
 	}
@@ -39,7 +41,8 @@ func TestClusterJobCompletionPreservesPositiveRequestIdentity(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{}
 	connection := &fakeDatabaseConnection{transaction: transaction}
 	completion := JobCompletion{
-		ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "different-runner",
+		ScaleSet: "linux", Repository: "repo",
+		RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "different-runner"},
 	}
 
 	if err := storeWithConnection(connection).CompleteJob(context.Background(), completion); err != nil {
@@ -61,7 +64,7 @@ func TestClusterJobCompletionKeepsInvalidReconciliationFailuresRetryable(t *test
 	connection := &fakeDatabaseConnection{transaction: transaction}
 
 	err := storeWithConnection(connection).CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: "linux", Repository: "repo", RunnerName: "linux-legacy",
+		ScaleSet: "linux", Repository: "repo", RunnerIdentity: scaler.RunnerIdentity{RunnerName: "linux-legacy"},
 	})
 	if !errors.Is(err, failure) {
 		t.Fatalf("expected reconciliation failure, got %v", err)
@@ -75,7 +78,8 @@ func TestClusterJobCompletionReportsObservedAssignmentFailure(t *testing.T) {
 	failure := errors.New("database unavailable")
 	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, nil, failure}}
 	err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).CompleteJob(
-		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerName: "runner"},
+		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo",
+			RunnerIdentity: scaler.RunnerIdentity{RunnerName: "runner"}},
 	)
 	if !errors.Is(err, failure) {
 		t.Fatalf("observed assignment completion error = %v", err)
@@ -89,7 +93,8 @@ func TestClusterJobCompletionReportsPositiveDemandFailure(t *testing.T) {
 	failure := errors.New("database unavailable")
 	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, nil, nil, nil, failure}}
 	err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).CompleteJob(
-		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo", RequestID: 42},
+		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo",
+			RunnerIdentity: scaler.RunnerIdentity{RequestID: 42}},
 	)
 	if !errors.Is(err, failure) {
 		t.Fatalf("positive demand completion error = %v", err)
@@ -100,7 +105,8 @@ func TestClusterJobCompletionReportsAggregateObligationFailure(t *testing.T) {
 	failure := errors.New("database unavailable")
 	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, nil, nil, failure}}
 	err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).CompleteJob(
-		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerName: "runner"},
+		context.Background(), JobCompletion{ScaleSet: "linux", Repository: "repo",
+			RunnerIdentity: scaler.RunnerIdentity{RunnerName: "runner"}},
 	)
 	if !errors.Is(err, failure) {
 		t.Fatalf("aggregate obligation completion error = %v", err)

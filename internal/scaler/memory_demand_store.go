@@ -83,17 +83,14 @@ func (store *MemoryDemandStore) RegisterLibvirtRunner(_ context.Context, runner 
 }
 
 func (store *MemoryDemandStore) CompleteJob(_ context.Context, completion JobCompletion) error {
-	if completion.RunnerName != "" {
-		runner := LibvirtRunnerLifecycle(completion)
-		store.libvirtRunners[runnerLifecycleKey(runner)] = memoryLibvirtLifecycle{runner: runner, reapRequested: true}
+	key, lifecycle, err := store.resolveMemoryLibvirtRunner(
+		completion.ScaleSet, completion.Repository, completion.RunnerIdentity, anyMemoryLibvirtRunner,
+	)
+	if err != nil {
+		return err
 	}
-	for key, lifecycle := range store.libvirtRunners {
-		if lifecycle.runner.ScaleSet == completion.ScaleSet && lifecycle.runner.Repository == completion.Repository &&
-			lifecycle.runner.RequestID == completion.RequestID {
-			lifecycle.reapRequested = true
-			store.libvirtRunners[key] = lifecycle
-		}
-	}
+	lifecycle.reapRequested = true
+	store.libvirtRunners[key] = lifecycle
 	delete(store.demand, demandKey{Repository: completion.Repository, RequestID: completion.RequestID})
 	return nil
 }
@@ -114,8 +111,49 @@ func (store *MemoryDemandStore) PendingLibvirtReaps(
 }
 
 func (store *MemoryDemandStore) ConfirmLibvirtReaped(_ context.Context, runner LibvirtRunnerLifecycle) error {
-	delete(store.libvirtRunners, runnerLifecycleKey(runner))
+	key, _, err := store.resolveMemoryLibvirtRunner(
+		runner.ScaleSet, runner.Repository, runner.Identity(), pendingMemoryLibvirtRunner,
+	)
+	if err != nil {
+		return err
+	}
+	delete(store.libvirtRunners, key)
 	return nil
+}
+
+type memoryLibvirtEligibility func(memoryLibvirtLifecycle) bool
+
+func anyMemoryLibvirtRunner(memoryLibvirtLifecycle) bool { return true }
+
+func pendingMemoryLibvirtRunner(lifecycle memoryLibvirtLifecycle) bool {
+	return lifecycle.reapRequested
+}
+
+func (store *MemoryDemandStore) resolveMemoryLibvirtRunner(
+	scaleSet, repository string,
+	identity RunnerIdentity,
+	eligible memoryLibvirtEligibility,
+) (string, memoryLibvirtLifecycle, error) {
+	if err := identity.Validate(); err != nil {
+		return "", memoryLibvirtLifecycle{}, err
+	}
+	selection := memoryIdentitySelection{}
+	selectedKey := ""
+	selectedLifecycle := memoryLibvirtLifecycle{}
+	for key, lifecycle := range store.libvirtRunners {
+		runner := lifecycle.runner
+		if runner.ScaleSet != scaleSet || runner.Repository != repository || !eligible(lifecycle) {
+			continue
+		}
+		if selection.observe(identity, runner.RequestID, runner.RunnerName) {
+			selectedKey = key
+			selectedLifecycle = lifecycle
+		}
+	}
+	if err := selection.result(identity); err != nil {
+		return "", memoryLibvirtLifecycle{}, err
+	}
+	return selectedKey, selectedLifecycle, nil
 }
 
 func runnerLifecycleKey(runner LibvirtRunnerLifecycle) string {
