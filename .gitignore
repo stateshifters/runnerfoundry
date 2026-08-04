@@ -6,3 +6,4 @@ coverage.out
 .tmp/
 examples/libvirt-ubuntu-runner/output/
 examples/libvirt-ubuntu-runner/packer-key*
+remediation-plan/
