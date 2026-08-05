@@ -1,1 +1,1 @@
-Must adhere to local skill, [Readme](README.md) and [Contributing](CONTRIBUTING.md) guidelines, and ensure that your output is correct, complete, and aligned with the project's goals and guidelines.
+Must adhere to local skills, the normative [product contract](docs/PRD.md), the operator [README](README.md), and [Contributing](CONTRIBUTING.md). Output must be correct, complete, and aligned with those documents. No implementation or documentation may define a job lifecycle that competes with the product contract.

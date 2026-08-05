@@ -63,7 +63,7 @@ The sample XML uses the libvirt `default` network and a transient overlay backed
 
 ## Configure RunnerFoundry
 
-Point a libvirt infrastructure provider at the installed XML:
+Point a libvirt-backed Runner Pool at the installed XML through the GitHub adapter's `scale_sets` setting:
 
 ```yaml
 scale_sets:

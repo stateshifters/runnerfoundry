@@ -24,7 +24,7 @@ sudo install -D -m 0644 output/runnerfoundry-ubuntu.qcow2 \
 sudo install -D -m 0644 domain.xml /etc/runnerfoundry/domain.xml
 ```
 
-Configure the scale set to use the template:
+Configure the Runner Pool through the GitHub adapter's `scale_sets` setting:
 
 ```yaml
 scale_sets:

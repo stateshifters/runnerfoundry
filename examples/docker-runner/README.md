@@ -2,14 +2,14 @@
 
 RunnerFoundry does not build container images or require this Compose file. The operator may supply any Compose service whose runner consumes `ACTIONS_RUNNER_INPUT_JITCONFIG`, executes one job, and exits.
 
-This optional example uses GitHub's runner image as the smallest evaluation setup. From the repository root, copy it to the path referenced by the RunnerFoundry scale set:
+This optional example uses GitHub's runner image as the smallest evaluation setup. From the repository root, copy it to the path referenced by the Docker-backed Runner Pool:
 
 ```sh
 cd examples/docker-runner
 sudo install -D -m 0644 compose.yaml /etc/runnerfoundry/compose.yaml
 ```
 
-Configure the provider:
+Configure the Runner Pool through the GitHub adapter's `scale_sets` setting:
 
 ```yaml
 scale_sets:

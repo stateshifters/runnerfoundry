@@ -5,8 +5,27 @@ discussions, or any other method with the owners of this repository before makin
 
 Please note we have a code of conduct, please follow it in all your interactions with the project.
 
-The [architecture overview](docs/architecture.md) describes the application's current system boundaries, runtime modes, and
-interactions. Read it before changing behavior that crosses those boundaries.
+The [product contract](docs/PRD.md) is the sole authority for product behavior and terminology. Read it before changing job
+ingestion, queueing, execution, result reporting, capacity publication, persistence, or deployment behavior. The
+[architecture overview](docs/architecture.md) explains the boundaries that preserve that contract.
+
+## Product contract authority
+
+`docs/PRD.md` and `docs/architecture.md` are binding product requirements. They are not suggestions, proposals,
+implementation notes, or descriptions that may be rewritten to match the current code. Any edit to either document requires
+explicit user approval for that exact change, including edits presented as clarification, cleanup, reconciliation, or
+refactoring. A general request to change code does not grant permission to change the product contract.
+
+When code conflicts with these documents, the code is wrong. Change the implementation to satisfy the contract; do not weaken,
+reinterpret, or remove the contract to accommodate the implementation. If the requested work cannot comply, stop and obtain
+explicit user direction before changing either document or proceeding with a conflicting implementation.
+
+The operator [README](README.md), examples, and other task documentation must conform to the product contract. Correct those
+documents when they drift, but do not use them to introduce, override, or reinterpret product behavior.
+
+Documentation and core code use the source-neutral terms **Git source**, **source adapter**, **job**, **Runner Pool**,
+**runner**, and **result**. Source-specific terminology belongs only in its adapter, exact external API names, and explicitly
+source-specific operator instructions. GitHub runner scale-set terminology must not enter core contracts.
 
 ## Quality bar (what good looks like)
 
@@ -39,8 +58,8 @@ documentation changes, internal removals, and mechanical cleanups do not require
 
 ## Shared infrastructure risk
 
-This CLI relies on shared infrastructure and credentials. That means a single bad actor can degrade or remove service for
-every user, and recovering may require a coordinated release. Treat any change that could amplify abuse, increase request
+This CLI relies on shared infrastructure and credentials. A single bad actor can therefore degrade or remove service for
+every user, and restoring service may require coordinated work. Treat any change that could amplify abuse, increase request
 volume, or relax safeguards as a safety boundary.
 
 Do not add user-facing knobs or configuration that let users change behavior in ways that could increase external load or
