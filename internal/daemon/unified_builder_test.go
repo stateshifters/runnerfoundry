@@ -65,11 +65,8 @@ func TestBuildUnifiedGenerationRejectsInvalidRunnerPools(t *testing.T) {
 	valid := validBuilderDependencies(t)
 	missingProvider := valid
 	missingProvider.providers = nil
-	invalidTimeout := builderConfig()
-	invalidTimeout.ScaleSets[0].JobStartTimeout = "bad"
 	assertBuildRejected(t, config.Config{GitHub: config.GitHubConfig{DiscoveryInterval: "1m"}}, valid)
 	assertBuildRejected(t, builderConfig(), missingProvider)
-	assertBuildRejected(t, invalidTimeout, valid)
 }
 
 func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
@@ -96,12 +93,18 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	store := newBuilderStoreFake()
 	store.operationErr = wantErr
 	manager := newBuilderManager(t, store)
-	orchestrator := runtimeengine.NewOrchestrator(store, manager.Source(), builderProviderFake{}, daemonTestID(1), builderTime)
-	assertLifecycleAdapterFailures(t, orchestrator, wantErr)
+	orchestrator := runtimeengine.NewOrchestrator(store, manager.Source(), builderProviderFake{}, daemonTestID(1))
 	assertPoolAdapterFailures(t, orchestrator, wantErr)
 	store.operationErr = nil
-	assertLifecycleAdapterSuccess(t, orchestrator)
 	assertPoolAdapterSuccess(t, orchestrator)
+	pool := orchestrationPool{orchestrator: orchestrator, runnerPool: "linux"}
+	if err := pool.Cleanup(context.Background()); err != nil {
+		t.Fatalf("clean up empty pool: %v", err)
+	}
+	store.operationErr = wantErr
+	if err := pool.Cleanup(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("cleanup error = %v, want %v", err, wantErr)
+	}
 	closers := configuredClosers(unifiedBuilderDependencies{
 		leadership: newExclusiveLeadership(errors.New("not leader"), nil),
 		closers:    []runtimeCloser{closerFake{events: &[]string{}, name: "state"}},
@@ -111,42 +114,14 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	}
 }
 
-func assertLifecycleAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestrator) {
-	t.Helper()
-	lifecycle := orchestrationLifecycle{orchestrator: orchestrator, batchSize: 1}
-	if err := lifecycle.RecoverInterruptedAcquisitions(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := lifecycle.RetryPendingResults(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func assertPoolAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestrator) {
 	t.Helper()
 	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(orchestrator, "linux", 1), orchestrator: orchestrator}
 	if err := pool.RequestWork(context.Background(), "linux"); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.StartAcquired(context.Background(), "linux"); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.FailUnstarted(context.Background(), "linux", time.Minute); err != nil {
-		t.Fatal(err)
-	}
 	if err := pool.Reconcile(context.Background(), "linux"); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func assertLifecycleAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchestrator, wantErr error) {
-	t.Helper()
-	lifecycle := orchestrationLifecycle{orchestrator: orchestrator, batchSize: 1}
-	if err := lifecycle.RecoverInterruptedAcquisitions(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("recovery error = %v", err)
-	}
-	if err := lifecycle.RetryPendingResults(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("retry error = %v", err)
 	}
 }
 
@@ -155,12 +130,6 @@ func assertPoolAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchest
 	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(orchestrator, "linux", 1), orchestrator: orchestrator}
 	if err := pool.RequestWork(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("request error = %v", err)
-	}
-	if err := pool.StartAcquired(context.Background(), "linux"); !errors.Is(err, wantErr) {
-		t.Fatalf("start error = %v", err)
-	}
-	if err := pool.FailUnstarted(context.Background(), "linux", time.Minute); !errors.Is(err, wantErr) {
-		t.Fatalf("timeout error = %v", err)
 	}
 	if err := pool.Reconcile(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("reconcile error = %v", err)
@@ -171,7 +140,7 @@ func builderConfig() config.Config {
 	return config.Config{
 		GitHub: config.GitHubConfig{DiscoveryInterval: "1m"},
 		ScaleSets: []config.ScaleSetConfig{{
-			Name: "linux", RunnerGroup: "default", MaxRunners: 1, JobStartTimeout: "1m",
+			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
 		}},
 	}
 }
@@ -223,39 +192,17 @@ func newBuilderStoreFake() *builderStoreFake {
 	}
 }
 
-func (*builderStoreFake) Enqueue(context.Context, core.JobRequest) (core.JobRecord, bool, error) {
-	return core.JobRecord{}, false, nil
+func (*builderStoreFake) Enqueue(context.Context, core.JobRequest) (core.Job, bool, error) {
+	return core.Job{}, false, nil
 }
-func (*builderStoreFake) ClaimOldest(context.Context, core.RunnerPool, core.MemberID, time.Time) (core.JobRecord, bool, error) {
-	return core.JobRecord{}, false, nil
+func (store *builderStoreFake) TakeOldest(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
+	return core.ProcessingJob{}, false, store.operationErr
 }
-func (*builderStoreFake) MarkStartedBySource(context.Context, core.SourceReference, time.Time) (core.JobRecord, error) {
-	return core.JobRecord{}, nil
+func (*builderStoreFake) CancelQueued(context.Context, core.SourceReference) error { return nil }
+func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+	return nil, store.operationErr
 }
-func (*builderStoreFake) BeginAcquisition(context.Context, core.JobID, time.Time) (core.JobRecord, error) {
-	return core.JobRecord{}, nil
-}
-func (*builderStoreFake) ConfirmAcquisition(context.Context, core.JobID, time.Time) (core.JobRecord, error) {
-	return core.JobRecord{}, nil
-}
-func (*builderStoreFake) SetResultPending(context.Context, core.JobID, core.Result) (core.JobRecord, error) {
-	return core.JobRecord{}, nil
-}
-func (*builderStoreFake) SetResultPendingBySource(context.Context, core.SourceReference, core.Result) (core.JobRecord, error) {
-	return core.JobRecord{}, nil
-}
-func (*builderStoreFake) Finalize(context.Context, core.JobID, core.ResultDelivery) (core.Receipt, error) {
-	return core.Receipt{}, nil
-}
-func (*builderStoreFake) LookupReceipt(context.Context, core.SourceReference) (core.Receipt, bool, error) {
-	return core.Receipt{}, false, nil
-}
-func (*builderStoreFake) SetMemberAttemptsResultPending(context.Context, core.MemberID, core.Result) ([]core.JobRecord, error) {
-	return nil, nil
-}
-func (*builderStoreFake) Lookup(context.Context, core.JobID) (core.JobRecord, bool, error) {
-	return core.JobRecord{}, false, nil
-}
+func (*builderStoreFake) RemoveProcessing(context.Context, core.JobID) error { return nil }
 
 func (store *builderStoreFake) PublishMemberState(
 	context.Context,
@@ -289,29 +236,4 @@ func (store *builderStoreFake) Registrations(context.Context) ([]state.Registrat
 }
 func (*builderStoreFake) DeleteRegistration(context.Context, string, core.RunnerPool) error {
 	return nil
-}
-
-func (store *builderStoreFake) PendingAcquisitions(ctx context.Context, limit int) ([]core.JobRecord, error) {
-	if store.operationErr != nil {
-		return nil, store.operationErr
-	}
-	return nil, nil
-}
-func (store *builderStoreFake) PendingResults(ctx context.Context, limit int) ([]core.JobRecord, error) {
-	if store.operationErr != nil {
-		return nil, store.operationErr
-	}
-	return nil, nil
-}
-func (store *builderStoreFake) AttemptsByMember(ctx context.Context, member core.MemberID, pool core.RunnerPool) ([]core.JobRecord, error) {
-	if store.operationErr != nil {
-		return nil, store.operationErr
-	}
-	return nil, nil
-}
-func (store *builderStoreFake) SetUnstartedAttemptsResultPending(ctx context.Context, pool core.RunnerPool, before time.Time, result core.Result) ([]core.JobRecord, error) {
-	if store.operationErr != nil {
-		return nil, store.operationErr
-	}
-	return nil, nil
 }

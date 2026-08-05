@@ -124,24 +124,22 @@ func (session *Session) Close(ctx context.Context) error {
 	return nil
 }
 
-// AcquireRequest associates one already-routed GitHub request with this
-// session. The caller must route by SessionKey; this method never retries a
-// rejected claim or acquires any other request.
-func (session *Session) AcquireRequest(
+// AcquireRequests acquires one validated message batch through its owning
+// session. The returned IDs are the subset GitHub granted to this caller.
+func (session *Session) AcquireRequests(
 	ctx context.Context,
-	requestID int64,
-) error {
-	if requestID <= 0 {
-		return fmt.Errorf("GitHub request ID %d must be positive", requestID)
+	requestIDs []int64,
+) ([]int64, error) {
+	for _, requestID := range requestIDs {
+		if requestID <= 0 {
+			return nil, fmt.Errorf("GitHub request ID %d must be positive", requestID)
+		}
 	}
-	acquiredIDs, err := session.messageAPI.AcquireJobs(ctx, []int64{requestID})
+	acquiredIDs, err := session.messageAPI.AcquireJobs(ctx, requestIDs)
 	if err != nil {
-		return fmt.Errorf("acquire GitHub request %d: %w", requestID, err)
+		return nil, fmt.Errorf("acquire GitHub requests: %w", err)
 	}
-	if !containsRequest(acquiredIDs, requestID) {
-		return fmt.Errorf("GitHub request %d was not acquired", requestID)
-	}
-	return nil
+	return acquiredIDs, nil
 }
 
 // GenerateBootstrap asks GitHub for opaque JIT runner configuration without
@@ -164,13 +162,4 @@ func (client *Client) GenerateBootstrap(
 		return nil, fmt.Errorf("generate JIT bootstrap for runner %q returned empty configuration", runnerName)
 	}
 	return []byte(jitConfig.EncodedJITConfig), nil
-}
-
-func containsRequest(acquiredIDs []int64, requestID int64) bool {
-	for _, acquiredID := range acquiredIDs {
-		if acquiredID == requestID {
-			return true
-		}
-	}
-	return false
 }

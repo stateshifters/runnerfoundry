@@ -139,37 +139,10 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	if scaleSet.MaxRunners <= 0 {
 		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
 	}
-	if scaleSet.JobStartTimeout == "" {
-		scaleSet.JobStartTimeout = defaultJobStartTimeout
-	}
-	jobStartTimeout, err := time.ParseDuration(scaleSet.JobStartTimeout)
-	if err != nil {
-		return fmt.Errorf("scale set %q job_start_timeout: %w", scaleSet.Name, err)
-	}
-	if jobStartTimeout <= 0 {
-		return fmt.Errorf("scale set %q job_start_timeout must be positive", scaleSet.Name)
-	}
 	if err := scaleSet.validateProvider(); err != nil {
 		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
 	}
 	return nil
-}
-
-// JobStartDuration returns the validated maximum time a provisioned runner may
-// wait for JobStarted before its one attempt fails.
-func (scaleSet ScaleSetConfig) JobStartDuration() (time.Duration, error) {
-	configuredTimeout := scaleSet.JobStartTimeout
-	if configuredTimeout == "" {
-		configuredTimeout = defaultJobStartTimeout
-	}
-	jobStartTimeout, err := time.ParseDuration(configuredTimeout)
-	if err != nil {
-		return 0, fmt.Errorf("parse validated job start timeout: %w", err)
-	}
-	if jobStartTimeout <= 0 {
-		return 0, errors.New("parse validated job start timeout: duration must be positive")
-	}
-	return jobStartTimeout, nil
 }
 
 func (scaleSet *ScaleSetConfig) validateProvider() error {

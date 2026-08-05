@@ -38,7 +38,7 @@ type MemberRegistry interface {
 }
 
 type RunnerPoolCapacityStore interface {
-	// AvailableRunnerPoolCapacity returns live member capacity minus queued and attempting
-	// jobs for the pool, clamped to zero. Result-pending jobs do not consume capacity.
+	// AvailableRunnerPoolCapacity returns live member capacity minus queued jobs and
+	// processing jobs owned by live members, clamped to zero.
 	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
 }

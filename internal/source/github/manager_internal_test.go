@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
@@ -74,18 +73,5 @@ func assertTransportClientFailure(
 	}
 	if err := client.PruneRunnerPools(context.Background(), "default", nil); !errors.Is(err, wantErr) {
 		t.Fatalf("prune error = %v", err)
-	}
-}
-
-func TestCloseLeaderPreservesRoutesWhenReplacementValidationFails(t *testing.T) {
-	t.Parallel()
-
-	source, err := NewSource(nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := &Manager{source: source, members: []MemberRoute{{RunnerPool: core.RunnerPool("invalid")}}}
-	if err := manager.CloseLeader(context.Background()); err == nil {
-		t.Fatal("CloseLeader() error = nil, want invalid replacement failure")
 	}
 }

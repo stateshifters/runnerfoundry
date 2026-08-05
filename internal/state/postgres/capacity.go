@@ -18,8 +18,7 @@ const heartbeatMemberSQL = `INSERT INTO public.runnerfoundry_members(member_id, 
 const insertCapacitySQL = `INSERT INTO public.runnerfoundry_member_runner_pools(member_id, runner_pool, capacity)
 	VALUES($1, $2, $3)`
 const removeMemberCapacitiesSQL = `DELETE FROM public.runnerfoundry_member_runner_pools WHERE member_id = $1`
-const expireMemberSQL = `DELETE FROM public.runnerfoundry_members WHERE member_id = $1
-	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_jobs WHERE member_id = $2)`
+const expireMemberSQL = `DELETE FROM public.runnerfoundry_members WHERE member_id = $1`
 const listLiveMembersSQL = `SELECT member_id FROM public.runnerfoundry_members WHERE heartbeat_at >= $1 ORDER BY member_id`
 const listExpiredMembersSQL = `SELECT member_id FROM public.runnerfoundry_members WHERE heartbeat_at < $1 ORDER BY member_id`
 const countLiveMembersSQL = `SELECT COUNT(*) FROM public.runnerfoundry_members WHERE heartbeat_at >= $1`
@@ -30,11 +29,13 @@ const availableCapacitySQL = `SELECT
 		JOIN public.runnerfoundry_members members ON members.member_id = pools.member_id
 		WHERE pools.runner_pool = $1 AND members.heartbeat_at >= $2
 	), 0), (
-		SELECT COUNT(*) FROM public.runnerfoundry_jobs
-		WHERE runner_pool = $1 AND state = 'queued'
+		SELECT COUNT(*) FROM public.runnerfoundry_queued_jobs
+		WHERE runner_pool = $1
 	), (
-		SELECT COUNT(*) FROM public.runnerfoundry_jobs
-		WHERE runner_pool = $1 AND state = 'attempting' AND member_id IS NOT NULL
+		SELECT COUNT(*)
+		FROM public.runnerfoundry_processing_jobs processing
+		JOIN public.runnerfoundry_members members ON members.member_id = processing.member_id
+		WHERE processing.runner_pool = $1 AND members.heartbeat_at >= $2
 	)`
 
 func (store *Store) PublishMemberState(
@@ -87,23 +88,20 @@ func insertMemberCapacities(
 	return nil
 }
 
-func (store *Store) ExpireMember(ctx context.Context, memberID core.MemberID) error {
+func (store *Store) ExpireMember(ctx context.Context, memberID core.MemberID) (resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin expire member: %w", err)
 	}
 	open := true
-	defer rollback(ctx, transaction, &open)
-	if _, err := transaction.Execute(ctx, removeMemberCapacitiesSQL, memberID); err != nil {
-		return fmt.Errorf("remove expired member capacities: %w", err)
+	defer rollback(ctx, transaction, &open, &resultErr)
+	if _, err := transaction.Execute(ctx, expireMemberSQL, memberID); err != nil {
+		return fmt.Errorf("remove expired member: %w", err)
 	}
-	if _, err := transaction.Execute(ctx, expireMemberSQL, memberID, memberID); err != nil {
-		return fmt.Errorf("remove unreferenced expired member: %w", err)
-	}
-	open = false
 	if err := transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit expire member: %w", err)
 	}
+	open = false
 	return nil
 }
 
@@ -121,7 +119,7 @@ func (store *Store) listMembers(ctx context.Context, description, statement stri
 		return nil, fmt.Errorf("begin list %s members: %w", description, err)
 	}
 	open := true
-	defer rollback(ctx, transaction, &open)
+	defer rollback(ctx, transaction, &open, &resultErr)
 	rows, err := transaction.Query(ctx, statement, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query %s members: %w", description, err)
@@ -130,10 +128,10 @@ func (store *Store) listMembers(ctx context.Context, description, statement stri
 	if resultErr != nil {
 		return nil, resultErr
 	}
-	open = false
 	if err := transaction.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit list live members: %w", err)
 	}
+	open = false
 	return members, nil
 }
 
@@ -165,12 +163,12 @@ func (store *Store) AvailableRunnerPoolCapacity(
 	runnerPool core.RunnerPool,
 	cutoff time.Time,
 ) (int, error) {
-	var liveCapacity, queuedJobs, attemptingJobs int
+	var liveCapacity, queuedJobs, processingJobs int
 	if err := store.executor.QueryRow(ctx, availableCapacitySQL, string(runnerPool), cutoff).
-		Scan(&liveCapacity, &queuedJobs, &attemptingJobs); err != nil {
+		Scan(&liveCapacity, &queuedJobs, &processingJobs); err != nil {
 		return 0, fmt.Errorf("available runner pool capacity: %w", err)
 	}
-	return statecontract.CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, attemptingJobs), nil
+	return statecontract.CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, processingJobs), nil
 }
 
 func (store *Store) executeTransaction(
@@ -191,9 +189,9 @@ func (store *Store) executeTransaction(
 	if _, err := transaction.Execute(ctx, statement, arguments...); err != nil {
 		return fmt.Errorf("%s: %w", description, err)
 	}
-	open = false
 	if err := transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit %s: %w", description, err)
 	}
+	open = false
 	return nil
 }

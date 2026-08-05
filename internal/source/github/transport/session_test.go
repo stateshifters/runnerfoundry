@@ -8,31 +8,21 @@ import (
 	upstream "github.com/actions/scaleset"
 )
 
-func TestSessionAcquireRequestAcquiresOnlyTheRequestedJob(t *testing.T) {
+func TestSessionAcquireRequestsReturnsAcquiredSubset(t *testing.T) {
 	t.Parallel()
 
 	messageAPI := &messageSessionAPIFake{acquiredIDs: []int64{42}}
 	session := &Session{messageAPI: messageAPI}
 
-	err := session.AcquireRequest(context.Background(), 42)
+	acquired, err := session.AcquireRequests(context.Background(), []int64{41, 42})
 	if err != nil {
-		t.Fatalf("acquire request: %v", err)
+		t.Fatalf("acquire requests: %v", err)
 	}
-	if len(messageAPI.requestedIDs) != 1 || messageAPI.requestedIDs[0] != 42 {
-		t.Fatalf("acquired request IDs = %#v, want [42]", messageAPI.requestedIDs)
+	if len(messageAPI.requestedIDs) != 2 || messageAPI.requestedIDs[0] != 41 || messageAPI.requestedIDs[1] != 42 {
+		t.Fatalf("requested IDs = %#v, want [41 42]", messageAPI.requestedIDs)
 	}
-}
-
-func TestSessionAcquireRequestRejectsUnacquiredRequest(t *testing.T) {
-	t.Parallel()
-
-	session := &Session{
-		messageAPI: &messageSessionAPIFake{acquiredIDs: []int64{99}},
-	}
-
-	err := session.AcquireRequest(context.Background(), 42)
-	if err == nil {
-		t.Fatal("AcquireRequest succeeded for an unacquired request")
+	if len(acquired) != 1 || acquired[0] != 42 {
+		t.Fatalf("acquired IDs = %#v, want [42]", acquired)
 	}
 }
 
@@ -235,18 +225,18 @@ func TestSessionReportsAcquisitionFailures(t *testing.T) {
 
 	for _, testCase := range []struct {
 		name       string
-		requestID  int64
+		requestIDs []int64
 		messageAPI messageSessionAPI
 	}{
-		{name: "invalid request", requestID: 0, messageAPI: &messageSessionAPIFake{}},
-		{name: "acquire failure", requestID: 42, messageAPI: &messageSessionAPIFake{acquireErr: expectedErr}},
+		{name: "invalid request", requestIDs: []int64{42, 0}, messageAPI: &messageSessionAPIFake{}},
+		{name: "acquire failure", requestIDs: []int64{42}, messageAPI: &messageSessionAPIFake{acquireErr: expectedErr}},
 	} {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			testSession := &Session{messageAPI: testCase.messageAPI}
-			if err := testSession.AcquireRequest(context.Background(), testCase.requestID); err == nil {
-				t.Fatal("AcquireRequest succeeded")
+			if _, err := testSession.AcquireRequests(context.Background(), testCase.requestIDs); err == nil {
+				t.Fatal("AcquireRequests succeeded")
 			}
 		})
 	}

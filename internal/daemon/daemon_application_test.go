@@ -39,6 +39,7 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 		members = append(members, state.member)
 		return newUnifiedGeneration(
 			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+			nil,
 		), nil
 	}
 
@@ -53,11 +54,11 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 	}
 }
 
-func TestProductionRuntimeCloseTerminalizesAttemptsAndWithdrawsMember(t *testing.T) {
+func TestProductionRuntimeCloseWithdrawsMember(t *testing.T) {
 	t.Parallel()
 
-	wantErr := errors.New("terminal transition failed")
-	store := &shutdownStoreFake{builderStoreFake: newBuilderStoreFake(), resultErr: wantErr}
+	wantErr := errors.New("member withdrawal failed")
+	store := &shutdownStoreFake{builderStoreFake: newBuilderStoreFake(), expireErr: wantErr}
 	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
 	if err != nil {
 		t.Fatalf("create memory logger: %v", err)
@@ -69,12 +70,8 @@ func TestProductionRuntimeCloseTerminalizesAttemptsAndWithdrawsMember(t *testing
 	if err := runtime.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("close error = %v, want transition failure", err)
 	}
-	if len(store.results) != 1 || store.results[0].Outcome != core.OutcomeFailure ||
-		store.results[0].Origin != core.ResultOriginService {
-		t.Fatalf("shutdown results = %#v, want one service failure", store.results)
-	}
 	if len(store.expired) != 1 || store.expired[0] != daemonTestID(7) {
-		t.Fatalf("withdrawn members = %#v, want member 7 despite transition failure", store.expired)
+		t.Fatalf("withdrawn members = %#v, want member 7", store.expired)
 	}
 }
 
@@ -93,6 +90,7 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 		builds++
 		return newUnifiedGeneration(
 			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+			nil,
 		), nil
 	}
 	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
@@ -106,23 +104,13 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 
 type shutdownStoreFake struct {
 	*builderStoreFake
-	results   []core.Result
 	expired   []core.MemberID
-	resultErr error
-}
-
-func (store *shutdownStoreFake) SetMemberAttemptsResultPending(
-	_ context.Context,
-	_ core.MemberID,
-	result core.Result,
-) ([]core.JobRecord, error) {
-	store.results = append(store.results, result)
-	return nil, store.resultErr
+	expireErr error
 }
 
 func (store *shutdownStoreFake) ExpireMember(_ context.Context, member core.MemberID) error {
 	store.expired = append(store.expired, member)
-	return nil
+	return store.expireErr
 }
 
 func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {

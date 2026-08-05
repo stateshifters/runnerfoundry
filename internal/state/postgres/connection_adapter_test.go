@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -62,7 +61,7 @@ func TestPGXTransactionDelegatesOwnedProtocol(t *testing.T) {
 		},
 		func(context.Context, string, ...any) (pgx.Rows, error) { return rowsProtocol, nil },
 		func(context.Context, string, ...any) pgx.Row {
-			return fakePGXRow{values: fullPostgreSQLJobValues(fixedTime())}
+			return fakePGXRow{values: []any{testJobID1, "github", "request-1", "linux", fixedTime()}}
 		},
 		func(context.Context) error { return nil }, func(context.Context) error { return nil },
 	)
@@ -99,7 +98,7 @@ func verifyPGXTransactionRows(t *testing.T, transaction Transaction) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if err := transaction.QueryRow(context.Background(), "select").Scan(makeJobDestinations()...); err != nil {
+	if err := transaction.QueryRow(context.Background(), "select").Scan(makeQueuedJobDestinations()...); err != nil {
 		t.Fatalf("query row: %v", err)
 	}
 }
@@ -142,9 +141,13 @@ func TestPGXTransactionReportsProtocolFailures(t *testing.T) {
 func TestRollbackHelperToleratesRollbackFailureAndClosedTransaction(t *testing.T) {
 	t.Parallel()
 	open := true
-	rollback(context.Background(), Transaction{rollback: failingCompletion(errors.New("protocol"))}, &open)
+	var resultErr error
+	rollback(context.Background(), Transaction{rollback: failingCompletion(errors.New("protocol"))}, &open, &resultErr)
+	if resultErr == nil {
+		t.Fatal("expected rollback error")
+	}
 	open = false
-	rollback(context.Background(), Transaction{}, &open)
+	rollback(context.Background(), Transaction{}, &open, &resultErr)
 }
 
 type inertPGXTransaction struct{ pgx.Tx }
@@ -173,13 +176,9 @@ func (rows *fakePGXRows) Conn() *pgx.Conn                              { return 
 func (rows *fakePGXRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
 func (rows *fakePGXRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 
-func makeJobDestinations() []any {
+func makeQueuedJobDestinations() []any {
 	var jobID uuid.UUID
-	var adapter, sourceID, runnerPool, state string
+	var adapter, sourceID, runnerPool string
 	var enqueuedAt time.Time
-	var memberID uuid.NullUUID
-	var outcome, origin, reason sql.NullString
-	var claimedAt, startedAt, acquisitionStartedAt, acquiredAt sql.NullTime
-	return []any{&jobID, &adapter, &sourceID, &runnerPool, &state, &enqueuedAt, &memberID, &claimedAt,
-		&startedAt, &acquisitionStartedAt, &acquiredAt, &outcome, &origin, &reason}
+	return []any{&jobID, &adapter, &sourceID, &runnerPool, &enqueuedAt}
 }

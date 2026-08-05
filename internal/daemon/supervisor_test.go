@@ -32,7 +32,8 @@ func TestSupervisorReplacesGenerationOnlyAfterReplacementStarts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.starts != 1 || first.stops != 1 || second.starts != 1 || second.stops != 1 {
+	if first.starts != 1 || first.stops != 1 || first.shutdowns != 0 ||
+		second.starts != 1 || second.stops != 0 || second.shutdowns != 1 {
 		t.Fatalf("generation calls first=%+v second=%+v", first, second)
 	}
 	if notifier.ready != 2 || notifier.reloading != 1 {
@@ -59,7 +60,7 @@ func TestSupervisorKeepsActiveGenerationWhenReloadBuildFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.starts != 1 || first.stops != 1 {
+	if first.starts != 1 || first.stops != 0 || first.shutdowns != 1 {
 		t.Fatalf("active generation calls = %+v", first)
 	}
 	if !errors.Is(reported, wantErr) {
@@ -157,7 +158,7 @@ func TestSupervisorReportsInitialReadyFailureAndStopsGeneration(t *testing.T) {
 		func() (config.Config, error) { return config.Config{}, nil },
 		func(context.Context, config.Config) (generation, error) { return active, nil },
 		&fakeSupervisorNotifier{readyErr: wantErr}, func(error) {})
-	if !errors.Is(err, wantErr) || active.stops != 1 {
+	if !errors.Is(err, wantErr) || active.shutdowns != 1 {
 		t.Fatalf("supervise error=%v generation=%+v", err, active)
 	}
 }
@@ -174,11 +175,12 @@ func TestSupervisorReportsInitialStartFailure(t *testing.T) {
 }
 
 type fakeGeneration struct {
-	starts   int
-	stops    int
-	onStart  func()
-	startErr error
-	stopErr  error
+	starts    int
+	stops     int
+	shutdowns int
+	onStart   func()
+	startErr  error
+	stopErr   error
 }
 
 func (generation *fakeGeneration) Start(context.Context) error {
@@ -191,6 +193,11 @@ func (generation *fakeGeneration) Start(context.Context) error {
 
 func (generation *fakeGeneration) Stop(context.Context) error {
 	generation.stops++
+	return generation.stopErr
+}
+
+func (generation *fakeGeneration) Shutdown(context.Context) error {
+	generation.shutdowns++
 	return generation.stopErr
 }
 

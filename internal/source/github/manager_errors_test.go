@@ -198,27 +198,6 @@ func TestManagerOpenLeaderReportsFactoryAndSessionFailures(t *testing.T) {
 	}
 }
 
-func TestManagerOpenLeaderClosesSessionsAfterRouteAndReplacementFailures(t *testing.T) {
-	t.Parallel()
-
-	record := managerRecord("https://github.com/octo/repo", 17)
-	store := &registrationRepositoryFake{records: []statecontract.Registration{record, record}}
-	factory := newManagerFactoryFake([]transport.Repository{managerTransportRepository(record)})
-	session := &managerSessionFake{
-		key:      transport.SessionKey{Repository: record.RepositoryURL, RunnerPool: string(record.RunnerPool)},
-		closeErr: errors.New("close failed"),
-	}
-	factory.clients[record.RepositoryURL].session = session
-	manager := newManagerFixture(t, &managerDiscovererFake{}, factory.Client, store)
-	handler := &recordingEventHandler{events: &[]string{}}
-	if _, err := manager.OpenLeader(context.Background(), "owner", handler); err == nil {
-		t.Fatal("duplicate leader routes accepted")
-	}
-	if !session.closed {
-		t.Fatal("failed replacement did not close opened sessions")
-	}
-}
-
 func assertReconcileFails(
 	t *testing.T,
 	manager *githubsource.Manager,

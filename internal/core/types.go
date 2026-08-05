@@ -31,58 +31,9 @@ type Job struct {
 	EnqueuedAt time.Time
 }
 
-type JobState string
-
-const (
-	JobStateQueued        JobState = "queued"
-	JobStateAttempting    JobState = "attempting"
-	JobStateResultPending JobState = "result_pending"
-)
-
-type Outcome string
-
-const (
-	OutcomeSuccess Outcome = "success"
-	OutcomeFailure Outcome = "failure"
-)
-
-type ResultOrigin string
-
-const (
-	ResultOriginRunner  ResultOrigin = "runner"
-	ResultOriginService ResultOrigin = "service"
-)
-
-type Result struct {
-	Outcome Outcome
-	Origin  ResultOrigin
-	Reason  string
-}
-
-type JobRecord struct {
-	Job                  Job
-	State                JobState
-	AttemptingMember     MemberID
-	ClaimedAt            time.Time
-	StartedAt            time.Time
-	AcquisitionStartedAt time.Time
-	AcquiredAt           time.Time
-	Result               *Result
-}
-
-type ResultDelivery string
-
-const (
-	ResultDeliveryReported      ResultDelivery = "reported"
-	ResultDeliveryRunnerManaged ResultDelivery = "runner_managed"
-	ResultDeliveryUnsupported   ResultDelivery = "unsupported"
-)
-
-type Receipt struct {
-	Source   SourceReference
-	Outcome  Outcome
-	Origin   ResultOrigin
-	Delivery ResultDelivery
+type ProcessingJob struct {
+	Job      Job
+	MemberID MemberID
 }
 
 type RunnerPoolCapacity struct {
@@ -90,41 +41,12 @@ type RunnerPoolCapacity struct {
 	Capacity   int
 }
 
-type JobQueueStore interface {
-	Enqueue(ctx context.Context, request JobRequest) (JobRecord, bool, error)
-	ClaimOldest(ctx context.Context, runnerPool RunnerPool, member MemberID, claimedAt time.Time) (JobRecord, bool, error)
-}
-
-type JobAttemptStore interface {
-	MarkStartedBySource(ctx context.Context, source SourceReference, startedAt time.Time) (JobRecord, error)
-	BeginAcquisition(ctx context.Context, jobID JobID, at time.Time) (JobRecord, error)
-	ConfirmAcquisition(ctx context.Context, jobID JobID, at time.Time) (JobRecord, error)
-	AttemptsByMember(ctx context.Context, member MemberID, runnerPool RunnerPool) ([]JobRecord, error)
-	PendingAcquisitions(ctx context.Context, limit int) ([]JobRecord, error)
-}
-
-type JobResultStore interface {
-	SetResultPending(ctx context.Context, jobID JobID, result Result) (JobRecord, error)
-	SetResultPendingBySource(ctx context.Context, source SourceReference, result Result) (JobRecord, error)
-	Finalize(ctx context.Context, jobID JobID, delivery ResultDelivery) (Receipt, error)
-	LookupReceipt(ctx context.Context, source SourceReference) (Receipt, bool, error)
-	PendingResults(ctx context.Context, limit int) ([]JobRecord, error)
-}
-
-type JobFailureStore interface {
-	SetMemberAttemptsResultPending(ctx context.Context, member MemberID, result Result) ([]JobRecord, error)
-	SetUnstartedAttemptsResultPending(ctx context.Context, runnerPool RunnerPool, before time.Time, result Result) ([]JobRecord, error)
-	Lookup(ctx context.Context, jobID JobID) (JobRecord, bool, error)
-}
-
-// JobStore owns the one durable job lifecycle shared by every backend.
+// JobStore owns current queued and member-processed work. Taking work moves it
+// atomically out of the FIFO queue; no completed-job history is retained here.
 type JobStore interface {
-	JobQueueStore
-	JobAttemptStore
-	JobResultStore
-	JobFailureStore
-}
-
-type ResultReporter interface {
-	ReportResult(ctx context.Context, job Job, result Result) (ResultDelivery, error)
+	Enqueue(ctx context.Context, request JobRequest) (Job, bool, error)
+	TakeOldest(ctx context.Context, runnerPool RunnerPool, member MemberID) (ProcessingJob, bool, error)
+	CancelQueued(ctx context.Context, source SourceReference) error
+	ProcessingByMember(ctx context.Context, member MemberID, runnerPool RunnerPool) ([]ProcessingJob, error)
+	RemoveProcessing(ctx context.Context, jobID JobID) error
 }

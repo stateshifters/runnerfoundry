@@ -9,192 +9,131 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
-func TestEnqueueReportsEveryProtocolFailure(t *testing.T) {
+func TestEnqueueProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	stores := []*Store{
-		NewStore(Executor{begin: failingBegin(protocolErr)}),
-		NewStore(Executor{begin: transactionBeginning(transactionFailingExecute(1, protocolErr))}),
-		NewStore(Executor{begin: transactionBeginning(enqueueRowsAffectedError(protocolErr))}),
-		NewStore(Executor{begin: transactionBeginning(enqueueTransaction(
-			Row{scan: func(...any) error { return protocolErr }}, nil))}),
-		NewStore(Executor{begin: transactionBeginning(enqueueTransaction(
-			rowFromValues(fullSQLiteJobValues(fixedTime())), protocolErr))}),
-	}
-	for index, store := range stores {
-		if _, _, err := store.Enqueue(context.Background(), request); err == nil {
-			t.Fatalf("case %d: expected enqueue error", index)
-		}
-	}
-	noRows := Transaction{queryRow: func(context.Context, string, ...any) Row {
-		return Row{scan: func(...any) error { return sql.ErrNoRows }}
-	}}
-	if _, _, err := loadEnqueuedJob(context.Background(), noRows, request.Source, 1); err == nil {
-		t.Fatal("expected missing inserted job error")
-	}
-	if _, _, err := loadEnqueuedJob(context.Background(), noRows, request.Source, 0); err == nil {
-		t.Fatal("expected receipt lookup error")
-	}
-}
-
-func enqueueRowsAffectedError(protocolErr error) Transaction {
-	return Transaction{execute: func(context.Context, string, ...any) (Result, error) {
-		return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
-	}, rollback: successfulCompletion}
-}
-
-func enqueueTransaction(row Row, commitErr error) Transaction {
-	return Transaction{execute: successfulExecute, queryRow: func(context.Context, string, ...any) Row { return row },
-		commit: func(context.Context) error { return commitErr }, rollback: successfulCompletion}
-}
-
-func TestClaimReportsEmptyQueue(t *testing.T) {
-	t.Parallel()
-	store := NewStore(Executor{queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }})})
-	_, claimed, err := store.ClaimOldest(context.Background(), "linux", testMemberID, fixedTime())
-	if err != nil || claimed {
-		t.Fatalf("empty queue = %t, %v", claimed, err)
-	}
-}
-
-func TestClaimReportsProtocolError(t *testing.T) {
-	t.Parallel()
-	store := NewStore(Executor{queryRow: constantRow(Row{scan: func(...any) error { return errors.New("protocol") }})})
-	if _, _, err := store.ClaimOldest(context.Background(), "linux", testMemberID, fixedTime()); err == nil {
-		t.Fatal("expected claim error")
-	}
-}
-
-func TestClaimReturnsOldestJob(t *testing.T) {
-	t.Parallel()
-	store := NewStore(Executor{queryRow: constantRow(rowFromValues(fullSQLiteJobValues(fixedTime())))})
-	record, claimed, err := store.ClaimOldest(context.Background(), "linux", testMemberID, fixedTime())
-	if err != nil || !claimed || record.Job.ID != testJobID {
-		t.Fatalf("claim = %#v, %t, %v", record, claimed, err)
-	}
-}
-
-func TestChangedJobAndResultPendingReportProtocolFailures(t *testing.T) {
-	t.Parallel()
-	protocolErr := errors.New("protocol")
-	broken := NewStore(Executor{queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }})})
-	if _, err := broken.MarkStartedBySource(context.Background(), core.SourceReference{}, fixedTime()); err == nil {
-		t.Fatal("expected mark-started error")
-	}
-	if _, err := broken.ConfirmAcquisition(context.Background(), testJobID, fixedTime()); err == nil {
-		t.Fatal("expected changed-job scan error")
-	}
-	result := core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService}
-	stores := []*Store{
-		NewStore(Executor{begin: failingBegin(protocolErr)}),
-		resultPendingErrorStore(Row{scan: func(...any) error { return protocolErr }}, Row{}, nil),
-		resultPendingErrorStore(Row{scan: func(...any) error { return sql.ErrNoRows }},
-			Row{scan: func(...any) error { return protocolErr }}, nil),
-		resultPendingErrorStore(rowFromValues(fullSQLiteJobValues(fixedTime())), Row{}, protocolErr),
-	}
-	for index, store := range stores {
-		if _, err := store.SetResultPending(context.Background(), testJobID, result); err == nil {
-			t.Fatalf("case %d: expected result-pending error", index)
-		}
-	}
-}
-
-func TestRollbackHelperToleratesRollbackFailureAndClosedTransaction(t *testing.T) {
-	t.Parallel()
-	open := true
-	rollback(context.Background(), Transaction{rollback: failingCompletion(errors.New("protocol"))}, &open)
-	open = false
-	rollback(context.Background(), Transaction{}, &open)
-}
-
-func resultPendingErrorStore(first Row, second Row, commitErr error) *Store {
-	calls := 0
-	transaction := Transaction{queryRow: func(context.Context, string, ...any) Row {
-		calls++
-		if calls == 1 {
-			return first
-		}
-		return second
-	}, commit: func(context.Context) error { return commitErr }, rollback: successfulCompletion}
-	return NewStore(Executor{begin: transactionBeginning(transaction)})
-}
-
-func TestCleanupOperationsReportEveryProtocolFailure(t *testing.T) {
-	t.Parallel()
-	operations := []func(*Store) error{
-		func(store *Store) error {
-			_, err := store.SetMemberAttemptsResultPending(context.Background(), testMemberID, core.Result{})
-			return err
-		},
-		func(store *Store) error {
-			_, err := store.SetUnstartedAttemptsResultPending(context.Background(), "linux", fixedTime(), core.Result{})
-			return err
-		},
-	}
-	for _, operation := range operations {
-		assertCleanupFailures(t, operation)
-	}
-}
-
-func assertCleanupFailures(t *testing.T, operation func(*Store) error) {
-	t.Helper()
-	protocolErr := errors.New("protocol")
 	transactions := []Transaction{
-		{query: func(context.Context, string, ...any) (Rows, error) { return Rows{}, protocolErr }, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) {
-			return rowsWithFailure(protocolErr, nil, nil), nil
+		{execute: failingExecute(protocolErr), rollback: successfulCompletion},
+		{execute: func(context.Context, string, ...any) (Result, error) {
+			return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
 		}, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) { return rowsFromValues(nil), nil },
-			commit: failingCompletion(protocolErr), rollback: successfulCompletion},
+		{execute: successfulExecute, queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion},
+		{execute: successfulExecute, queryRow: constantRow(rowFromValues(queuedJobValues())), commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	}
-	if err := operation(NewStore(Executor{begin: failingBegin(protocolErr)})); err == nil {
-		t.Fatal("expected cleanup begin error")
+	if _, _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).Enqueue(context.Background(), request); err == nil {
+		t.Fatal("expected begin failure")
 	}
 	for index, transaction := range transactions {
-		if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
-			t.Fatalf("case %d: expected cleanup error", index)
+		if _, _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Enqueue(context.Background(), request); err == nil {
+			t.Fatalf("case %d: expected enqueue failure", index)
 		}
 	}
 }
 
-func TestFinalizeReportsEveryProtocolFailure(t *testing.T) {
+func TestEnqueueIgnoresAnExistingTombstone(t *testing.T) {
+	t.Parallel()
+	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
+	tombstoned := Transaction{execute: func(context.Context, string, ...any) (Result, error) {
+		return Result{rowsAffected: func() (int64, error) { return 0, nil }}, nil
+	}, queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}), commit: successfulCompletion,
+		rollback: successfulCompletion}
+	job, created, err := NewStore(Executor{begin: transactionBeginning(tombstoned)}).Enqueue(context.Background(), request)
+	if err != nil || created || job != (core.Job{}) {
+		t.Fatalf("tombstoned enqueue=%#v %t %v", job, created, err)
+	}
+}
+
+func TestTakeOldestProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	pendingValues := fullSQLiteJobValues(fixedTime())
-	pendingValues[4] = "result_pending"
-	stores := []*Store{
-		NewStore(Executor{begin: failingBegin(protocolErr)}),
-		finalizeErrorStore(Row{scan: func(...any) error { return protocolErr }}, 0, nil),
-		finalizeErrorStore(rowFromValues(queuedSQLiteValues()), 0, nil),
-		finalizeErrorStore(rowFromValues(pendingValues), 1, nil),
-		finalizeErrorStore(rowFromValues(pendingValues), 2, nil),
-		finalizeErrorStore(rowFromValues(pendingValues), 0, protocolErr),
+	if _, _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+		t.Fatal("expected take begin failure")
 	}
-	for index, store := range stores {
-		if _, err := store.Finalize(context.Background(), testJobID, core.ResultDeliveryReported); err == nil {
-			t.Fatalf("case %d: expected finalize error", index)
+	selectionFailure := Transaction{queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion}
+	if _, _, err := NewStore(Executor{begin: transactionBeginning(selectionFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+		t.Fatal("expected selection failure")
+	}
+	emptyCommitFailure := Transaction{queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}),
+		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
+	if _, _, err := NewStore(Executor{begin: transactionBeginning(emptyCommitFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+		t.Fatal("expected empty commit failure")
+	}
+	commitFailure := Transaction{queryRow: constantRow(rowFromValues(queuedJobValues())), execute: successfulExecute,
+		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
+	if _, _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+		t.Fatal("expected move commit failure")
+	}
+}
+
+func TestCancelQueuedProtocolFailures(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	if err := NewStore(Executor{begin: failingBegin(protocolErr)}).CancelQueued(context.Background(), source); err == nil {
+		t.Fatal("expected cancel begin failure")
+	}
+	for failureCall := 1; failureCall <= 2; failureCall++ {
+		transaction := transactionFailingExecute(failureCall, protocolErr)
+		if err := NewStore(Executor{begin: transactionBeginning(transaction)}).CancelQueued(context.Background(), source); err == nil {
+			t.Fatalf("cancel execute %d", failureCall)
 		}
 	}
-}
-
-func finalizeErrorStore(row Row, executeFailure int, commitErr error) *Store {
-	transaction := transactionFailingExecute(executeFailure, errors.New("protocol"))
-	if executeFailure == 0 {
-		transaction.execute = successfulExecute
+	cancelCommitFailure := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
+	if err := NewStore(Executor{begin: transactionBeginning(cancelCommitFailure)}).CancelQueued(context.Background(), source); err == nil {
+		t.Fatal("expected cancel commit failure")
 	}
-	transaction.queryRow = func(context.Context, string, ...any) Row { return row }
-	transaction.commit = func(context.Context) error { return commitErr }
-	return NewStore(Executor{begin: transactionBeginning(transaction)})
 }
 
-func queuedSQLiteValues() []any {
-	values := fullSQLiteJobValues(fixedTime())
-	values[4] = "queued"
-	values[11] = sql.NullString{}
-	return values
+func TestProcessingLookupProtocolFailures(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
+		t.Fatal("expected processing begin failure")
+	}
+	for index, transaction := range failingListTransactions(protocolErr) {
+		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
+			t.Fatalf("case %d: expected processing failure", index)
+		}
+	}
 }
 
 func constantRow(row Row) func(context.Context, string, ...any) Row {
 	return func(context.Context, string, ...any) Row { return row }
+}
+
+func failingBegin(protocolErr error) func(context.Context) (Transaction, error) {
+	return func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }
+}
+
+func failingExecute(protocolErr error) func(context.Context, string, ...any) (Result, error) {
+	return func(context.Context, string, ...any) (Result, error) { return Result{}, protocolErr }
+}
+
+func failingCompletion(protocolErr error) func(context.Context) error {
+	return func(context.Context) error { return protocolErr }
+}
+
+func transactionFailingExecute(failureCall int, protocolErr error) Transaction {
+	calls := 0
+	return Transaction{execute: func(context.Context, string, ...any) (Result, error) {
+		calls++
+		if calls == failureCall {
+			return Result{}, protocolErr
+		}
+		return successfulResult(), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+}
+
+func rowsWithFailure(scanErr, iterationErr, closeErr error) Rows {
+	advanced := false
+	return Rows{close: func() error { return closeErr }, err: func() error { return iterationErr },
+		next: func() bool {
+			if scanErr != nil && !advanced {
+				advanced = true
+				return true
+			}
+			return false
+		},
+		scan: func(...any) error { return scanErr }}
 }

@@ -8,6 +8,8 @@ RunnerFoundry accepts job demand from a supported Git source, queues that demand
 
 GitHub Actions is the only supported Git source today. Support for another source must be implemented behind a source adapter without changing the core contract.
 
+Result reporting is a product outcome. The provisioned runner reports the workflow result directly to the Git source. RunnerFoundry reports a runner-provisioning failure only when the source exposes a supported operation for doing so.
+
 ## Terms
 
 - **Git source**: The external system that requests a job and receives its result.
@@ -50,13 +52,12 @@ Cleanup applies the same terminal path to a queued job that cannot be served: re
 
 Publishing capacity is separate from processing jobs:
 
-1. Each live member contributes its configured Runner Pool capacity.
-2. Available capacity is the live configured capacity minus the number of `queued` and `attempting` jobs for that Runner Pool, clamped to zero.
-3. A job stops consuming capacity when it reaches `result_pending`; result-delivery retries do not consume runner capacity.
-4. The source adapter publishes available capacity using the source's model, and the source can request jobs for that capacity.
-5. Heartbeats, capacity updates, and deregistration maintain availability without creating jobs or changing their ordering, ownership, or outcomes.
+1. The runner service registers or updates Runner Pool capacity.
+2. The source adapter publishes that capacity using the source's model.
+3. The source can then request jobs for that capacity.
+4. Heartbeats, capacity updates, and deregistration maintain availability without changing queued-job ordering or outcomes.
 
-For GitHub, the adapter publishes Runner Pool capacity as repository-scoped GitHub runner scale sets. Every repository representation of the same Runner Pool receives the same shared availability. This lets personal GitHub accounts share RunnerFoundry capacity across repositories without requiring organization-level runners. Simultaneous requests can observe the same capacity snapshot before either request becomes a durable job; later publications reflect all durable demand. This mapping and its source consistency limit are owned entirely by the GitHub adapter.
+For GitHub, the adapter publishes Runner Pool capacity as GitHub runner scale sets. This mapping is owned entirely by the GitHub adapter.
 
 ## Deployment modes
 

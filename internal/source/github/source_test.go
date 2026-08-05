@@ -12,42 +12,18 @@ import (
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
-func TestSourceRoutesAcquisitionByRepositoryAndRunnerPool(t *testing.T) {
-	t.Parallel()
-
-	first := &leaderSessionFake{key: transport.SessionKey{Repository: "octo/first", RunnerPool: "linux"}}
-	second := &leaderSessionFake{key: transport.SessionKey{Repository: "octo/second", RunnerPool: "linux"}}
-	source, err := githubsource.NewSource([]githubsource.LeaderSession{first, second}, nil)
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-
-	job := sourceJob(t, "octo/second", core.RunnerPool("linux"), 42)
-	if err := source.Acquire(context.Background(), job); err != nil {
-		t.Fatalf("acquire routed request: %v", err)
-	}
-	if len(first.acquired) != 0 || !reflect.DeepEqual(second.acquired, []int64{42}) {
-		t.Fatalf("acquisitions: first=%#v second=%#v", first.acquired, second.acquired)
-	}
-}
-
-func TestSourceRoutesBootstrapToMemberClientWithoutLeaderSession(t *testing.T) {
+func TestSourceRoutesBootstrapByRepositoryAndRunnerPool(t *testing.T) {
 	t.Parallel()
 
 	first := &bootstrapClientFake{content: []byte("wrong")}
 	second := &bootstrapClientFake{content: []byte("opaque-jit")}
 	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{
-		{
-			Repository: "octo/first", RunnerPool: core.RunnerPool("linux"),
-			Client: first, Registration: transport.Registration{ID: 11, Name: "linux"},
-		},
-		{
-			Repository: "octo/second", RunnerPool: core.RunnerPool("linux"),
-			Client: second, Registration: transport.Registration{ID: 17, Name: "linux"},
-		},
+		memberRoute("octo/first", first),
+		memberRoute("octo/second", second),
 	})
-	job := sourceJob(t, "octo/second", core.RunnerPool("linux"), 43)
-	bootstrap, err := source.GenerateBootstrap(context.Background(), job, "runner-43")
+	bootstrap, err := source.GenerateBootstrap(
+		context.Background(), sourceJob(t, "octo/second", core.RunnerPool("linux"), 43), "runner-43",
+	)
 	if err != nil {
 		t.Fatalf("generate routed bootstrap: %v", err)
 	}
@@ -60,11 +36,39 @@ func TestSourceRoutesBootstrapToMemberClientWithoutLeaderSession(t *testing.T) {
 	}
 }
 
-func TestSourceRejectsMismatchedOrMissingRoutes(t *testing.T) {
+func TestSourceRejectsInvalidRoutes(t *testing.T) {
 	t.Parallel()
 
-	source, leader, member := newRoutingFixture(t)
+	valid := memberRoute("octo/repo", &bootstrapClientFake{})
+	tests := map[string][]githubsource.MemberRoute{
+		"missing repository": {{RunnerPool: valid.RunnerPool, Client: valid.Client, Registration: valid.Registration}},
+		"missing pool":       {{Repository: valid.Repository, Client: valid.Client, Registration: valid.Registration}},
+		"missing client":     {{Repository: valid.Repository, RunnerPool: valid.RunnerPool, Registration: valid.Registration}},
+		"invalid registration": {{
+			Repository: valid.Repository, RunnerPool: valid.RunnerPool, Client: valid.Client,
+			Registration: transport.Registration{ID: 0, Name: "linux"},
+		}},
+		"mismatched registration": {{
+			Repository: valid.Repository, RunnerPool: valid.RunnerPool, Client: valid.Client,
+			Registration: transport.Registration{ID: 17, Name: "windows"},
+		}},
+		"duplicate": {valid, valid},
+	}
+	for testName, routes := range tests {
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+			if _, err := githubsource.NewSource(routes); err == nil {
+				t.Fatal("NewSource() error = nil, want invalid route failure")
+			}
+		})
+	}
+}
 
+func TestSourceRejectsInvalidJobsAndMissingRoutes(t *testing.T) {
+	t.Parallel()
+
+	client := &bootstrapClientFake{content: []byte("opaque")}
+	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", client)})
 	tests := map[string]core.Job{
 		"foreign adapter": {
 			Source: core.SourceReference{Adapter: "gitlab", ID: "opaque"}, RunnerPool: core.RunnerPool("linux"),
@@ -77,143 +81,77 @@ func TestSourceRejectsMismatchedOrMissingRoutes(t *testing.T) {
 	}
 	for testName, job := range tests {
 		t.Run(testName, func(t *testing.T) {
-			assertJobRejected(t, source, job)
+			t.Parallel()
+			if _, err := source.GenerateBootstrap(context.Background(), job, "runner"); err == nil {
+				t.Fatal("GenerateBootstrap() error = nil, want routing failure")
+			}
 		})
 	}
-	if len(leader.acquired) != 0 || member.calls != 0 {
-		t.Fatalf("invalid jobs reached routes: acquired=%#v bootstrap calls=%d", leader.acquired, member.calls)
+	if client.calls != 0 {
+		t.Fatalf("invalid jobs reached bootstrap client %d times", client.calls)
 	}
 }
 
-func TestSourcePropagatesRouteFailures(t *testing.T) {
+func TestSourcePropagatesBootstrapFailures(t *testing.T) {
 	t.Parallel()
 
-	wantErr := errors.New("route failed")
-	leader := &leaderSessionFake{
-		key: transport.SessionKey{Repository: "octo/repo", RunnerPool: "linux"}, err: wantErr,
+	tests := map[string]*bootstrapClientFake{
+		"client error":  {err: errors.New("bootstrap failed")},
+		"empty content": {},
 	}
-	member := &bootstrapClientFake{err: wantErr}
-	source, err := githubsource.NewSource(
-		[]githubsource.LeaderSession{leader},
-		[]githubsource.MemberRoute{{
-			Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), Client: member,
-			Registration: transport.Registration{ID: 17, Name: "linux"},
-		}},
-	)
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-	job := sourceJob(t, "octo/repo", core.RunnerPool("linux"), 46)
-	if err := source.Acquire(context.Background(), job); !errors.Is(err, wantErr) {
-		t.Fatalf("Acquire() error = %v, want %v", err, wantErr)
-	}
-	if _, err := source.GenerateBootstrap(context.Background(), job, "runner"); !errors.Is(err, wantErr) {
-		t.Fatalf("GenerateBootstrap() error = %v, want %v", err, wantErr)
+	for testName, client := range tests {
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+			source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", client)})
+			if _, err := source.GenerateBootstrap(
+				context.Background(), sourceJob(t, "octo/repo", core.RunnerPool("linux"), 46), "runner",
+			); err == nil {
+				t.Fatal("GenerateBootstrap() error = nil, want bootstrap failure")
+			}
+		})
 	}
 }
 
-func TestNewSourceRejectsInvalidAndDuplicateLeaderRoutes(t *testing.T) {
+func TestSourceReplaceRoutesIsAtomic(t *testing.T) {
 	t.Parallel()
 
-	key := transport.SessionKey{Repository: "octo/repo", RunnerPool: "linux"}
-	validLeader := &leaderSessionFake{key: key}
-	assertSourceConstructionFails(t, []githubsource.LeaderSession{nil}, nil)
-	assertSourceConstructionFails(t, []githubsource.LeaderSession{&leaderSessionFake{}}, nil)
-	assertSourceConstructionFails(
-		t, []githubsource.LeaderSession{validLeader, &leaderSessionFake{key: key}}, nil,
-	)
-}
-
-func TestNewSourceRejectsInvalidAndDuplicateMemberRoutes(t *testing.T) {
-	t.Parallel()
-
-	validMember := githubsource.MemberRoute{
-		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), Client: &bootstrapClientFake{},
-		Registration: transport.Registration{ID: 17, Name: "linux"},
+	oldClient := &bootstrapClientFake{content: []byte("old")}
+	newClient := &bootstrapClientFake{content: []byte("new")}
+	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", oldClient)})
+	if err := source.ReplaceRoutes([]githubsource.MemberRoute{memberRoute("octo/new", newClient)}); err != nil {
+		t.Fatalf("replace routes: %v", err)
 	}
-	assertSourceConstructionFails(t, nil, []githubsource.MemberRoute{{}})
-	assertSourceConstructionFails(t, nil, []githubsource.MemberRoute{{
-		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), Client: &bootstrapClientFake{},
-	}})
-	assertSourceConstructionFails(t, nil, []githubsource.MemberRoute{validMember, validMember})
-}
-
-func TestSourceRejectsEmptyBootstrapContent(t *testing.T) {
-	t.Parallel()
-
-	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{{
-		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), Client: &bootstrapClientFake{},
-		Registration: transport.Registration{ID: 17, Name: "linux"},
-	}})
 	if _, err := source.GenerateBootstrap(
-		context.Background(), sourceJob(t, "octo/repo", core.RunnerPool("linux"), 47), "runner",
-	); err == nil {
-		t.Fatal("GenerateBootstrap() error = nil, want empty content failure")
+		context.Background(), sourceJob(t, "octo/new", core.RunnerPool("linux"), 47), "runner",
+	); err != nil {
+		t.Fatalf("use replacement route: %v", err)
+	}
+	if err := source.ReplaceRoutes([]githubsource.MemberRoute{{Repository: "invalid"}}); err == nil {
+		t.Fatal("ReplaceRoutes() error = nil, want invalid replacement")
+	}
+	if _, err := source.GenerateBootstrap(
+		context.Background(), sourceJob(t, "octo/new", core.RunnerPool("linux"), 48), "runner",
+	); err != nil {
+		t.Fatalf("use preserved route: %v", err)
+	}
+	if oldClient.calls != 0 || newClient.calls != 2 {
+		t.Fatalf("bootstrap calls: old=%d new=%d", oldClient.calls, newClient.calls)
 	}
 }
 
 func newSourceWithMemberRoutes(t *testing.T, routes []githubsource.MemberRoute) *githubsource.Source {
 	t.Helper()
-	source, err := githubsource.NewSource(nil, routes)
+	source, err := githubsource.NewSource(routes)
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}
 	return source
 }
 
-func newRoutingFixture(t *testing.T) (*githubsource.Source, *leaderSessionFake, *bootstrapClientFake) {
-	t.Helper()
-	leader := &leaderSessionFake{key: transport.SessionKey{Repository: "octo/repo", RunnerPool: "linux"}}
-	member := &bootstrapClientFake{content: []byte("opaque")}
-	source, err := githubsource.NewSource(
-		[]githubsource.LeaderSession{leader},
-		[]githubsource.MemberRoute{{
-			Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), Client: member,
-			Registration: transport.Registration{ID: 17, Name: "linux"},
-		}},
-	)
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-	return source, leader, member
-}
-
-func assertJobRejected(t *testing.T, source *githubsource.Source, job core.Job) {
-	t.Helper()
-	if err := source.Acquire(context.Background(), job); err == nil {
-		t.Fatal("Acquire() error = nil, want routing failure")
-	}
-	if _, err := source.GenerateBootstrap(context.Background(), job, "runner"); err == nil {
-		t.Fatal("GenerateBootstrap() error = nil, want routing failure")
-	}
-}
-
-func assertSourceConstructionFails(
-	t *testing.T,
-	leaders []githubsource.LeaderSession,
-	members []githubsource.MemberRoute,
-) {
-	t.Helper()
-	if _, err := githubsource.NewSource(leaders, members); err == nil {
-		t.Fatal("NewSource() error = nil, want invalid route failure")
-	}
-}
-
-func TestSourceReportsRunnerManagedDeliveryPolicy(t *testing.T) {
-	t.Parallel()
-
-	source, err := githubsource.NewSource(nil, nil)
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-	delivery, err := source.ReportResult(context.Background(), core.Job{
-		Source: core.SourceReference{Adapter: githubsource.AdapterName},
-	}, core.Result{Origin: core.ResultOriginRunner})
-	if err != nil {
-		t.Fatalf("report result: %v", err)
-	}
-	if delivery != core.ResultDeliveryRunnerManaged {
-		t.Fatalf("delivery = %q, want runner managed", delivery)
+func memberRoute(repository string, client githubsource.BootstrapClient) githubsource.MemberRoute {
+	return githubsource.MemberRoute{
+		Repository: repository, RunnerPool: core.RunnerPool("linux"), Client: client,
+		Registration: transport.Registration{ID: 17, Name: "linux"},
 	}
 }
 
@@ -225,22 +163,7 @@ func sourceJob(t *testing.T, repository string, runnerPool core.RunnerPool, requ
 	if err != nil {
 		t.Fatalf("encode source identity: %v", err)
 	}
-	return core.Job{
-		Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID}, RunnerPool: runnerPool,
-	}
-}
-
-type leaderSessionFake struct {
-	key      transport.SessionKey
-	acquired []int64
-	err      error
-}
-
-func (session *leaderSessionFake) Key() transport.SessionKey { return session.key }
-
-func (session *leaderSessionFake) AcquireRequest(_ context.Context, requestID int64) error {
-	session.acquired = append(session.acquired, requestID)
-	return session.err
+	return core.Job{Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID}, RunnerPool: runnerPool}
 }
 
 type bootstrapClientFake struct {

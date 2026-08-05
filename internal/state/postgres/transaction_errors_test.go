@@ -79,7 +79,6 @@ func TestExpireMemberReportsEachProtocolFailure(t *testing.T) {
 		transaction Transaction
 	}{
 		{name: "first execute", transaction: transactionFailingExecute(1, protocolErr)},
-		{name: "second execute", transaction: transactionFailingExecute(2, protocolErr)},
 		{name: "commit", transaction: Transaction{execute: successfulExecute,
 			commit: failingCompletion(protocolErr), rollback: successfulCompletion}},
 	} {
@@ -131,7 +130,7 @@ func TestScalarQueriesReportProtocolFailures(t *testing.T) {
 func TestJobAndRegistrationListsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	assertTransactionalListFailures(t, func(store *Store) error {
-		_, err := store.PendingResults(context.Background(), 3)
+		_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
 		return err
 	})
 	assertTransactionalListFailures(t, func(store *Store) error {

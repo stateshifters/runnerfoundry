@@ -13,7 +13,6 @@ import (
 
 const (
 	defaultDiscoveryInterval = "5m"
-	defaultJobStartTimeout   = "10m"
 	defaultLogFileMaxSizeMB  = 100
 	defaultLogFileMaxBackups = 5
 )
@@ -65,12 +64,11 @@ type LogFileConfig struct {
 }
 
 type ScaleSetConfig struct {
-	Name            string         `yaml:"name"`
-	RunnerGroup     string         `yaml:"runner_group"`
-	MaxRunners      int            `yaml:"max_runners"`
-	JobStartTimeout string         `yaml:"job_start_timeout"`
-	Docker          *DockerConfig  `yaml:"docker"`
-	Libvirt         *LibvirtConfig `yaml:"libvirt"`
+	Name        string         `yaml:"name"`
+	RunnerGroup string         `yaml:"runner_group"`
+	MaxRunners  int            `yaml:"max_runners"`
+	Docker      *DockerConfig  `yaml:"docker"`
+	Libvirt     *LibvirtConfig `yaml:"libvirt"`
 }
 
 type DockerConfig struct {

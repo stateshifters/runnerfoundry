@@ -42,13 +42,13 @@ func (store *Store) Registration(
 	return registration, true, nil
 }
 
-func (store *Store) Registrations(ctx context.Context) ([]statecontract.Registration, error) {
+func (store *Store) Registrations(ctx context.Context) (_ []statecontract.Registration, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin registrations lookup: %w", err)
 	}
 	open := true
-	defer rollback(ctx, transaction, &open)
+	defer rollback(ctx, transaction, &open, &resultErr)
 	rows, err := transaction.Query(ctx, registrationsSQL)
 	if err != nil {
 		return nil, fmt.Errorf("query registrations: %w", err)
@@ -57,10 +57,10 @@ func (store *Store) Registrations(ctx context.Context) ([]statecontract.Registra
 	if err != nil {
 		return nil, err
 	}
-	open = false
 	if err := transaction.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit registrations lookup: %w", err)
 	}
+	open = false
 	return registrations, nil
 }
 

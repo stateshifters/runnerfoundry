@@ -8,7 +8,7 @@ import (
 )
 
 type WorkCoordinator interface {
-	ClaimWork(ctx context.Context, runnerPool core.RunnerPool) (bool, error)
+	ProcessOne(ctx context.Context, runnerPool core.RunnerPool) (bool, error)
 	OccupiedSlots(ctx context.Context, runnerPool core.RunnerPool) (int, error)
 }
 
@@ -39,7 +39,7 @@ func (worker *PoolWorker) RequestWork(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	started, err := worker.coordinator.ClaimWork(ctx, worker.runnerPool)
+	started, err := worker.coordinator.ProcessOne(ctx, worker.runnerPool)
 	if err != nil {
 		return false, fmt.Errorf("request work for Runner Pool %q: %w", worker.runnerPool, err)
 	}

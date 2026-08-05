@@ -7,7 +7,6 @@ import (
 	"reflect"
 
 	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 type Options struct {
@@ -103,14 +102,10 @@ func (runtime *productionRuntime) Close(ctx context.Context) error {
 }
 
 func (runtime *productionRuntime) withdrawMember(ctx context.Context) error {
-	result := core.Result{
-		Outcome: core.OutcomeFailure,
-		Origin:  core.ResultOriginService,
-		Reason:  "RunnerFoundry member shut down",
+	if err := runtime.state.store.ExpireMember(ctx, runtime.state.member); err != nil {
+		return fmt.Errorf("withdraw member %q: %w", runtime.state.member, err)
 	}
-	_, resultErr := runtime.state.store.SetMemberAttemptsResultPending(ctx, runtime.state.member, result)
-	expireErr := runtime.state.store.ExpireMember(ctx, runtime.state.member)
-	return errors.Join(resultErr, expireErr)
+	return nil
 }
 
 func newGenerationConfigLoader(

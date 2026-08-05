@@ -46,7 +46,7 @@ func TestLoggingGenerationClosesUnactivatedCandidateWhenRuntimeStartFails(t *tes
 	}
 }
 
-func TestLoggingGenerationReportsActivationAndUnactivatedStopFailures(t *testing.T) {
+func TestLoggingGenerationReportsActivationFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("failed")
@@ -58,20 +58,76 @@ func TestLoggingGenerationReportsActivationAndUnactivatedStopFailures(t *testing
 	if err := wrapped.Start(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("activation error = %v", err)
 	}
-	events = nil
-	wrapped = &loggingGeneration{
+}
+
+func TestLoggingGenerationReportsUnactivatedStopFailures(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
 		generation: &orderedGenerationFake{events: &events, stopErr: wantErr},
 		prepared:   &preparedLogFake{events: &events, closeErr: wantErr},
 	}
-	if err := wrapped.Stop(context.Background()); !errors.Is(err, wantErr) {
+	if err := wrapper.Stop(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("unactivated stop error = %v", err)
 	}
-	wrapped = &loggingGeneration{
+}
+
+func TestLoggingGenerationReportsActivatedStopFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
 		generation: &orderedGenerationFake{events: &events, stopErr: wantErr},
 		prepared:   &preparedLogFake{events: &events}, activated: true,
 	}
-	if err := wrapped.Stop(context.Background()); !errors.Is(err, wantErr) {
+	if err := wrapper.Stop(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("activated stop error = %v", err)
+	}
+}
+
+func TestLoggingGenerationReportsActivatedShutdownFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
+		generation: &orderedGenerationFake{events: &events, stopErr: wantErr},
+		prepared:   &preparedLogFake{events: &events}, activated: true,
+	}
+	if err := wrapper.Shutdown(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("activated shutdown error = %v", err)
+	}
+}
+
+func TestLoggingGenerationDelegatesFinalShutdown(t *testing.T) {
+	t.Parallel()
+
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
+		generation: &orderedGenerationFake{events: &events},
+		prepared:   &preparedLogFake{events: &events},
+		activated:  true,
+	}
+	if err := wrapper.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shut down active logging generation: %v", err)
+	}
+	if want := []string{"shutdown"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("active shutdown events = %#v, want %#v", events, want)
+	}
+
+	events = nil
+	wrapper = &loggingGeneration{
+		generation: &orderedGenerationFake{events: &events},
+		prepared:   &preparedLogFake{events: &events},
+	}
+	if err := wrapper.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shut down inactive logging generation: %v", err)
+	}
+	if want := []string{"shutdown", "close-prepared"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("inactive shutdown events = %#v, want %#v", events, want)
 	}
 }
 
@@ -87,6 +143,10 @@ func (fake *orderedGenerationFake) Start(context.Context) error {
 }
 func (fake *orderedGenerationFake) Stop(context.Context) error {
 	*fake.events = append(*fake.events, "stop")
+	return fake.stopErr
+}
+func (fake *orderedGenerationFake) Shutdown(context.Context) error {
+	*fake.events = append(*fake.events, "shutdown")
 	return fake.stopErr
 }
 

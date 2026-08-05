@@ -26,8 +26,7 @@ func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
 
 			want := []string{
 				"heartbeat", "expire", "refresh-members", "leadership", "open-leader",
-				"recover-acquisitions", "poll", "retry-results", "request:linux", "start:linux",
-				"timeout:linux", "reconcile:linux",
+				"poll", "reconcile:linux", "request:linux",
 			}
 			if !reflect.DeepEqual(events, want) {
 				t.Fatalf("events = %#v, want %#v", events, want)
@@ -48,8 +47,7 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 	}
 
 	want := []string{
-		"heartbeat", "expire", "refresh-members", "leadership", "retry-results",
-		"request:linux", "start:linux", "timeout:linux", "reconcile:linux",
+		"heartbeat", "expire", "refresh-members", "leadership", "reconcile:linux", "request:linux",
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
@@ -82,14 +80,29 @@ func TestUnifiedEngineContinuesIndependentMaintenanceAfterFailures(t *testing.T)
 	engine := unifiedEngineFixture(&events)
 	heartbeatErr := errors.New("heartbeat unavailable")
 	engine.membership = membershipFake{events: &events, heartbeatErr: heartbeatErr}
-	engine.pools[0].runtime = poolRuntimeFake{events: &events, requestErr: errors.New("claim unavailable")}
+	engine.pools[0].runtime = poolRuntimeFake{events: &events, reconcileErr: errors.New("reconcile unavailable")}
 
 	err := engine.Cycle(context.Background())
 	if err == nil || !errors.Is(err, heartbeatErr) {
 		t.Fatalf("cycle error = %v, want heartbeat error", err)
 	}
-	if occurrences(events, "reconcile:linux") != 1 || occurrences(events, "retry-results") != 1 {
-		t.Fatalf("events = %#v, want independent maintenance to continue", events)
+	if occurrences(events, "reconcile:linux") != 1 || occurrences(events, "request:linux") != 0 {
+		t.Fatalf("events = %#v, want failed reconciliation to prevent a claim", events)
+	}
+}
+
+func TestUnifiedEngineReportsRequestFailureAfterSuccessfulReconciliation(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("claim unavailable")
+	events := make([]string, 0)
+	engine := unifiedEngineFixture(&events)
+	engine.pools[0].runtime = poolRuntimeFake{events: &events, requestErr: wantErr}
+	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("cycle error = %v, want request failure", err)
+	}
+	if want := []string{"reconcile:linux", "request:linux"}; !reflect.DeepEqual(events[len(events)-2:], want) {
+		t.Fatalf("pool events = %#v, want %#v", events[len(events)-2:], want)
 	}
 }
 
@@ -122,9 +135,8 @@ func TestUnifiedEngineJoinsIndependentOperationFailures(t *testing.T) {
 	engine.source = sourceRuntimeFake{
 		events: &events, refreshErr: wantErr, pollErr: wantErr,
 	}
-	engine.lifecycle = lifecycleRuntimeFake{events: &events, recoverErr: wantErr, retryErr: wantErr}
 	engine.pools[0].runtime = poolRuntimeFake{
-		events: &events, requestErr: wantErr, startErr: wantErr, timeoutErr: wantErr, reconcileErr: wantErr,
+		events: &events, requestErr: wantErr, reconcileErr: wantErr,
 	}
 	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("cycle error = %v", err)
@@ -195,10 +207,8 @@ func unifiedEngineFixture(events *[]string) *UnifiedEngine {
 		Membership:  membershipFake{events: events},
 		Leadership:  leadershipFake{leader: true, events: events},
 		Source:      sourceRuntimeFake{events: events},
-		Lifecycle:   lifecycleRuntimeFake{events: events},
 		Pools: []RunnerPoolRuntime{{
-			RunnerPool: core.RunnerPool("linux"), JobStartTimeout: 10 * time.Minute,
-			runtime: poolRuntimeFake{events: events},
+			RunnerPool: core.RunnerPool("linux"), runtime: poolRuntimeFake{events: events},
 		}},
 	})
 }
@@ -267,40 +277,15 @@ func (fake sourceRuntimeFake) CloseLeader(context.Context) error {
 	return fake.closeErr
 }
 
-type lifecycleRuntimeFake struct {
-	events     *[]string
-	recoverErr error
-	retryErr   error
-}
-
-func (fake lifecycleRuntimeFake) RecoverInterruptedAcquisitions(context.Context) error {
-	*fake.events = append(*fake.events, "recover-acquisitions")
-	return fake.recoverErr
-}
-func (fake lifecycleRuntimeFake) RetryPendingResults(context.Context) error {
-	*fake.events = append(*fake.events, "retry-results")
-	return fake.retryErr
-}
-
 type poolRuntimeFake struct {
 	events       *[]string
 	requestErr   error
-	startErr     error
-	timeoutErr   error
 	reconcileErr error
 }
 
 func (fake poolRuntimeFake) RequestWork(context.Context, core.RunnerPool) error {
 	*fake.events = append(*fake.events, "request:linux")
 	return fake.requestErr
-}
-func (fake poolRuntimeFake) StartAcquired(context.Context, core.RunnerPool) error {
-	*fake.events = append(*fake.events, "start:linux")
-	return fake.startErr
-}
-func (fake poolRuntimeFake) FailUnstarted(context.Context, core.RunnerPool, time.Duration) error {
-	*fake.events = append(*fake.events, "timeout:linux")
-	return fake.timeoutErr
 }
 func (fake poolRuntimeFake) Reconcile(context.Context, core.RunnerPool) error {
 	*fake.events = append(*fake.events, "reconcile:linux")

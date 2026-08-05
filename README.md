@@ -1,6 +1,6 @@
 # RunnerFoundry
 
-RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runners. It queues each job for a Runner Pool, gives the oldest matching job to that pool, attempts execution, reports success or failure to the source, and removes the internal job.
+RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runners. It queues each job for a Runner Pool, gives the oldest matching job to that pool, and owns the ephemeral runner until provider cleanup completes. The provisioned runner reports the workflow result directly to the source.
 
 GitHub Actions is the only supported Git source. RunnerFoundry is designed for personal GitHub accounts that need to share self-hosted capacity across repositories without organization-level runners. Docker Compose and libvirt are the supported execution providers.
 
@@ -12,13 +12,16 @@ The normative behavior and terminology live in the [product contract](docs/PRD.m
 
 1. GitHub requests a job for capacity published by the GitHub adapter.
 2. The adapter creates an internal job associated with a Runner Pool.
-3. Jobs remain FIFO within that Runner Pool.
-4. When the pool requests work, RunnerFoundry attempts its oldest queued job.
-5. RunnerFoundry reports success or failure through the adapter, then removes the internal job.
+3. The job remains in that Runner Pool's FIFO queue until a member picks it up.
+4. Pickup atomically moves the oldest queued job into member-owned processing.
+5. RunnerFoundry provisions one ephemeral runner and retains processing ownership until provider cleanup completes.
+6. The runner reports the workflow result directly to GitHub.
 
-Runner registration and capacity publication are separate from this job flow. A failed or removed job is not requeued internally; another attempt starts only with another request from GitHub.
+Runner registration and capacity publication are separate from this job flow. A failed or removed job is not requeued internally; another attempt starts only with another request from GitHub. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
 
-Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts all queued and attempting jobs from the capacity contributed by live members. A terminal job waiting for result delivery no longer consumes runner capacity.
+Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts queued jobs and processing jobs owned by live members from the capacity contributed by live members. Moving a job from queued to processing does not change availability.
+
+GitHub does not expose a supported operation for reporting a provisioning failure for an individual job. RunnerFoundry therefore cleans up the provider resource without inventing a GitHub result. If a future source supports such reporting, it remains inside that source adapter and does not create a persisted result lifecycle.
 
 ## Deployment choices
 
@@ -179,7 +182,6 @@ These settings belong to the GitHub adapter. GitHub runner scale-set terminology
 | `scale_sets[].name` | Required and unique | Runner Pool name and GitHub `runs-on` value. |
 | `scale_sets[].runner_group` | Optional; default `default` | GitHub runner group used for the published capacity. |
 | `scale_sets[].max_runners` | Required positive integer | Capacity contributed by this member. |
-| `scale_sets[].job_start_timeout` | Optional; default `10m` | Maximum wait for GitHub to start a job on the provisioned runner. Expiry fails the job's only attempt. |
 | `prune` | Optional; default `false` | Remove GitHub runner scale sets not present in this configuration. Enable only when RunnerFoundry owns them. |
 
 Each `scale_sets` entry configures exactly one execution provider: `docker` or `libvirt`.
@@ -326,7 +328,7 @@ Review the release notes, stop the affected member or cluster, install the packa
 
 - **Configuration rejected:** Read the first validation error in the service log. Check unknown fields, App credentials, state-backend selection, positive capacity, and exactly one provider per Runner Pool.
 - **GitHub capacity missing:** Verify App permissions, installation scope, the configured GitHub runner group, and the private-key file.
-- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued and attempting jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
+- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued and live-member processing jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
 - **Jobs remain queued:** Confirm that workflow `runs-on` matches `scale_sets[].name`, provider validation succeeds, and the Runner Pool has capacity.
 - **Docker unavailable:** Run `docker compose -f <file> config --services` as the service account.
 - **libvirt unavailable:** Run `virsh --connect <uri> list --all` as the service account and validate the domain XML and referenced storage.

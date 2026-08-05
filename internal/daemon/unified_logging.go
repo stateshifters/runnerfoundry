@@ -38,3 +38,13 @@ func (wrapped *loggingGeneration) Stop(ctx context.Context) error {
 	}
 	return errors.Join(wrapped.generation.Stop(ctx), wrapped.prepared.Close())
 }
+
+func (wrapped *loggingGeneration) Shutdown(ctx context.Context) error {
+	if wrapped.activated {
+		if err := wrapped.generation.Shutdown(ctx); err != nil {
+			return fmt.Errorf("shut down logging generation: %w", err)
+		}
+		return nil
+	}
+	return errors.Join(wrapped.generation.Shutdown(ctx), wrapped.prepared.Close())
+}

@@ -3,6 +3,7 @@ package github_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -12,232 +13,234 @@ import (
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
-func TestJobAvailableCreatesOneSourceNeutralJobBeforeAcknowledgement(t *testing.T) {
+func TestPollOnceAcquiresAvailableWorkBeforePersistingBatchEffects(t *testing.T) {
 	t.Parallel()
 
 	queueTime := time.Date(2026, time.August, 5, 10, 30, 0, 0, time.UTC)
-	message := &upstream.RunnerScaleSetMessage{
-		MessageID: 17,
-		JobAvailableMessages: []*upstream.JobAvailable{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42, QueueTime: queueTime},
-		}},
-	}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+	message := messageWithAllEffects(queueTime)
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}, acquired: []int64{42}}
 	handler := &recordingEventHandler{events: &client.events}
-	adapter := githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
-	}
+	adapter := newAdapter(client, handler)
 
-	assertReceivedWithCapacity(t, &adapter, client, 7)
-
-	sourceID := mustSourceID(t, 42)
-	want := core.JobRequest{
-		Source:     core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID},
-		RunnerPool: core.RunnerPool("linux"),
-		EnqueuedAt: queueTime,
+	received, err := adapter.PollOnce(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("poll message: %v", err)
 	}
-	assertSingleRequest(t, handler.requests, want)
-	assertEvents(t, client.events, []string{"request:github:" + sourceID, "ack:17"})
+	if !received {
+		t.Fatal("poll did not report received message")
+	}
+	assertBatchEffects(t, queueTime, client, handler)
 }
 
-func TestJobStartedAndCompletedTranslateBeforeAcknowledgement(t *testing.T) {
-	t.Parallel()
-
-	startedAt := time.Date(2026, time.August, 5, 11, 0, 0, 0, time.UTC)
-	message := &upstream.RunnerScaleSetMessage{
-		MessageID: 18,
+func messageWithAllEffects(queueTime time.Time) *upstream.RunnerScaleSetMessage {
+	return &upstream.RunnerScaleSetMessage{
+		MessageID: 17,
+		JobAvailableMessages: []*upstream.JobAvailable{
+			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 41, QueueTime: queueTime}},
+			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42, QueueTime: queueTime.Add(time.Second)}},
+		},
+		JobAssignedMessages: []*upstream.JobAssigned{
+			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 43, QueueTime: queueTime.Add(2 * time.Second)}},
+		},
 		JobStartedMessages: []*upstream.JobStarted{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 51, RunnerAssignTime: startedAt},
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 44},
 		}},
 		JobCompletedMessages: []*upstream.JobCompleted{
-			{Result: "succeeded", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 51}},
-			{Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 52}},
+			{Result: "succeeded", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 44}},
+			{Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 45}},
 		},
 	}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
-	handler := &recordingEventHandler{events: &client.events}
-	adapter := githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
-	}
+}
 
-	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
-		t.Fatalf("poll lifecycle message: %v", err)
+func assertBatchEffects(
+	t *testing.T,
+	queueTime time.Time,
+	client *recordingClient,
+	handler *recordingEventHandler,
+) {
+	t.Helper()
+	if client.maxCapacity != 7 {
+		t.Fatalf("poll capacity = %d, want 7", client.maxCapacity)
 	}
-
+	if !reflect.DeepEqual(client.requested, [][]int64{{41, 42}}) {
+		t.Fatalf("acquisition requests = %#v, want [[41 42]]", client.requested)
+	}
+	wantRequests := []core.JobRequest{
+		jobRequest(t, 42, queueTime.Add(time.Second)),
+		jobRequest(t, 43, queueTime.Add(2*time.Second)),
+	}
+	if !reflect.DeepEqual(handler.requests, wantRequests) {
+		t.Fatalf("requests = %#v, want %#v", handler.requests, wantRequests)
+	}
+	wantCancel := sourceReference(t, 45)
+	if !reflect.DeepEqual(handler.cancellations, []core.SourceReference{wantCancel}) {
+		t.Fatalf("cancellations = %#v, want [%#v]", handler.cancellations, wantCancel)
+	}
 	assertEvents(t, client.events, []string{
-		"started:github:" + mustSourceID(t, 51) + ":2026-08-05T11:00:00Z",
-		"completed:github:" + mustSourceID(t, 51) + ":success:runner",
-		"completed:github:" + mustSourceID(t, 52) + ":failure:runner",
-		"ack:18",
+		"acquire:41,42",
+		"request:" + sourceReference(t, 42).ID,
+		"request:" + sourceReference(t, 43).ID,
+		"cancel:" + sourceReference(t, 45).ID,
+		"ack:17",
 	})
 }
 
-func TestStatisticsAndAssignedCountsDoNotCreateDemand(t *testing.T) {
+func TestPollOnceRejectsUnknownAcquiredRequestBeforeDurableEffects(t *testing.T) {
 	t.Parallel()
 
-	message := &upstream.RunnerScaleSetMessage{
-		MessageID: 19,
-		Statistics: &upstream.RunnerScaleSetStatistic{
-			TotalAvailableJobs: 7,
-			TotalAssignedJobs:  5,
-		},
-		JobAssignedMessages: []*upstream.JobAssigned{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 61},
-		}},
-	}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+	message := availableMessage(18, 51)
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}, acquired: []int64{51, 52}}
 	handler := &recordingEventHandler{events: &client.events}
-	adapter := githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
-	}
+	adapter := newAdapter(client, handler)
 
-	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
-		t.Fatalf("poll count-only message: %v", err)
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err == nil || !received {
+		t.Fatalf("poll = (%t, %v), want received failure", received, err)
 	}
-
-	if len(handler.requests) != 0 {
-		t.Fatalf("count-only message created requests %#v", handler.requests)
+	if len(handler.requests) != 0 || len(client.acknowledged) != 0 {
+		t.Fatalf("unknown acquisition produced effects: requests=%#v acknowledgements=%#v",
+			handler.requests, client.acknowledged)
 	}
-	assertEvents(t, client.events, []string{"ack:19"})
 }
 
-func TestDurableFailureLeavesMessageForRedelivery(t *testing.T) {
+func TestPollOnceLeavesMessageWhenAcquisitionOrDurableEffectFails(t *testing.T) {
 	t.Parallel()
 
-	message := &upstream.RunnerScaleSetMessage{
-		MessageID: 20,
-		JobAvailableMessages: []*upstream.JobAvailable{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 71},
-		}},
+	for testName, testCase := range durableFailureCases() {
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+			testCase.client.messages = []*upstream.RunnerScaleSetMessage{testCase.message}
+			testCase.handler.events = &testCase.client.events
+			adapter := newAdapter(testCase.client, testCase.handler)
+			received, err := adapter.PollOnce(context.Background(), 0)
+			if err == nil || !received {
+				t.Fatalf("poll = (%t, %v), want received failure", received, err)
+			}
+			if len(testCase.client.acknowledged) != 0 {
+				t.Fatalf("failed message acknowledgements = %#v", testCase.client.acknowledged)
+			}
+		})
 	}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message, message}}
-	handler := &recordingEventHandler{events: &client.events, failuresRemaining: 1}
-	adapter := githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
-	}
-
-	if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
-		t.Fatal("first delivery succeeded despite durable failure")
-	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("failed durable handling acknowledged messages %#v", client.acknowledged)
-	}
-	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
-		t.Fatalf("redeliver message: %v", err)
-	}
-
-	sourceID := mustSourceID(t, 71)
-	assertEvents(t, client.events, []string{"request:github:" + sourceID, "request:github:" + sourceID, "ack:20"})
 }
 
-func TestAvailableBatchHandlesEveryRequestBeforeReturningError(t *testing.T) {
-	t.Parallel()
+type durableFailureCase struct {
+	message *upstream.RunnerScaleSetMessage
+	client  *recordingClient
+	handler *recordingEventHandler
+}
 
-	message := &upstream.RunnerScaleSetMessage{
-		MessageID: 21,
-		JobAvailableMessages: []*upstream.JobAvailable{
-			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 72}},
-			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 73}},
+func durableFailureCases() map[string]durableFailureCase {
+	return map[string]durableFailureCase{
+		"acquisition": {
+			message: availableMessage(19, 61),
+			client:  &recordingClient{acquireErr: errors.New("acquire failed")},
+			handler: &recordingEventHandler{},
 		},
-		JobStartedMessages: []*upstream.JobStarted{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 72},
-		}},
-	}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
-	handler := &recordingEventHandler{events: &client.events, failuresRemaining: 2}
-	adapter := githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
-	}
-
-	assertFailedAvailableBatch(t, &adapter, handler, client)
-	wantEvents := []string{
-		"request:github:" + mustSourceID(t, 72),
-		"request:github:" + mustSourceID(t, 73),
-	}
-	assertEvents(t, client.events, wantEvents)
-}
-
-func TestGitHubResultDeliveryIsRunnerManaged(t *testing.T) {
-	t.Parallel()
-
-	adapter := githubsource.Adapter{}
-	delivery, err := adapter.ReportResult(context.Background(), core.Job{
-		Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: "81"},
-	}, core.Result{Outcome: core.OutcomeSuccess, Origin: core.ResultOriginRunner})
-	if err != nil {
-		t.Fatalf("report GitHub result: %v", err)
-	}
-	if delivery != core.ResultDeliveryRunnerManaged {
-		t.Fatalf("GitHub result delivery = %q, want runner managed", delivery)
+		"request": {
+			message: availableMessage(20, 62),
+			client:  &recordingClient{acquired: []int64{62}},
+			handler: &recordingEventHandler{requestErr: errors.New("persist failed")},
+		},
+		"assigned request": {
+			message: &upstream.RunnerScaleSetMessage{MessageID: 20, JobAssignedMessages: []*upstream.JobAssigned{{
+				JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64},
+			}}},
+			client:  &recordingClient{},
+			handler: &recordingEventHandler{requestErr: errors.New("persist assigned failed")},
+		},
+		"cancellation": {
+			message: &upstream.RunnerScaleSetMessage{MessageID: 21, JobCompletedMessages: []*upstream.JobCompleted{{
+				Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 63},
+			}}},
+			client:  &recordingClient{},
+			handler: &recordingEventHandler{cancelErr: errors.New("cancel failed")},
+		},
 	}
 }
 
-func TestServiceResultDeliveryIsUnsupported(t *testing.T) {
+func TestPollOnceValidatesRelevantEventsBeforeAcquisition(t *testing.T) {
 	t.Parallel()
 
-	adapter := githubsource.Adapter{}
-	delivery, err := adapter.ReportResult(context.Background(), core.Job{
-		Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: "82"},
-	}, core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService})
-	if err != nil {
-		t.Fatalf("classify service result: %v", err)
+	tests := map[string]*upstream.RunnerScaleSetMessage{
+		"nil available":        {MessageID: 22, JobAvailableMessages: []*upstream.JobAvailable{nil}},
+		"invalid available":    availableMessage(23, 0),
+		"nil assigned":         {MessageID: 24, JobAssignedMessages: []*upstream.JobAssigned{nil}},
+		"invalid assigned":     {MessageID: 25, JobAssignedMessages: []*upstream.JobAssigned{{}}},
+		"nil completion":       {MessageID: 26, JobCompletedMessages: []*upstream.JobCompleted{nil}},
+		"invalid cancellation": {MessageID: 27, JobCompletedMessages: []*upstream.JobCompleted{{Result: "canceled"}}},
 	}
-	if delivery != core.ResultDeliveryUnsupported {
-		t.Fatalf("service result delivery = %q, want unsupported", delivery)
+	for testName, message := range tests {
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+			client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+			adapter := newAdapter(client, &recordingEventHandler{events: &client.events})
+			if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
+				t.Fatal("PollOnce() error = nil, want invalid event failure")
+			}
+			if len(client.requested) != 0 || len(client.acknowledged) != 0 {
+				t.Fatalf("invalid event effects: acquisitions=%#v acknowledgements=%#v",
+					client.requested, client.acknowledged)
+			}
+		})
 	}
 }
 
-func TestForeignResultDeliveryIsUnsupported(t *testing.T) {
+func TestPollOncePreservesAcknowledgementCursor(t *testing.T) {
 	t.Parallel()
 
-	adapter := githubsource.Adapter{}
-	delivery, err := adapter.ReportResult(context.Background(), core.Job{
-		Source: core.SourceReference{Adapter: "gitlab", ID: "91"},
-	}, core.Result{Outcome: core.OutcomeFailure})
-	if err != nil {
-		t.Fatalf("classify foreign result: %v", err)
+	client := &recordingClient{
+		messages:  []*upstream.RunnerScaleSetMessage{{MessageID: 28}},
+		deleteErr: errors.New("acknowledgement failed"),
 	}
-	if delivery != core.ResultDeliveryUnsupported {
-		t.Fatalf("foreign result delivery = %q, want unsupported", delivery)
+	adapter := newAdapter(client, &recordingEventHandler{events: &client.events})
+	adapter.LastMessageID = 27
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err == nil || !received || adapter.LastMessageID != 27 {
+		t.Fatalf("failed acknowledgement = (%t, %v, cursor %d), want received error and cursor 27",
+			received, err, adapter.LastMessageID)
+	}
+	client.deleteErr = nil
+	client.messages = []*upstream.RunnerScaleSetMessage{{MessageID: 28}}
+	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
+		t.Fatalf("redeliver acknowledged message: %v", err)
+	}
+	if adapter.LastMessageID != 28 {
+		t.Fatalf("cursor = %d, want 28", adapter.LastMessageID)
 	}
 }
 
 type recordingEventHandler struct {
-	events            *[]string
-	requests          []core.JobRequest
-	failuresRemaining int
-	startedErr        error
-	completedErr      error
+	events        *[]string
+	requests      []core.JobRequest
+	cancellations []core.SourceReference
+	requestErr    error
+	cancelErr     error
 }
 
 func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) error {
 	handler.requests = append(handler.requests, request)
-	*handler.events = append(*handler.events, "request:"+request.Source.Adapter+":"+request.Source.ID)
-	if handler.failuresRemaining > 0 {
-		handler.failuresRemaining--
-		return errors.New("durable handling failed")
+	if handler.events != nil {
+		*handler.events = append(*handler.events, "request:"+request.Source.ID)
 	}
-	return nil
+	return handler.requestErr
 }
 
-func (handler *recordingEventHandler) Started(_ context.Context, source core.SourceReference, observedAt time.Time) error {
-	*handler.events = append(*handler.events, "started:"+source.Adapter+":"+source.ID+":"+observedAt.Format(time.RFC3339))
-	return handler.startedErr
-}
-
-func (handler *recordingEventHandler) Completed(_ context.Context, source core.SourceReference, result core.Result) error {
-	*handler.events = append(
-		*handler.events,
-		"completed:"+source.Adapter+":"+source.ID+":"+string(result.Outcome)+":"+string(result.Origin),
-	)
-	return handler.completedErr
+func (handler *recordingEventHandler) Cancel(_ context.Context, source core.SourceReference) error {
+	handler.cancellations = append(handler.cancellations, source)
+	if handler.events != nil {
+		*handler.events = append(*handler.events, "cancel:"+source.ID)
+	}
+	return handler.cancelErr
 }
 
 type recordingClient struct {
 	messages     []*upstream.RunnerScaleSetMessage
+	acquired     []int64
+	requested    [][]int64
 	acknowledged []int
 	events       []string
 	receiveErr   error
+	acquireErr   error
 	deleteErr    error
 	maxCapacity  int
 }
@@ -255,6 +258,16 @@ func (client *recordingClient) GetMessage(_ context.Context, _, maxCapacity int)
 	return message, nil
 }
 
+func (client *recordingClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	client.requested = append(client.requested, append([]int64(nil), requestIDs...))
+	values := make([]string, len(requestIDs))
+	for index, requestID := range requestIDs {
+		values[index] = strconv.FormatInt(requestID, 10)
+	}
+	client.events = append(client.events, "acquire:"+join(values))
+	return append([]int64(nil), client.acquired...), client.acquireErr
+}
+
 func (client *recordingClient) DeleteMessage(_ context.Context, messageID int) error {
 	if client.deleteErr != nil {
 		return client.deleteErr
@@ -264,26 +277,27 @@ func (client *recordingClient) DeleteMessage(_ context.Context, messageID int) e
 	return nil
 }
 
-func assertEvents(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("events = %#v, want %#v", got, want)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("events = %#v, want %#v", got, want)
-		}
+func availableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {
+	return &upstream.RunnerScaleSetMessage{
+		MessageID: messageID,
+		JobAvailableMessages: []*upstream.JobAvailable{{
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: requestID},
+		}},
 	}
 }
 
-func assertSingleRequest(t *testing.T, requests []core.JobRequest, want core.JobRequest) {
-	t.Helper()
-	if len(requests) != 1 || requests[0] != want {
-		t.Fatalf("source-neutral requests = %#v, want [%#v]", requests, want)
+func newAdapter(client githubsource.MessageClient, handler githubsource.EventHandler) *githubsource.Adapter {
+	return &githubsource.Adapter{
+		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 }
 
-func mustSourceID(t *testing.T, requestID int64) string {
+func jobRequest(t *testing.T, requestID int64, enqueuedAt time.Time) core.JobRequest {
+	t.Helper()
+	return core.JobRequest{Source: sourceReference(t, requestID), RunnerPool: core.RunnerPool("linux"), EnqueuedAt: enqueuedAt}
+}
+
+func sourceReference(t *testing.T, requestID int64) core.SourceReference {
 	t.Helper()
 	sourceID, err := githubsource.EncodeSourceID(githubsource.SourceIdentity{
 		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), RequestID: requestID,
@@ -291,35 +305,23 @@ func mustSourceID(t *testing.T, requestID int64) string {
 	if err != nil {
 		t.Fatalf("encode source identity: %v", err)
 	}
-	return sourceID
+	return core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID}
 }
 
-func assertReceivedWithCapacity(t *testing.T, adapter *githubsource.Adapter, client *recordingClient, capacity int) {
+func assertEvents(t *testing.T, got, want []string) {
 	t.Helper()
-	received, err := adapter.PollOnce(context.Background(), capacity)
-	if err != nil {
-		t.Fatalf("poll available job: %v", err)
-	}
-	if !received || client.maxCapacity != capacity {
-		t.Fatalf("poll result = (%t, capacity %d), want (true, capacity %d)",
-			received, client.maxCapacity, capacity)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
 
-func assertFailedAvailableBatch(
-	t *testing.T,
-	adapter *githubsource.Adapter,
-	handler *recordingEventHandler,
-	client *recordingClient,
-) {
-	t.Helper()
-	if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
-		t.Fatal("PollOnce() error = nil, want unresolved available requests")
+func join(values []string) string {
+	if len(values) == 0 {
+		return ""
 	}
-	if len(handler.requests) != 2 {
-		t.Fatalf("durably handled requests = %#v, want both available requests", handler.requests)
+	joined := values[0]
+	for _, value := range values[1:] {
+		joined += "," + value
 	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("unresolved batch acknowledgements = %#v", client.acknowledged)
-	}
+	return joined
 }

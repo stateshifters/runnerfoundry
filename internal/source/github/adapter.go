@@ -25,6 +25,7 @@ var ErrNoMessage = transport.ErrNoMessage
 // a message only after all translated events have been durably handled.
 type MessageClient interface {
 	GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error)
+	AcquireRequests(ctx context.Context, requestIDs []int64) ([]int64, error)
 	DeleteMessage(ctx context.Context, messageID int) error
 }
 
@@ -35,8 +36,7 @@ type MessageClient interface {
 // idempotently because acknowledgement can fail after durable handling.
 type EventHandler interface {
 	Request(ctx context.Context, request core.JobRequest) error
-	Started(ctx context.Context, source core.SourceReference, observedAt time.Time) error
-	Completed(ctx context.Context, source core.SourceReference, result core.Result) error
+	Cancel(ctx context.Context, source core.SourceReference) error
 }
 
 // Adapter receives GitHub scale-set messages and translates their job events
@@ -86,83 +86,165 @@ func (adapter *Adapter) PollOnce(ctx context.Context, maxCapacity int) (bool, er
 }
 
 func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
-	if err := adapter.handleAvailable(ctx, message.JobAvailableMessages); err != nil {
+	effects, err := adapter.validateMessage(message)
+	if err != nil {
 		return err
 	}
-	if err := adapter.handleStarted(ctx, message.JobStartedMessages); err != nil {
+	acquired, err := adapter.acquireAvailable(ctx, effects)
+	if err != nil {
 		return err
 	}
-	return adapter.handleCompleted(ctx, message.JobCompletedMessages)
+	if err := adapter.persistRequests(ctx, acquired); err != nil {
+		return err
+	}
+	if err := adapter.persistRequests(ctx, effects.Assigned); err != nil {
+		return err
+	}
+	return adapter.persistCancellations(ctx, effects.Cancellations)
 }
 
-func (adapter *Adapter) handleAvailable(ctx context.Context, messages []*upstream.JobAvailable) error {
-	var handlingErrors []error
-	for _, available := range messages {
-		if available == nil {
-			handlingErrors = append(handlingErrors, errors.New("GitHub JobAvailable message is nil"))
-			continue
-		}
-		source, err := adapter.sourceReference(available.RunnerRequestID)
-		if err != nil {
-			handlingErrors = append(handlingErrors, err)
-			continue
-		}
-		request := core.JobRequest{
-			Source:     source,
-			RunnerPool: adapter.RunnerPool,
-			EnqueuedAt: available.QueueTime,
-		}
-		if err := adapter.Handler.Request(ctx, request); err != nil {
-			handlingErrors = append(
-				handlingErrors,
-				fmt.Errorf("durably handle GitHub JobAvailable request %d: %w", available.RunnerRequestID, err),
-			)
+func (adapter *Adapter) acquireAvailable(ctx context.Context, effects messageEffects) ([]identifiedRequest, error) {
+	if len(effects.AvailableIDs) == 0 {
+		return nil, nil
+	}
+	acquiredIDs, err := adapter.Client.AcquireRequests(ctx, effects.AvailableIDs)
+	if err != nil {
+		return nil, fmt.Errorf("acquire GitHub available requests: %w", err)
+	}
+	for _, requestID := range acquiredIDs {
+		if _, found := effects.Available[requestID]; !found {
+			return nil, fmt.Errorf("GitHub acquired unknown request %d", requestID)
 		}
 	}
-	return errors.Join(handlingErrors...)
+	acquired := make([]identifiedRequest, 0, len(acquiredIDs))
+	for _, requestID := range acquiredIDs {
+		acquired = append(acquired, identifiedRequest{SourceID: requestID, JobRequest: effects.Available[requestID]})
+	}
+	return acquired, nil
 }
 
-func (adapter *Adapter) handleStarted(ctx context.Context, messages []*upstream.JobStarted) error {
-	for _, started := range messages {
-		if started == nil {
-			return errors.New("GitHub JobStarted message is nil")
-		}
-		source, err := adapter.sourceReference(started.RunnerRequestID)
-		if err != nil {
+func (adapter *Adapter) persistRequests(ctx context.Context, requests []identifiedRequest) error {
+	for _, request := range requests {
+		if err := adapter.request(ctx, request.SourceID, request.JobRequest); err != nil {
 			return err
-		}
-		if err := adapter.Handler.Started(ctx, source, started.RunnerAssignTime); err != nil {
-			return fmt.Errorf("durably handle GitHub JobStarted request %d: %w", started.RunnerRequestID, err)
 		}
 	}
 	return nil
 }
 
-func (adapter *Adapter) handleCompleted(ctx context.Context, messages []*upstream.JobCompleted) error {
-	for _, completed := range messages {
-		if completed == nil {
-			return errors.New("GitHub JobCompleted message is nil")
-		}
-		source, err := adapter.sourceReference(completed.RunnerRequestID)
-		if err != nil {
-			return err
-		}
-		if err := adapter.Handler.Completed(ctx, source, translateResult(completed)); err != nil {
-			return fmt.Errorf("durably handle GitHub JobCompleted request %d: %w", completed.RunnerRequestID, err)
+func (adapter *Adapter) persistCancellations(ctx context.Context, cancellations []identifiedCancellation) error {
+	for _, cancellation := range cancellations {
+		if err := adapter.Handler.Cancel(ctx, cancellation.Source); err != nil {
+			return fmt.Errorf("durably cancel GitHub request %d: %w", cancellation.RequestID, err)
 		}
 	}
 	return nil
 }
 
-// ReportResult classifies delivery of a terminal result to GitHub. GitHub's
-// runner reports its own result, so jobs originating from this adapter require
-// no second API report. Jobs from another adapter are unsupported here.
-func (adapter Adapter) ReportResult(
-	_ context.Context,
-	job core.Job,
-	result core.Result,
-) (core.ResultDelivery, error) {
-	return resultDelivery(job, result), nil
+type identifiedRequest struct {
+	SourceID   int64
+	JobRequest core.JobRequest
+}
+
+type identifiedCancellation struct {
+	RequestID int64
+	Source    core.SourceReference
+}
+
+type messageEffects struct {
+	Available     map[int64]core.JobRequest
+	AvailableIDs  []int64
+	Assigned      []identifiedRequest
+	Cancellations []identifiedCancellation
+}
+
+func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage) (messageEffects, error) {
+	available, requestIDs, err := adapter.validateAvailable(message.JobAvailableMessages)
+	if err != nil {
+		return messageEffects{}, err
+	}
+	assigned, err := adapter.validateAssigned(message.JobAssignedMessages)
+	if err != nil {
+		return messageEffects{}, err
+	}
+	cancellations, err := adapter.validateCancellations(message.JobCompletedMessages)
+	if err != nil {
+		return messageEffects{}, err
+	}
+	return messageEffects{
+		Available: available, AvailableIDs: requestIDs, Assigned: assigned, Cancellations: cancellations,
+	}, nil
+}
+
+func (adapter *Adapter) validateAvailable(
+	events []*upstream.JobAvailable,
+) (map[int64]core.JobRequest, []int64, error) {
+	available := make(map[int64]core.JobRequest, len(events))
+	requestIDs := make([]int64, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			return nil, nil, errors.New("GitHub JobAvailable message is nil")
+		}
+		request, err := adapter.jobRequest(event.RunnerRequestID, event.QueueTime)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, duplicate := available[event.RunnerRequestID]; !duplicate {
+			requestIDs = append(requestIDs, event.RunnerRequestID)
+		}
+		available[event.RunnerRequestID] = request
+	}
+	return available, requestIDs, nil
+}
+
+func (adapter *Adapter) validateAssigned(events []*upstream.JobAssigned) ([]identifiedRequest, error) {
+	assigned := make([]identifiedRequest, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			return nil, errors.New("GitHub JobAssigned message is nil")
+		}
+		request, err := adapter.jobRequest(event.RunnerRequestID, event.QueueTime)
+		if err != nil {
+			return nil, err
+		}
+		assigned = append(assigned, identifiedRequest{SourceID: event.RunnerRequestID, JobRequest: request})
+	}
+	return assigned, nil
+}
+
+func (adapter *Adapter) validateCancellations(
+	events []*upstream.JobCompleted,
+) ([]identifiedCancellation, error) {
+	cancellations := make([]identifiedCancellation, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			return nil, errors.New("GitHub JobCompleted message is nil")
+		}
+		if event.Result != "canceled" {
+			continue
+		}
+		source, err := adapter.sourceReference(event.RunnerRequestID)
+		if err != nil {
+			return nil, err
+		}
+		cancellations = append(cancellations, identifiedCancellation{RequestID: event.RunnerRequestID, Source: source})
+	}
+	return cancellations, nil
+}
+
+func (adapter *Adapter) jobRequest(requestID int64, enqueuedAt time.Time) (core.JobRequest, error) {
+	source, err := adapter.sourceReference(requestID)
+	if err != nil {
+		return core.JobRequest{}, err
+	}
+	return core.JobRequest{Source: source, RunnerPool: adapter.RunnerPool, EnqueuedAt: enqueuedAt}, nil
+}
+
+func (adapter *Adapter) request(ctx context.Context, requestID int64, request core.JobRequest) error {
+	if err := adapter.Handler.Request(ctx, request); err != nil {
+		return fmt.Errorf("durably handle GitHub request %d: %w", requestID, err)
+	}
+	return nil
 }
 
 func (adapter *Adapter) sourceReference(requestID int64) (core.SourceReference, error) {
@@ -175,11 +257,4 @@ func (adapter *Adapter) sourceReference(requestID int64) (core.SourceReference, 
 		return core.SourceReference{}, fmt.Errorf("identify GitHub request %s: %w", strconv.FormatInt(requestID, 10), err)
 	}
 	return core.SourceReference{Adapter: AdapterName, ID: sourceID}, nil
-}
-
-func translateResult(completed *upstream.JobCompleted) core.Result {
-	if completed.Result == "succeeded" {
-		return core.Result{Outcome: core.OutcomeSuccess, Origin: core.ResultOriginRunner}
-	}
-	return core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginRunner, Reason: completed.Result}
 }

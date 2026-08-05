@@ -4,266 +4,105 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
-func TestEnqueuePersistsAndReturnsRepositoryAssignedJob(t *testing.T) {
+func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 	t.Parallel()
-	enqueuedAt := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
-	store, commitCalls := successfulEnqueueStore(enqueuedAt)
-	record, created, err := store.Enqueue(context.Background(), core.JobRequest{
-		Source: core.SourceReference{Adapter: "github", ID: "request-7"}, RunnerPool: "linux", EnqueuedAt: enqueuedAt,
-	})
-	if err != nil || !created || record.Job.ID != testJobID || record.State != core.JobStateQueued || *commitCalls != 1 {
-		t.Fatalf("enqueue = %#v, %t, commits=%d, error=%v", record, created, *commitCalls, err)
-	}
-}
-
-func TestEnqueueDoesNotRecreateFinalizedSourceRequest(t *testing.T) {
-	t.Parallel()
-	store, queryCalls := finalizedRedeliveryStore("request-7")
-	record, created, err := store.Enqueue(context.Background(), core.JobRequest{
-		Source: core.SourceReference{Adapter: "github", ID: "request-7"}, RunnerPool: "linux",
-	})
-	if err != nil || created || record != (core.JobRecord{}) || *queryCalls != 2 {
-		t.Fatalf("redelivery = %#v, %t, queries=%d, error=%v", record, created, *queryCalls, err)
-	}
-}
-
-func successfulEnqueueStore(enqueuedAt time.Time) (*Store, *int) {
-	commitCalls := 0
+	statements := make([]string, 0, 4)
+	commits := 0
 	transaction := Transaction{
-		execute: func(context.Context, string, ...any) (Result, error) {
-			return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
+		queryRow: func(_ context.Context, statement string, _ ...any) Row {
+			statements = append(statements, statement)
+			return rowFromValues(queuedJobValues())
 		},
-		queryRow: func(context.Context, string, ...any) Row {
-			return Row{scan: func(destinations ...any) error {
-				return assignDestinations(destinations,
-					[]any{testJobIDText, "github", "request-7", "linux", "queued", enqueuedAt.UnixNano()})
-			}}
+		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+			statements = append(statements, statement)
+			return successfulResult(), nil
 		},
-		commit: func(context.Context) error { commitCalls++; return nil }, rollback: func(context.Context) error { return nil },
+		commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion,
 	}
-	return NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }}), &commitCalls
+	store := NewStore(Executor{begin: transactionBeginning(transaction)})
+
+	processing, found, err := store.TakeOldest(context.Background(), "linux", testMemberID)
+
+	if err != nil || !found || processing.Job.ID != testJobID || processing.MemberID != testMemberID {
+		t.Fatalf("take oldest = %#v, %t, %v", processing, found, err)
+	}
+	if commits != 1 || len(statements) != 4 {
+		t.Fatalf("transaction effects = %#v, commits=%d", statements, commits)
+	}
+	if !strings.Contains(statements[0], "ORDER BY enqueued_at LIMIT 1") {
+		t.Fatalf("selection is not SQL-owned FIFO: %s", statements[0])
+	}
 }
 
-func finalizedRedeliveryStore(sourceID string) (*Store, *int) {
-	queryCalls := 0
-	transaction := Transaction{
-		execute: func(context.Context, string, ...any) (Result, error) {
-			return Result{rowsAffected: func() (int64, error) { return 0, nil }}, nil
-		},
-		queryRow: func(context.Context, string, ...any) Row {
-			queryCalls++
-			if queryCalls == 1 {
-				return Row{scan: func(...any) error { return sql.ErrNoRows }}
-			}
-			return Row{scan: func(destinations ...any) error {
-				return assignDestinations(destinations, []any{"github", sourceID, "failure", "service", "reported"})
-			}}
-		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
-	}
-	return NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }}), &queryCalls
-}
-
-func TestBeginAcquisitionPersistsFirstMarker(t *testing.T) {
+func TestTakeOldestRollsBackEveryPartialMove(t *testing.T) {
 	t.Parallel()
-	at := time.Date(2026, time.August, 5, 12, 5, 0, 0, time.UTC)
-	var statement string
-	store := NewStore(Executor{
-		begin: func(context.Context) (Transaction, error) { return Transaction{}, errors.New("begin not expected") },
-		queryRow: func(_ context.Context, query string, _ ...any) Row {
-			statement = query
-			return Row{scan: func(destinations ...any) error {
-				values := []any{testJobIDText, "github", "request-7", "linux", "attempting", at.Add(-time.Minute).UnixNano(),
-					sql.NullString{String: testMemberIDText, Valid: true}, sql.NullInt64{Int64: at.Add(-time.Second).UnixNano(), Valid: true},
-					sql.NullInt64{}, sql.NullInt64{Int64: at.UnixNano(), Valid: true}}
-				return assignDestinations(destinations, values)
-			}}
-		},
-	})
-	record, err := store.BeginAcquisition(context.Background(), testJobID, at)
-	if err != nil || !record.AcquisitionStartedAt.Equal(at) || !strings.Contains(statement, "COALESCE") {
-		t.Fatalf("begin acquisition = %#v, statement=%q, error=%v", record, statement, err)
-	}
-}
-
-func TestSetResultPendingIsIdempotentForSameResult(t *testing.T) {
-	t.Parallel()
-	result := core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService, Reason: "cleanup"}
-	transaction := resultPendingTransaction(sqlitePendingJobValues(result), nil)
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	record, err := store.SetResultPending(context.Background(), testJobID, result)
-	if err != nil || record.Result == nil || *record.Result != result {
-		t.Fatalf("same result = %#v, %v", record, err)
-	}
-}
-
-func TestSetResultPendingRejectsDifferentResult(t *testing.T) {
-	t.Parallel()
-	existing := core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService, Reason: "cleanup"}
-	transaction := resultPendingTransaction(nil, sqlitePendingJobValues(existing))
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	_, err := store.SetResultPending(context.Background(), testJobID,
-		core.Result{Outcome: core.OutcomeSuccess, Origin: core.ResultOriginRunner})
-	if !errors.Is(err, core.ErrConflictingResult) {
-		t.Fatalf("conflicting result error = %v", err)
-	}
-}
-
-func TestCapacityPublicationCannotMutateJobs(t *testing.T) {
-	t.Parallel()
-	var statements []string
-	transaction := Transaction{
-		execute: func(_ context.Context, query string, _ ...any) (Result, error) {
-			statements = append(statements, query)
-			return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
-		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
-	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	if err := store.PublishMemberState(context.Background(), testMemberID, fixedTime(), []core.RunnerPoolCapacity{
-		{RunnerPool: "linux", Capacity: 2}, {RunnerPool: "disabled", Capacity: 0},
-	}); err != nil {
-		t.Fatalf("publish member state: %v", err)
-	}
-	if len(statements) != 3 || !strings.Contains(statements[0], "runnerfoundry_members") ||
-		!strings.Contains(statements[1], "DELETE FROM runnerfoundry_member_runner_pools") ||
-		!strings.Contains(statements[2], "INSERT INTO runnerfoundry_member_runner_pools") {
-		t.Fatalf("member state statements = %#v", statements)
-	}
-	for _, statement := range statements {
-		if strings.Contains(statement, "runnerfoundry_jobs") {
-			t.Fatalf("capacity statement crossed job boundary: %s", statement)
+	protocolErr := errors.New("protocol")
+	for failureCall := 1; failureCall <= 3; failureCall++ {
+		failureCall := failureCall
+		executeCalls, rollbacks := 0, 0
+		transaction := Transaction{
+			queryRow: func(context.Context, string, ...any) Row { return rowFromValues(queuedJobValues()) },
+			execute: func(context.Context, string, ...any) (Result, error) {
+				executeCalls++
+				if executeCalls == failureCall {
+					return Result{}, protocolErr
+				}
+				return successfulResult(), nil
+			},
+			commit:   successfulCompletion,
+			rollback: func(context.Context) error { rollbacks++; return nil },
+		}
+		_, _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+			TakeOldest(context.Background(), "linux", testMemberID)
+		if err == nil || rollbacks != 1 {
+			t.Fatalf("failure %d: err=%v rollbacks=%d", failureCall, err, rollbacks)
 		}
 	}
 }
 
-func TestAvailableCapacityUsesOneSnapshot(t *testing.T) {
+func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 	t.Parallel()
-
-	var arguments []any
-	queryCalls := 0
-	store := NewStore(Executor{queryRow: func(_ context.Context, _ string, values ...any) Row {
-		queryCalls++
-		arguments = values
-		return rowFromValues([]any{30, 7, 5})
-	}})
-	capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", fixedTime())
-	if err != nil || capacity != 18 || queryCalls != 1 || len(arguments) != 2 || arguments[0] != "linux" {
-		t.Fatalf("available capacity = %d, queries=%d arguments=%#v error=%v",
-			capacity, queryCalls, arguments, err)
-	}
-}
-
-func TestFinalizeWritesTombstoneBeforeRemovingJob(t *testing.T) {
-	t.Parallel()
-	result := core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService, Reason: "cleanup"}
-	var statements []string
 	transaction := Transaction{
-		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
-			statements = append(statements, statement)
-			return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
-		},
 		queryRow: func(context.Context, string, ...any) Row {
-			return Row{scan: func(destinations ...any) error {
-				return assignDestinations(destinations, sqlitePendingJobValues(result))
-			}}
+			return Row{scan: func(...any) error { return sql.ErrNoRows }}
 		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
+		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	receipt, err := store.Finalize(context.Background(), testJobID, core.ResultDeliveryReported)
-	if err != nil || receipt.Outcome != result.Outcome || len(statements) != 2 ||
-		!strings.Contains(statements[0], "source_receipts") || !strings.Contains(statements[1], "DELETE") {
-		t.Fatalf("finalize receipt=%#v statements=%#v error=%v", receipt, statements, err)
+	_, found, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		TakeOldest(context.Background(), "linux", testMemberID)
+	if err != nil || found {
+		t.Fatalf("empty queue = %t, %v", found, err)
 	}
 }
 
-func TestExpireMemberRemovesCapacityBeforeRetainingReferencedIdentity(t *testing.T) {
+func TestCancelQueuedAlwaysTombstonesTheSource(t *testing.T) {
 	t.Parallel()
-	var statements []string
-	transaction := Transaction{
-		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
-			statements = append(statements, statement)
-			return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
-		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
+	statements := make([]string, 0, 2)
+	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+		statements = append(statements, statement)
+		return successfulResult(), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+	source := core.SourceReference{Adapter: "github", ID: "request-3"}
+	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		CancelQueued(context.Background(), source); err != nil {
+		t.Fatalf("cancel queued: %v", err)
 	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	if err := store.ExpireMember(context.Background(), testMemberID); err != nil {
-		t.Fatalf("expire member: %v", err)
-	}
-	if len(statements) != 2 || !strings.Contains(statements[0], "member_runner_pools") ||
-		!strings.Contains(statements[1], "NOT EXISTS") {
-		t.Fatalf("expiry statements = %#v", statements)
+	if len(statements) != 2 || !strings.Contains(statements[0], "source_tombstones") ||
+		!strings.Contains(statements[1], "queued_jobs") {
+		t.Fatalf("cancellation effects = %#v", statements)
 	}
 }
 
-func TestUnstartedTimeoutIsScopedToRunnerPool(t *testing.T) {
-	t.Parallel()
-	var statement string
-	var arguments []any
-	transaction := Transaction{
-		query: func(_ context.Context, query string, values ...any) (Rows, error) {
-			statement, arguments = query, values
-			return emptyRows(), nil
-		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
-	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	_, err := store.SetUnstartedAttemptsResultPending(context.Background(), "linux", time.Unix(0, 2).UTC(),
-		core.Result{Outcome: core.OutcomeFailure, Origin: core.ResultOriginService})
-	if err != nil || !strings.Contains(statement, "runner_pool = ?") || len(arguments) != 5 || arguments[3] != "linux" {
-		t.Fatalf("pool timeout statement=%q arguments=%#v error=%v", statement, arguments, err)
-	}
+func queuedJobValues() []any {
+	return []any{testJobIDText, "github", "request-3", "linux", fixedTime().UnixNano()}
 }
 
-func emptyRows() Rows {
-	return Rows{close: func() error { return nil }, err: func() error { return nil }, next: func() bool { return false },
-		scan: func(...any) error { return errors.New("scan not expected") }}
-}
-
-func resultPendingTransaction(updateValues, lookupValues []any) Transaction {
-	queryCalls := 0
-	return Transaction{
-		queryRow: func(context.Context, string, ...any) Row {
-			queryCalls++
-			values := updateValues
-			if queryCalls > 1 {
-				values = lookupValues
-			}
-			if values == nil {
-				return Row{scan: func(...any) error { return sql.ErrNoRows }}
-			}
-			return Row{scan: func(destinations ...any) error { return assignDestinations(destinations, values) }}
-		},
-		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
-	}
-}
-
-func sqlitePendingJobValues(result core.Result) []any {
-	return []any{testJobIDText, "github", "request-7", "linux", "result_pending", int64(1), sql.NullString{},
-		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{},
-		sql.NullString{String: string(result.Outcome), Valid: true},
-		sql.NullString{String: string(result.Origin), Valid: true}, sql.NullString{String: result.Reason, Valid: true}}
-}
-
-func assignDestinations(destinations, values []any) error {
-	for index, value := range values {
-		destination := reflect.ValueOf(destinations[index])
-		source := reflect.ValueOf(value)
-		if destination.Kind() != reflect.Pointer || !source.Type().AssignableTo(destination.Elem().Type()) {
-			return fmt.Errorf("cannot assign %T to %T", value, destinations[index])
-		}
-		destination.Elem().Set(source)
-	}
-	return nil
+func successfulResult() Result {
+	return Result{rowsAffected: func() (int64, error) { return 1, nil }}
 }

@@ -22,6 +22,10 @@ type runtimeCloser interface {
 	Close(ctx context.Context) error
 }
 
+type runtimeFinalizer interface {
+	Cleanup(ctx context.Context) error
+}
+
 type gatedCycleEngine struct {
 	engine     cycleEngine
 	leadership generationLeadership
@@ -55,15 +59,17 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 }
 
 type unifiedGeneration struct {
-	engine  cycleEngine
-	ticker  cycleTicker
-	report  func(error)
-	closers []runtimeCloser
+	engine     cycleEngine
+	ticker     cycleTicker
+	report     func(error)
+	closers    []runtimeCloser
+	finalizers []runtimeFinalizer
 
-	mutex  sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
-	closed bool
+	mutex     sync.Mutex
+	cancel    context.CancelFunc
+	done      chan struct{}
+	closed    bool
+	finalized bool
 }
 
 func newUnifiedGeneration(
@@ -71,14 +77,42 @@ func newUnifiedGeneration(
 	ticker cycleTicker,
 	report func(error),
 	closers []runtimeCloser,
+	finalizers []runtimeFinalizer,
 ) *unifiedGeneration {
 	if report == nil {
 		report = func(error) {}
 	}
 	return &unifiedGeneration{
 		engine: engine, ticker: ticker, report: report,
-		closers: append([]runtimeCloser(nil), closers...),
+		closers:    append([]runtimeCloser(nil), closers...),
+		finalizers: append([]runtimeFinalizer(nil), finalizers...),
 	}
+}
+
+// Shutdown performs process-final cleanup after stopping claims and source
+// polls. Reloads call Stop directly and therefore preserve active runners.
+func (generation *unifiedGeneration) Shutdown(ctx context.Context) error {
+	stopErr := generation.Stop(ctx)
+	generation.mutex.Lock()
+	if generation.finalized {
+		generation.mutex.Unlock()
+		return stopErr
+	}
+	generation.mutex.Unlock()
+
+	cleanupErrors := make([]error, 0, len(generation.finalizers))
+	for _, finalizer := range generation.finalizers {
+		if err := finalizer.Cleanup(ctx); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	cleanupErr := errors.Join(cleanupErrors...)
+	if cleanupErr == nil {
+		generation.mutex.Lock()
+		generation.finalized = true
+		generation.mutex.Unlock()
+	}
+	return errors.Join(stopErr, cleanupErr)
 }
 
 func (generation *unifiedGeneration) Start(ctx context.Context) error {

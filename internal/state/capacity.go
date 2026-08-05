@@ -1,10 +1,9 @@
 package state
 
-// CalculateAvailableRunnerPoolCapacity subtracts durable active demand from
-// live configured capacity. Terminal results are absent from the inputs
-// because they no longer require a runner.
-func CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, attemptingJobs int) int {
-	available := liveCapacity - queuedJobs - attemptingJobs
+// CalculateAvailableRunnerPoolCapacity subtracts waiting and live processing
+// demand from the capacity published by live members.
+func CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, processingJobs int) int {
+	available := liveCapacity - queuedJobs - processingJobs
 	if available < 0 {
 		return 0
 	}

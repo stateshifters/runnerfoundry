@@ -72,11 +72,6 @@ func TestManagerOpensPollAdaptersAndClosesLeaderSessions(t *testing.T) {
 	if _, err := adapters[0].PollOnce(context.Background(), 0); err != nil {
 		t.Fatalf("poll opened session: %v", err)
 	}
-	if err := fixture.manager.Source().Acquire(
-		context.Background(), sourceJob(t, fixture.record.RepositoryURL, fixture.record.RunnerPool, 62),
-	); err != nil {
-		t.Fatalf("acquire opened route: %v", err)
-	}
 	if err := fixture.manager.CloseLeader(context.Background()); err != nil {
 		t.Fatalf("close leader: %v", err)
 	}
@@ -312,8 +307,10 @@ func (session *managerSessionFake) GetMessage(context.Context, int, int) (*upstr
 	return message, nil
 }
 
-func (*managerSessionFake) DeleteMessage(context.Context, int) error    { return nil }
-func (*managerSessionFake) AcquireRequest(context.Context, int64) error { return nil }
+func (*managerSessionFake) DeleteMessage(context.Context, int) error { return nil }
+func (*managerSessionFake) AcquireRequests(context.Context, []int64) ([]int64, error) {
+	return nil, nil
+}
 func (session *managerSessionFake) Close(context.Context) error {
 	session.closes++
 	session.closed = true

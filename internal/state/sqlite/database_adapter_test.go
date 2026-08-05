@@ -75,7 +75,7 @@ func TestInitializeAppliesFreshSchemaThroughInjectedDatabaseProtocol(t *testing.
 	for _, statement := range sqliteSchemaStatements {
 		mock.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
-	mock.ExpectExec(regexp.QuoteMeta("PRAGMA user_version = 101")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 	mock.ExpectClose()
 	if err := initialize(context.Background(), database); err != nil {
@@ -139,8 +139,8 @@ func TestDatabaseAdapterDelegatesEnqueueTransaction(t *testing.T) {
 	}
 	now := fixedTime()
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(insertJobSQL)).WillReturnResult(sqlmock.NewResult(3, 1))
-	mock.ExpectQuery(regexp.QuoteMeta(lookupJobBySourceSQL)).WillReturnRows(sqliteJobRows(now))
+	mock.ExpectExec(regexp.QuoteMeta(insertQueuedJobSQL)).WillReturnResult(sqlmock.NewResult(3, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(queuedJobBySourceSQL)).WillReturnRows(sqliteQueuedJobRows(now))
 	mock.ExpectCommit()
 	mock.ExpectClose()
 	store := NewDatabaseStore(database)
@@ -157,7 +157,7 @@ func TestDatabaseAdapterDelegatesEnqueueTransaction(t *testing.T) {
 	}
 }
 
-func TestDatabaseAdapterDelegatesRowsAndScalarQueries(t *testing.T) {
+func TestDatabaseAdapterDelegatesProcessingRowsAndScalarQueries(t *testing.T) {
 	t.Parallel()
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -165,12 +165,12 @@ func TestDatabaseAdapterDelegatesRowsAndScalarQueries(t *testing.T) {
 	}
 	now := fixedTime()
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(pendingResultsSQL)).WillReturnRows(sqliteJobRows(now))
+	mock.ExpectQuery(regexp.QuoteMeta(processingByMemberSQL)).WillReturnRows(sqliteProcessingJobRows())
 	mock.ExpectCommit()
 	mock.ExpectQuery(regexp.QuoteMeta(countLiveMembersSQL)).WillReturnRows(
 		sqlmock.NewRows([]string{"count"}).AddRow(2))
 	store := NewDatabaseStore(database)
-	if records, queryErr := store.PendingResults(context.Background(), 1); queryErr != nil || len(records) != 1 {
+	if records, queryErr := store.ProcessingByMember(context.Background(), testMemberID, "linux"); queryErr != nil || len(records) != 1 {
 		t.Fatalf("query through adapter = %#v, %v", records, queryErr)
 	}
 	if count, countErr := store.CountLiveMembers(context.Background(), now); countErr != nil || count != 2 {
@@ -217,21 +217,21 @@ func TestDatabaseAdapterReportsQueryFailures(t *testing.T) {
 	protocolErr := errors.New("protocol")
 	for index, rows := range []*sqlmock.Rows{
 		nil,
-		sqliteJobRows(fixedTime()).RowError(0, protocolErr),
+		sqliteProcessingJobRows().RowError(0, protocolErr),
 	} {
 		database, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatalf("case %d: create fake: %v", index, err)
 		}
 		mock.ExpectBegin()
-		query := mock.ExpectQuery(regexp.QuoteMeta(pendingResultsSQL))
+		query := mock.ExpectQuery(regexp.QuoteMeta(processingByMemberSQL))
 		if rows == nil {
 			query.WillReturnError(protocolErr)
 		} else {
 			query.WillReturnRows(rows)
 		}
 		mock.ExpectRollback()
-		if _, err := NewDatabaseStore(database).PendingResults(context.Background(), 1); err == nil {
+		if _, err := NewDatabaseStore(database).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
 			t.Fatalf("case %d: expected query error", index)
 		}
 	}
@@ -324,9 +324,12 @@ func expectSchemaStatements(mock sqlmock.Sqlmock) {
 	}
 }
 
-func sqliteJobRows(now time.Time) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "state", "enqueued_at",
-		"member_id", "claimed_at", "started_at", "acquisition_started_at", "acquired_at", "result", "result_origin", "result_reason"}).
-		AddRow(testJobIDText, "github", "request-3", "linux", "attempting", now.UnixNano(), testMemberIDText, now.UnixNano(),
-			now.UnixNano(), now.UnixNano(), now.UnixNano(), "failure", "service", "cleanup")
+func sqliteQueuedJobRows(now time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "enqueued_at"}).
+		AddRow(testJobIDText, "github", "request-3", "linux", now.UnixNano())
+}
+
+func sqliteProcessingJobRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "member_id"}).
+		AddRow(testJobIDText, "github", "request-3", "linux", testMemberIDText)
 }

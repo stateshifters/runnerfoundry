@@ -11,6 +11,7 @@ import (
 type generation interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
+	Shutdown(ctx context.Context) error
 }
 
 type generationBuilder func(context.Context, config.Config) (generation, error)
@@ -28,7 +29,7 @@ func supervise(
 		return err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, active.Stop(context.WithoutCancel(ctx)))
+		resultErr = errors.Join(resultErr, active.Shutdown(context.WithoutCancel(ctx)))
 	}()
 	if err = notifier.Ready(ctx); err != nil {
 		return fmt.Errorf("notify runtime ready: %w", err)

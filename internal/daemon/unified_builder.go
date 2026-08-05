@@ -14,8 +14,6 @@ import (
 	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
-const maintenanceBatchSize = 100
-
 type unifiedStore interface {
 	core.JobStore
 	runtimeengine.MembershipStore
@@ -56,6 +54,7 @@ func buildUnifiedGeneration(
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
 	return newUnifiedGeneration(
 		processEngine, dependencies.ticker, dependencies.report, configuredClosers(dependencies),
+		assembled.finalizers,
 	), nil
 }
 
@@ -64,18 +63,16 @@ func buildConfiguredEngine(
 	dependencies unifiedBuilderDependencies,
 	discoveryInterval time.Duration,
 ) *UnifiedEngine {
-	lifecycle := orchestrationLifecycle{orchestrator: assembled.lifecycle, batchSize: maintenanceBatchSize}
 	source := newGitHubSourceRuntime(
-		dependencies.manager, dependencies.store, dependencies.member.String(), assembled.lifecycle,
+		dependencies.manager, dependencies.store, dependencies.member.String(), runtimeengine.NewQueueHandler(dependencies.store),
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
 	membership := runtimeengine.NewMembershipService(
-		dependencies.store, assembled.lifecycle, dependencies.member, assembled.localCapacity, dependencies.currentTime,
+		dependencies.store, dependencies.member, assembled.localCapacity, dependencies.currentTime,
 	)
 	return NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
-		Membership: membership, Leadership: dependencies.leadership, Source: source,
-		Lifecycle: lifecycle, Pools: assembled.pools,
+		Membership: membership, Leadership: dependencies.leadership, Source: source, Pools: assembled.pools,
 	})
 }
 
@@ -91,7 +88,7 @@ type assembledRuntime struct {
 	managerConfig githubsource.ManagerConfig
 	localCapacity []core.RunnerPoolCapacity
 	pools         []RunnerPoolRuntime
-	lifecycle     *runtimeengine.Orchestrator
+	finalizers    []runtimeFinalizer
 }
 
 func assembleConfiguredRuntime(
@@ -102,13 +99,14 @@ func assembleConfiguredRuntime(
 		managerConfig: githubsource.ManagerConfig{Prune: configured.Prune},
 		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.ScaleSets)),
 		pools:         make([]RunnerPoolRuntime, 0, len(configured.ScaleSets)),
+		finalizers:    make([]runtimeFinalizer, 0, len(configured.ScaleSets)),
 	}
 	for _, scaleSet := range configured.ScaleSets {
 		if err := assembled.appendScaleSet(scaleSet, dependencies); err != nil {
 			return assembledRuntime{}, err
 		}
 	}
-	if assembled.lifecycle == nil {
+	if len(assembled.pools) == 0 {
 		return assembledRuntime{}, errors.New("at least one Runner Pool is required")
 	}
 	return assembled, nil
@@ -123,28 +121,24 @@ func (assembled *assembledRuntime) appendScaleSet(
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
-	jobStartTimeout, err := scaleSet.JobStartDuration()
-	if err != nil {
-		return fmt.Errorf("runner pool %q job start timeout: %w", runnerPool, err)
-	}
 	orchestrator := runtimeengine.NewOrchestrator(
-		dependencies.store, dependencies.manager.Source(), provider, dependencies.member, dependencies.currentTime,
+		dependencies.store, dependencies.manager.Source(), provider, dependencies.member,
 	)
-	if assembled.lifecycle == nil {
-		assembled.lifecycle = orchestrator
-	}
 	assembled.localCapacity = append(assembled.localCapacity, core.RunnerPoolCapacity{
 		RunnerPool: runnerPool, Capacity: scaleSet.MaxRunners,
 	})
 	assembled.managerConfig.RunnerPools = append(assembled.managerConfig.RunnerPools, githubsource.RunnerPoolConfig{
 		RunnerPool: runnerPool, RunnerGroup: scaleSet.RunnerGroup,
 	})
+	pool := orchestrationPool{
+		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, scaleSet.MaxRunners), orchestrator: orchestrator,
+		runnerPool: runnerPool,
+	}
 	assembled.pools = append(assembled.pools, RunnerPoolRuntime{
-		RunnerPool: runnerPool, JobStartTimeout: jobStartTimeout,
-		runtime: orchestrationPool{
-			worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, scaleSet.MaxRunners), orchestrator: orchestrator,
-		},
+		RunnerPool: runnerPool,
+		runtime:    pool,
 	})
+	assembled.finalizers = append(assembled.finalizers, pool)
 	return nil
 }
 
@@ -160,30 +154,10 @@ func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error 
 	return nil
 }
 
-type orchestrationLifecycle struct {
-	orchestrator *runtimeengine.Orchestrator
-	batchSize    int
-}
-
-func (lifecycle orchestrationLifecycle) RecoverInterruptedAcquisitions(ctx context.Context) error {
-	_, err := lifecycle.orchestrator.RecoverInterruptedAcquisitions(ctx, lifecycle.batchSize)
-	if err != nil {
-		return fmt.Errorf("recover interrupted acquisitions: %w", err)
-	}
-	return nil
-}
-
-func (lifecycle orchestrationLifecycle) RetryPendingResults(ctx context.Context) error {
-	_, err := lifecycle.orchestrator.RetryPendingResults(ctx, lifecycle.batchSize)
-	if err != nil {
-		return fmt.Errorf("retry pending results: %w", err)
-	}
-	return nil
-}
-
 type orchestrationPool struct {
 	worker       *runtimeengine.PoolWorker
 	orchestrator *runtimeengine.Orchestrator
+	runnerPool   core.RunnerPool
 }
 
 func (pool orchestrationPool) RequestWork(ctx context.Context, _ core.RunnerPool) error {
@@ -194,30 +168,18 @@ func (pool orchestrationPool) RequestWork(ctx context.Context, _ core.RunnerPool
 	return nil
 }
 
-func (pool orchestrationPool) StartAcquired(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.StartAcquired(ctx, runnerPool)
-	if err != nil {
-		return fmt.Errorf("start acquired pool work: %w", err)
-	}
-	return nil
-}
-
-func (pool orchestrationPool) FailUnstarted(
-	ctx context.Context,
-	runnerPool core.RunnerPool,
-	timeout time.Duration,
-) error {
-	_, err := pool.orchestrator.FailUnstartedAttempts(ctx, runnerPool, timeout)
-	if err != nil {
-		return fmt.Errorf("fail unstarted pool work: %w", err)
-	}
-	return nil
-}
-
 func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.RunnerPool) error {
 	_, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
 	if err != nil {
 		return fmt.Errorf("reconcile pool work: %w", err)
+	}
+	return nil
+}
+
+func (pool orchestrationPool) Cleanup(ctx context.Context) error {
+	_, err := pool.orchestrator.CleanupPool(ctx, pool.runnerPool)
+	if err != nil {
+		return fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
 	return nil
 }

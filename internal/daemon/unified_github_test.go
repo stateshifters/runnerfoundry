@@ -408,6 +408,9 @@ func (fake *capacityMessageClientFake) GetMessage(_ context.Context, _, maxCapac
 }
 
 func (*capacityMessageClientFake) DeleteMessage(context.Context, int) error { return nil }
+func (*capacityMessageClientFake) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
+}
 
 type blockingCapacityMessageClient struct {
 	started chan int
@@ -424,6 +427,9 @@ func (client *blockingCapacityMessageClient) GetMessage(ctx context.Context, _, 
 }
 
 func (*blockingCapacityMessageClient) DeleteMessage(context.Context, int) error { return nil }
+func (*blockingCapacityMessageClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
+}
 
 type messageThenBlockingClient struct {
 	started       chan int
@@ -451,6 +457,9 @@ func (client *messageThenBlockingClient) GetMessage(
 }
 
 func (*messageThenBlockingClient) DeleteMessage(context.Context, int) error { return nil }
+func (*messageThenBlockingClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
+}
 
 type stubbornCapacityMessageClient struct {
 	started chan int
@@ -472,16 +481,14 @@ func (client *stubbornCapacityMessageClient) GetMessage(
 }
 
 func (*stubbornCapacityMessageClient) DeleteMessage(context.Context, int) error { return nil }
+func (*stubbornCapacityMessageClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
+}
 
 type eventHandlerFake struct{}
 
-func (eventHandlerFake) Request(context.Context, core.JobRequest) error { return nil }
-func (eventHandlerFake) Started(context.Context, core.SourceReference, time.Time) error {
-	return nil
-}
-func (eventHandlerFake) Completed(context.Context, core.SourceReference, core.Result) error {
-	return nil
-}
+func (eventHandlerFake) Request(context.Context, core.JobRequest) error     { return nil }
+func (eventHandlerFake) Cancel(context.Context, core.SourceReference) error { return nil }
 
 func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
 	t.Helper()

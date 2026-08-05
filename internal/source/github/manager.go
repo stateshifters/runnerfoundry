@@ -29,7 +29,6 @@ type RegistrationRepository interface {
 }
 
 type ManagedSession interface {
-	LeaderSession
 	MessageClient
 	Close(ctx context.Context) error
 }
@@ -151,10 +150,7 @@ func NewManager(
 	if discoverer == nil || factory == nil || registrations == nil {
 		return nil, errors.New("GitHub discoverer, client factory, and registration repository are required")
 	}
-	source := &Source{
-		leaderRoutes: make(map[routeKey]LeaderSession),
-		memberRoutes: make(map[routeKey]memberRoute),
-	}
+	source := &Source{routes: make(map[routeKey]memberRoute)}
 	return &Manager{
 		discoverer: discoverer, factory: factory, registrations: registrations, source: source,
 	}, nil
@@ -314,7 +310,7 @@ func (manager *Manager) RefreshMembers(ctx context.Context) error {
 			Client: managedBootstrapClient{client: client}, Registration: transportRegistration(record),
 		})
 	}
-	if err := manager.source.ReplaceRoutes(asLeaderSessions(manager.leaders), routes); err != nil {
+	if err := manager.source.ReplaceRoutes(routes); err != nil {
 		return fmt.Errorf("replace GitHub member routes: %w", err)
 	}
 	manager.members = routes
@@ -322,8 +318,8 @@ func (manager *Manager) RefreshMembers(ctx context.Context) error {
 }
 
 // OpenLeader opens one actions/scaleset message session per persisted
-// registration and returns its polling adapter. Callers must set each
-// adapter's MaxCapacity from current live aggregate capacity before polling.
+// registration and returns its polling adapter. Callers pass current shared
+// capacity to each PollOnce call.
 func (manager *Manager) OpenLeader(
 	ctx context.Context,
 	owner string,
@@ -340,9 +336,6 @@ func (manager *Manager) OpenLeader(
 	sessions, adapters, err := manager.openLeaderRecords(ctx, records, owner, handler)
 	if err != nil {
 		return nil, errors.Join(cleanupErr, err)
-	}
-	if err := manager.source.ReplaceRoutes(asLeaderSessions(sessions), manager.members); err != nil {
-		return nil, errors.Join(cleanupErr, manager.closeOpened(ctx, sessions, err))
 	}
 	oldSessions := manager.leaders
 	manager.leaders = sessions
@@ -407,24 +400,12 @@ func (manager *Manager) closeOpened(ctx context.Context, sessions []ManagedSessi
 	return errors.Join(cause, manager.retireSessions(ctx, sessions))
 }
 
-// CloseLeader removes every leader acquisition route before closing its
-// actions/scaleset message session.
+// CloseLeader closes every actions/scaleset message session.
 func (manager *Manager) CloseLeader(ctx context.Context) error {
-	if err := manager.source.ReplaceRoutes(nil, manager.members); err != nil {
-		return fmt.Errorf("remove GitHub leader routes: %w", err)
-	}
 	sessions := append(manager.retiring, manager.leaders...)
 	manager.leaders = nil
 	manager.retiring = nil
 	return manager.retireSessions(ctx, sessions)
-}
-
-func asLeaderSessions(sessions []ManagedSession) []LeaderSession {
-	leaders := make([]LeaderSession, len(sessions))
-	for index, session := range sessions {
-		leaders[index] = session
-	}
-	return leaders
 }
 
 func (manager *Manager) retireSessions(ctx context.Context, sessions []ManagedSession) error {

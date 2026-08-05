@@ -25,24 +25,16 @@ type sourceRuntime interface {
 	CloseLeader(ctx context.Context) error
 }
 
-type lifecycleRuntime interface {
-	RecoverInterruptedAcquisitions(ctx context.Context) error
-	RetryPendingResults(ctx context.Context) error
-}
-
 type poolRuntime interface {
 	RequestWork(ctx context.Context, runnerPool core.RunnerPool) error
-	StartAcquired(ctx context.Context, runnerPool core.RunnerPool) error
-	FailUnstarted(ctx context.Context, runnerPool core.RunnerPool, timeout time.Duration) error
 	Reconcile(ctx context.Context, runnerPool core.RunnerPool) error
 }
 
 // RunnerPoolRuntime binds one configured Runner Pool to its member-local
 // execution runtime. Every backend uses this same lifecycle.
 type RunnerPoolRuntime struct {
-	RunnerPool      core.RunnerPool
-	JobStartTimeout time.Duration
-	runtime         poolRuntime
+	RunnerPool core.RunnerPool
+	runtime    poolRuntime
 }
 
 // UnifiedEngineConfig contains the boundaries used by a member's maintenance
@@ -54,7 +46,6 @@ type UnifiedEngineConfig struct {
 	Membership  membershipRuntime
 	Leadership  leadershipRuntime
 	Source      sourceRuntime
-	Lifecycle   lifecycleRuntime
 	Pools       []RunnerPoolRuntime
 }
 
@@ -66,7 +57,6 @@ type UnifiedEngine struct {
 	membership    membershipRuntime
 	leadership    leadershipRuntime
 	source        sourceRuntime
-	lifecycle     lifecycleRuntime
 	pools         []RunnerPoolRuntime
 	leaderOpen    bool
 	leaderClosing bool
@@ -79,7 +69,6 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 		membership:  config.Membership,
 		leadership:  config.Leadership,
 		source:      config.Source,
-		lifecycle:   config.Lifecycle,
 		pools:       append([]RunnerPoolRuntime(nil), config.Pools...),
 	}
 }
@@ -102,9 +91,6 @@ func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 	}
 
 	cycleErrors = append(cycleErrors, engine.runLeaderWork(ctx, liveMemberCutoff)...)
-	if err := engine.lifecycle.RetryPendingResults(ctx); err != nil {
-		cycleErrors = append(cycleErrors, fmt.Errorf("retry pending results: %w", err))
-	}
 	for _, runnerPool := range engine.pools {
 		cycleErrors = append(cycleErrors, engine.runPoolWork(ctx, runnerPool)...)
 	}
@@ -160,10 +146,7 @@ func (engine *UnifiedEngine) openLeadership(ctx context.Context) error {
 }
 
 func (engine *UnifiedEngine) runOwnedLeaderWork(ctx context.Context, liveMemberCutoff time.Time) []error {
-	leaderErrors := make([]error, 0, 2)
-	if err := engine.lifecycle.RecoverInterruptedAcquisitions(ctx); err != nil {
-		leaderErrors = append(leaderErrors, fmt.Errorf("recover interrupted acquisitions: %w", err))
-	}
+	leaderErrors := make([]error, 0, 1)
 	if err := engine.source.Poll(ctx, liveMemberCutoff); err != nil {
 		leaderErrors = append(leaderErrors, fmt.Errorf("poll source requests: %w", err))
 	}
@@ -171,18 +154,13 @@ func (engine *UnifiedEngine) runOwnedLeaderWork(ctx context.Context, liveMemberC
 }
 
 func (engine *UnifiedEngine) runPoolWork(ctx context.Context, runnerPool RunnerPoolRuntime) []error {
-	poolErrors := make([]error, 0, 4)
-	if err := runnerPool.runtime.RequestWork(ctx, runnerPool.RunnerPool); err != nil {
-		poolErrors = append(poolErrors, fmt.Errorf("request work for Runner Pool %q: %w", runnerPool.RunnerPool, err))
-	}
-	if err := runnerPool.runtime.StartAcquired(ctx, runnerPool.RunnerPool); err != nil {
-		poolErrors = append(poolErrors, fmt.Errorf("start acquired work for Runner Pool %q: %w", runnerPool.RunnerPool, err))
-	}
-	if err := runnerPool.runtime.FailUnstarted(ctx, runnerPool.RunnerPool, runnerPool.JobStartTimeout); err != nil {
-		poolErrors = append(poolErrors, fmt.Errorf("expire startup for Runner Pool %q: %w", runnerPool.RunnerPool, err))
-	}
+	poolErrors := make([]error, 0, 1)
 	if err := runnerPool.runtime.Reconcile(ctx, runnerPool.RunnerPool); err != nil {
 		poolErrors = append(poolErrors, fmt.Errorf("reconcile Runner Pool %q: %w", runnerPool.RunnerPool, err))
+		return poolErrors
+	}
+	if err := runnerPool.runtime.RequestWork(ctx, runnerPool.RunnerPool); err != nil {
+		poolErrors = append(poolErrors, fmt.Errorf("request work for Runner Pool %q: %w", runnerPool.RunnerPool, err))
 	}
 	return poolErrors
 }
