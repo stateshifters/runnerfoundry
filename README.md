@@ -551,7 +551,7 @@ Together they advertise capacity of six. Neither host receives more assignments 
 
 ### 4. Start and verify the cluster
 
-Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 007 unifies identified and assigned-count capacity obligations in `scaler_demand`, makes its request identity optional, and persists retry eligibility. It advances the compatibility floor and must be applied while every RunnerFoundry node is stopped. The equivalent standalone model is SQLite schema version 6 and migrates automatically under SQLite's exclusive process ownership.
+Startup automatically migrates an empty or outdated database before the node publishes capacity or reports ready. Concurrent nodes serialize migration and compatibility checks with a PostgreSQL advisory lock. Migration 009 removes the expired libvirt lifecycle compatibility representation after an aggregate safety preflight and makes the generic lifecycle the only authority. It advances the compatibility floor to `9` and must be applied while every RunnerFoundry node is stopped. The equivalent standalone model is SQLite schema version 8 and migrates automatically under SQLite's exclusive process ownership.
 
 ```sh
 sudo systemctl enable --now runnerfoundry
@@ -737,7 +737,7 @@ On a normal standalone shutdown, active jobs remain running while message sessio
 
 For a normal standalone package upgrade, review release notes, stop the service, install the new package, and start the service.
 
-The project does not publish a mixed-version cluster compatibility policy. Migration 007 advances the schema compatibility floor for unified capacity obligations. Use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, retain a session-affine `state.postgres.direct` management endpoint, and install the new package on every node. Start one node and wait for migration 007, repository-session convergence, and `leader operational`. Then start the second node and verify that one node is `leader operational` and the other is `standby` before starting any remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
+The project does not publish a mixed-version cluster compatibility policy. Migration 009 advances the schema compatibility floor to `9` and removes the expired libvirt lifecycle bridge. The minimum compatible binary is the first release containing schema generation 9; a binary limited to generation 8 or lower cannot use the contracted schema. Use a full-cluster maintenance window: back up PostgreSQL through the operator's database process, stop every RunnerFoundry node, retain a session-affine `state.postgres.direct` management endpoint, and install the new package on every node. Start one node and wait for migration 009, repository-session convergence, and `leader operational`. Then start the second node and verify that one node is `leader operational` and the other is `standby` before starting any remaining nodes. Cluster startup applies forward PostgreSQL migrations automatically, and the service resumes normal multi-node operation after the coordinated upgrade.
 
 Before downgrading a cluster:
 
@@ -746,6 +746,8 @@ Before downgrading a cluster:
 3. wait at least 30 seconds for heartbeats to expire;
 4. run `migrate down --to` with the newer executable;
 5. install and start the older release only after rollback succeeds.
+
+To downgrade across migration 009, run `migrate down --to 8` with the generation-9 executable. The rollback reconstructs the legacy libvirt representation from generic lifecycle data without changing generic lifecycle history. For standalone SQLite, stop the service and restore a backup taken before schema version 8; standalone startup does not provide a Down migration command.
 
 Rolling back migration 006 to version 5 additionally requires every identity-free libvirt lifecycle row to finish or be safely reaped. Rollback refuses while any retained libvirt lifecycle has request ID `0`; it never deletes those cleanup obligations.
 

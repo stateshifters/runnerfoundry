@@ -77,6 +77,12 @@ type RunnerLifecycle struct {
 	ReapReason       string
 }
 
+type JobCompletion struct {
+	ScaleSet   string
+	Repository string
+	RunnerIdentity
+}
+
 // Identity returns the persisted request/name pair used for exact mutations.
 func (runner RunnerLifecycle) Identity() RunnerIdentity {
 	return RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
@@ -155,9 +161,6 @@ func (store *SQLiteDemandStore) MarkRunnerBusy(
 	if err = updateSQLiteRunnerBusy(ctx, transaction, scaleSet, repository, identity, githubRunnerID, startedAt); err != nil {
 		return err
 	}
-	if err = reconcileSQLiteMirrorForIdentity(ctx, transaction, scaleSet, repository, identity); err != nil {
-		return err
-	}
 	transactionOpen = false
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit mark runner busy: %w", err)
@@ -194,7 +197,7 @@ func requestSQLiteRunnerReap(
 	); err != nil {
 		return err
 	}
-	return mirrorSQLiteRunnerReapRequest(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func updateSQLiteRunnerReapRequest(
@@ -221,34 +224,6 @@ func updateSQLiteRunnerReapRequest(
 		return err
 	}
 	return nil
-}
-
-func mirrorSQLiteRunnerReapRequest(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository string,
-	identity RunnerIdentity,
-) error {
-	mirrorResult, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
-		[]any{scaleSet, repository},
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND runner_name = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name = ?`,
-		"mirror requested libvirt runner reap")
-	if err != nil {
-		return err
-	}
-	changed, err := mirrorResult.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count mirrored runner reap: %w", err)
-	}
-	if changed > 1 {
-		return &RunnerIdentityInvariantError{Identity: identity, Matches: changed}
-	}
-	return reconcileSQLiteMirrorForIdentity(ctx, transaction, scaleSet, repository, identity)
 }
 
 func (store *SQLiteDemandStore) RequestExpiredRunnerReaps(
@@ -284,7 +259,7 @@ func requestExpiredSQLiteRunnerReaps(
 	if err != nil {
 		return 0, err
 	}
-	return changed, reconcileSQLiteBulkReapMirrors(ctx, transaction, scaleSet, repository, "job_start_timeout")
+	return changed, nil
 }
 
 func (store *SQLiteDemandStore) RequestExcessWaitingRunnerReaps(
@@ -322,7 +297,7 @@ func requestExcessSQLiteRunnerReaps(
 	if err != nil {
 		return 0, err
 	}
-	return changed, reconcileSQLiteBulkReapMirrors(ctx, transaction, scaleSet, repository, reason)
+	return changed, nil
 }
 
 func requestExcessSQLiteGenericRunnerReaps(
@@ -443,34 +418,7 @@ func confirmSQLiteRunnerReaped(ctx context.Context, transaction *sql.Tx, runner 
 	); err != nil {
 		return err
 	}
-	authoritative, err := authoritativeSQLiteTerminalRunner(ctx, transaction, runner)
-	if err != nil {
-		return err
-	}
-	if err = deleteSQLiteGenericRunner(ctx, transaction, runner); err != nil {
-		return err
-	}
-	if authoritative.Provider != RunnerProviderLibvirt {
-		return nil
-	}
-	return deleteSQLiteMirror(ctx, transaction, authoritative)
-}
-
-func authoritativeSQLiteTerminalRunner(
-	ctx context.Context,
-	transaction *sql.Tx,
-	runner RunnerLifecycle,
-) (RunnerLifecycle, error) {
-	authoritative, err := loadSQLiteAuthoritativeRunner(
-		ctx, transaction, runner.ScaleSet, runner.Repository, runner.Identity(),
-	)
-	if err != nil {
-		return RunnerLifecycle{}, err
-	}
-	if err = validateSQLiteCompatibleMirror(ctx, transaction, authoritative); err != nil {
-		return RunnerLifecycle{}, err
-	}
-	return authoritative, nil
+	return deleteSQLiteGenericRunner(ctx, transaction, runner)
 }
 
 func deleteSQLiteGenericRunner(ctx context.Context, transaction *sql.Tx, runner RunnerLifecycle) error {
@@ -491,28 +439,6 @@ func deleteSQLiteGenericRunner(ctx context.Context, transaction *sql.Tx, runner 
 		return err
 	}
 	return nil
-}
-
-func confirmSQLiteMirroredRunnerReaped(
-	ctx context.Context,
-	transaction *sql.Tx,
-	runner RunnerLifecycle,
-) error {
-	identity := runner.Identity()
-	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
-		[]any{runner.ScaleSet, runner.Repository},
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND request_id = ?`,
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND runner_name = ?`,
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND request_id = ? AND runner_name = ?`,
-		"confirm mirrored libvirt runner reap")
-	if err != nil {
-		return err
-	}
-	return requireAtMostOneSQLiteIdentityChange(result, identity,
-		"count confirmed mirrored libvirt runner reap")
 }
 
 func requireLifecycleChange(result sql.Result, operation string) error {

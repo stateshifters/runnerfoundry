@@ -27,9 +27,6 @@ func completeSQLiteRunnerJob(ctx context.Context, transaction *sql.Tx, completio
 	if err := requestSQLiteCompletedRunnerReap(ctx, transaction, completion, completedAt); err != nil {
 		return err
 	}
-	if err := mirrorSQLiteCompletedRunner(ctx, transaction, completion); err != nil {
-		return err
-	}
 	if err := removeSQLiteCompletedRunnerDemand(ctx, transaction, completion); err != nil {
 		return err
 	}
@@ -68,31 +65,6 @@ func removeSQLiteCompletedRequestDemand(ctx context.Context, transaction *sql.Tx
 		return fmt.Errorf("remove completed demand: %w", err)
 	}
 	return nil
-}
-
-func mirrorSQLiteCompletedRunner(ctx context.Context, transaction *sql.Tx, completion JobCompletion) error {
-	result, err := executeSQLiteIdentityStatement(ctx, transaction, completion.RunnerIdentity,
-		[]any{completion.ScaleSet, completion.Repository},
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND runner_name = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name = ?`,
-		"mirror completed libvirt runner reap")
-	if err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count mirrored completed runner reap: %w", err)
-	}
-	if changed > 1 {
-		return &RunnerIdentityInvariantError{Identity: completion.RunnerIdentity, Matches: changed}
-	}
-	return reconcileSQLiteMirrorForIdentity(
-		ctx, transaction, completion.ScaleSet, completion.Repository, completion.RunnerIdentity,
-	)
 }
 
 func removeSQLiteCompletedRunnerDemand(ctx context.Context, transaction *sql.Tx, completion JobCompletion) error {

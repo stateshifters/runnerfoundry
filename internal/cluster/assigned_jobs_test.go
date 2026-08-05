@@ -73,7 +73,6 @@ func committedAssignedObservationTransaction(t *testing.T, oldestRunnableAt time
 			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("UPDATE 0"),
-			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("INSERT 0 2"),
 		},
 		rowResults: []fakeRow{
@@ -241,8 +240,8 @@ func assertAssignedCapacity(t *testing.T, activeRunners int, availableCapacity i
 
 func assertAssignedObservationTransitions(t *testing.T, transaction *fakeDatabaseTransaction) {
 	t.Helper()
-	if len(transaction.executions) != 8 {
-		t.Fatalf("assigned observation executions = %d, want 8", len(transaction.executions))
+	if len(transaction.executions) != 7 {
+		t.Fatalf("assigned observation executions = %d, want 7", len(transaction.executions))
 	}
 	if !strings.Contains(transaction.executions[1].statement, "SET controller_epoch = $4") ||
 		!strings.Contains(transaction.executions[1].statement, "EXISTS") {

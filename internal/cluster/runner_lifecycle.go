@@ -45,17 +45,6 @@ func (store *Store) ConfirmRunnerWaiting(
 	return nil
 }
 
-func (store *Store) CompleteRunnerLifecycleJob(
-	ctx context.Context,
-	completion scaler.JobCompletion,
-	_ time.Time,
-) error {
-	return store.CompleteJob(ctx, JobCompletion{
-		ScaleSet: completion.ScaleSet, Repository: completion.Repository,
-		RunnerIdentity: completion.RunnerIdentity,
-	})
-}
-
 func (store *Store) RequestExpiredRunnerReaps(
 	ctx context.Context,
 	scaleSet, repository string,
@@ -94,11 +83,6 @@ func expireClusterRunnersInTransaction(
 		return 0, fmt.Errorf("request clustered expired runner reaps: %w", err)
 	}
 	changed := int(commandTag.RowsAffected())
-	if err = reconcileClusterBulkLibvirtReaps(
-		ctx, transaction, scaleSet, repository, "job_start_timeout",
-	); err != nil {
-		return 0, err
-	}
 	if _, err = transaction.Exec(ctx, releaseExpiredClusterAssignmentsSQL, scaleSet, repository, requestedAt); err != nil {
 		return 0, fmt.Errorf("release expired runner assignments: %w", err)
 	}
@@ -223,73 +207,7 @@ func confirmClusterRunnerReapedInTransaction(
 	if err != nil {
 		return err
 	}
-	authoritativeRunner, err := loadClusterTerminalRunnerAuthority(ctx, transaction, runner, identity, predicate)
-	if err != nil {
-		return err
-	}
-	if err = deleteClusterRunnerLifecycle(ctx, transaction, runner, identity, predicate); err != nil {
-		return err
-	}
-	if authoritativeRunner.Provider == scaler.RunnerProviderLibvirt {
-		if err = deleteClusterLibvirtRunnerLifecycle(ctx, transaction, authoritativeRunner, identity); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func loadClusterTerminalRunnerAuthority(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	identity scaler.RunnerIdentity,
-	predicate clusterRunnerIdentityPredicate,
-) (scaler.RunnerLifecycle, error) {
-	arguments := append([]any{runner.NodeID, runner.ScaleSet, runner.Repository}, predicate.arguments...)
-	var authority scaler.RunnerLifecycle
-	var nameConflicts, requestOwners int64
-	err := transaction.QueryRow(ctx, fmt.Sprintf(clusterTerminalRunnerAuthoritySQL, predicate.condition), arguments...).Scan(
-		&authority.Provider, &authority.RunnerName, &authority.RequestID, &nameConflicts, &requestOwners,
-	)
-	if err != nil {
-		return authority, fmt.Errorf("load authoritative terminal runner lifecycle: %w", err)
-	}
-	authority.NodeID = runner.NodeID
-	authority.ScaleSet = runner.ScaleSet
-	authority.Repository = runner.Repository
-	if nameConflicts > 1 || requestOwners > 1 {
-		return authority, &scaler.RunnerIdentityInvariantError{
-			Identity: identity, Matches: max(nameConflicts, requestOwners),
-		}
-	}
-	if nameConflicts == 1 || requestOwners == 1 {
-		return authority, clusterLifecycleConsistencyError(authority, "legacy identity conflicts with terminal reap")
-	}
-	if err = validateClusterTerminalProvider(ctx, transaction, authority); err != nil {
-		return authority, err
-	}
-	return authority, nil
-}
-
-func validateClusterTerminalProvider(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	authority scaler.RunnerLifecycle,
-) error {
-	if authority.Provider == scaler.RunnerProviderLibvirt {
-		return nil
-	}
-	var legacyExists bool
-	err := transaction.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4)`,
-		authority.NodeID, authority.ScaleSet, authority.Repository, authority.RunnerName).Scan(&legacyExists)
-	if err != nil {
-		return fmt.Errorf("inspect terminal legacy provider conflict: %w", err)
-	}
-	if legacyExists {
-		return clusterLifecycleConsistencyError(authority, "legacy libvirt lifecycle conflicts with authoritative provider")
-	}
-	return nil
+	return deleteClusterRunnerLifecycle(ctx, transaction, runner, identity, predicate)
 }
 
 func deleteClusterRunnerLifecycle(
@@ -301,69 +219,6 @@ func deleteClusterRunnerLifecycle(
 ) error {
 	return deleteClusterReapedLifecycle(ctx, transaction, runner, identity, predicate,
 		"scaler_runner_lifecycle", "phase = 'reap_pending'", "confirm clustered runner reaped")
-}
-
-func deleteClusterLibvirtRunnerLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	identity scaler.RunnerIdentity,
-) error {
-	changed, err := deleteCompatibleClusterLibvirtLifecycle(ctx, transaction, runner)
-	if err != nil {
-		return err
-	}
-	if changed > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: changed}
-	}
-	if changed == 1 {
-		return nil
-	}
-	return classifyUndeletedClusterLibvirtLifecycle(ctx, transaction, runner, identity)
-}
-
-func deleteCompatibleClusterLibvirtLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-) (int64, error) {
-	commandTag, err := transaction.Exec(ctx, `DELETE FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4
-		  AND (request_id = 0 OR request_id = $5)
-		  AND NOT EXISTS (SELECT 1 FROM scaler_libvirt_runner_lifecycle owner
-		      WHERE owner.scale_set = $2 AND owner.repository = $3
-		        AND owner.request_id = $5 AND $5 > 0 AND owner.runner_name <> $4)`,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName, runner.RequestID)
-	if err != nil {
-		return 0, fmt.Errorf("confirm mirrored clustered libvirt runner reap: %w", err)
-	}
-	return commandTag.RowsAffected(), nil
-}
-
-func classifyUndeletedClusterLibvirtLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	identity scaler.RunnerIdentity,
-) error {
-	var nameConflicts, requestOwners int64
-	if err := transaction.QueryRow(ctx, `SELECT
-		COUNT(*) FILTER (WHERE runner_name = $4),
-		COUNT(*) FILTER (WHERE request_id = $5 AND $5 > 0 AND runner_name <> $4)
-		FROM scaler_libvirt_runner_lifecycle
-		WHERE scale_set = $2 AND repository = $3
-		  AND (node_id = $1 OR (request_id = $5 AND $5 > 0 AND runner_name <> $4))`,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName, runner.RequestID,
-	).Scan(&nameConflicts, &requestOwners); err != nil {
-		return fmt.Errorf("inspect mirrored clustered libvirt runner reap: %w", err)
-	}
-	if nameConflicts > 1 || requestOwners > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: max(nameConflicts, requestOwners)}
-	}
-	if nameConflicts == 1 || requestOwners == 1 {
-		return clusterLifecycleConsistencyError(runner, "legacy request identity conflicts with terminal reap")
-	}
-	return nil
 }
 
 func deleteClusterReapedLifecycle(

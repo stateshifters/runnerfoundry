@@ -8,6 +8,8 @@ Accepted
 
 Amends [4. Coordinate multi-host scaling in PostgreSQL](0004-coordinate-multi-host-scaling-in-postgresql.md)
 
+Amended by [12. Retire the legacy libvirt lifecycle bridge](0012-retire-the-legacy-libvirt-lifecycle-bridge.md)
+
 ## Context
 
 GitHub's scale-set statistics are the authority for desired capacity, but a provider instance is not necessarily usable capacity. A runner can be provisioned for an assignment that is canceled before the runner acquires it. GitHub then removes the runner registration while Docker or libvirt continues to report the provider instance. Counting that instance indefinitely can fill `max_runners` and prevent replacement demand from starting.

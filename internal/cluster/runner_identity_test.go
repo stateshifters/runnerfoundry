@@ -187,7 +187,7 @@ func assertClusterTransitionFailure(
 func TestClusterBindRunnerIdentityBindsOnlyIdentityFreeNamedRunner(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{
 		execTags: []pgconn.CommandTag{
-			pgconn.NewCommandTag("UPDATE 0"), pgconn.NewCommandTag("UPDATE 1"), pgconn.NewCommandTag("UPDATE 1"),
+			pgconn.NewCommandTag("UPDATE 0"), pgconn.NewCommandTag("UPDATE 1"),
 		},
 		rowResults: []fakeRow{integerCountRow(t, 0), integerCountRow(t, 1)},
 	}
@@ -198,7 +198,7 @@ func TestClusterBindRunnerIdentityBindsOnlyIdentityFreeNamedRunner(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(transaction.executions) != 3 {
+	if len(transaction.executions) != 2 {
 		t.Fatalf("binding executions = %#v", transaction.executions)
 	}
 	bindStatement := transaction.executions[1].statement
@@ -224,78 +224,6 @@ func TestClusterMessageStartIgnoresNotFoundButReturnsMismatch(t *testing.T) {
 		scaler.RunnerMessageIdentity{RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "other"}})
 	if !errors.Is(err, scaler.ErrRunnerIdentityMismatch) {
 		t.Fatalf("mismatched message start error = %v", err)
-	}
-}
-
-func TestClusterBindRunnerIdentityClassifiesMirroredLifecycle(t *testing.T) {
-	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}
-	t.Run("missing mirror is repaired", func(t *testing.T) {
-		assertClusterMirrorClassification(t, identity, 1, nil)
-	})
-	t.Run("stale mirror is reconciled", func(t *testing.T) {
-		assertClusterMirrorClassification(t, identity, 1, nil)
-	})
-	t.Run("mirror name owns another request", func(t *testing.T) {
-		assertClusterMirrorClassification(t, identity, 0, scaler.ErrRunnerLifecycleConsistency)
-	})
-	t.Run("mirror request belongs to another name", func(t *testing.T) {
-		assertClusterMirrorClassification(t, identity, 0, scaler.ErrRunnerLifecycleConsistency)
-	})
-}
-
-func assertClusterMirrorClassification(
-	t *testing.T,
-	identity scaler.RunnerIdentity,
-	mirrorChanges int64,
-	want error,
-) {
-	t.Helper()
-	transaction := clusterMirrorClassificationTransaction(t, identity, mirrorChanges)
-	err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).BindRunnerIdentity(
-		context.Background(), "linux", "repo", identity, 7, time.Unix(1, 0).UTC(),
-	)
-	assertClusterMirrorClassificationResult(t, transaction, err, want)
-}
-
-func clusterMirrorClassificationTransaction(
-	t *testing.T,
-	identity scaler.RunnerIdentity,
-	mirrorChanges int64,
-) *fakeDatabaseTransaction {
-	t.Helper()
-	transaction := &fakeDatabaseTransaction{
-		execTags: []pgconn.CommandTag{
-			pgconn.NewCommandTag("UPDATE 1"), pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", mirrorChanges)),
-		},
-	}
-	if mirrorChanges == 0 {
-		transaction.rowResults = []fakeRow{
-			{scan: func(destinations ...any) {
-				*destination[NodeID](t, destinations[0]) = "node"
-				*destination[scaler.RunnerProvider](t, destinations[1]) = scaler.RunnerProviderLibvirt
-				*destination[string](t, destinations[2]) = identity.RunnerName
-			}},
-			integerCountRow(t, 1),
-		}
-	}
-	return transaction
-}
-
-func assertClusterMirrorClassificationResult(
-	t *testing.T,
-	transaction *fakeDatabaseTransaction,
-	err error,
-	want error,
-) {
-	t.Helper()
-	if want == nil && err != nil {
-		t.Fatal(err)
-	}
-	if want != nil && !errors.Is(err, want) {
-		t.Fatalf("binding error = %v, want %v", err, want)
-	}
-	if want != nil && transaction.rollbackCalls != 1 {
-		t.Fatalf("rollback calls = %d, want 1", transaction.rollbackCalls)
 	}
 }
 

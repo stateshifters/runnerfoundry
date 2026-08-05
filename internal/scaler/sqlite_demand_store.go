@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 7
+const currentStateSchemaVersion = 8
 
 //go:embed migrations/007_normalize_assignment_source.sql
 var sqliteAssignmentSourceMigrationSQL string
@@ -88,6 +88,7 @@ func (store *SQLiteDemandStore) migrateTo(ctx context.Context, targetVersion int
 		store.addRepositoryState,
 		store.addCapacityObligations,
 		store.normalizeAssignmentSource,
+		store.retireLibvirtLifecycleBridge,
 	}
 	for ; version < targetVersion; version++ {
 		if err = migrations[version](ctx); err != nil {
@@ -95,6 +96,43 @@ func (store *SQLiteDemandStore) migrateTo(ctx context.Context, targetVersion int
 		}
 	}
 	return nil
+}
+
+func (store *SQLiteDemandStore) retireLibvirtLifecycleBridge(ctx context.Context) error {
+	return store.runSQLiteTransaction(ctx, "libvirt lifecycle bridge contraction", func(transaction *sql.Tx) error {
+		var legacyOnly, conflicting int
+		err := transaction.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM libvirt_runner_lifecycle legacy
+			 LEFT JOIN runner_lifecycle lifecycle
+			   ON lifecycle.scale_set = legacy.scale_set
+			  AND lifecycle.repository = legacy.repository
+			  AND lifecycle.runner_name = legacy.runner_name
+			 WHERE lifecycle.runner_name IS NULL),
+			(SELECT COUNT(*) FROM libvirt_runner_lifecycle legacy
+			 JOIN runner_lifecycle lifecycle
+			   ON lifecycle.scale_set = legacy.scale_set
+			  AND lifecycle.repository = legacy.repository
+			  AND lifecycle.runner_name = legacy.runner_name
+			 WHERE lifecycle.provider <> 'libvirt'
+			    OR lifecycle.request_id <> legacy.request_id
+			    OR (lifecycle.phase = 'reap_pending') <> (legacy.reap_requested = 1))`).
+			Scan(&legacyOnly, &conflicting)
+		if err != nil {
+			return fmt.Errorf("inspect libvirt lifecycle bridge aggregates: %w", err)
+		}
+		if legacyOnly+conflicting > 0 {
+			return fmt.Errorf("refuse libvirt lifecycle bridge contraction: legacy_only=%d conflicting=%d",
+				legacyOnly, conflicting)
+		}
+		if _, err = transaction.ExecContext(ctx, `DROP TRIGGER mirror_libvirt_runner_lifecycle_insert;
+			DROP TRIGGER mirror_libvirt_runner_lifecycle_update;
+			DROP TRIGGER mirror_libvirt_runner_lifecycle_delete;
+			DROP TABLE libvirt_runner_lifecycle;
+			PRAGMA user_version = 8;`); err != nil {
+			return fmt.Errorf("retire libvirt lifecycle bridge: %w", err)
+		}
+		return nil
+	})
 }
 
 func (store *SQLiteDemandStore) normalizeAssignmentSource(ctx context.Context) error {

@@ -25,15 +25,11 @@ func (store *MemoryDemandStore) ApplyMessageUpdate(
 func (store *MemoryDemandStore) cloneForMessageUpdate() *MemoryDemandStore {
 	clone := &MemoryDemandStore{
 		demand:          make(map[demandKey]QueuedDemand, len(store.demand)),
-		libvirtRunners:  make(map[string]memoryLibvirtLifecycle, len(store.libvirtRunners)),
 		runners:         make(map[string]RunnerLifecycle, len(store.runners)),
 		nextObservation: store.nextObservation,
 	}
 	for key, demand := range store.demand {
 		clone.demand[key] = demand
-	}
-	for key, runner := range store.libvirtRunners {
-		clone.libvirtRunners[key] = runner
 	}
 	for key, runner := range store.runners {
 		clone.runners[key] = runner
@@ -60,7 +56,6 @@ type memoryMessageUpdateState interface {
 		startedAt time.Time,
 	) error
 	CompleteRunnerLifecycleJob(ctx context.Context, completion JobCompletion, completedAt time.Time) error
-	CompleteJob(ctx context.Context, completion JobCompletion) error
 }
 
 func applyMemoryMessageUpdate(
@@ -114,11 +109,6 @@ func applyMemoryCompletedRunners(ctx context.Context, store memoryMessageUpdateS
 		if err := ignoreMemoryMessageNotFound(
 			store.CompleteRunnerLifecycleJob(ctx, completion, update.ObservedAt),
 			"complete memory runner lifecycle",
-		); err != nil {
-			return err
-		}
-		if err := ignoreMemoryMessageNotFound(
-			store.CompleteJob(ctx, completion), "complete memory compatibility lifecycle",
 		); err != nil {
 			return err
 		}

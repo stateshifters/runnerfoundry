@@ -20,23 +20,21 @@ func TestSQLiteRegistrationReportsInsertedRowCountFailure(t *testing.T) {
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
 
-func TestSQLiteRegistrationStateReportsMirrorInspectionFailure(t *testing.T) {
+func TestSQLiteRegistrationStateReportsInspectionFailure(t *testing.T) {
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
 	runner := genericSQLiteRunner()
-	fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
-	fixture.mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnError(errors.New("inspect failed"))
+	fixture.mock.ExpectQuery("SELECT provider").WillReturnError(errors.New("inspect failed"))
 	if _, err := loadSQLiteLifecycleRegistrationState(context.Background(), transaction, runner); err == nil {
 		t.Fatal("expected mirror registration inspection failure")
 	}
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
 
-func TestSQLiteRegistrationStateReportsMirrorOwnerFailure(t *testing.T) {
+func TestSQLiteRegistrationStateReportsRequestOwnerFailure(t *testing.T) {
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
 	runner := genericSQLiteRunner()
 	fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
-	fixture.mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnError(sql.ErrNoRows)
-	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnError(errors.New("inspect failed"))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnError(errors.New("inspect failed"))
 	if _, err := loadSQLiteLifecycleRegistrationState(context.Background(), transaction, runner); err == nil {
 		t.Fatal("expected mirror request owner failure")
 	}
@@ -65,20 +63,36 @@ func TestSQLiteGenericRegistrationValidationRejectsPendingReap(t *testing.T) {
 	}
 }
 
-func TestSQLiteMirrorRegistrationValidationRejectsDockerMirror(t *testing.T) {
+func TestSQLiteGenericRegistrationValidationRejectsOwnerAndProviderConflicts(t *testing.T) {
 	runner := genericSQLiteRunner()
-	err := validateSQLiteMirrorRegistrationState(runner, sqliteLifecycleRegistrationState{mirrorExists: true})
-	if !errors.Is(err, ErrRunnerLifecycleConsistency) {
-		t.Fatalf("mirror registration error = %v, want lifecycle consistency", err)
+	for name, state := range map[string]sqliteLifecycleRegistrationState{
+		"owner":    {genericRequestOwnedByOtherName: true},
+		"provider": {genericExists: true, provider: RunnerProviderLibvirt},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSQLiteGenericRegistrationState(runner, state); !errors.Is(err, ErrRunnerLifecycleConsistency) {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
 	}
+}
+
+func TestSQLiteRegistrationReturnsValidationFailure(t *testing.T) {
+	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
+	runner := genericSQLiteRunner()
+	fixture.mock.ExpectQuery("SELECT provider").WillReturnRows(sqlmock.NewRows(
+		[]string{"provider", "request_id", "assignment_id", "phase"},
+	).AddRow("libvirt", runner.RequestID, runner.AssignmentID, runner.Phase))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(
+		sqlmock.NewRows([]string{"count"}).AddRow(0))
+	if err := registerSQLiteRunner(context.Background(), transaction, runner); !errors.Is(err, ErrRunnerLifecycleConsistency) {
+		t.Fatalf("registration error = %v", err)
+	}
+	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
 
 func expectMissingSQLiteRegistrationState(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnRows(
-		sqlmock.NewRows([]string{"count"}).AddRow(0),
-	)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(
 		sqlmock.NewRows([]string{"count"}).AddRow(0),
 	)

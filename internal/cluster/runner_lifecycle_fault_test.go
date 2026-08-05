@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,23 +9,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
-
-func TestClusterRunnerRegistrationRollsBackGenericLifecycleWhenMirrorFails(t *testing.T) {
-	failure := errors.New("mirror unavailable")
-	runner := testRunnerLifecycle()
-	runner.Phase = scaler.RunnerProvisioning
-	state := &hermeticClusterLifecycleState{mirrorFailure: failure}
-
-	err := storeWithConnection(state.connection(runner)).RegisterRunner(
-		context.Background(), runner,
-	)
-	if !errors.Is(err, failure) {
-		t.Fatalf("registration error = %v, want mirror failure", err)
-	}
-	if state.generic != nil {
-		t.Fatalf("failed registration committed generic lifecycle = %#v", state.generic)
-	}
-}
 
 func testRunnerLifecycle() scaler.RunnerLifecycle {
 	return scaler.RunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
@@ -68,7 +50,6 @@ func TestClusterRunnerLifecycleRegistrationFailures(t *testing.T) {
 	connections := []*fakeDatabaseConnection{
 		{execErrors: []error{databaseFailure()}},
 		{execTag: pgconn.NewCommandTag("INSERT 0 0"), rowResults: []fakeRow{{err: databaseFailure()}}},
-		{execTag: pgconn.NewCommandTag("INSERT 0 0"), rowResults: []fakeRow{{scan: scanBoolean(t, false)}}},
 		{execErrors: []error{nil, databaseFailure()}},
 	}
 	for index, connection := range connections {
@@ -133,28 +114,12 @@ func assertRunnerReapTransitionFailures(ctx context.Context, t *testing.T) {
 		RequestRunnerReap(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, "reason", time.Now()); err == nil {
 		t.Fatal("expected reap update failure")
 	}
-	if err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}}).
-		RequestRunnerReap(ctx, "linux", "repo", scaler.RunnerIdentity{RequestID: 42}, "reason", time.Now()); err == nil {
-		t.Fatal("expected mirrored reap failure")
-	}
-}
-
-func TestClusterRunnerBusyReportsMirroredIdentityFailure(t *testing.T) {
-	if err := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{
-		execErrors: []error{nil, databaseFailure()},
-	}}).
-		BindRunnerIdentity(context.Background(), "linux", "repo",
-			scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner"}, 1, time.Now()); err == nil {
-		t.Fatal("expected mirrored busy identity failure")
-	}
 }
 
 func TestClusterExpiredRunnerLifecycleReportsTransactionFailures(t *testing.T) {
 	connections := []*fakeDatabaseConnection{
 		{beginErr: databaseFailure()},
 		{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}},
-		{transaction: &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}},
-		{transaction: &fakeDatabaseTransaction{execErrors: []error{nil, nil, databaseFailure()}}},
 		{transaction: &fakeDatabaseTransaction{commitErr: databaseFailure()}},
 	}
 	for index, connection := range connections {
@@ -165,6 +130,15 @@ func TestClusterExpiredRunnerLifecycleReportsTransactionFailures(t *testing.T) {
 				t.Fatal("expected timeout transaction failure")
 			}
 		})
+	}
+}
+
+func TestClusterExpiredRunnerLifecycleReportsAssignmentReleaseFailure(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}
+	if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).RequestExpiredRunnerReaps(
+		context.Background(), "linux", "repo", time.Now(), time.Now(),
+	); err == nil {
+		t.Fatal("expected assignment release failure")
 	}
 }
 
@@ -204,7 +178,6 @@ func TestClusterConfirmRunnerReapedReportsTransactionFailures(t *testing.T) {
 		{beginErr: databaseFailure()},
 		{transaction: &fakeDatabaseTransaction{execErrors: []error{databaseFailure()}}},
 		{transaction: &fakeDatabaseTransaction{execTags: []pgconn.CommandTag{pgconn.NewCommandTag("DELETE 0")}}},
-		{transaction: &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}},
 		{transaction: &fakeDatabaseTransaction{commitErr: databaseFailure()}},
 	}
 	for index, connection := range connections {

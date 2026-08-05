@@ -112,7 +112,7 @@ func queuedObligationCountRow(t *testing.T, count int) fakeRow {
 }
 
 func assignedObservationWritesThen(failure error) []error {
-	return append(make([]error, 8), failure)
+	return append(make([]error, 7), failure)
 }
 
 func assertAssignedObservationFailure(

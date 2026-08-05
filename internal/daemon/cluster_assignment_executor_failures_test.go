@@ -140,6 +140,36 @@ func TestAssignmentExecutorReportsRunningTransitionFailure(t *testing.T) {
 	}
 }
 
+func TestAssignmentExecutorReportsStartingLoadAndRepairFailures(t *testing.T) {
+	t.Run("load", func(t *testing.T) {
+		state := &fakeClusterState{startingErr: errors.New("failed")}
+		daemon := activeClusteredDaemon(t, state)
+		daemon.executeAssignments(context.Background())
+	})
+	t.Run("repair", func(t *testing.T) {
+		state := &fakeClusterState{startingAssignments: []cluster.Assignment{*localAssignment()}}
+		daemon := activeClusteredDaemon(t, state)
+		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+			return scaler.Reconciler{}, errors.New("failed")
+		}
+		daemon.executeAssignments(context.Background())
+	})
+}
+
+func TestAssignmentReconcilerRejectsStateWithoutGenericLifecycle(t *testing.T) {
+	state := &fakeClusterState{}
+	daemon := activeClusteredDaemon(t, state)
+	daemon.assignments = state
+	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
+		return scaler.Reconciler{}, nil
+	}
+	configuration := daemon.configurationSnapshot()
+	_, err := daemon.assignmentReconciler(context.Background(), configuration, configuration.config.ScaleSets[0], localAssignment())
+	if err == nil || !strings.Contains(err.Error(), "does not support runner lifecycle") {
+		t.Fatalf("reconciler error = %v", err)
+	}
+}
+
 func localAssignment() *cluster.Assignment {
 	return &cluster.Assignment{
 		ID: 1, NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2,

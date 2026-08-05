@@ -5,12 +5,12 @@ import (
 	"fmt"
 )
 
-// ErrRunnerLifecycleConsistency identifies generic and compatibility lifecycle
-// history that cannot be reconciled without overwriting immutable data.
-var ErrRunnerLifecycleConsistency = errors.New("runner lifecycle representations are inconsistent")
+// ErrRunnerLifecycleConsistency identifies authoritative lifecycle state that
+// conflicts with a requested identity or provider transition.
+var ErrRunnerLifecycleConsistency = errors.New("runner lifecycle state is inconsistent")
 
-// RunnerLifecycleConsistencyError identifies a generic/legacy lifecycle conflict
-// that cannot be repaired without changing authoritative identity or provider history.
+// RunnerLifecycleConsistencyError identifies a transition that conflicts with
+// authoritative identity or provider history.
 type RunnerLifecycleConsistencyError struct {
 	ScaleSet   string
 	Repository string

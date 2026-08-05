@@ -43,18 +43,10 @@ func registrationGenericRow(runner scaler.RunnerLifecycle) fakeRow {
 	}}
 }
 
-func registrationMirrorRow(runner scaler.RunnerLifecycle) fakeRow {
-	return fakeRow{scan: func(destinations ...any) {
-		setFakeDestination(destinations[0], runner.RequestID)
-		setFakeDestination(destinations[1], runner.Phase == scaler.RunnerReapPending)
-	}}
-}
-
-func TestRunnerRegistrationCoversPostReconciliationReloadFailure(t *testing.T) {
+func TestRunnerRegistrationCoversPostInsertReloadFailure(t *testing.T) {
 	runner := testRunnerLifecycle()
 	transaction := registrationTransaction(
-		registrationGenericRow(runner), integerRow(0), registrationMirrorRow(runner), integerRow(0),
-		fakeRow{err: errors.New("reload")},
+		fakeRow{err: pgx.ErrNoRows}, integerRow(0), fakeRow{err: errors.New("reload")},
 	)
 	err := registerRunnerInTransaction(context.Background(), transaction.databaseTransaction(), runner)
 	if err == nil {
@@ -74,7 +66,7 @@ func TestEnsureGenericRegistrationCoversMutationFailures(t *testing.T) {
 		"missing assignment": {
 			execTags: []pgconn.CommandTag{pgconn.NewCommandTag("INSERT 0 0")},
 			rowResults: []fakeRow{
-				{err: pgx.ErrNoRows}, integerRow(0), {err: pgx.ErrNoRows}, integerRow(0),
+				{err: pgx.ErrNoRows}, integerRow(0),
 			},
 		},
 	}
@@ -84,27 +76,6 @@ func TestEnsureGenericRegistrationCoversMutationFailures(t *testing.T) {
 				ctx, transaction.databaseTransaction(), runner, clusterLifecycleRegistrationState{},
 			); err == nil {
 				t.Fatal("expected generic registration failure")
-			}
-		})
-	}
-}
-
-func TestReconciledRegistrationValidationCoversConflicts(t *testing.T) {
-	runner := testRunnerLifecycle()
-	tests := map[string]clusterLifecycleRegistrationState{
-		"invalid generic": {
-			genericExists: true, provider: scaler.RunnerProviderDocker,
-		},
-		"missing mirror": validGenericRegistrationState(runner),
-		"stale mirror phase": {
-			genericExists: true, provider: runner.Provider, requestID: runner.RequestID,
-			assignmentID: runner.AssignmentID, phase: runner.Phase, mirrorExists: true,
-		},
-	}
-	for name, state := range tests {
-		t.Run(name, func(t *testing.T) {
-			if err := validateReconciledClusterLifecycleRegistration(runner, state); err == nil {
-				t.Fatal("expected reconciled registration conflict")
 			}
 		})
 	}
@@ -133,15 +104,12 @@ func TestRegistrationInsertCoversDatabaseAndInvariantFailures(t *testing.T) {
 	}
 }
 
-func TestRegistrationStateLoadingCoversEachRepresentationFailure(t *testing.T) {
+func TestRegistrationStateLoadingCoversAuthorityFailures(t *testing.T) {
 	runner := testRunnerLifecycle()
 	tests := map[string][]fakeRow{
 		"generic": {{err: errors.New("generic")}},
-		"mirror": {
-			{err: pgx.ErrNoRows}, integerRow(0), {err: errors.New("mirror")},
-		},
-		"mirror owner": {
-			{err: pgx.ErrNoRows}, integerRow(0), {err: pgx.ErrNoRows}, {err: errors.New("owner")},
+		"owner": {
+			{err: pgx.ErrNoRows}, {err: errors.New("owner")},
 		},
 	}
 	for name, rows := range tests {
@@ -153,6 +121,15 @@ func TestRegistrationStateLoadingCoversEachRepresentationFailure(t *testing.T) {
 				t.Fatal("expected registration state load failure")
 			}
 		})
+	}
+}
+
+func TestRegistrationRequestOwnerLoadingSkipsIdentityFreeRunner(t *testing.T) {
+	state := clusterLifecycleRegistrationState{}
+	runner := testRunnerLifecycle()
+	runner.RequestID = 0
+	if err := loadClusterGenericRequestOwners(context.Background(), (&fakeDatabaseTransaction{}).databaseTransaction(), runner, &state); err != nil {
+		t.Fatal(err)
 	}
 }
 

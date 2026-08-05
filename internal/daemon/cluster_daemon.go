@@ -91,7 +91,6 @@ type clusterDemandState interface {
 	ApplyMessageUpdate(ctx context.Context, update scaler.MessageUpdate) (scaler.MessageUpdateResult, error)
 	Enqueue(ctx context.Context, demand cluster.Demand) error
 	CompleteDemand(ctx context.Context, scaleSet string, repository string, requestID int64) error
-	CompleteJob(ctx context.Context, completion cluster.JobCompletion) error
 }
 
 type clusterAssignmentClaimState interface {
@@ -120,19 +119,12 @@ type clusterAssignmentState interface {
 	clusterExactSchedulingState
 	clusterAssignedJobState
 	clusterAssignmentExecutionState
-	clusterLibvirtLifecycleState
 }
 
 type clusterAssignmentExecutionState interface {
 	ClaimForStart(ctx context.Context, nodeID cluster.NodeID) (*cluster.Assignment, error)
 	Starting(ctx context.Context, nodeID cluster.NodeID) ([]cluster.Assignment, error)
 	ConfirmRunning(ctx context.Context, assignmentID cluster.AssignmentID, nodeID cluster.NodeID) error
-}
-
-type clusterLibvirtLifecycleState interface {
-	RegisterLibvirtRunner(ctx context.Context, assignmentID cluster.AssignmentID, runner cluster.LibvirtRunnerLifecycle) error
-	PendingLibvirtReaps(ctx context.Context, nodeID cluster.NodeID) ([]cluster.LibvirtRunnerLifecycle, error)
-	ConfirmLibvirtReaped(ctx context.Context, runner cluster.LibvirtRunnerLifecycle) error
 }
 
 type clusterState interface {

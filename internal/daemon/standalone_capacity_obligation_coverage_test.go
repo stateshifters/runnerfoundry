@@ -10,8 +10,22 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
+
+func TestPrepareCoordinatedLifecycleCoversLibvirtAndUnsupportedStore(t *testing.T) {
+	logs := &bytes.Buffer{}
+	configuration := coordinatedLifecycleConfig{
+		Logger: newClusterLogSnapshotLogger(logs), RepositoryURL: "repo",
+		ScaleSetConfig: config.ScaleSetConfig{Name: "linux", Libvirt: &config.LibvirtConfig{}},
+		Coordinator:    scaler.NewDurableCoordinator("linux", 1, failingDaemonDemandStore{}),
+	}
+	prepareCoordinatedLifecycle(context.Background(), &configuration)
+	if configuration.RunnerReapRetries == nil || !strings.Contains(logs.String(), "runner_lifecycle_configure") {
+		t.Fatalf("prepared lifecycle retries=%#v logs=%q", configuration.RunnerReapRetries, logs.String())
+	}
+}
 
 func TestStandaloneControlInitializesDurableCapacityCoordinator(t *testing.T) {
 	store := newDaemonCapacityObligationStore()

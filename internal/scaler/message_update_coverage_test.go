@@ -75,7 +75,6 @@ func TestMemoryMessageUpdatePropagatesStateFailures(t *testing.T) {
 		{name: "demand", state: &faultingMemoryMessageState{applyErr: failure}},
 		{name: "started runner", state: &faultingMemoryMessageState{busyErr: failure}},
 		{name: "runner lifecycle completion", state: &faultingMemoryMessageState{lifecycleErr: failure}},
-		{name: "compatibility completion", state: &faultingMemoryMessageState{completionErr: failure}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -87,10 +86,9 @@ func TestMemoryMessageUpdatePropagatesStateFailures(t *testing.T) {
 }
 
 type faultingMemoryMessageState struct {
-	applyErr      error
-	busyErr       error
-	lifecycleErr  error
-	completionErr error
+	applyErr     error
+	busyErr      error
+	lifecycleErr error
 }
 
 func (state *faultingMemoryMessageState) Apply(context.Context, string, []JobDemand, []DemandRemoval) error {
@@ -113,10 +111,6 @@ func (state *faultingMemoryMessageState) CompleteRunnerLifecycleJob(
 	context.Context, JobCompletion, time.Time,
 ) error {
 	return state.lifecycleErr
-}
-
-func (state *faultingMemoryMessageState) CompleteJob(context.Context, JobCompletion) error {
-	return state.completionErr
 }
 
 func seedMemoryMessageRunner(t *testing.T, store *MemoryDemandStore, now time.Time) {

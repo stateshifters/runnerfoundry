@@ -57,9 +57,30 @@ func (daemon *clusteredDaemon) executePendingRunnerReaps(ctx context.Context) bo
 	daemon.ensureRunnerReapRetries()
 	lifecycleStore, supported := daemon.assignments.(clusteredRunnerLifecycleState)
 	if !supported {
-		return daemon.executePendingLibvirtReaps(ctx)
+		daemon.logger.Error("cluster state does not support runner lifecycle")
+		return false
 	}
 	configuration := daemon.configurationSnapshot()
+	if !daemon.requestExpiredRunnerReaps(ctx, lifecycleStore, configuration) {
+		return false
+	}
+	pending, err := lifecycleStore.PendingNodeRunnerReaps(ctx, daemon.nodeID)
+	if err != nil {
+		daemon.logger.Error("load pending runner reaps failed", slog.String("error", err.Error()))
+		return false
+	}
+	daemon.runnerReapRetries.prune(pending)
+	for _, runner := range pending {
+		daemon.executePendingRunnerReap(ctx, configuration, lifecycleStore, runner)
+	}
+	return true
+}
+
+func (daemon *clusteredDaemon) requestExpiredRunnerReaps(
+	ctx context.Context,
+	lifecycleStore clusteredRunnerLifecycleState,
+	configuration clusteredConfigurationSnapshot,
+) bool {
 	now := time.Now().UTC()
 	for _, scaleSet := range configuration.config.ScaleSets {
 		timeout, err := scaleSet.JobStartDuration()
@@ -73,15 +94,6 @@ func (daemon *clusteredDaemon) executePendingRunnerReaps(ctx context.Context) bo
 				slog.String("scaleSet", scaleSet.Name), slog.String("error", err.Error()))
 			return false
 		}
-	}
-	pending, err := lifecycleStore.PendingNodeRunnerReaps(ctx, daemon.nodeID)
-	if err != nil {
-		daemon.logger.Error("load pending runner reaps failed", slog.String("error", err.Error()))
-		return false
-	}
-	daemon.runnerReapRetries.prune(pending)
-	for _, runner := range pending {
-		daemon.executePendingRunnerReap(ctx, configuration, lifecycleStore, runner)
 	}
 	return true
 }
@@ -277,11 +289,11 @@ func (daemon *clusteredDaemon) assignmentReconciler(
 	if err != nil {
 		return scaler.Reconciler{}, err
 	}
-	if lifecycleStore, supported := daemon.assignments.(scaler.RunnerLifecycleStore); supported {
-		configureAssignmentRunnerLifecycle(&reconciler, lifecycleStore, scaleSet, assignment)
-	} else if scaleSet.Libvirt != nil {
-		configureLegacyAssignmentLifecycle(daemon, &reconciler, assignment)
+	lifecycleStore, supported := daemon.assignments.(scaler.RunnerLifecycleStore)
+	if !supported {
+		return scaler.Reconciler{}, errors.New("cluster state does not support runner lifecycle")
 	}
+	configureAssignmentRunnerLifecycle(&reconciler, lifecycleStore, scaleSet, assignment)
 	return reconciler, nil
 }
 
@@ -329,77 +341,6 @@ func configureAssignmentRunnerLifecycle(
 	reconciler.ScaleSet.AssignmentID = int64(assignment.ID)
 	reconciler.ScaleSet.InstallationID = int64(assignment.InstallationID)
 	reconciler.ScaleSet.GitHubScaleSetID = assignment.GitHubScaleSetID
-}
-
-func configureLegacyAssignmentLifecycle(
-	daemon *clusteredDaemon,
-	reconciler *scaler.Reconciler,
-	assignment *cluster.Assignment,
-) {
-	reconciler.ScaleSet.RegisterRunner = func(registerCtx context.Context, runnerName string, requestID int64) error {
-		return daemon.assignments.RegisterLibvirtRunner(registerCtx, assignment.ID, cluster.LibvirtRunnerLifecycle{
-			NodeID: assignment.NodeID, ScaleSet: assignment.ScaleSet, Repository: assignment.Repository,
-			RequestID: requestID, RunnerName: runnerName,
-		})
-	}
-}
-
-func (daemon *clusteredDaemon) executePendingLibvirtReaps(ctx context.Context) bool {
-	pending, err := daemon.assignments.PendingLibvirtReaps(ctx, daemon.nodeID)
-	if err != nil {
-		daemon.logger.Error("load pending libvirt runner reaps failed", slog.String("error", err.Error()))
-		return false
-	}
-	configuration := daemon.configurationSnapshot()
-	for _, runner := range pending {
-		daemon.executePendingLibvirtReap(ctx, configuration.config.ScaleSets, runner)
-	}
-	return true
-}
-
-func (daemon *clusteredDaemon) executePendingLibvirtReap(
-	ctx context.Context,
-	scaleSets []config.ScaleSetConfig,
-	runner cluster.LibvirtRunnerLifecycle,
-) {
-	scaleSet, exists := localScaleSet(scaleSets, runner.ScaleSet)
-	if !exists || scaleSet.Libvirt == nil {
-		daemon.logger.Warn("pending libvirt runner reap retained because local configuration is unavailable",
-			slog.String("scaleSet", runner.ScaleSet), slog.String("repository", runner.Repository),
-			slog.String("runnerName", runner.RunnerName))
-		return
-	}
-	absent, err := daemon.reapClusterLibvirtRunner(ctx, scaleSet, runner)
-	if err != nil {
-		daemon.logger.Error("pending libvirt runner reap failed",
-			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
-		return
-	}
-	if !absent {
-		return
-	}
-	if err := daemon.assignments.ConfirmLibvirtReaped(ctx, runner); err != nil {
-		daemon.logger.Error("confirm pending libvirt runner absence failed",
-			slog.String("runnerName", runner.RunnerName), slog.String("error", err.Error()))
-	}
-}
-
-func (daemon *clusteredDaemon) reapClusterLibvirtRunner(
-	ctx context.Context,
-	scaleSet config.ScaleSetConfig,
-	runner cluster.LibvirtRunnerLifecycle,
-) (bool, error) {
-	reconciler, err := daemon.buildReconciler(ctx, runner.Repository, scaleSet, nil, 0)
-	if err != nil {
-		return false, fmt.Errorf("build pending libvirt runner reaper: %w", err)
-	}
-	reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
-	defer cancelReap()
-	absent, err := reconciler.ReapRunner(reapCtx, runner.RunnerName)
-	if err != nil {
-		return false, fmt.Errorf("reap runner %q: %w", runner.RunnerName, err)
-	}
-	return absent, nil
 }
 
 func (daemon *clusteredDaemon) completeRemovedScaleSetAssignment(

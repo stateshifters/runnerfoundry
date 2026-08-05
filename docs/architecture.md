@@ -583,14 +583,6 @@ erDiagram
         timestamptz waiting_since
         text reap_reason
     }
-    SCALER_LIBVIRT_RUNNER_LIFECYCLE {
-        text node_id PK, FK
-        text scale_set PK
-        text repository PK
-        bigint request_id
-        text runner_name PK
-        boolean reap_requested "legacy compatibility"
-    }
 ```
 
 The schema enforces one active assignment per demand obligation with a partial unique index. `job_available` demand has a positive request ID; `assigned_count` demand has no request ID and references the assigned observation that justified it. Every assignment has one mandatory demand parent. Its constrained source copy can only match that parent, while observation and controller epoch remain demand-owned. The repository tables retain one App's fenced controller epoch, discovery generations, conclusively managed installations and repositories, and confirmed registration IDs. Assigned observations retain the latest aggregate count under that epoch. Demand rows retain attempt and next-attempt eligibility for oldest-runnable selection. The generic lifecycle table records provider, exact identities, lifecycle phase, timestamps, and reap reason. Database checks reject invalid source/state, identity, phase, and timestamp combinations. Additional indexes support repository generation cleanup, FIFO eligibility, active-assignment counts, assigned observations, waiting leases, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; runner lifecycle records remain until confirmed provider and GitHub absence.
@@ -603,7 +595,7 @@ Configuration values may be literals, environment references, or file references
 
 Cluster startup inspects the schema and automatically migrates upward before contribution publication. A dedicated advisory lock serializes version inspection, migration, and compatibility validation among simultaneous nodes. Migrations are embedded, ordered, transactional, and reversible.
 
-`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. Migration 008 makes demand mandatory and authoritative for assignment source and epoch, validates existing assignment and lifecycle aggregates before mutation, and adds source/state, identity, phase, and timestamp constraints. It advances the compatibility floor to `8` and requires a coordinated rollout with every RunnerFoundry node stopped and the session-affine direct management endpoint retained. Start one upgraded node and wait for migration and repository-session convergence before starting a second; verify one leader and one standby before adding further nodes. The equivalent standalone change is SQLite schema version 7, applied automatically while the database has its exclusive process owner. `migrate down --to` must be run with the currently deployed binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. Down reconstructs the version-007 assignment representation from demand without deleting assignment or lifecycle history. The compatibility row prevents a binary from using a schema generation below the schema's supported floor. After migration, ordinary operation remains multi-node.
+`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. Migration 009 aggregate-preflights the legacy and generic libvirt lifecycle representations, removes the expired bridge only when every legacy row is representable, and advances the compatibility floor to `9`. It requires a coordinated rollout with every RunnerFoundry node stopped and the session-affine direct management endpoint retained. Start one upgraded node and wait for migration and repository-session convergence before starting a second; verify one leader and one standby before adding further nodes. The equivalent standalone change is SQLite schema version 8, applied automatically while the database has its exclusive process owner. `migrate down --to 8` must be run with the generation-9 binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. Down reconstructs the legacy libvirt projection from generic lifecycle rows without changing generic lifecycle history. The compatibility row prevents a binary from using a schema generation below the schema's supported floor. After migration, ordinary operation remains multi-node.
 
 ### Reload, failover, and shutdown
 

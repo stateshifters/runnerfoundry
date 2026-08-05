@@ -227,7 +227,6 @@ func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t
 		Coordinator: coordinator,
 		Repository:  "repo",
 		ScaleSet:    "linux",
-		ReapLibvirt: true,
 	}
 	message := &upstream.RunnerScaleSetMessage{
 		Statistics: &upstream.RunnerScaleSetStatistic{},
@@ -241,7 +240,7 @@ func TestCoordinatedScaleSetHandlerPersistsLibvirtReapBeforeCompletionSucceeds(t
 	if err := handler.HandleMessage(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	pending, err := store.PendingRunnerReaps(context.Background(), "linux", "repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +255,7 @@ func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunner
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
 	handler := coordinatedScaleSetHandler{
-		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux", ReapLibvirt: true,
+		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux",
 	}
 	message := &upstream.RunnerScaleSetMessage{
 		Statistics:           &upstream.RunnerScaleSetStatistic{},
@@ -266,7 +265,7 @@ func TestCoordinatedScaleSetHandlerPersistsIdentityFreeLibvirtCompletionByRunner
 	if err := handler.HandleMessage(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	pending, err := store.PendingRunnerReaps(context.Background(), "linux", "repo")
 	if err != nil || len(pending) != 1 || pending[0].RunnerName != "repo-linux-1" {
 		t.Fatalf("pending reaps = %#v, %v", pending, err)
 	}
@@ -293,7 +292,7 @@ func newLibvirtCompletionAcknowledgementHarness(t *testing.T) libvirtCompletionA
 	coordinator := scaler.NewDurableCoordinator("linux", 1, store)
 	coordinator.AddRepository("repo", &recordingRecoveryWorker{})
 	handler := coordinatedScaleSetHandler{
-		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux", ReapLibvirt: true,
+		Coordinator: coordinator, Repository: "repo", ScaleSet: "linux",
 	}
 	message := &upstream.RunnerScaleSetMessage{
 		MessageID: 7, Statistics: &upstream.RunnerScaleSetStatistic{},
@@ -337,7 +336,7 @@ func (harness libvirtCompletionAcknowledgementHarness) retryWithDurablePersisten
 
 func (harness libvirtCompletionAcknowledgementHarness) expectPendingReapAcknowledged(t *testing.T) {
 	t.Helper()
-	pending, err := harness.store.PendingLibvirtReaps(context.Background(), "linux", "repo")
+	pending, err := harness.store.PendingRunnerReaps(context.Background(), "linux", "repo")
 	acknowledged := harness.client.acknowledged
 	if err != nil || len(pending) != 1 || len(acknowledged) != 1 || acknowledged[0] != 7 {
 		t.Fatalf("pending=%#v acknowledged=%#v error=%v", pending, acknowledged, err)
@@ -347,16 +346,6 @@ func (harness libvirtCompletionAcknowledgementHarness) expectPendingReapAcknowle
 type failingCompletionLifecycleStore struct {
 	*scaler.MemoryDemandStore
 	fail bool
-}
-
-func (store *failingCompletionLifecycleStore) CompleteJob(ctx context.Context, completion scaler.JobCompletion) error {
-	if store.fail {
-		return errors.New("persistence failed")
-	}
-	if err := store.MemoryDemandStore.CompleteJob(ctx, completion); err != nil {
-		return fmt.Errorf("complete in-memory job: %w", err)
-	}
-	return nil
 }
 
 func (store *failingCompletionLifecycleStore) ApplyMessageUpdate(

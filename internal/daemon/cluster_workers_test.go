@@ -276,7 +276,7 @@ func clusteredDaemonForTest(state *fakeClusterState) *clusteredDaemon {
 		},
 		openStore: func(postgresconfig.Settings) (clusterStoreConnection, error) {
 			return clusterStoreConnection{
-				state: state, repositoryState: &fakeRepositoryStateStore{},
+				state: newLifecycleClusterState(state), repositoryState: &fakeRepositoryStateStore{},
 				tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 			}, nil
 		},
@@ -340,12 +340,7 @@ type fakeClusterState struct {
 	statuses                 []cluster.ScaleSetStatus
 	demand                   []cluster.Demand
 	removedDemand            []removedClusterDemand
-	completedJobs            []cluster.JobCompletion
-	registeredLibvirtRunners []cluster.LibvirtRunnerLifecycle
-	pendingLibvirtReaps      []cluster.LibvirtRunnerLifecycle
-	pendingLibvirtReapsErr   error
-	confirmedLibvirtReaps    []cluster.LibvirtRunnerLifecycle
-	confirmLibvirtReapErr    error
+	completedJobs            []scaler.JobCompletion
 	assignments              []*cluster.Assignment
 	pendingAssignments       []cluster.Assignment
 	readyAssignments         []*cluster.Assignment
@@ -441,13 +436,8 @@ func (state *fakeClusterState) ApplyMessageUpdate(
 			return scaler.MessageUpdateResult{}, err
 		}
 	}
-	for _, completed := range update.Completed {
-		if err := state.CompleteJob(ctx, cluster.JobCompletion{
-			ScaleSet: update.ScaleSet, Repository: update.Repository,
-			RunnerIdentity: completed.RunnerIdentity,
-		}); err != nil {
-			return scaler.MessageUpdateResult{}, err
-		}
+	if err := state.applyCompletedJobs(update); err != nil {
+		return scaler.MessageUpdateResult{}, err
 	}
 	observationResult, err := state.ObserveAssignedJobs(ctx, cluster.AssignedJobObservation{
 		AppID: update.AppID, ScaleSet: update.ScaleSet, Repository: update.Repository,
@@ -457,6 +447,25 @@ func (state *fakeClusterState) ApplyMessageUpdate(
 		return scaler.MessageUpdateResult{}, err
 	}
 	return observationResult.QueueUpdate, nil
+}
+
+func (state *fakeClusterState) applyCompletedJobs(update scaler.MessageUpdate) error {
+	for _, completed := range update.Completed {
+		if state.removeErr != nil {
+			return state.removeErr
+		}
+		completion := scaler.JobCompletion{
+			ScaleSet: update.ScaleSet, Repository: update.Repository,
+			RunnerIdentity: completed.RunnerIdentity,
+		}
+		state.completedJobs = append(state.completedJobs, completion)
+		if completion.RequestID > 0 {
+			state.removedDemand = append(state.removedDemand, removedClusterDemand{
+				scaleSet: completion.ScaleSet, repository: completion.Repository, requestID: completion.RequestID,
+			})
+		}
+	}
+	return nil
 }
 
 func (state *fakeClusterState) AssignOldest(context.Context, string, time.Time, time.Duration) (*cluster.Assignment, error) {
@@ -582,34 +591,6 @@ func (state *fakeClusterState) CompleteDemand(_ context.Context, scaleSet string
 	return state.removeErr
 }
 
-func (state *fakeClusterState) CompleteJob(_ context.Context, completion cluster.JobCompletion) error {
-	state.completedJobs = append(state.completedJobs, completion)
-	if completion.RequestID > 0 {
-		state.removedDemand = append(state.removedDemand, removedClusterDemand{
-			scaleSet: completion.ScaleSet, repository: completion.Repository, requestID: completion.RequestID,
-		})
-	}
-	return state.removeErr
-}
-
-func (state *fakeClusterState) RegisterLibvirtRunner(
-	_ context.Context,
-	_ cluster.AssignmentID,
-	runner cluster.LibvirtRunnerLifecycle,
-) error {
-	state.registeredLibvirtRunners = append(state.registeredLibvirtRunners, runner)
-	return nil
-}
-
-func (state *fakeClusterState) PendingLibvirtReaps(context.Context, cluster.NodeID) ([]cluster.LibvirtRunnerLifecycle, error) {
-	return append([]cluster.LibvirtRunnerLifecycle(nil), state.pendingLibvirtReaps...), state.pendingLibvirtReapsErr
-}
-
-func (state *fakeClusterState) ConfirmLibvirtReaped(_ context.Context, runner cluster.LibvirtRunnerLifecycle) error {
-	state.confirmedLibvirtReaps = append(state.confirmedLibvirtReaps, runner)
-	return state.confirmLibvirtReapErr
-}
-
 func (state *fakeClusterState) CompleteAssignment(
 	_ context.Context,
 	assignmentID cluster.AssignmentID,
@@ -665,6 +646,7 @@ type fakeClusterLease struct {
 	closeErr   error
 	closeCalls int
 	onClose    func(context.Context) error
+	onAlive    func()
 }
 
 type clusterLifecycleNotifier struct {
@@ -690,7 +672,12 @@ func (failingStatusNotifier) Status(context.Context, clusterServiceStatus) error
 	return errors.New("status unavailable")
 }
 
-func (lease *fakeClusterLease) Alive(context.Context) bool { return lease.alive }
+func (lease *fakeClusterLease) Alive(context.Context) bool {
+	if lease.onAlive != nil {
+		lease.onAlive()
+	}
+	return lease.alive
+}
 
 func (lease *fakeClusterLease) Close(ctx context.Context) error {
 	lease.closed = true

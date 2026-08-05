@@ -22,13 +22,6 @@ type sqliteBindingCounts struct {
 	identityFree int64
 }
 
-type sqliteLibvirtBindingCounts struct {
-	name         int64
-	exact        int64
-	request      int64
-	identityFree int64
-}
-
 const (
 	activeSQLiteRunner sqliteRunnerEligibility = iota
 	anySQLiteRunner
@@ -38,11 +31,9 @@ const (
 	sqliteNameIdentityClause    = "runner_name = ?"
 	sqlitePairIdentityClause    = "request_id = ? AND runner_name = ?"
 
-	sqliteRunnerCountPrefix  = "SELECT COUNT(*) FROM runner_lifecycle WHERE scale_set = ? AND repository = ? AND "
-	sqliteLibvirtCountPrefix = "SELECT COUNT(*) FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ? AND "
-	sqliteActiveClause       = "phase <> 'reap_pending' AND "
-	sqlitePendingClause      = "phase = 'reap_pending' AND "
-	sqliteLibvirtPending     = "reap_requested = 1 AND "
+	sqliteRunnerCountPrefix = "SELECT COUNT(*) FROM runner_lifecycle WHERE scale_set = ? AND repository = ? AND "
+	sqliteActiveClause      = "phase <> 'reap_pending' AND "
+	sqlitePendingClause     = "phase = 'reap_pending' AND "
 )
 
 func sqliteIdentityStatement(
@@ -91,30 +82,6 @@ func countSQLiteRunnerMatches(
 	queries := sqliteRunnerCountQueries(eligibility)
 	return countSQLiteIdentityMatches(ctx, transaction, identity, scaleSet, repository,
 		queries, "resolve runner identity")
-}
-
-func resolveSQLiteLibvirtIdentity(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository string,
-	eligibility sqliteRunnerEligibility,
-	identity RunnerIdentity,
-) error {
-	return resolveSQLiteIdentity(identity, func(candidate RunnerIdentity) (int64, error) {
-		return countSQLiteLibvirtMatches(ctx, transaction, eligibility, scaleSet, repository, candidate)
-	})
-}
-
-func countSQLiteLibvirtMatches(
-	ctx context.Context,
-	transaction *sql.Tx,
-	eligibility sqliteRunnerEligibility,
-	scaleSet, repository string,
-	identity RunnerIdentity,
-) (int64, error) {
-	queries := sqliteLibvirtCountQueries(eligibility)
-	return countSQLiteIdentityMatches(ctx, transaction, identity, scaleSet, repository,
-		queries, "resolve libvirt runner identity")
 }
 
 func resolveSQLiteIdentity(identity RunnerIdentity, count func(RunnerIdentity) (int64, error)) error {
@@ -177,18 +144,6 @@ func sqliteRunnerCountQueries(eligibility sqliteRunnerEligibility) sqliteIdentit
 	case anySQLiteRunner:
 	case pendingSQLiteRunner:
 		prefix += sqlitePendingClause
-	}
-	return sqliteIdentityQueries{
-		request: prefix + sqliteRequestIdentityClause,
-		name:    prefix + sqliteNameIdentityClause,
-		pair:    prefix + sqlitePairIdentityClause,
-	}
-}
-
-func sqliteLibvirtCountQueries(eligibility sqliteRunnerEligibility) sqliteIdentityQueries {
-	prefix := sqliteLibvirtCountPrefix
-	if eligibility == pendingSQLiteRunner {
-		prefix += sqliteLibvirtPending
 	}
 	return sqliteIdentityQueries{
 		request: prefix + sqliteRequestIdentityClause,
@@ -277,7 +232,7 @@ func bindSQLiteRunnerIdentity(
 	if err != nil {
 		return err
 	}
-	return reconcileSQLiteMirrorForIdentity(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func bindSQLiteIdentityFreeRunner(
@@ -355,51 +310,6 @@ func classifySQLiteIdentityFreeBinding(
 	return nil
 }
 
-func sqliteLibvirtBindingCandidateCounts(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository string,
-	identity RunnerIdentity,
-) (sqliteLibvirtBindingCounts, error) {
-	nameMatches, err := countSQLiteLibvirtMatches(ctx, transaction, anySQLiteRunner,
-		scaleSet, repository, RunnerIdentity{RunnerName: identity.RunnerName})
-	if err != nil || nameMatches == 0 {
-		return sqliteLibvirtBindingCounts{name: nameMatches}, err
-	}
-	exactMatches, err := countSQLiteLibvirtMatches(ctx, transaction, anySQLiteRunner,
-		scaleSet, repository, identity)
-	if err != nil || exactMatches == 1 {
-		return sqliteLibvirtBindingCounts{name: nameMatches, exact: exactMatches}, err
-	}
-	requestMatches, err := countSQLiteLibvirtMatches(ctx, transaction, anySQLiteRunner,
-		scaleSet, repository, RunnerIdentity{RequestID: identity.RequestID})
-	if err != nil {
-		return sqliteLibvirtBindingCounts{}, err
-	}
-	identityFreeMatches, err := countSQLiteIdentityFreeLibvirtMatches(
-		ctx, transaction, scaleSet, repository, identity.RunnerName,
-	)
-	return sqliteLibvirtBindingCounts{
-		name: nameMatches, exact: exactMatches, request: requestMatches, identityFree: identityFreeMatches,
-	}, err
-}
-
-func classifySQLiteLibvirtBinding(
-	identity RunnerIdentity,
-	counts sqliteLibvirtBindingCounts,
-) (bool, error) {
-	if counts.name == 0 || counts.exact == 1 {
-		return false, nil
-	}
-	if counts.name > 1 {
-		return false, &RunnerIdentityInvariantError{Identity: identity, Matches: counts.name}
-	}
-	if counts.request > 0 || counts.identityFree == 0 {
-		return false, &RunnerIdentityMismatchError{Identity: identity}
-	}
-	return true, nil
-}
-
 func updateSQLiteRunnerBusy(
 	ctx context.Context,
 	transaction *sql.Tx,
@@ -438,16 +348,6 @@ func countSQLiteIdentityFreeRunnerMatches(
 	return countSQLiteFixedMatches(ctx, transaction, `SELECT COUNT(*) FROM runner_lifecycle
 		WHERE scale_set = ? AND repository = ? AND phase <> 'reap_pending'
 		AND runner_name = ? AND request_id = 0`, "resolve identity-free runner", scaleSet, repository, runnerName)
-}
-
-func countSQLiteIdentityFreeLibvirtMatches(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository, runnerName string,
-) (int64, error) {
-	return countSQLiteFixedMatches(ctx, transaction, `SELECT COUNT(*) FROM libvirt_runner_lifecycle
-		WHERE scale_set = ? AND repository = ? AND runner_name = ? AND request_id = 0`,
-		"resolve identity-free libvirt runner", scaleSet, repository, runnerName)
 }
 
 func countSQLiteFixedMatches(

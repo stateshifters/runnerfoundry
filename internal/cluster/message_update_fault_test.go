@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -111,21 +110,6 @@ func TestClusterMessageUpdateReportsRollbackFailureWithPrimaryError(t *testing.T
 	)
 	if !errors.Is(err, queryFailure) || !errors.Is(err, rollbackFailure) {
 		t.Fatalf("joined rollback error = %v", err)
-	}
-}
-
-func TestClusterMessageUpdateRollsBackLibvirtIdentityFailure(t *testing.T) {
-	failure := errors.New("libvirt update failed")
-	transaction := &fakeDatabaseTransaction{
-		execErrors: []error{nil, failure}, rowResults: []fakeRow{clusterEpochRow(t, 3)},
-	}
-
-	_, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ApplyMessageUpdate(
-		context.Background(), clusterMessageUpdateWithStart(),
-	)
-	failedStatement := transaction.executions[len(transaction.executions)-1].statement
-	if !errors.Is(err, failure) || !strings.Contains(failedStatement, "scaler_libvirt_runner_lifecycle") {
-		t.Fatalf("libvirt identity error = %v, statement = %q", err, failedStatement)
 	}
 }
 

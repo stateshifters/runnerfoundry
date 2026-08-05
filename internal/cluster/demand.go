@@ -167,13 +167,6 @@ const loadOldestDemandSQL = `
 	        ON lifecycle_assignment.assignment_id = lifecycle.assignment_id
 	      WHERE lifecycle_assignment.demand_id = demand.demand_id
 	  )
-	  AND NOT EXISTS (
-	      SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
-	      WHERE lifecycle.scale_set = demand.scale_set
-	        AND lifecycle.repository = demand.repository
-	        AND lifecycle.request_id = COALESCE(demand.request_id, 0)
-	        AND lifecycle.reap_requested
-	  )
 	ORDER BY demand.queue_time, demand.observation_id
 	LIMIT 1
 	FOR UPDATE OF demand`

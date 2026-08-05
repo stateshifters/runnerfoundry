@@ -238,9 +238,7 @@ func markSQLiteMessageRunnerBusy(
 			identity, started.GitHubRunnerID, update.ObservedAt); err != nil {
 			return err
 		}
-		return reconcileSQLiteMirrorForIdentity(
-			ctx, transaction, update.ScaleSet, update.Repository, identity,
-		)
+		return nil
 	}
 	if identity.isPair() && (errors.Is(resolveErr, ErrRunnerIdentityMismatch) ||
 		errors.Is(resolveErr, ErrRunnerIdentityNotFound)) {

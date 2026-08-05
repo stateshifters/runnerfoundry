@@ -358,11 +358,6 @@ func reconcileExcessAssignedRunners(
 		observation.Repository, observation.ObservedAt); err != nil {
 		return fmt.Errorf("request excess assigned runner reaps: %w", err)
 	}
-	if err := reconcileClusterBulkLibvirtReaps(
-		ctx, transaction, observation.ScaleSet, observation.Repository, "assigned_jobs_decreased",
-	); err != nil {
-		return err
-	}
 	if _, err := transaction.Exec(ctx, completeExcessAssignedAssignmentsSQL,
 		observation.ScaleSet, observation.Repository); err != nil {
 		return fmt.Errorf("complete excess assigned assignments: %w", err)

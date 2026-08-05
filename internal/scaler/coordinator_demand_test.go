@@ -165,7 +165,7 @@ func TestCoordinatorRecoversProviderVisibleDemand(t *testing.T) {
 	}
 }
 
-func TestCoordinatorCountsPendingLibvirtReapAndFencesItsRequest(t *testing.T) {
+func TestCoordinatorCountsPendingRunnerReapAndFencesItsRequest(t *testing.T) {
 	fixture := coordinatorWithPendingLibvirtReap(t, 1)
 	applyCoordinatorDemand(t, fixture.coordinator, []JobDemand{
 		{Repository: "repo", RequestID: 42, QueueTime: time.Now()},
@@ -175,7 +175,7 @@ func TestCoordinatorCountsPendingLibvirtReapAndFencesItsRequest(t *testing.T) {
 	if len(*fixture.worker.startOrder) != 0 || len(fixture.worker.acquired) != 0 {
 		t.Fatalf("pending reap admitted demand: starts=%#v acquired=%#v", *fixture.worker.startOrder, fixture.worker.acquired)
 	}
-	if err := fixture.store.ConfirmLibvirtReaped(context.Background(), fixture.runner); err != nil {
+	if err := fixture.store.ConfirmRunnerReaped(context.Background(), fixture.runner); err != nil {
 		t.Fatal(err)
 	}
 	scheduleCoordinator(t, fixture.coordinator)
@@ -188,7 +188,7 @@ type pendingLibvirtReapFixture struct {
 	coordinator *Coordinator
 	store       *MemoryDemandStore
 	worker      *recordingWorker
-	runner      LibvirtRunnerLifecycle
+	runner      RunnerLifecycle
 }
 
 func coordinatorWithPendingLibvirtReap(
@@ -201,13 +201,14 @@ func coordinatorWithPendingLibvirtReap(
 	startOrder := []string{}
 	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
 	coordinator.AddRepository("repo", worker)
-	runner := LibvirtRunnerLifecycle{ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
-	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
+	runner := RunnerLifecycle{ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderLibvirt,
+		RequestID: 42, RunnerName: "linux-42", Phase: RunnerWaitingForJob, WaitingSince: time.Now()}
+	if err := store.RegisterRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteJob(context.Background(), JobCompletion{
+	if err := store.CompleteRunnerLifecycleJob(context.Background(), JobCompletion{
 		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
-	}); err != nil {
+	}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return pendingLibvirtReapFixture{coordinator: coordinator, store: store, worker: worker, runner: runner}
@@ -226,14 +227,15 @@ func TestCoordinatorFencesRequeuedRequestWhileAdmittingAnotherIdentity(t *testin
 	startOrder := []string{}
 	worker := &recordingWorker{repository: "repo", startOrder: &startOrder}
 	coordinator.AddRepository("repo", worker)
-	runner := LibvirtRunnerLifecycle{ScaleSet: "linux", Repository: "repo", RequestID: 42, RunnerName: "linux-42"}
-	if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
+	runner := RunnerLifecycle{ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderLibvirt,
+		RequestID: 42, RunnerName: "linux-42", Phase: RunnerWaitingForJob, WaitingSince: time.Now()}
+	if err := store.RegisterRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteJob(context.Background(), JobCompletion{
+	if err := store.CompleteRunnerLifecycleJob(context.Background(), JobCompletion{
 		ScaleSet: "linux", Repository: "repo",
 		RunnerIdentity: RunnerIdentity{RequestID: 42, RunnerName: runner.RunnerName},
-	}); err != nil {
+	}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	applyCoordinatorDemand(t, coordinator, []JobDemand{

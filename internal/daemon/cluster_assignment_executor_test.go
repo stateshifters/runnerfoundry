@@ -103,10 +103,6 @@ func (state *lifecycleClusterState) ConfirmRunnerReaped(ctx context.Context, run
 	}
 	return nil
 }
-func (state *lifecycleClusterState) CompleteJob(ctx context.Context, completion cluster.JobCompletion) error {
-	return state.fakeClusterState.CompleteJob(ctx, completion)
-}
-
 func TestAssignmentExecutionPhasesRetainStructuredLogValues(t *testing.T) {
 	if assignmentExecutionPhaseStart != "start" {
 		t.Fatalf("start phase = %q, want start", assignmentExecutionPhaseStart)
@@ -220,21 +216,6 @@ func TestClusteredExecutorUsesOnlyLocalScaleSets(t *testing.T) {
 		if nodeID != "runner-host-1" {
 			t.Fatalf("assignment was claimed for node %q", nodeID)
 		}
-	}
-}
-
-func TestClusteredExecutorRegistersLibvirtRunnerBeforeStart(t *testing.T) {
-	daemon, state, provider := clusteredAssignmentExecutorFixture(t)
-	daemon.config.ScaleSets[0].Docker = nil
-	daemon.config.ScaleSets[0].Libvirt = &config.LibvirtConfig{ConnectionURI: "test", DomainXMLTemplate: "test"}
-	daemon.executeAssignments(context.Background())
-
-	if len(provider.started) != 1 || len(state.registeredLibvirtRunners) != 1 {
-		t.Fatalf("started=%#v registered=%#v", provider.started, state.registeredLibvirtRunners)
-	}
-	registered := state.registeredLibvirtRunners[0]
-	if registered.NodeID != "runner-host-1" || registered.RequestID != 2 || registered.RunnerName != provider.started[0].RunnerName {
-		t.Fatalf("registered lifecycle = %#v; start = %#v", registered, provider.started[0])
 	}
 }
 

@@ -150,11 +150,11 @@ func applyClusterMessageCompletion(
 	update scaler.MessageUpdate,
 	completed scaler.RunnerMessageIdentity,
 ) error {
-	completion := JobCompletion{
+	completion := scaler.JobCompletion{
 		ScaleSet: update.ScaleSet, Repository: update.Repository,
 		RunnerIdentity: scaler.RunnerIdentity{RequestID: completed.RequestID, RunnerName: completed.RunnerName},
 	}
-	err := completeJobInTransaction(ctx, transaction, completion)
+	err := completeRunnerLifecycleJobInTransaction(ctx, transaction, completion)
 	if !errors.Is(err, scaler.ErrRunnerIdentityNotFound) {
 		return err
 	}
@@ -196,11 +196,7 @@ func loadCapacityObligationQueueSnapshot(
 		      JOIN scaler_assignments lifecycle_assignment
 		        ON lifecycle_assignment.assignment_id = lifecycle.assignment_id
 		      WHERE lifecycle_assignment.demand_id = demand.demand_id)
-		  AND NOT EXISTS (SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
-		      WHERE lifecycle.scale_set = demand.scale_set
-		        AND lifecycle.repository = demand.repository
-		        AND lifecycle.request_id = COALESCE(demand.request_id, 0)
-		        AND lifecycle.reap_requested))
+		  )
 		FROM scaler_demand demand
 		LEFT JOIN scaler_assigned_job_observations assigned
 		  ON assigned.assigned_observation_id = demand.assigned_observation_id

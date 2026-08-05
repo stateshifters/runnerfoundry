@@ -120,8 +120,10 @@ func (candidate *conflictingRegistrationTransaction) ownsMirrorRepresentation() 
 func (candidate *conflictingRegistrationTransaction) otherMirrorOwnerCount() int64 {
 	candidate.state.stateMutex.Lock()
 	defer candidate.state.stateMutex.Unlock()
-	if candidate.state.mirrorName != "" && candidate.state.mirrorName != candidate.runner.RunnerName {
-		return 1
+	for runnerName := range candidate.state.genericNames {
+		if runnerName != candidate.runner.RunnerName {
+			return 1
+		}
 	}
 	return 0
 }
@@ -201,7 +203,7 @@ func assertConflictingClusterRegistrationResults(
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("concurrent results = %d successes, %d conflicts", successes, conflicts)
 	}
-	if len(state.genericNames) != 1 || !state.genericNames[state.mirrorName] {
-		t.Fatalf("committed generic names = %#v, mirror = %q", state.genericNames, state.mirrorName)
+	if len(state.genericNames) != 1 {
+		t.Fatalf("committed generic names = %#v", state.genericNames)
 	}
 }

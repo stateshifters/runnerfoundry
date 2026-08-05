@@ -14,11 +14,7 @@ type sqliteLifecycleRegistrationState struct {
 	requestID                      int64
 	assignmentID                   int64
 	phase                          RunnerLifecyclePhase
-	mirrorExists                   bool
-	mirrorRequest                  int64
-	mirrorReap                     bool
 	genericRequestOwnedByOtherName bool
-	mirrorRequestOwnedByOtherName  bool
 }
 
 func (store *SQLiteDemandStore) RegisterRunner(ctx context.Context, runner RunnerLifecycle) error {
@@ -45,10 +41,7 @@ func registerSQLiteRunner(ctx context.Context, transaction *sql.Tx, runner Runne
 			return changedErr
 		}
 	}
-	if runner.Provider != RunnerProviderLibvirt {
-		return nil
-	}
-	return reconcileSQLiteLibvirtRegistration(ctx, transaction, runner)
+	return nil
 }
 
 func loadSQLiteLifecycleRegistrationState(ctx context.Context, transaction *sql.Tx, runner RunnerLifecycle) (sqliteLifecycleRegistrationState, error) {
@@ -61,11 +54,6 @@ func loadSQLiteLifecycleRegistrationState(ctx context.Context, transaction *sql.
 	if err == nil {
 		state.genericExists, state.provider, state.phase = true, RunnerProvider(provider), RunnerLifecyclePhase(phase)
 	}
-	err = transaction.QueryRowContext(ctx, `SELECT request_id, reap_requested FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ? AND runner_name = ?`, runner.ScaleSet, runner.Repository, runner.RunnerName).Scan(&state.mirrorRequest, &state.mirrorReap)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return state, fmt.Errorf("inspect mirrored runner lifecycle: %w", err)
-	}
-	state.mirrorExists = err == nil
 	if err = loadSQLiteRegistrationRequestOwners(ctx, transaction, runner, &state); err != nil {
 		return state, err
 	}
@@ -81,11 +69,6 @@ func loadSQLiteRegistrationRequestOwners(
 	if runner.RequestID <= 0 {
 		return nil
 	}
-	var mirrorOwners int
-	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name <> ?`, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName).Scan(&mirrorOwners); err != nil {
-		return fmt.Errorf("inspect mirrored request ownership: %w", err)
-	}
-	state.mirrorRequestOwnedByOtherName = mirrorOwners > 0
 	var genericOwners int
 	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM runner_lifecycle WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name <> ?`, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName).Scan(&genericOwners); err != nil {
 		return fmt.Errorf("inspect authoritative request ownership: %w", err)
@@ -95,10 +78,7 @@ func loadSQLiteRegistrationRequestOwners(
 }
 
 func validateSQLiteLifecycleRegistrationState(runner RunnerLifecycle, state sqliteLifecycleRegistrationState) error {
-	if err := validateSQLiteGenericRegistrationState(runner, state); err != nil {
-		return err
-	}
-	return validateSQLiteMirrorRegistrationState(runner, state)
+	return validateSQLiteGenericRegistrationState(runner, state)
 }
 
 func validateSQLiteGenericRegistrationState(runner RunnerLifecycle, state sqliteLifecycleRegistrationState) error {
@@ -117,29 +97,8 @@ func validateSQLiteGenericRegistrationState(runner RunnerLifecycle, state sqlite
 	return nil
 }
 
-func validateSQLiteMirrorRegistrationState(runner RunnerLifecycle, state sqliteLifecycleRegistrationState) error {
-	if state.mirrorRequestOwnedByOtherName {
-		return sqliteLifecycleConsistencyError(runner, "legacy request identity is owned by another runner name")
-	}
-	if state.mirrorExists && runner.Provider != RunnerProviderLibvirt {
-		return sqliteLifecycleConsistencyError(runner, "legacy libvirt lifecycle conflicts with authoritative provider")
-	}
-	if state.mirrorExists && state.mirrorRequest > 0 && state.mirrorRequest != runner.RequestID {
-		return sqliteLifecycleConsistencyError(runner, "legacy request identity conflicts with authoritative lifecycle")
-	}
-	return nil
-}
-
 func sqliteLifecycleConsistencyError(runner RunnerLifecycle, reason string) error {
 	return &RunnerLifecycleConsistencyError{ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerName: runner.RunnerName, Reason: reason}
-}
-
-func reconcileSQLiteLibvirtRegistration(ctx context.Context, transaction *sql.Tx, runner RunnerLifecycle) error {
-	_, err := transaction.ExecContext(ctx, `INSERT INTO libvirt_runner_lifecycle (scale_set, repository, request_id, runner_name, reap_requested) VALUES(?, ?, ?, ?, ?) ON CONFLICT(scale_set, repository, runner_name) DO UPDATE SET request_id = excluded.request_id, reap_requested = excluded.reap_requested`, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName, runner.Phase == RunnerReapPending)
-	if err != nil {
-		return fmt.Errorf("reconcile mirrored runner lifecycle: %w", err)
-	}
-	return nil
 }
 
 func normalizeSQLiteRunnerRegistration(runner RunnerLifecycle) RunnerLifecycle {

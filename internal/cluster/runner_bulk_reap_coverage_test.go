@@ -14,11 +14,9 @@ func TestExcessRunnerReapCoversTransactionOutcomes(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	failure := errors.New("failed")
 	tests := map[string]*fakeDatabaseConnection{
-		"begin":      {beginErr: failure},
-		"update":     {transaction: &fakeDatabaseTransaction{execErrors: []error{failure}}},
-		"mirror":     {transaction: &fakeDatabaseTransaction{execErrors: []error{nil, failure}}},
-		"validation": {transaction: bulkValidationFailureTransaction(failure)},
-		"commit":     {transaction: &fakeDatabaseTransaction{commitErr: failure}},
+		"begin":  {beginErr: failure},
+		"update": {transaction: &fakeDatabaseTransaction{execErrors: []error{failure}}},
+		"commit": {transaction: &fakeDatabaseTransaction{commitErr: failure}},
 	}
 	for name, connection := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -37,17 +35,9 @@ func TestExcessRunnerReapCoversTransactionOutcomes(t *testing.T) {
 	}
 }
 
-func bulkValidationFailureTransaction(failure error) *fakeDatabaseTransaction {
-	transaction := &fakeDatabaseTransaction{}
-	transaction.queryRowHook = func(string, ...any) databaseRow {
-		return databaseRow{scanner: fakeRow{err: failure}}
-	}
-	return transaction
-}
-
 func TestExcessRunnerReapClampsNegativeRetention(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{execTags: []pgconn.CommandTag{
-		pgconn.NewCommandTag("UPDATE 2"), pgconn.NewCommandTag("INSERT 0 2"),
+		pgconn.NewCommandTag("UPDATE 2"),
 	}}
 	changed, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).RequestExcessWaitingRunnerReaps(
 		context.Background(), "linux", "repo", -1, "excess", time.Unix(1, 0).UTC(),

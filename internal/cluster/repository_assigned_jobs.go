@@ -49,9 +49,6 @@ func withdrawRemovedInstallationAssignedObservations(
 		update.appID, update.generation, update.completedAt); err != nil {
 		return fmt.Errorf("request removed-installation assigned runner reaps: %w", err)
 	}
-	if err := mirrorWithdrawnLibvirtRunners(ctx, transaction); err != nil {
-		return err
-	}
 	if _, err := transaction.Exec(ctx, completeRemovedInstallationAssignmentsSQL,
 		update.appID, update.generation); err != nil {
 		return fmt.Errorf("complete removed-installation assigned assignments: %w", err)
@@ -84,9 +81,6 @@ func withdrawUndiscoveredAssignedObservations(
 			  AND repository.last_seen_generation < $3)
 		  AND lifecycle.phase <> 'reap_pending'`, appID, installationID, generation, withdrawnAt); err != nil {
 		return fmt.Errorf("request undiscovered assigned runner reaps: %w", err)
-	}
-	if err := mirrorWithdrawnLibvirtRunners(ctx, transaction); err != nil {
-		return err
 	}
 	return removeUndiscoveredAssignedObservations(ctx, transaction, appID, installationID, generation)
 }
@@ -139,9 +133,6 @@ func withdrawRegistrationAssignedObservation(
 		) AND lifecycle.phase <> 'reap_pending'`, withdrawnAt, appID, repositoryURL, scaleSetName); err != nil {
 		return fmt.Errorf("request withdrawn assigned runner reaps: %w", err)
 	}
-	if err := mirrorWithdrawnLibvirtRunners(ctx, transaction); err != nil {
-		return err
-	}
 	if _, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
 		FROM scaler_demand demand
 		WHERE demand.demand_id = assignment.demand_id
@@ -153,18 +144,6 @@ func withdrawRegistrationAssignedObservation(
 	if _, err := transaction.Exec(ctx, `DELETE FROM scaler_assigned_job_observations
 		WHERE app_id = $1 AND repository_url = $2 AND scale_set = $3`, appID, repositoryURL, scaleSetName); err != nil {
 		return fmt.Errorf("remove withdrawn assigned observations: %w", err)
-	}
-	return nil
-}
-
-func mirrorWithdrawnLibvirtRunners(ctx context.Context, transaction *databaseTransaction) error {
-	if _, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle legacy SET reap_requested = true
-		WHERE EXISTS (SELECT 1 FROM scaler_runner_lifecycle lifecycle
-			WHERE lifecycle.node_id = legacy.node_id AND lifecycle.scale_set = legacy.scale_set
-			  AND lifecycle.repository = legacy.repository AND lifecycle.runner_name = legacy.runner_name
-			  AND lifecycle.phase = 'reap_pending'
-			  AND lifecycle.reap_reason IN ('registration_withdrawn', 'repository_withdrawn', 'installation_withdrawn'))`); err != nil {
-		return fmt.Errorf("mirror withdrawn libvirt runner reaps: %w", err)
 	}
 	return nil
 }

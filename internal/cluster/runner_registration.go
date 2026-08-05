@@ -72,17 +72,7 @@ func registerRunnerInTransaction(
 	if err = ensureClusterGenericRegistration(ctx, transaction, runner, state); err != nil {
 		return err
 	}
-	if runner.Provider != scaler.RunnerProviderLibvirt {
-		return nil
-	}
-	if err = reconcileClusterLibvirtRegistration(ctx, transaction, runner); err != nil {
-		return err
-	}
-	state, err = loadClusterLifecycleRegistrationState(ctx, transaction, runner)
-	if err != nil {
-		return err
-	}
-	return validateReconciledClusterLifecycleRegistration(runner, state)
+	return nil
 }
 
 func ensureClusterGenericRegistration(
@@ -112,19 +102,6 @@ func ensureClusterGenericRegistration(
 	return nil
 }
 
-func validateReconciledClusterLifecycleRegistration(
-	runner scaler.RunnerLifecycle,
-	state clusterLifecycleRegistrationState,
-) error {
-	if err := validateClusterLifecycleRegistrationState(runner, state); err != nil {
-		return err
-	}
-	if !state.mirrorExists || state.mirrorReap != (runner.Phase == scaler.RunnerReapPending) {
-		return clusterLifecycleConsistencyError(runner, "legacy lifecycle could not be reconciled")
-	}
-	return nil
-}
-
 func insertClusterRunnerLifecycle(
 	ctx context.Context,
 	transaction *databaseTransaction,
@@ -149,11 +126,7 @@ type clusterLifecycleRegistrationState struct {
 	requestID     int64
 	assignmentID  int64
 	phase         scaler.RunnerLifecyclePhase
-	mirrorExists  bool
-	mirrorRequest int64
-	mirrorReap    bool
 	genericOwners int64
-	mirrorOwners  int64
 }
 
 func loadClusterLifecycleRegistrationState(
@@ -166,12 +139,6 @@ func loadClusterLifecycleRegistrationState(
 		return state, err
 	}
 	if err := loadClusterGenericRequestOwners(ctx, transaction, runner, &state); err != nil {
-		return state, err
-	}
-	if err := loadClusterMirrorRegistrationState(ctx, transaction, runner, &state); err != nil {
-		return state, err
-	}
-	if err := loadClusterMirrorRequestOwners(ctx, transaction, runner, &state); err != nil {
 		return state, err
 	}
 	return state, nil
@@ -214,51 +181,11 @@ func loadClusterGenericRegistrationState(
 	return nil
 }
 
-func loadClusterMirrorRegistrationState(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	state *clusterLifecycleRegistrationState,
-) error {
-	err := transaction.QueryRow(ctx, `SELECT request_id, reap_requested
-		FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4`,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName,
-	).Scan(&state.mirrorRequest, &state.mirrorReap)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("inspect clustered mirrored runner lifecycle registration: %w", err)
-	}
-	state.mirrorExists = err == nil
-	return nil
-}
-
-func loadClusterMirrorRequestOwners(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	state *clusterLifecycleRegistrationState,
-) error {
-	if runner.RequestID <= 0 {
-		return nil
-	}
-	err := transaction.QueryRow(ctx, `SELECT COUNT(*) FROM scaler_libvirt_runner_lifecycle
-		WHERE scale_set = $1 AND repository = $2 AND request_id = $3
-		  AND runner_name <> $4`, runner.ScaleSet, runner.Repository,
-		runner.RequestID, runner.RunnerName).Scan(&state.mirrorOwners)
-	if err != nil {
-		return fmt.Errorf("inspect clustered legacy request ownership: %w", err)
-	}
-	return nil
-}
-
 func validateClusterLifecycleRegistrationState(
 	runner scaler.RunnerLifecycle,
 	state clusterLifecycleRegistrationState,
 ) error {
-	if err := validateClusterGenericRegistrationState(runner, state); err != nil {
-		return err
-	}
-	return validateClusterMirrorRegistrationState(runner, state)
+	return validateClusterGenericRegistrationState(runner, state)
 }
 
 func validateClusterGenericRegistrationState(
@@ -280,54 +207,8 @@ func validateClusterGenericRegistrationState(
 	return nil
 }
 
-func validateClusterMirrorRegistrationState(
-	runner scaler.RunnerLifecycle,
-	state clusterLifecycleRegistrationState,
-) error {
-	if state.mirrorExists && runner.Provider != scaler.RunnerProviderLibvirt {
-		return clusterLifecycleConsistencyError(runner, "legacy libvirt lifecycle conflicts with authoritative provider")
-	}
-	if state.mirrorExists && state.mirrorRequest > 0 && state.mirrorRequest != runner.RequestID {
-		return clusterLifecycleConsistencyError(runner, "legacy request identity conflicts with authoritative lifecycle")
-	}
-	if state.mirrorOwners > 0 {
-		return clusterLifecycleConsistencyError(runner, "legacy request identity belongs to another runner name")
-	}
-	return nil
-}
-
 func clusterLifecycleConsistencyError(runner scaler.RunnerLifecycle, reason string) error {
 	return &scaler.RunnerLifecycleConsistencyError{
 		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerName: runner.RunnerName, Reason: reason,
 	}
-}
-
-func reconcileClusterLibvirtRegistration(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-) error {
-	_, err := transaction.Exec(ctx, `WITH lifecycle AS MATERIALIZED (
-		SELECT $1::text AS node_id, $2::text AS scale_set, $3::text AS repository,
-		       $4::bigint AS request_id, $5::text AS runner_name, $6::boolean AS reap_requested
-	), locked AS MATERIALIZED (
-		SELECT pg_advisory_xact_lock(hashtextextended(concat_ws(E'\x1f', scale_set, repository,
-			CASE WHEN request_id > 0 THEN request_id::text ELSE runner_name END), 0)) FROM lifecycle
-	)
-	INSERT INTO scaler_libvirt_runner_lifecycle AS legacy
-		(node_id, scale_set, repository, request_id, runner_name, reap_requested)
-		SELECT node_id, scale_set, repository, request_id, runner_name, reap_requested FROM lifecycle CROSS JOIN locked
-		WHERE NOT EXISTS (SELECT 1 FROM scaler_libvirt_runner_lifecycle owner
-			WHERE owner.scale_set = lifecycle.scale_set AND owner.repository = lifecycle.repository
-			  AND owner.request_id = lifecycle.request_id
-			  AND lifecycle.request_id > 0 AND owner.runner_name <> lifecycle.runner_name)
-		ON CONFLICT (node_id, scale_set, repository, runner_name) DO UPDATE SET
-		request_id = EXCLUDED.request_id, reap_requested = EXCLUDED.reap_requested
-		WHERE legacy.request_id = 0 OR legacy.request_id = EXCLUDED.request_id`,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName,
-		runner.Phase == scaler.RunnerReapPending)
-	if err != nil {
-		return fmt.Errorf("reconcile clustered libvirt lifecycle: %w", err)
-	}
-	return nil
 }

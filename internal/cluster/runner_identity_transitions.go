@@ -61,7 +61,7 @@ func markClusterRunnerBusyInTransaction(
 	if err = requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected()); err != nil {
 		return err
 	}
-	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func (store *Store) BindRunnerIdentity(
@@ -110,7 +110,7 @@ func bindClusterRunnerIdentityInTransaction(
 			return err
 		}
 	}
-	return mirrorBoundClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func markExactClusterRunnerBusy(
@@ -194,16 +194,7 @@ func requestClusterRunnerReapInTransaction(
 	if err = requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected()); err != nil {
 		return err
 	}
-	return mirrorClusterRunnerReap(ctx, transaction, scaleSet, repository, identity)
-}
-
-func mirrorClusterRunnerReap(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func bindClusterRunnerIdentity(
@@ -290,177 +281,4 @@ func updateBoundClusterRunner(
 		return &scaler.RunnerIdentityMismatchError{Identity: identity}
 	}
 	return nil
-}
-
-func mirrorBoundClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
-}
-
-func reconcileClusterLibvirtLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return err
-	}
-	statement := fmt.Sprintf(reconcileClusterLibvirtLifecycleSQL, predicate.condition)
-	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	commandTag, err := transaction.Exec(ctx, statement, arguments...)
-	if err != nil {
-		return fmt.Errorf("reconcile clustered libvirt lifecycle transition: %w", err)
-	}
-	if commandTag.RowsAffected() > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: commandTag.RowsAffected()}
-	}
-	if commandTag.RowsAffected() == 1 {
-		return nil
-	}
-	return classifyUnreconciledClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
-}
-
-func classifyUnreconciledClusterLibvirtLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return err
-	}
-	authority, err := loadClusterLifecycleTransitionAuthority(
-		ctx, transaction, scaleSet, repository, predicate,
-	)
-	if err != nil {
-		return err
-	}
-	mirrorCount, err := countClusterLifecycleTransitionMirrors(
-		ctx, transaction, scaleSet, repository, authority,
-	)
-	if err != nil {
-		return err
-	}
-	return classifyClusterLifecycleTransitionConflict(scaleSet, repository, identity, authority, mirrorCount)
-}
-
-type clusterLifecycleTransitionAuthority struct {
-	nodeID     NodeID
-	provider   scaler.RunnerProvider
-	runnerName string
-}
-
-func loadClusterLifecycleTransitionAuthority(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	predicate clusterRunnerIdentityPredicate,
-) (clusterLifecycleTransitionAuthority, error) {
-	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	var authority clusterLifecycleTransitionAuthority
-	err := transaction.QueryRow(ctx, fmt.Sprintf(`SELECT node_id, provider, runner_name FROM scaler_runner_lifecycle
-		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition), arguments...).Scan(
-		&authority.nodeID, &authority.provider, &authority.runnerName,
-	)
-	if err != nil {
-		return authority, fmt.Errorf("inspect authoritative clustered lifecycle transition: %w", err)
-	}
-	return authority, nil
-}
-
-func countClusterLifecycleTransitionMirrors(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	authority clusterLifecycleTransitionAuthority,
-) (int64, error) {
-	var mirrorCount int64
-	err := transaction.QueryRow(ctx, `SELECT COUNT(*) FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4`,
-		authority.nodeID, scaleSet, repository, authority.runnerName).Scan(&mirrorCount)
-	if err != nil {
-		return 0, fmt.Errorf("inspect legacy clustered lifecycle transition: %w", err)
-	}
-	return mirrorCount, nil
-}
-
-func classifyClusterLifecycleTransitionConflict(
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-	authority clusterLifecycleTransitionAuthority,
-	mirrorCount int64,
-) error {
-	if mirrorCount > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: mirrorCount}
-	}
-	if authority.provider != scaler.RunnerProviderLibvirt && mirrorCount == 0 {
-		return nil
-	}
-	reason := "legacy lifecycle conflicts with authoritative transition"
-	if authority.provider != scaler.RunnerProviderLibvirt {
-		reason = "legacy libvirt lifecycle conflicts with authoritative provider"
-	}
-	return &scaler.RunnerLifecycleConsistencyError{
-		ScaleSet: scaleSet, Repository: repository, RunnerName: authority.runnerName,
-		Reason: reason,
-	}
-}
-
-func classifyUnchangedClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	scope := clusterRunnerIdentityScope{
-		table: "scaler_libvirt_runner_lifecycle", condition: "scale_set = $1 AND repository = $2",
-		arguments: []any{scaleSet, repository},
-	}
-	matches, err := inspectClusterBindingCandidates(ctx, transaction, scope, identity)
-	if err != nil {
-		return err
-	}
-	if matches.request > 1 || matches.runner > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: max(matches.request, matches.runner)}
-	}
-	if matches.request == 0 && matches.runner == 0 {
-		return nil
-	}
-	exactMatches, err := countExactClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
-	if err != nil {
-		return err
-	}
-	if exactMatches == 1 && matches.request == 1 && matches.runner == 1 {
-		return nil
-	}
-	return &scaler.RunnerIdentityMismatchError{Identity: identity}
-}
-
-func countExactClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) (int64, error) {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return 0, err
-	}
-	var exactMatches int64
-	exactArguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	if err = transaction.QueryRow(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM scaler_libvirt_runner_lifecycle
-		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition), exactArguments...).Scan(&exactMatches); err != nil {
-		return 0, fmt.Errorf("inspect clustered libvirt runner identity: %w", err)
-	}
-	if exactMatches > 1 {
-		return 0, &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: exactMatches}
-	}
-	return exactMatches, nil
 }

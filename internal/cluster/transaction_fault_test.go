@@ -142,6 +142,16 @@ func fakeTerminalRunner(arguments []any) scaler.RunnerLifecycle {
 	return runner
 }
 
+func terminalAuthorityRow(runner scaler.RunnerLifecycle, nameConflicts, requestOwners int64) fakeRow {
+	return fakeRow{scan: func(destinations ...any) {
+		setFakeDestination(destinations[0], runner.Provider)
+		setFakeDestination(destinations[1], runner.RunnerName)
+		setFakeDestination(destinations[2], runner.RequestID)
+		setFakeDestination(destinations[3], nameConflicts)
+		setFakeDestination(destinations[4], requestOwners)
+	}}
+}
+
 func (transaction *fakeDatabaseTransaction) Rollback(context.Context) error {
 	transaction.rollbackCalls++
 	if transaction.rollbackHook != nil {
