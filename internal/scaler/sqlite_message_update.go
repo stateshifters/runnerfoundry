@@ -117,7 +117,9 @@ func reconcileSQLiteMessageStatistics(
 	}
 	decision, err := reconcileAssignedCapacityObservation(ctx, transaction, AssignedCapacityObservation{
 		ScaleSet: update.ScaleSet, Repository: update.Repository, ControllerEpoch: update.ControllerEpoch,
-		AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
+		AssignedJobs: update.AssignedJobs, RunningJobs: update.RunningJobs,
+		RegisteredRunners: update.RegisteredRunners, BusyRunners: update.BusyRunners,
+		ObservedAt: update.ObservedAt,
 	}, activeCapacity)
 	return decision, err
 }
@@ -177,7 +179,7 @@ func sqliteCapacityObligationQueueSnapshot(
 	err := transaction.QueryRowContext(ctx, `SELECT
 		COALESCE(SUM(CASE WHEN source = 'job_available' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN source = 'assigned_count' THEN 1 ELSE 0 END), 0),
-		MIN(CASE WHEN next_attempt_at <= ? AND (
+		MIN(CASE WHEN blocked_reason IS NULL AND next_attempt_at <= ? AND (
 			source = 'job_available' OR NOT EXISTS (
 				SELECT 1 FROM runner_lifecycle lifecycle WHERE lifecycle.assignment_id = demand.demand_id
 			)

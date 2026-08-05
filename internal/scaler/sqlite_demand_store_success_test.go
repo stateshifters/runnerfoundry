@@ -78,6 +78,9 @@ func TestSQLiteStoreRunsEveryMigrationInMemory(t *testing.T) {
 	).AddRow(0, 0))
 	fixture.mock.ExpectExec("DROP TRIGGER").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectCommit()
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("ALTER TABLE assigned_capacity_observations").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectCommit()
 	if err := fixture.store.migrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -319,20 +322,22 @@ func TestProductionSQLiteDependenciesConstructWithoutIO(t *testing.T) {
 
 func assertBulkRunnerReapsSucceed(t *testing.T, fixture demandStoreMock, now time.Time) {
 	t.Helper()
-	for _, operation := range []func() (int, error){
-		func() (int, error) {
-			return fixture.store.RequestExpiredRunnerReaps(context.Background(), "linux", "repo", now, now)
-		},
-		func() (int, error) {
-			return fixture.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", 1, "excess", now)
-		},
-	} {
-		fixture.mock.ExpectBegin()
-		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectCommit()
-		if changed, err := operation(); err != nil || changed != 1 {
-			t.Fatalf("changed = %d, %v", changed, err)
-		}
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectExec("UPDATE demand").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectCommit()
+	if changed, err := fixture.store.RequestExpiredRunnerReaps(
+		context.Background(), "linux", "repo", now, now,
+	); err != nil || changed != 1 {
+		t.Fatalf("expired changed = %d, %v", changed, err)
+	}
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectCommit()
+	if changed, err := fixture.store.RequestExcessWaitingRunnerReaps(
+		context.Background(), "linux", "repo", 1, "excess", now,
+	); err != nil || changed != 1 {
+		t.Fatalf("excess changed = %d, %v", changed, err)
 	}
 }
 

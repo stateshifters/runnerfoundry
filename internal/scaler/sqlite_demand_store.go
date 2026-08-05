@@ -13,10 +13,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentStateSchemaVersion = 8
+const currentStateSchemaVersion = 9
 
 //go:embed migrations/007_normalize_assignment_source.sql
 var sqliteAssignmentSourceMigrationSQL string
+
+//go:embed migrations/008_block_stranded_assigned_capacity.sql
+var sqliteStrandedAssignedCapacityMigrationSQL string
 
 type SQLiteDemandStore struct {
 	database *sql.DB
@@ -89,6 +92,7 @@ func (store *SQLiteDemandStore) migrateTo(ctx context.Context, targetVersion int
 		store.addCapacityObligations,
 		store.normalizeAssignmentSource,
 		store.retireLibvirtLifecycleBridge,
+		store.addStrandedAssignedCapacity,
 	}
 	for ; version < targetVersion; version++ {
 		if err = migrations[version](ctx); err != nil {
@@ -96,6 +100,15 @@ func (store *SQLiteDemandStore) migrateTo(ctx context.Context, targetVersion int
 		}
 	}
 	return nil
+}
+
+func (store *SQLiteDemandStore) addStrandedAssignedCapacity(ctx context.Context) error {
+	return store.runSQLiteTransaction(ctx, "stranded assigned-capacity migration", func(transaction *sql.Tx) error {
+		if _, err := transaction.ExecContext(ctx, sqliteStrandedAssignedCapacityMigrationSQL); err != nil {
+			return fmt.Errorf("add stranded assigned-capacity state: %w", err)
+		}
+		return nil
+	})
 }
 
 func (store *SQLiteDemandStore) retireLibvirtLifecycleBridge(ctx context.Context) error {
@@ -595,7 +608,7 @@ func runnableCapacityObligationQuery(scaleSet string, cutoff time.Time) (string,
 		query = `SELECT demand_id, repository, COALESCE(request_id, 0), queue_time, acquired,
 			observation_order, source, COALESCE(assigned_observation_id, 0), controller_epoch,
 			attempt, next_attempt_at
-			FROM demand WHERE scale_set = ? AND next_attempt_at <= ?
+			FROM demand WHERE scale_set = ? AND blocked_reason IS NULL AND next_attempt_at <= ?
 			AND (source = 'job_available' OR NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
 				WHERE lifecycle.assignment_id = demand.demand_id))
 			ORDER BY queue_time, observation_order`

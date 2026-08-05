@@ -176,6 +176,14 @@ var sqliteRunnerBulkReapFailures = []func(demandStoreMock) error{
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
+		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+		f.mock.ExpectExec("UPDATE demand").WillReturnError(errors.New("failed"))
+		f.mock.ExpectRollback()
+		_, err := f.store.RequestExpiredRunnerReaps(context.Background(), "linux", "repo", time.Now(), time.Now())
+		return err
+	},
+	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
 		f.mock.ExpectRollback()
 		_, err := f.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", -1, "reason", time.Now())

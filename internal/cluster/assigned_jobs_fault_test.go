@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
 func TestObserveAssignedJobsReportsEveryPersistenceFailure(t *testing.T) {
@@ -96,6 +99,33 @@ func TestObserveAssignedJobsReportsQueueSnapshotFailure(t *testing.T) {
 	assertAssignedObservationFailure(t, transaction, assignedObservationFixture(), failure)
 }
 
+func TestAssignedObligationBlockingReportsPersistenceFailures(t *testing.T) {
+	failure := errors.New("failed")
+	observation := assignedObservationFixture()
+	for name, decision := range map[string]scaler.AssignedObligationDecision{
+		"block":   {Block: 1},
+		"unblock": {Unblock: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transaction := &fakeDatabaseTransaction{execErrors: []error{failure}}
+			if _, err := applyAssignedObligationDecision(
+				context.Background(), transaction.databaseTransaction(), observation, decision,
+			); !errors.Is(err, failure) {
+				t.Fatalf("%s error = %v, want %v", name, err, failure)
+			}
+		})
+	}
+}
+
+func TestAssignedObligationUnblockingReturnsChangedRows(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{execTags: []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 1")}}
+	decision, err := applyAssignedObligationDecision(context.Background(), transaction.databaseTransaction(), assignedObservationFixture(),
+		scaler.AssignedObligationDecision{Unblock: 1})
+	if err != nil || decision.Unblock != 1 {
+		t.Fatalf("unblock decision = %#v, %v", decision, err)
+	}
+}
+
 func availableAssignedJobCapacityRow(t *testing.T) fakeRow {
 	t.Helper()
 	return fakeRow{scan: func(destinations ...any) {
@@ -108,6 +138,7 @@ func queuedObligationCountRow(t *testing.T, count int) fakeRow {
 	t.Helper()
 	return fakeRow{scan: func(destinations ...any) {
 		*destination[int](t, destinations[0]) = count
+		*destination[int](t, destinations[1]) = 0
 	}}
 }
 

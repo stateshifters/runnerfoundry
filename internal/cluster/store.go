@@ -140,12 +140,15 @@ type Assignment struct {
 // AssignedJobObservation is an authoritative aggregate assigned-job count for
 // one repository scale set in the current repository-controller epoch.
 type AssignedJobObservation struct {
-	AppID           int64
-	Repository      string
-	ScaleSet        string
-	ControllerEpoch int64
-	AssignedJobs    int
-	ObservedAt      time.Time
+	AppID             int64
+	Repository        string
+	ScaleSet          string
+	ControllerEpoch   int64
+	AssignedJobs      int
+	RunningJobs       int
+	RegisteredRunners int
+	BusyRunners       int
+	ObservedAt        time.Time
 }
 
 type AssignedJobObservationResult struct {

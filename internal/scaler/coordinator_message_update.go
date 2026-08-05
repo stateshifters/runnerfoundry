@@ -16,16 +16,9 @@ func (coordinator *Coordinator) ApplyMessageUpdate(
 	if !supported {
 		return MessageUpdateResult{}, errors.New("demand store does not support atomic message updates")
 	}
-	coordinator.mutex.Lock()
-	update.AppID = coordinator.controllerAppID
-	update.ControllerEpoch = coordinator.controllerEpoch
-	update.ScaleSet = coordinator.scaleSet
-	coordinator.mutex.Unlock()
-	activeCapacity, err := coordinator.repositoryActiveCapacity(ctx, update.Repository)
-	if err != nil {
-		return MessageUpdateResult{}, fmt.Errorf("inspect message-update capacity: %w", err)
+	if err := coordinator.prepareMessageUpdate(ctx, &update); err != nil {
+		return MessageUpdateResult{}, err
 	}
-	update.ActiveCapacity = activeCapacity
 	result, err := store.ApplyMessageUpdate(ctx, update)
 	if err != nil {
 		return MessageUpdateResult{}, fmt.Errorf("persist scale-set message update: %w", err)
@@ -35,4 +28,24 @@ func (coordinator *Coordinator) ApplyMessageUpdate(
 	}
 	result.ControllerEpoch = update.ControllerEpoch
 	return result, nil
+}
+
+func (coordinator *Coordinator) prepareMessageUpdate(ctx context.Context, update *MessageUpdate) error {
+	coordinator.mutex.Lock()
+	update.AppID = coordinator.controllerAppID
+	update.ControllerEpoch = coordinator.controllerEpoch
+	update.ScaleSet = coordinator.scaleSet
+	coordinator.mutex.Unlock()
+	classification := ClassifyAssignedCapacity(update.assignedCapacityStatistics())
+	if err := coordinator.requestAssignedRunnerCleanup(
+		ctx, update.Repository, classification, update.ObservedAt,
+	); err != nil {
+		return fmt.Errorf("request message-update runner cleanup: %w", err)
+	}
+	activeCapacity, err := coordinator.repositoryActiveCapacity(ctx, update.Repository)
+	if err != nil {
+		return fmt.Errorf("inspect message-update capacity: %w", err)
+	}
+	update.ActiveCapacity = activeCapacity
+	return nil
 }

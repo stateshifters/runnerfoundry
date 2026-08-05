@@ -115,9 +115,34 @@ func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
 	if !strings.Contains(transaction.executions[3].statement, "UPDATE scaler_demand") {
 		t.Fatalf("newest cancellation ran before queued-obligation adoption: %#v", transaction.executions)
 	}
-	if !strings.Contains(lastExecution.statement, "ORDER BY demand.queue_time DESC, demand.observation_id DESC") ||
+	if !strings.Contains(lastExecution.statement, "demand.queue_time DESC, demand.observation_id DESC") ||
 		lastExecution.arguments[3] != 3 {
 		t.Fatalf("assigned obligation cancellation = %#v", lastExecution)
+	}
+}
+
+func TestObserveAssignedJobsBlocksConclusiveStrandedCapacity(t *testing.T) {
+	transaction := committedAssignedObservationTransaction(t, time.Unix(90, 0).UTC())
+	transaction.execTags = append(transaction.execTags, pgconn.NewCommandTag("UPDATE 1"))
+	observation := assignedObservationFixture()
+	observation.AssignedJobs = 2
+	observation.BusyRunners = 1
+
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ObserveAssignedJobs(
+		context.Background(), observation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QueueUpdate.AssignedObligations.Block != 1 {
+		t.Fatalf("stranded reconciliation = %#v", result.QueueUpdate.AssignedObligations)
+	}
+	lastExecution := transaction.executions[len(transaction.executions)-1]
+	if !strings.Contains(lastExecution.statement, "blocked_reason = 'stranded_upstream_assignment'") {
+		t.Fatalf("stranded obligation was not blocked: %s", lastExecution.statement)
+	}
+	if transaction.executions[5].arguments[4] != "stranded_upstream_assignment" {
+		t.Fatalf("stranded runner reap = %#v", transaction.executions[5])
 	}
 }
 

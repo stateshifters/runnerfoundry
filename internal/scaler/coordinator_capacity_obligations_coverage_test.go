@@ -113,6 +113,77 @@ func TestCoordinatorObservationFailurePaths(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStrandedCleanupAndFailurePaths(t *testing.T) {
+	now := time.Now().UTC()
+	store := &cleanupCapacityStore{recordingCapacityObligationStore: newRecordingCapacityObligationStore(nil)}
+	coordinator := NewDurableCoordinator("windows", 1, store)
+	coordinator.SetControllerEpoch(1)
+	if _, err := coordinator.ObserveAssignedCapacityStatistics(context.Background(), "repo",
+		AssignedCapacityStatistics{AssignedJobs: 1, BusyRunners: 1}, now); err != nil {
+		t.Fatal(err)
+	}
+	if store.retain != 0 || store.reason != "stranded_upstream_assignment" {
+		t.Fatalf("stranded cleanup = retain %d reason %q", store.retain, store.reason)
+	}
+
+	store.excessErr = errors.New("cleanup")
+	if _, err := coordinator.ObserveAssignedCapacityStatistics(context.Background(), "repo",
+		AssignedCapacityStatistics{AssignedJobs: 1}, now); err == nil {
+		t.Fatal("assigned observation ignored cleanup failure")
+	}
+	if _, err := coordinator.ApplyMessageUpdate(context.Background(), MessageUpdate{
+		Repository: "repo", AssignedJobs: 1, ObservedAt: now,
+	}); err == nil {
+		t.Fatal("message update ignored cleanup failure")
+	}
+}
+
+type cleanupCapacityStore struct {
+	*recordingCapacityObligationStore
+	excessErr error
+	reason    string
+	retain    int
+}
+
+func (store *cleanupCapacityStore) ApplyMessageUpdate(
+	context.Context,
+	MessageUpdate,
+) (MessageUpdateResult, error) {
+	return MessageUpdateResult{}, nil
+}
+
+func (*cleanupCapacityStore) RegisterRunner(context.Context, RunnerLifecycle) error { return nil }
+func (*cleanupCapacityStore) ConfirmRunnerWaiting(context.Context, RunnerLifecycle, time.Time) error {
+	return nil
+}
+func (*cleanupCapacityStore) MarkRunnerBusy(context.Context, string, string, RunnerIdentity, int64, time.Time) error {
+	return nil
+}
+func (*cleanupCapacityStore) BindRunnerIdentity(context.Context, string, string, RunnerIdentity, int64, time.Time) error {
+	return nil
+}
+func (*cleanupCapacityStore) RequestRunnerReap(context.Context, string, string, RunnerIdentity, string, time.Time) error {
+	return nil
+}
+func (*cleanupCapacityStore) RequestExpiredRunnerReaps(context.Context, string, string, time.Time, time.Time) (int, error) {
+	return 0, nil
+}
+func (store *cleanupCapacityStore) RequestExcessWaitingRunnerReaps(
+	_ context.Context,
+	_, _ string,
+	retain int,
+	reason string,
+	_ time.Time,
+) (int, error) {
+	store.retain = retain
+	store.reason = reason
+	return 0, store.excessErr
+}
+func (*cleanupCapacityStore) PendingRunnerReaps(context.Context, string, string) ([]RunnerLifecycle, error) {
+	return nil, nil
+}
+func (*cleanupCapacityStore) ConfirmRunnerReaped(context.Context, RunnerLifecycle) error { return nil }
+
 func TestCoordinatorScheduleFailureAndClaimBranches(t *testing.T) {
 	store := newRecordingCapacityObligationStore(nil)
 	coordinator := NewDurableCoordinator("linux", 1, store)
@@ -253,9 +324,9 @@ func TestCoordinatorExecutionOutlivesTriggerAndUsesIndependentContexts(t *testin
 }
 
 func TestCapacityObligationRetryDelayBounds(t *testing.T) {
-	if capacityObligationRetryDelay(-1) != 5*time.Second ||
-		capacityObligationRetryDelay(2) != 20*time.Second ||
-		capacityObligationRetryDelay(99) != 60*time.Second {
+	if CapacityObligationRetryDelay(-1) != 5*time.Second ||
+		CapacityObligationRetryDelay(2) != 20*time.Second ||
+		CapacityObligationRetryDelay(99) != 60*time.Second {
 		t.Fatal("retry delays are not bounded")
 	}
 }

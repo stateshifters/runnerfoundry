@@ -38,6 +38,16 @@ func TestSQLiteDemandStoreReportsDatabaseConfigurationFailure(t *testing.T) {
 	}
 }
 
+func TestSQLiteDemandStoreReportsStrandedCapacityMigrationFailure(t *testing.T) {
+	fixture := mockDemandStore(t)
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectExec("ALTER TABLE assigned_capacity_observations").WillReturnError(errors.New("failed"))
+	fixture.mock.ExpectRollback()
+	if err := fixture.store.addStrandedAssignedCapacity(context.Background()); err == nil {
+		t.Fatal("expected stranded assigned-capacity migration failure")
+	}
+}
+
 func TestSQLiteDemandStoreReportsSchemaVersionReadFailure(t *testing.T) {
 	fixture := mockDemandStore(t)
 	fixture.mock.ExpectExec("PRAGMA journal_mode").WillReturnResult(sqlmock.NewResult(0, 0))

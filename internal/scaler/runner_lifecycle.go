@@ -259,6 +259,22 @@ func requestExpiredSQLiteRunnerReaps(
 	if err != nil {
 		return 0, err
 	}
+	if _, err = transaction.ExecContext(ctx, `UPDATE demand
+		SET attempt = attempt + 1,
+		    next_attempt_at = ? + CASE attempt
+		        WHEN 0 THEN ? WHEN 1 THEN ? WHEN 2 THEN ? WHEN 3 THEN ? ELSE ? END
+		WHERE source = 'assigned_count' AND blocked_reason IS NULL
+		  AND demand_id IN (
+		      SELECT assignment_id FROM runner_lifecycle
+		      WHERE scale_set = ? AND (? = '' OR repository = ?)
+		        AND phase = 'reap_pending' AND reap_reason = 'job_start_timeout'
+		        AND updated_at = ? AND assignment_id IS NOT NULL
+		  )`, requestedAt.UnixNano(),
+		capacityObligationRetryDelays[0].Nanoseconds(), capacityObligationRetryDelays[1].Nanoseconds(),
+		capacityObligationRetryDelays[2].Nanoseconds(), capacityObligationRetryDelays[3].Nanoseconds(),
+		capacityObligationRetryDelays[4].Nanoseconds(), scaleSet, repository, repository, requestedAt.UnixNano()); err != nil {
+		return 0, fmt.Errorf("defer expired runner capacity obligation: %w", err)
+	}
 	return changed, nil
 }
 

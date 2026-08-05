@@ -30,10 +30,29 @@ func (coordinator *Coordinator) ObserveAssignedCapacity(
 	assignedJobs int,
 	observedAt time.Time,
 ) (AssignedObligationDecision, error) {
+	return coordinator.ObserveAssignedCapacityStatistics(ctx, repository, AssignedCapacityStatistics{
+		AssignedJobs: assignedJobs,
+	}, observedAt)
+}
+
+// ObserveAssignedCapacityStatistics durably translates authoritative aggregate
+// statistics into runnable or blocked capacity obligations.
+func (coordinator *Coordinator) ObserveAssignedCapacityStatistics(
+	ctx context.Context,
+	repository string,
+	statistics AssignedCapacityStatistics,
+	observedAt time.Time,
+) (AssignedObligationDecision, error) {
 	store, supported := coordinator.store.(CapacityObligationStore)
 	if !supported {
-		coordinator.ObserveAssigned(repository, assignedJobs)
+		coordinator.ObserveAssigned(repository, statistics.AssignedJobs)
 		return AssignedObligationDecision{}, nil
+	}
+	classification := ClassifyAssignedCapacity(statistics)
+	if err := coordinator.requestAssignedRunnerCleanup(
+		ctx, repository, classification, observedAt,
+	); err != nil {
+		return AssignedObligationDecision{}, err
 	}
 	coordinator.mutex.Lock()
 	epoch := coordinator.controllerEpoch
@@ -44,12 +63,36 @@ func (coordinator *Coordinator) ObserveAssignedCapacity(
 	}
 	decision, err := store.ObserveAssignedCapacity(ctx, AssignedCapacityObservation{
 		ScaleSet: coordinator.scaleSet, Repository: repository, ControllerEpoch: epoch,
-		AssignedJobs: assignedJobs, ObservedAt: observedAt,
+		AssignedJobs: statistics.AssignedJobs, RunningJobs: statistics.RunningJobs,
+		RegisteredRunners: statistics.RegisteredRunners, BusyRunners: statistics.BusyRunners,
+		ObservedAt: observedAt,
 	}, activeCapacity)
 	if err != nil {
 		return AssignedObligationDecision{}, fmt.Errorf("persist assigned capacity observation: %w", err)
 	}
 	return decision, nil
+}
+
+func (coordinator *Coordinator) requestAssignedRunnerCleanup(
+	ctx context.Context,
+	repository string,
+	classification AssignedCapacityClassification,
+	requestedAt time.Time,
+) error {
+	lifecycleStore, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return nil
+	}
+	reason := "assigned_jobs_decreased"
+	if classification.StrandedAssigned > 0 {
+		reason = "stranded_upstream_assignment"
+	}
+	if _, err := lifecycleStore.RequestExcessWaitingRunnerReaps(
+		ctx, coordinator.scaleSet, repository, classification.RunnableAssigned, reason, requestedAt,
+	); err != nil {
+		return fmt.Errorf("request excess assigned runner cleanup: %w", err)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) repositoryActiveCapacity(ctx context.Context, repository string) (int, error) {
@@ -212,7 +255,7 @@ func (coordinator *Coordinator) executeCapacityObligation(
 	if err == nil {
 		return
 	}
-	retryAt := coordinator.now().UTC().Add(capacityObligationRetryDelay(obligation.Attempt))
+	retryAt := coordinator.now().UTC().Add(CapacityObligationRetryDelay(obligation.Attempt))
 	recordCtx, cancelRecord := coordinator.capacityOperationContext(parentCtx)
 	recordErr := store.RecordObligationFailure(recordCtx, obligation.ObligationID, retryAt)
 	cancelRecord()
@@ -336,7 +379,9 @@ func (coordinator *Coordinator) acquireExactObligation(
 	return nil
 }
 
-func capacityObligationRetryDelay(attempt int) time.Duration {
+// CapacityObligationRetryDelay returns the bounded durable retry delay for an
+// obligation attempt in either runtime mode.
+func CapacityObligationRetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}

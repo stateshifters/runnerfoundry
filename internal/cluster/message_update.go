@@ -172,7 +172,9 @@ func applyClusterMessageStatistics(
 	capacity := scaler.AssignedJobCapacity{}
 	return applyAssignedJobObservation(ctx, transaction, AssignedJobObservation{
 		AppID: update.AppID, Repository: update.Repository, ScaleSet: update.ScaleSet,
-		ControllerEpoch: update.ControllerEpoch, AssignedJobs: update.AssignedJobs, ObservedAt: update.ObservedAt,
+		ControllerEpoch: update.ControllerEpoch, AssignedJobs: update.AssignedJobs,
+		RunningJobs: update.RunningJobs, RegisteredRunners: update.RegisteredRunners,
+		BusyRunners: update.BusyRunners, ObservedAt: update.ObservedAt,
 	}, &capacity)
 }
 
@@ -185,7 +187,7 @@ func loadCapacityObligationQueueSnapshot(
 	err := transaction.QueryRow(ctx, `SELECT
 		COUNT(*) FILTER (WHERE demand.source = 'job_available'),
 		COUNT(*) FILTER (WHERE demand.source = 'assigned_count'),
-		MIN(demand.queue_time) FILTER (WHERE demand.next_attempt_at <= $5
+		MIN(demand.queue_time) FILTER (WHERE demand.blocked_reason IS NULL AND demand.next_attempt_at <= $5
 		  AND (demand.source = 'job_available' OR (
 		      assigned.controller_epoch = demand.controller_epoch
 		      AND control.controller_epoch = demand.controller_epoch

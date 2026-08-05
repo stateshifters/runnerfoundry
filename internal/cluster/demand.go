@@ -155,7 +155,7 @@ const loadOldestDemandSQL = `
 	LEFT JOIN scaler_registrations registration
 	  ON registration.app_id = assigned.app_id AND registration.repository_url = demand.repository
 	 AND registration.scale_set_name = demand.scale_set
-	WHERE demand.scale_set = $1 AND demand.next_attempt_at <= $2
+	WHERE demand.scale_set = $1 AND demand.blocked_reason IS NULL AND demand.next_attempt_at <= $2
 	  AND (demand.source = 'job_available' OR (
 	      assigned.controller_epoch = demand.controller_epoch
 	      AND control.controller_epoch = demand.controller_epoch

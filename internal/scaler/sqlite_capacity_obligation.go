@@ -26,11 +26,14 @@ var (
 // AssignedCapacityObservation is the durable standalone representation of an
 // authoritative TotalAssignedJobs statistic.
 type AssignedCapacityObservation struct {
-	ScaleSet        string
-	Repository      string
-	ControllerEpoch int64
-	AssignedJobs    int
-	ObservedAt      time.Time
+	ScaleSet          string
+	Repository        string
+	ControllerEpoch   int64
+	AssignedJobs      int
+	RunningJobs       int
+	RegisteredRunners int
+	BusyRunners       int
+	ObservedAt        time.Time
 }
 
 // ObserveAssignedCapacity records the latest authoritative count and adjusts
@@ -64,7 +67,9 @@ func (store *SQLiteDemandStore) ObserveAssignedCapacity(
 
 func validAssignedCapacityObservation(observation AssignedCapacityObservation, activeCapacity int) bool {
 	return strings.TrimSpace(observation.ScaleSet) != "" && strings.TrimSpace(observation.Repository) != "" &&
-		observation.ControllerEpoch > 0 && observation.AssignedJobs >= 0 && activeCapacity >= 0 && !observation.ObservedAt.IsZero()
+		observation.ControllerEpoch > 0 && observation.AssignedJobs >= 0 && observation.RunningJobs >= 0 &&
+		observation.RegisteredRunners >= 0 && observation.BusyRunners >= 0 &&
+		activeCapacity >= 0 && !observation.ObservedAt.IsZero()
 }
 
 func reconcileAssignedCapacityObservation(
@@ -87,12 +92,17 @@ func reconcileAssignedCapacityObservation(
 	if err = removeObsoleteAssignedCapacity(ctx, transaction, observation); err != nil {
 		return AssignedObligationDecision{}, err
 	}
-	queued, err := countQueuedAssignedCapacity(ctx, transaction, observationID)
+	queued, blocked, err := countQueuedAssignedCapacity(ctx, transaction, observationID)
 	if err != nil {
 		return AssignedObligationDecision{}, err
 	}
+	classification := ClassifyAssignedCapacity(AssignedCapacityStatistics{
+		AssignedJobs: observation.AssignedJobs, RunningJobs: observation.RunningJobs,
+		RegisteredRunners: observation.RegisteredRunners, BusyRunners: observation.BusyRunners,
+	})
 	decision := DecideAssignedObligations(AssignedObligationSnapshot{
-		AssignedJobs: observation.AssignedJobs, ActiveCapacity: activeCapacity, QueuedObligations: queued,
+		AssignedJobs: observation.AssignedJobs, StrandedAssigned: classification.StrandedAssigned,
+		ActiveCapacity: activeCapacity, QueuedObligations: queued, BlockedObligations: blocked,
 	})
 	return decision, applyAssignedObligationDecision(ctx, transaction, observation, observationID, decision)
 }
@@ -123,14 +133,28 @@ func applyAssignedObligationDecision(
 	observationID int64,
 	decision AssignedObligationDecision,
 ) error {
-	if decision.Cancel > 0 {
-		if err := cancelQueuedAssignedCapacity(ctx, transaction, observationID, decision.Cancel); err != nil {
-			return err
-		}
+	operations := []struct {
+		count int
+		apply func(int) error
+	}{
+		{count: decision.Cancel, apply: func(count int) error {
+			return cancelQueuedAssignedCapacity(ctx, transaction, observationID, count)
+		}},
+		{count: decision.Create, apply: func(count int) error {
+			return createQueuedAssignedCapacity(ctx, transaction, observation, observationID, count)
+		}},
+		{count: decision.Block, apply: func(count int) error {
+			return blockQueuedAssignedCapacity(ctx, transaction, observationID, count)
+		}},
+		{count: decision.Unblock, apply: func(count int) error {
+			return unblockQueuedAssignedCapacity(ctx, transaction, observationID, count)
+		}},
 	}
-	if decision.Create > 0 {
-		if err := createQueuedAssignedCapacity(ctx, transaction, observation, observationID, decision.Create); err != nil {
-			return err
+	for _, operation := range operations {
+		if operation.count > 0 {
+			if err := operation.apply(operation.count); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -154,12 +178,16 @@ func assignedCapacityObservationIsStale(ctx context.Context, transaction *sql.Tx
 
 func upsertAssignedCapacityObservation(ctx context.Context, transaction *sql.Tx, observation AssignedCapacityObservation) (int64, error) {
 	_, err := transaction.ExecContext(ctx, `INSERT INTO assigned_capacity_observations(
-		scale_set, repository, controller_epoch, assigned_jobs, observed_at)
-		VALUES(?, ?, ?, ?, ?)
+		scale_set, repository, controller_epoch, assigned_jobs, running_jobs,
+		registered_runners, busy_runners, observed_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(scale_set, repository, controller_epoch) DO UPDATE SET
-		assigned_jobs = excluded.assigned_jobs, observed_at = excluded.observed_at`,
+		assigned_jobs = excluded.assigned_jobs, running_jobs = excluded.running_jobs,
+		registered_runners = excluded.registered_runners, busy_runners = excluded.busy_runners,
+		observed_at = excluded.observed_at`,
 		observation.ScaleSet, observation.Repository, observation.ControllerEpoch,
-		observation.AssignedJobs, observation.ObservedAt.UnixNano())
+		observation.AssignedJobs, observation.RunningJobs, observation.RegisteredRunners,
+		observation.BusyRunners, observation.ObservedAt.UnixNano())
 	if err != nil {
 		return 0, fmt.Errorf("record assigned capacity observation: %w", err)
 	}
@@ -182,16 +210,22 @@ func removeObsoleteAssignedCapacity(ctx context.Context, transaction *sql.Tx, ob
 	return nil
 }
 
-func countQueuedAssignedCapacity(ctx context.Context, transaction *sql.Tx, observationID int64) (int, error) {
-	var count int
-	err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM demand
+func countQueuedAssignedCapacity(
+	ctx context.Context,
+	transaction *sql.Tx,
+	observationID int64,
+) (queued int, blocked int, resultErr error) {
+	err := transaction.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN blocked_reason IS NULL THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN blocked_reason IS NOT NULL THEN 1 ELSE 0 END), 0)
+		FROM demand
 		WHERE assigned_observation_id = ? AND source = 'assigned_count'
 		AND NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
-			WHERE lifecycle.assignment_id = demand.demand_id)`, observationID).Scan(&count)
+			WHERE lifecycle.assignment_id = demand.demand_id)`, observationID).Scan(&queued, &blocked)
 	if err != nil {
-		return 0, fmt.Errorf("count queued assigned capacity obligations: %w", err)
+		return 0, 0, fmt.Errorf("count queued assigned capacity obligations: %w", err)
 	}
-	return count, nil
+	return queued, blocked, nil
 }
 
 func cancelQueuedAssignedCapacity(ctx context.Context, transaction *sql.Tx, observationID int64, count int) error {
@@ -200,10 +234,41 @@ func cancelQueuedAssignedCapacity(ctx context.Context, transaction *sql.Tx, obse
 		WHERE assigned_observation_id = ? AND source = 'assigned_count'
 		AND NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
 			WHERE lifecycle.assignment_id = demand.demand_id)
-		ORDER BY queue_time DESC, observation_order DESC LIMIT ?
+		ORDER BY (blocked_reason IS NOT NULL) DESC, queue_time DESC, observation_order DESC LIMIT ?
 	)`, observationID, count)
 	if err != nil {
 		return fmt.Errorf("cancel queued assigned capacity obligations: %w", err)
+	}
+	return nil
+}
+
+func blockQueuedAssignedCapacity(ctx context.Context, transaction *sql.Tx, observationID int64, count int) error {
+	_, err := transaction.ExecContext(ctx, `UPDATE demand
+		SET blocked_reason = 'stranded_upstream_assignment'
+		WHERE demand_id IN (
+			SELECT demand_id FROM demand
+			WHERE assigned_observation_id = ? AND source = 'assigned_count' AND blocked_reason IS NULL
+			AND NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
+				WHERE lifecycle.assignment_id = demand.demand_id)
+			ORDER BY queue_time DESC, observation_order DESC LIMIT ?
+		)`, observationID, count)
+	if err != nil {
+		return fmt.Errorf("block stranded assigned capacity obligations: %w", err)
+	}
+	return nil
+}
+
+func unblockQueuedAssignedCapacity(ctx context.Context, transaction *sql.Tx, observationID int64, count int) error {
+	_, err := transaction.ExecContext(ctx, `UPDATE demand SET blocked_reason = NULL
+		WHERE demand_id IN (
+			SELECT demand_id FROM demand
+			WHERE assigned_observation_id = ? AND source = 'assigned_count' AND blocked_reason IS NOT NULL
+			AND NOT EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
+				WHERE lifecycle.assignment_id = demand.demand_id)
+			ORDER BY queue_time, observation_order LIMIT ?
+		)`, observationID, count)
+	if err != nil {
+		return fmt.Errorf("unblock recovered assigned capacity obligations: %w", err)
 	}
 	return nil
 }

@@ -129,7 +129,7 @@ func TestMigrationStatusReportsEmptyZeroAndCurrentSchemas(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 9 {
+			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 10 {
 				t.Fatalf("migration status = %#v", status)
 			}
 		})
@@ -262,7 +262,7 @@ func TestNewMigrationExecutorRequiresPostgreSQLConnectionAndLoadsCatalog(t *test
 		t.Fatal("expected concrete PostgreSQL migration connection requirement")
 	}
 	executor, err := store.newMigrationExecutor(context.Background(), &postgreSQLLeaderConnection{})
-	if err != nil || executor.target != 9 {
+	if err != nil || executor.target != 10 {
 		t.Fatalf("migration executor = %#v, %v", executor, err)
 	}
 }

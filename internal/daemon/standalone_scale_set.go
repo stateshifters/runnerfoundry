@@ -196,8 +196,11 @@ func registerCoordinatedRepository(
 		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	}
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, worker)
-	if _, err := lifecycleConfig.Coordinator.ObserveAssignedCapacity(
-		ctx, lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs, time.Now().UTC(),
+	if _, err := lifecycleConfig.Coordinator.ObserveAssignedCapacityStatistics(
+		ctx, lifecycleConfig.RepositoryURL, scaler.AssignedCapacityStatistics{
+			AssignedJobs: statistics.TotalAssignedJobs, RunningJobs: statistics.TotalRunningJobs,
+			RegisteredRunners: statistics.TotalRegisteredRunners, BusyRunners: statistics.TotalBusyRunners,
+		}, time.Now().UTC(),
 	); err != nil {
 		lifecycleConfig.Coordinator.DetachRepository(lifecycleConfig.RepositoryURL)
 		return fmt.Errorf("persist initial assigned runner capacity: %w", err)

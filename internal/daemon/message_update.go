@@ -16,7 +16,10 @@ func scaleSetMessageUpdate(
 ) (scaler.MessageUpdate, error) {
 	update := scaler.MessageUpdate{
 		Repository: repository, ScaleSet: scaleSet, AssignedJobs: message.Statistics.TotalAssignedJobs,
-		ObservedAt: observedAt,
+		RunningJobs:       message.Statistics.TotalRunningJobs,
+		RegisteredRunners: message.Statistics.TotalRegisteredRunners,
+		BusyRunners:       message.Statistics.TotalBusyRunners,
+		ObservedAt:        observedAt,
 	}
 	var err error
 	update.Available, err = availableMessageDemands(repository, message.JobAvailableMessages)

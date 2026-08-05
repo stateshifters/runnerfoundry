@@ -55,7 +55,28 @@ func logCapacityObligationState(
 	update scaler.MessageUpdate,
 	result scaler.MessageUpdateResult,
 ) {
-	attributes := []slog.Attr{
+	classification := scaler.ClassifyAssignedCapacity(scaler.AssignedCapacityStatistics{
+		AssignedJobs: update.AssignedJobs, RunningJobs: update.RunningJobs,
+		RegisteredRunners: update.RegisteredRunners, BusyRunners: update.BusyRunners,
+	})
+	attributes := capacityObligationQueueAttributes(update, result)
+	attributes = append(attributes, capacityObligationStatisticsAttributes(update, classification)...)
+	attributes = append(attributes,
+		slog.Uint64("generation", generation), slog.Int64("epoch", update.ControllerEpoch),
+	)
+	if result.QueueSnapshot.OldestRunnableAt != nil {
+		age := max(update.ObservedAt.Sub(*result.QueueSnapshot.OldestRunnableAt), time.Duration(0))
+		attributes = append(attributes, slog.Duration("oldestRunnableAge", age))
+	}
+	logAction(ctx, logger, slog.LevelInfo, "capacity_obligation", "reconciled", attributes...)
+	logStrandedAssignmentTransition(ctx, logger, result.AssignedObligations, attributes)
+}
+
+func capacityObligationQueueAttributes(
+	update scaler.MessageUpdate,
+	result scaler.MessageUpdateResult,
+) []slog.Attr {
+	return []slog.Attr{
 		slog.String("repository", update.Repository),
 		slog.String("scaleSet", update.ScaleSet),
 		slog.Int("jobAvailable", result.QueueSnapshot.JobAvailable),
@@ -64,14 +85,37 @@ func logCapacityObligationState(
 		slog.Int("canceled", result.QueueSnapshot.Canceled),
 		slog.Int("createdAssigned", result.AssignedObligations.Create),
 		slog.Int("canceledAssigned", result.AssignedObligations.Cancel),
-		slog.Uint64("generation", generation),
-		slog.Int64("epoch", update.ControllerEpoch),
+		slog.Int("blockedAssigned", result.AssignedObligations.Block),
+		slog.Int("unblockedAssigned", result.AssignedObligations.Unblock),
 	}
-	if result.QueueSnapshot.OldestRunnableAt != nil {
-		age := max(update.ObservedAt.Sub(*result.QueueSnapshot.OldestRunnableAt), time.Duration(0))
-		attributes = append(attributes, slog.Duration("oldestRunnableAge", age))
+}
+
+func capacityObligationStatisticsAttributes(
+	update scaler.MessageUpdate,
+	classification scaler.AssignedCapacityClassification,
+) []slog.Attr {
+	return []slog.Attr{
+		slog.Int("assignedJobs", update.AssignedJobs),
+		slog.Int("runningJobs", update.RunningJobs),
+		slog.Int("registeredRunners", update.RegisteredRunners),
+		slog.Int("busyRunners", update.BusyRunners),
+		slog.Int("strandedAssigned", classification.StrandedAssigned),
+		slog.Int("runnableAssigned", classification.RunnableAssigned),
 	}
-	logAction(ctx, logger, slog.LevelInfo, "capacity_obligation", "reconciled", attributes...)
+}
+
+func logStrandedAssignmentTransition(
+	ctx context.Context,
+	logger *slog.Logger,
+	decision scaler.AssignedObligationDecision,
+	attributes []slog.Attr,
+) {
+	if decision.Block > 0 {
+		logAction(ctx, logger, slog.LevelWarn, "assigned_job_stranded", "blocked", attributes...)
+	}
+	if decision.Unblock > 0 {
+		logAction(ctx, logger, slog.LevelInfo, "assigned_job_stranded", "recovered", attributes...)
+	}
 }
 
 func (handler clusterMessageHandler) observedAt() time.Time {

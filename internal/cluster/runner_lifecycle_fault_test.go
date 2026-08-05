@@ -133,8 +133,17 @@ func TestClusterExpiredRunnerLifecycleReportsTransactionFailures(t *testing.T) {
 	}
 }
 
-func TestClusterExpiredRunnerLifecycleReportsAssignmentReleaseFailure(t *testing.T) {
+func TestClusterExpiredRunnerLifecycleReportsDemandDeferralFailure(t *testing.T) {
 	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, databaseFailure()}}
+	if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).RequestExpiredRunnerReaps(
+		context.Background(), "linux", "repo", time.Now(), time.Now(),
+	); err == nil {
+		t.Fatal("expected assignment release failure")
+	}
+}
+
+func TestClusterExpiredRunnerLifecycleReportsAssignmentReleaseFailure(t *testing.T) {
+	transaction := &fakeDatabaseTransaction{execErrors: []error{nil, nil, databaseFailure()}}
 	if _, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).RequestExpiredRunnerReaps(
 		context.Background(), "linux", "repo", time.Now(), time.Now(),
 	); err == nil {

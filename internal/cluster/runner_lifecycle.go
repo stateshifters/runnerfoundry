@@ -21,6 +21,18 @@ const releaseExpiredClusterAssignmentsSQL = `UPDATE scaler_assignments SET state
 		  AND phase = 'reap_pending' AND reap_reason = 'job_start_timeout' AND updated_at = $3
 	) AND state <> 'complete'`
 
+const deferExpiredClusterDemandsSQL = `UPDATE scaler_demand demand
+	SET attempt = demand.attempt + 1,
+	    next_attempt_at = CASE demand.attempt
+	        WHEN 0 THEN $4 WHEN 1 THEN $5 WHEN 2 THEN $6 WHEN 3 THEN $7 ELSE $8 END
+	FROM scaler_assignments assignment
+	JOIN scaler_runner_lifecycle lifecycle ON lifecycle.assignment_id = assignment.assignment_id
+	WHERE assignment.demand_id = demand.demand_id
+	  AND demand.source = 'assigned_count' AND demand.blocked_reason IS NULL
+	  AND lifecycle.scale_set = $1 AND ($2 = '' OR lifecycle.repository = $2)
+	  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = 'job_start_timeout'
+	  AND lifecycle.updated_at = $3`
+
 func (store *Store) ConfirmRunnerWaiting(
 	ctx context.Context,
 	runner scaler.RunnerLifecycle,
@@ -83,6 +95,14 @@ func expireClusterRunnersInTransaction(
 		return 0, fmt.Errorf("request clustered expired runner reaps: %w", err)
 	}
 	changed := int(commandTag.RowsAffected())
+	if _, err = transaction.Exec(ctx, deferExpiredClusterDemandsSQL, scaleSet, repository, requestedAt,
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(0)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(1)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(2)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(3)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(4))); err != nil {
+		return 0, fmt.Errorf("defer expired runner capacity obligations: %w", err)
+	}
 	if _, err = transaction.Exec(ctx, releaseExpiredClusterAssignmentsSQL, scaleSet, repository, requestedAt); err != nil {
 		return 0, fmt.Errorf("release expired runner assignments: %w", err)
 	}

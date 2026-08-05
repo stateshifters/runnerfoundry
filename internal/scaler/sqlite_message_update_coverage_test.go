@@ -71,7 +71,9 @@ func expectSQLiteMessageThroughAssignedReconciliation(mock sqlmock.Sqlmock) {
 	)
 	expectAssignedObligationAdoption(mock)
 	mock.ExpectExec("DELETE FROM assigned_capacity_observations").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM").WillReturnRows(
+		sqlmock.NewRows([]string{"queued", "blocked"}).AddRow(0, 0),
+	)
 }
 
 func TestSQLiteMessageUpdateReportsEpochQueryFailure(t *testing.T) {
