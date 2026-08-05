@@ -140,35 +140,20 @@ type Assignment struct {
 // AssignedJobObservation is an authoritative aggregate assigned-job count for
 // one repository scale set in the current repository-controller epoch.
 type AssignedJobObservation struct {
-	AppID           int64
-	Repository      string
-	ScaleSet        string
-	ControllerEpoch int64
-	AssignedJobs    int
-	ObservedAt      time.Time
+	AppID             int64
+	Repository        string
+	ScaleSet          string
+	ControllerEpoch   int64
+	AssignedJobs      int
+	RunningJobs       int
+	RegisteredRunners int
+	BusyRunners       int
+	ObservedAt        time.Time
 }
 
 type AssignedJobObservationResult struct {
 	Capacity    scaler.AssignedJobCapacity
 	QueueUpdate scaler.MessageUpdateResult
-}
-
-type LibvirtRunnerLifecycle struct {
-	NodeID     NodeID
-	ScaleSet   string
-	Repository string
-	RequestID  int64
-	RunnerName string
-}
-
-func (runner LibvirtRunnerLifecycle) Identity() scaler.RunnerIdentity {
-	return scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
-}
-
-type JobCompletion struct {
-	ScaleSet   string
-	Repository string
-	scaler.RunnerIdentity
 }
 
 type Store struct {

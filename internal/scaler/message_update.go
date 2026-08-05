@@ -25,16 +25,19 @@ type RunnerMessageIdentity struct {
 // message. Stores validate ControllerEpoch before applying any mutation and
 // commit the complete update atomically.
 type MessageUpdate struct {
-	AppID           int64
-	Repository      string
-	ScaleSet        string
-	ControllerEpoch int64
-	AssignedJobs    int
-	ActiveCapacity  int
-	ObservedAt      time.Time
-	Available       []JobDemand
-	Started         []RunnerMessageIdentity
-	Completed       []RunnerMessageIdentity
+	AppID             int64
+	Repository        string
+	ScaleSet          string
+	ControllerEpoch   int64
+	AssignedJobs      int
+	RunningJobs       int
+	RegisteredRunners int
+	BusyRunners       int
+	ActiveCapacity    int
+	ObservedAt        time.Time
+	Available         []JobDemand
+	Started           []RunnerMessageIdentity
+	Completed         []RunnerMessageIdentity
 }
 
 type MessageUpdateResult struct {
@@ -64,7 +67,15 @@ func ValidMessageUpdate(update MessageUpdate) bool {
 
 func validMessageUpdateMetadata(update MessageUpdate) bool {
 	return update.AppID > 0 && strings.TrimSpace(update.Repository) != "" && strings.TrimSpace(update.ScaleSet) != "" &&
-		update.ControllerEpoch > 0 && update.AssignedJobs >= 0 && update.ActiveCapacity >= 0 && !update.ObservedAt.IsZero()
+		update.ControllerEpoch > 0 && update.AssignedJobs >= 0 && update.RunningJobs >= 0 &&
+		update.RegisteredRunners >= 0 && update.BusyRunners >= 0 && update.ActiveCapacity >= 0 && !update.ObservedAt.IsZero()
+}
+
+func (update MessageUpdate) assignedCapacityStatistics() AssignedCapacityStatistics {
+	return AssignedCapacityStatistics{
+		AssignedJobs: update.AssignedJobs, RunningJobs: update.RunningJobs,
+		RegisteredRunners: update.RegisteredRunners, BusyRunners: update.BusyRunners,
+	}
 }
 
 func validMessageDemands(update MessageUpdate) bool {

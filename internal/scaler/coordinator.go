@@ -359,27 +359,11 @@ func (coordinator *Coordinator) countPendingRunnerCapacity(
 }
 
 func (coordinator *Coordinator) loadPendingRunnerCapacity(ctx context.Context) ([]RunnerLifecycle, error) {
-	if store, supported := coordinator.store.(RunnerLifecycleStore); supported {
-		pending, err := loadGenericPendingRunnerCapacity(ctx, store, coordinator.scaleSet)
-		if err != nil {
-			return nil, err
-		}
-		if len(pending) > 0 {
-			return pending, nil
-		}
+	store, supported := coordinator.store.(RunnerLifecycleStore)
+	if !supported {
+		return nil, nil
 	}
-	legacy, err := coordinator.loadPendingLibvirtCapacity(ctx)
-	if err != nil {
-		return nil, err
-	}
-	pending := make([]RunnerLifecycle, 0, len(legacy))
-	for _, runner := range legacy {
-		pending = append(pending, RunnerLifecycle{
-			ScaleSet: runner.ScaleSet, Repository: runner.Repository, Provider: RunnerProviderLibvirt,
-			RunnerName: runner.RunnerName, RequestID: runner.RequestID, Phase: RunnerReapPending,
-		})
-	}
-	return pending, nil
+	return loadGenericPendingRunnerCapacity(ctx, store, coordinator.scaleSet)
 }
 
 func loadGenericPendingRunnerCapacity(
@@ -406,18 +390,6 @@ func fencePendingRunnerRequests(demand []QueuedDemand, pending []RunnerLifecycle
 		}
 	}
 	return result
-}
-
-func (coordinator *Coordinator) loadPendingLibvirtCapacity(ctx context.Context) ([]LibvirtRunnerLifecycle, error) {
-	store, supported := coordinator.store.(LibvirtLifecycleStore)
-	if !supported {
-		return nil, nil
-	}
-	pending, err := store.PendingLibvirtReaps(ctx, coordinator.scaleSet, "")
-	if err != nil {
-		return nil, fmt.Errorf("load pending libvirt capacity: %w", err)
-	}
-	return pending, nil
 }
 
 // ReconcileAssigned starts enough identity-free runners for one repository's

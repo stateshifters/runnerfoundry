@@ -20,14 +20,6 @@ func (store *MemoryDemandStore) RegisterRunner(_ context.Context, runner RunnerL
 		runner.Phase = RunnerProvisioning
 	}
 	store.runners[key] = runner
-	if runner.Provider == RunnerProviderLibvirt {
-		legacy := LibvirtRunnerLifecycle{
-			ScaleSet: runner.ScaleSet, Repository: runner.Repository, RequestID: runner.RequestID, RunnerName: runner.RunnerName,
-		}
-		store.libvirtRunners[runnerLifecycleKey(legacy)] = memoryLibvirtLifecycle{
-			runner: legacy, reapRequested: runner.Phase == RunnerReapPending,
-		}
-	}
 	return nil
 }
 

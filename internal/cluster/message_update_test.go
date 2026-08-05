@@ -106,7 +106,7 @@ func TestClusterMessageUpdateRollsBackMismatchedCompletionIdentity(t *testing.T)
 
 func TestClusterMessageUpdateRollsBackStatisticsWithPriorEffects(t *testing.T) {
 	assertClusterMessageRollback(
-		t, clusterMessageUpdateWithDemandAndStart(), 3, "INSERT INTO scaler_assigned_job_observations",
+		t, clusterMessageUpdateWithDemandAndStart(), 2, "INSERT INTO scaler_assigned_job_observations",
 	)
 }
 
@@ -130,7 +130,6 @@ func committedClusterMessageTransaction(t *testing.T, oldestRunnableAt time.Time
 	transaction.execTags = []pgconn.CommandTag{
 		pgconn.NewCommandTag("INSERT 0 1"),
 		pgconn.NewCommandTag("INSERT 0 1"),
-		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),
@@ -191,7 +190,6 @@ func TestClusterMessageUpdateReturnsActuallyCanceledAggregateObligations(t *test
 	transaction := successfulClusterMessageTransaction(t)
 	transaction.execTags = []pgconn.CommandTag{
 		pgconn.NewCommandTag("INSERT 0 1"),
-		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),
 		pgconn.NewCommandTag("UPDATE 0"),

@@ -4,75 +4,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-func (store *Store) RegisterLibvirtRunner(
+func (store *Store) CompleteRunnerLifecycleJob(
 	ctx context.Context,
-	assignmentID AssignmentID,
-	runner LibvirtRunnerLifecycle,
+	completion scaler.JobCompletion,
+	_ time.Time,
 ) (resultErr error) {
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	inserted, err := insertLibvirtRunnerRegistration(ctx, connection, assignmentID, runner)
-	if err != nil {
-		return err
-	}
-	if inserted {
-		return nil
-	}
-	matches, err := registeredLibvirtRunnerMatches(ctx, connection, runner)
-	if err != nil {
-		return err
-	}
-	if !matches {
-		return &AssignmentTransitionError{AssignmentID: assignmentID, Expected: AssignmentStarting}
-	}
-	return nil
-}
-
-func insertLibvirtRunnerRegistration(
-	ctx context.Context,
-	connection *databaseConnection,
-	assignmentID AssignmentID,
-	runner LibvirtRunnerLifecycle,
-) (bool, error) {
-	commandTag, err := connection.Exec(ctx, `
-		INSERT INTO scaler_libvirt_runner_lifecycle
-		    (node_id, scale_set, repository, request_id, runner_name, reap_requested)
-		SELECT assignment.node_id, demand.scale_set, demand.repository, demand.request_id, $3, false
-		FROM scaler_assignments assignment
-		JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-		WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state <> 'complete'
-		ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`,
-		assignmentID, runner.NodeID, runner.RunnerName)
-	if err != nil {
-		return false, fmt.Errorf("register clustered libvirt runner: %w", err)
-	}
-	return commandTag.RowsAffected() == 1, nil
-}
-
-func registeredLibvirtRunnerMatches(
-	ctx context.Context,
-	connection *databaseConnection,
-	runner LibvirtRunnerLifecycle,
-) (bool, error) {
-	var exists bool
-	if err := connection.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND request_id = $4 AND runner_name = $5
-		  AND NOT reap_requested
-	)`, runner.NodeID, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName).Scan(&exists); err != nil {
-		return false, fmt.Errorf("verify clustered libvirt runner registration: %w", err)
-	}
-	return exists, nil
-}
-
-func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (resultErr error) {
 	if err := completion.Validate(); err != nil {
 		return fmt.Errorf("validate clustered job completion identity: %w", err)
 	}
@@ -87,7 +28,7 @@ func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	if err = completeJobInTransaction(ctx, transaction, completion); err != nil {
+	if err = completeRunnerLifecycleJobInTransaction(ctx, transaction, completion); err != nil {
 		return err
 	}
 	transactionOpen = false
@@ -97,10 +38,10 @@ func (store *Store) CompleteJob(ctx context.Context, completion JobCompletion) (
 	return nil
 }
 
-func completeJobInTransaction(
+func completeRunnerLifecycleJobInTransaction(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	completion JobCompletion,
+	completion scaler.JobCompletion,
 ) error {
 	predicate, err := newClusterRunnerIdentityPredicate(completion.RunnerIdentity, 3)
 	if err != nil {
@@ -134,12 +75,11 @@ func completeJobInTransaction(
 func applyClusterJobCompletionAssociations(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	completion JobCompletion,
+	completion scaler.JobCompletion,
 	predicate clusterRunnerIdentityPredicate,
 	arguments []any,
 ) error {
-	operations := clusterJobCompletionAssociationOperations(predicate)
-	for _, operation := range operations {
+	for _, operation := range clusterJobCompletionAssociationOperations(predicate) {
 		if err := applyClusterJobCompletionAssociation(
 			ctx, transaction, completion.RunnerIdentity, operation.statement, operation.failure, arguments,
 		); err != nil {
@@ -158,17 +98,8 @@ func clusterJobCompletionAssociationOperations(
 	predicate clusterRunnerIdentityPredicate,
 ) []clusterJobCompletionAssociationOperation {
 	return []clusterJobCompletionAssociationOperation{
-		clusterLibvirtReapOperation(predicate),
 		clusterAssignmentCompletionOperation(predicate),
 		clusterDemandCompletionOperation(predicate),
-	}
-}
-
-func clusterLibvirtReapOperation(predicate clusterRunnerIdentityPredicate) clusterJobCompletionAssociationOperation {
-	return clusterJobCompletionAssociationOperation{
-		statement: fmt.Sprintf(`UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-			WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition),
-		failure: "request clustered libvirt runner reap",
 	}
 }
 
@@ -177,10 +108,12 @@ func clusterAssignmentCompletionOperation(
 ) clusterJobCompletionAssociationOperation {
 	return clusterJobCompletionAssociationOperation{
 		statement: fmt.Sprintf(`UPDATE scaler_assignments assignment SET state = 'complete'
-			WHERE assignment.assignment_id IN (
+			FROM scaler_demand demand
+			WHERE demand.demand_id = assignment.demand_id
+			  AND assignment.assignment_id IN (
 				SELECT assignment_id FROM scaler_runner_lifecycle
 				WHERE scale_set = $1 AND repository = $2 AND assignment_id IS NOT NULL AND %s
-			) AND assignment.assigned_observation_id IS NOT NULL AND assignment.state <> 'complete'`, predicate.condition),
+			) AND demand.source = 'assigned_count' AND assignment.state <> 'complete'`, predicate.condition),
 		failure: "complete observed assignment",
 	}
 }
@@ -220,7 +153,7 @@ func qualifiedClusterRunnerPredicate(predicate clusterRunnerIdentityPredicate, q
 func completeClusterRequestDemand(
 	ctx context.Context,
 	transaction *databaseTransaction,
-	completion JobCompletion,
+	completion scaler.JobCompletion,
 ) error {
 	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_assignments assignment SET state = 'complete'
 		FROM scaler_demand demand
@@ -240,59 +173,4 @@ func completeClusterRequestDemand(
 		return fmt.Errorf("remove completed scale-set demand: %w", err)
 	}
 	return requireAtMostOneClusterRunnerIdentityMatch(completion.RunnerIdentity, commandTag.RowsAffected())
-}
-
-func (store *Store) PendingLibvirtReaps(
-	ctx context.Context,
-	nodeID NodeID,
-) (runners []LibvirtRunnerLifecycle, resultErr error) {
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	rows, err := connection.Query(ctx, `SELECT node_id, scale_set, repository, request_id, runner_name
-		FROM scaler_libvirt_runner_lifecycle
-		WHERE node_id = $1 AND reap_requested
-		ORDER BY scale_set, repository, runner_name`, nodeID)
-	if err != nil {
-		return nil, fmt.Errorf("load clustered libvirt reaps: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var runner LibvirtRunnerLifecycle
-		if err = rows.Scan(&runner.NodeID, &runner.ScaleSet, &runner.Repository, &runner.RequestID, &runner.RunnerName); err != nil {
-			return nil, fmt.Errorf("scan clustered libvirt reap: %w", err)
-		}
-		runners = append(runners, runner)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("read clustered libvirt reaps: %w", err)
-	}
-	return runners, nil
-}
-
-func (store *Store) ConfirmLibvirtReaped(ctx context.Context, runner LibvirtRunnerLifecycle) error {
-	identity := runner.Identity()
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 4)
-	if err != nil {
-		return err
-	}
-	return store.runClusterRunnerIdentityTransaction(ctx, "clustered libvirt runner reap confirmation",
-		func(transaction *databaseTransaction) error {
-			statement := fmt.Sprintf(`DELETE FROM scaler_libvirt_runner_lifecycle
-				WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND reap_requested AND %s`,
-				predicate.condition)
-			arguments := append([]any{runner.NodeID, runner.ScaleSet, runner.Repository}, predicate.arguments...)
-			commandTag, execErr := transaction.Exec(ctx, statement, arguments...)
-			if execErr != nil {
-				return fmt.Errorf("confirm clustered libvirt runner reaped: %w", execErr)
-			}
-			scope := clusterRunnerIdentityScope{
-				table:     "scaler_libvirt_runner_lifecycle",
-				condition: "node_id = $1 AND scale_set = $2 AND repository = $3 AND reap_requested",
-				arguments: []any{runner.NodeID, runner.ScaleSet, runner.Repository},
-			}
-			return requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected())
-		})
 }

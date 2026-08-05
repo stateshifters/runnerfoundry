@@ -115,26 +115,13 @@ func TestNodeSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	}
 }
 
-func TestLibvirtLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
-	runner := LibvirtRunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", RequestID: 1, RunnerName: "runner"}
-	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).RegisterLibvirtRunner(context.Background(), 1, runner))
-	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: "set", Repository: "repo", RunnerIdentity: scaler.RunnerIdentity{RequestID: 1},
-	}))
-	rows := scriptedRows(scanLibvirtRunner(t, runner))
-	reaps, err := storeWithConnection(&fakeDatabaseConnection{rowsResult: rows}).PendingLibvirtReaps(context.Background(), "node")
-	if err != nil || len(reaps) != 1 {
-		t.Fatalf("reaps = %#v, %v", reaps, err)
-	}
-	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).ConfirmLibvirtReaped(context.Background(), runner))
-}
-
 func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	runner := scaler.RunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
 		RunnerName: "runner", RequestID: 1, AssignmentID: 2, CreatedAt: now}
+	registrationState := &hermeticClusterLifecycleState{}
+	assertNoError(t, storeWithConnection(registrationState.connection(runner)).RegisterRunner(context.Background(), runner))
 	store := storeWithConnection(&fakeDatabaseConnection{})
-	assertNoError(t, store.RegisterRunner(context.Background(), runner))
 	assertNoError(t, store.ConfirmRunnerWaiting(context.Background(), runner, now))
 	identity := scaler.RunnerIdentity{RequestID: 1, RunnerName: "runner"}
 	assertNoError(t, store.MarkRunnerBusy(context.Background(), "set", "repo", identity, 3, now))
@@ -143,7 +130,7 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	if err != nil || changed != 1 {
 		t.Fatalf("expired = %d, %v", changed, err)
 	}
-	if changed, err = store.RequestExcessWaitingRunnerReaps(context.Background(), "set", "repo", 1, "excess", now); err != nil || changed != 0 {
+	if changed, err = store.RequestExcessWaitingRunnerReaps(context.Background(), "set", "repo", 1, "excess", now); err != nil || changed != 1 {
 		t.Fatalf("excess = %d, %v", changed, err)
 	}
 	assertNoError(t, store.ConfirmRunnerReaped(context.Background(), runner))
@@ -151,29 +138,10 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 
 func TestRunnerRegistrationAcceptsExistingAndNonLibvirtRunners(t *testing.T) {
 	runner := scaler.RunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderDocker,
-		RunnerName: "runner", RequestID: 1, AssignmentID: 2}
-	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).RegisterRunner(context.Background(), runner))
-	connection := &fakeDatabaseConnection{
-		execTag: pgconn.NewCommandTag("INSERT 0 0"), rowResults: []fakeRow{booleanRow(t, true)},
-	}
-	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
-}
-
-func TestRunnerRegistrationMirrorsIdentityFreeLibvirtLifecycle(t *testing.T) {
-	connection := &fakeDatabaseConnection{execTag: pgconn.NewCommandTag("INSERT 0 1")}
-	runner := scaler.RunnerLifecycle{
-		NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
-		RunnerName: "runner", RequestID: 0, AssignmentID: 2,
-	}
-
-	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
-	if len(connection.executions) != 2 {
-		t.Fatalf("registration executions = %d, want 2", len(connection.executions))
-	}
-	mirrorArguments := connection.executions[1].arguments
-	if len(mirrorArguments) != 5 || mirrorArguments[3] != int64(0) {
-		t.Fatalf("identity-free libvirt mirror arguments = %#v", mirrorArguments)
-	}
+		RunnerName: "runner", RequestID: 1, AssignmentID: 2, Phase: scaler.RunnerProvisioning}
+	state := &hermeticClusterLifecycleState{}
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(context.Background(), runner))
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(context.Background(), runner))
 }
 
 func TestRunnerLifecycleRowsDecodeEpochAsUnset(t *testing.T) {
@@ -202,15 +170,12 @@ func TestMarkRunnerBusyBindsIdentityFreeRunnerToStartedRequest(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(transaction.executions) != 3 {
+	if len(transaction.executions) != 2 {
 		t.Fatalf("busy binding executions = %#v", transaction.executions)
 	}
 	if !strings.Contains(transaction.executions[1].statement, "request_id = $1") ||
 		transaction.executions[1].arguments[0] != int64(42) {
 		t.Fatalf("runner request binding = %#v", transaction.executions[1])
-	}
-	if transaction.executions[2].arguments[0] != int64(42) {
-		t.Fatalf("legacy runner request binding = %#v", transaction.executions[2])
 	}
 }
 
@@ -309,17 +274,6 @@ func scanAssignment(t *testing.T, assignment Assignment) func(...any) {
 		*destination[int64](t, destinations[8]) = assignment.ControllerEpoch
 		*destination[bool](t, destinations[9]) = assignment.IdentityFree
 		*destination[AssignmentState](t, destinations[10]) = assignment.State
-	}
-}
-
-func scanLibvirtRunner(t *testing.T, runner LibvirtRunnerLifecycle) func(...any) {
-	t.Helper()
-	return func(destinations ...any) {
-		*destination[NodeID](t, destinations[0]) = runner.NodeID
-		*destination[string](t, destinations[1]) = runner.ScaleSet
-		*destination[string](t, destinations[2]) = runner.Repository
-		*destination[int64](t, destinations[3]) = runner.RequestID
-		*destination[string](t, destinations[4]) = runner.RunnerName
 	}
 }
 

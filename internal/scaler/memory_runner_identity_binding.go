@@ -10,9 +10,6 @@ func (store *MemoryDemandStore) bindMemoryRunnerIdentity(
 	if err != nil {
 		return err
 	}
-	if err = store.bindMemoryLibvirtMirror(candidate, identity); err != nil {
-		return err
-	}
 	store.markMemoryRunnerBusy(candidateKey, candidate, identity, githubRunnerID, startedAt)
 	return nil
 }
@@ -70,48 +67,4 @@ func (selection memoryIdentityBindingSelection) result(
 		return "", RunnerLifecycle{}, &RunnerIdentityNotFoundError{Identity: identity}
 	}
 	return selection.candidateKey, selection.candidate, nil
-}
-
-func (store *MemoryDemandStore) bindMemoryLibvirtMirror(runner RunnerLifecycle, identity RunnerIdentity) error {
-	if runner.Provider != RunnerProviderLibvirt {
-		return nil
-	}
-	key := runnerLifecycleKey(LibvirtRunnerLifecycle{
-		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerName: runner.RunnerName,
-	})
-	lifecycle, exists := store.libvirtRunners[key]
-	if !exists {
-		return nil
-	}
-	requestMatches := store.countMemoryLibvirtRequestMatches(runner, identity.RequestID)
-	if err := validateMemoryLibvirtMirrorBinding(identity, lifecycle.runner.RequestID, requestMatches); err != nil {
-		return err
-	}
-	lifecycle.runner.RequestID = identity.RequestID
-	store.libvirtRunners[key] = lifecycle
-	return nil
-}
-
-func (store *MemoryDemandStore) countMemoryLibvirtRequestMatches(runner RunnerLifecycle, requestID int64) int {
-	requestMatches := 0
-	for _, candidate := range store.libvirtRunners {
-		candidateRunner := candidate.runner
-		if candidateRunner.ScaleSet == runner.ScaleSet && candidateRunner.Repository == runner.Repository &&
-			candidateRunner.RequestID == requestID {
-			requestMatches++
-		}
-	}
-	return requestMatches
-}
-
-func validateMemoryLibvirtMirrorBinding(identity RunnerIdentity, currentRequestID int64, requestMatches int) error {
-	if requestMatches > 1 {
-		return &RunnerIdentityInvariantError{Identity: identity, Matches: int64(requestMatches)}
-	}
-	requestOwnedByAnotherRunner := requestMatches == 1 && currentRequestID != identity.RequestID
-	currentIdentityConflicts := currentRequestID != 0 && currentRequestID != identity.RequestID
-	if requestOwnedByAnotherRunner || currentIdentityConflicts {
-		return &RunnerIdentityMismatchError{Identity: identity}
-	}
-	return nil
 }

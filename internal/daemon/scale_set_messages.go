@@ -20,7 +20,6 @@ type coordinatedScaleSetHandler struct {
 	Repository  string
 	Logger      *slog.Logger
 	ScaleSet    string
-	ReapLibvirt bool // retained for source compatibility; lifecycle cleanup is provider-independent
 }
 
 func jobStartedHasIdentity(startedJob *upstream.JobStarted) bool {

@@ -11,15 +11,36 @@ import (
 const registerSQLiteRunnerLifecycleSQL = `INSERT INTO runner_lifecycle(
 	node_id, scale_set, repository, provider, runner_name, request_id, assignment_id, installation_id, github_scale_set_id,
 	github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason)
-	VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	SELECT ?, demand.scale_set, demand.repository, ?, ?, COALESCE(demand.request_id, 0),
+		demand.demand_id, ?, ?, ?, ?, ?, ?, ?, ?
+	FROM demand WHERE demand.demand_id = ?
 	ON CONFLICT(scale_set, repository, runner_name) DO NOTHING`
 
-const inspectSQLiteRunnerLifecycleSQL = `SELECT provider, request_id, assignment_id, phase
+const registerUnassignedSQLiteRunnerLifecycleSQL = `INSERT INTO runner_lifecycle(
+	node_id, scale_set, repository, provider, runner_name, request_id, assignment_id, installation_id, github_scale_set_id,
+	github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason)
+	VALUES(?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(scale_set, repository, runner_name) DO NOTHING`
+
+const inspectSQLiteRunnerLifecycleSQL = `SELECT provider, request_id, COALESCE(assignment_id, 0), phase
 	FROM runner_lifecycle WHERE scale_set = ? AND repository = ? AND runner_name = ?`
 
 const pendingSQLiteRunnerLifecyclesSQL = `SELECT node_id, scale_set, repository, provider, runner_name,
-	request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase, created_at, waiting_since, updated_at, reap_reason
-	FROM runner_lifecycle WHERE scale_set = ? AND (? = '' OR repository = ?) AND phase = 'reap_pending'
+	request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase,
+	created_at, waiting_since, updated_at, reap_reason
+	FROM (
+		SELECT lifecycle.node_id,
+			COALESCE(demand.scale_set, lifecycle.scale_set) AS scale_set,
+			COALESCE(demand.repository, lifecycle.repository) AS repository,
+			lifecycle.provider, lifecycle.runner_name,
+			COALESCE(demand.request_id, lifecycle.request_id) AS request_id,
+			COALESCE(lifecycle.assignment_id, 0) AS assignment_id,
+			lifecycle.installation_id, lifecycle.github_scale_set_id, lifecycle.github_runner_id,
+			lifecycle.phase, lifecycle.created_at, lifecycle.waiting_since, lifecycle.updated_at,
+			lifecycle.reap_reason
+		FROM runner_lifecycle lifecycle LEFT JOIN demand ON demand.demand_id = lifecycle.assignment_id
+	) authoritative_lifecycle
+	WHERE scale_set = ? AND (? = '' OR repository = ?) AND phase = 'reap_pending'
 	ORDER BY repository, runner_name`
 
 type RunnerProvider string
@@ -54,6 +75,12 @@ type RunnerLifecycle struct {
 	WaitingSince     time.Time
 	UpdatedAt        time.Time
 	ReapReason       string
+}
+
+type JobCompletion struct {
+	ScaleSet   string
+	Repository string
+	RunnerIdentity
 }
 
 // Identity returns the persisted request/name pair used for exact mutations.
@@ -102,62 +129,6 @@ type RunnerJobCompletionStore interface {
 	// CompleteRunnerLifecycleJob atomically requests cleanup and removes demand
 	// for exactly one runner selected by completion.RunnerIdentity.
 	CompleteRunnerLifecycleJob(ctx context.Context, completion JobCompletion, completedAt time.Time) error
-}
-
-func (store *SQLiteDemandStore) RegisterRunner(ctx context.Context, runner RunnerLifecycle) error {
-	createdAt := runner.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
-	phase := runner.Phase
-	if phase == "" {
-		phase = RunnerProvisioning
-	}
-	result, err := store.database.ExecContext(ctx, registerSQLiteRunnerLifecycleSQL,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.Provider, runner.RunnerName,
-		runner.RequestID, runner.AssignmentID, runner.InstallationID, runner.GitHubScaleSetID, runner.GitHubRunnerID, phase,
-		createdAt.UnixNano(), unixNanoOrZero(runner.WaitingSince), createdAt.UnixNano(), runner.ReapReason)
-	if err != nil {
-		return fmt.Errorf("register runner lifecycle: %w", err)
-	}
-	inserted, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count registered runner lifecycle: %w", err)
-	}
-	if inserted == 1 {
-		return store.mirrorLibvirtRegistration(ctx, runner)
-	}
-	return store.verifyMatchingRunnerRegistration(ctx, runner)
-}
-
-func (store *SQLiteDemandStore) verifyMatchingRunnerRegistration(ctx context.Context, runner RunnerLifecycle) error {
-	var requestID, assignmentID int64
-	var provider string
-	var existingPhase string
-	err := store.database.QueryRowContext(ctx, inspectSQLiteRunnerLifecycleSQL,
-		runner.ScaleSet, runner.Repository, runner.RunnerName).Scan(&provider, &requestID, &assignmentID, &existingPhase)
-	if err != nil {
-		return fmt.Errorf("inspect registered runner lifecycle: %w", err)
-	}
-	if provider != string(runner.Provider) || requestID != runner.RequestID || assignmentID != runner.AssignmentID ||
-		existingPhase == string(RunnerReapPending) {
-		return errors.New("runner identity remains reserved by another lifecycle")
-	}
-	return nil
-}
-
-func (store *SQLiteDemandStore) mirrorLibvirtRegistration(ctx context.Context, runner RunnerLifecycle) error {
-	if runner.Provider != RunnerProviderLibvirt {
-		return nil
-	}
-	_, err := store.database.ExecContext(ctx, `INSERT INTO libvirt_runner_lifecycle
-		(scale_set, repository, request_id, runner_name, reap_requested) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(scale_set, repository, runner_name) DO NOTHING`,
-		runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName, runner.Phase == RunnerReapPending)
-	if err != nil {
-		return fmt.Errorf("mirror libvirt runner lifecycle: %w", err)
-	}
-	return nil
 }
 
 func (store *SQLiteDemandStore) ConfirmRunnerWaiting(ctx context.Context, runner RunnerLifecycle, confirmedAt time.Time) error {
@@ -226,7 +197,7 @@ func requestSQLiteRunnerReap(
 	); err != nil {
 		return err
 	}
-	return mirrorSQLiteRunnerReapRequest(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func updateSQLiteRunnerReapRequest(
@@ -255,33 +226,29 @@ func updateSQLiteRunnerReapRequest(
 	return nil
 }
 
-func mirrorSQLiteRunnerReapRequest(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository string,
-	identity RunnerIdentity,
-) error {
-	mirrorResult, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
-		[]any{scaleSet, repository},
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND runner_name = ?`,
-		`UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE scale_set = ? AND repository = ? AND request_id = ? AND runner_name = ?`,
-		"mirror requested libvirt runner reap")
-	if err != nil {
-		return err
-	}
-	return requireAtMostOneSQLiteIdentityChange(mirrorResult, identity, "count mirrored runner reap")
-}
-
 func (store *SQLiteDemandStore) RequestExpiredRunnerReaps(
 	ctx context.Context,
 	scaleSet, repository string,
 	deadline, requestedAt time.Time,
 ) (int, error) {
-	result, err := store.database.ExecContext(ctx, `UPDATE runner_lifecycle
+	changed := 0
+	err := store.runSQLiteTransaction(ctx, "expired runner reap request", func(transaction *sql.Tx) error {
+		var transitionErr error
+		changed, transitionErr = requestExpiredSQLiteRunnerReaps(
+			ctx, transaction, scaleSet, repository, deadline, requestedAt,
+		)
+		return transitionErr
+	})
+	return changed, err
+}
+
+func requestExpiredSQLiteRunnerReaps(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	deadline, requestedAt time.Time,
+) (int, error) {
+	result, err := transaction.ExecContext(ctx, `UPDATE runner_lifecycle
 		SET phase = 'reap_pending', reap_reason = 'job_start_timeout', updated_at = ?
 		WHERE scale_set = ? AND (? = '' OR repository = ?) AND phase = 'waiting_for_job'
 		AND waiting_since > 0 AND waiting_since <= ?`, requestedAt.UnixNano(), scaleSet, repository, repository, deadline.UnixNano())
@@ -292,13 +259,21 @@ func (store *SQLiteDemandStore) RequestExpiredRunnerReaps(
 	if err != nil {
 		return 0, err
 	}
-	if _, err = store.database.ExecContext(ctx, `UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
-			WHERE lifecycle.scale_set = libvirt_runner_lifecycle.scale_set
-			  AND lifecycle.repository = libvirt_runner_lifecycle.repository
-			  AND lifecycle.runner_name = libvirt_runner_lifecycle.runner_name
-			  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = 'job_start_timeout')`); err != nil {
-		return 0, fmt.Errorf("mirror expired libvirt runner reaps: %w", err)
+	if _, err = transaction.ExecContext(ctx, `UPDATE demand
+		SET attempt = attempt + 1,
+		    next_attempt_at = ? + CASE attempt
+		        WHEN 0 THEN ? WHEN 1 THEN ? WHEN 2 THEN ? WHEN 3 THEN ? ELSE ? END
+		WHERE source = 'assigned_count' AND blocked_reason IS NULL
+		  AND demand_id IN (
+		      SELECT assignment_id FROM runner_lifecycle
+		      WHERE scale_set = ? AND (? = '' OR repository = ?)
+		        AND phase = 'reap_pending' AND reap_reason = 'job_start_timeout'
+		        AND updated_at = ? AND assignment_id IS NOT NULL
+		  )`, requestedAt.UnixNano(),
+		capacityObligationRetryDelays[0].Nanoseconds(), capacityObligationRetryDelays[1].Nanoseconds(),
+		capacityObligationRetryDelays[2].Nanoseconds(), capacityObligationRetryDelays[3].Nanoseconds(),
+		capacityObligationRetryDelays[4].Nanoseconds(), scaleSet, repository, repository, requestedAt.UnixNano()); err != nil {
+		return 0, fmt.Errorf("defer expired runner capacity obligation: %w", err)
 	}
 	return changed, nil
 }
@@ -313,7 +288,43 @@ func (store *SQLiteDemandStore) RequestExcessWaitingRunnerReaps(
 	if retain < 0 {
 		retain = 0
 	}
-	result, err := store.database.ExecContext(ctx, `UPDATE runner_lifecycle
+	changed := 0
+	err := store.runSQLiteTransaction(ctx, "excess runner reap request", func(transaction *sql.Tx) error {
+		var transitionErr error
+		changed, transitionErr = requestExcessSQLiteRunnerReaps(
+			ctx, transaction, scaleSet, repository, retain, reason, requestedAt,
+		)
+		return transitionErr
+	})
+	return changed, err
+}
+
+func requestExcessSQLiteRunnerReaps(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	retain int,
+	reason string,
+	requestedAt time.Time,
+) (int, error) {
+	changed, err := requestExcessSQLiteGenericRunnerReaps(
+		ctx, transaction, scaleSet, repository, retain, reason, requestedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
+func requestExcessSQLiteGenericRunnerReaps(
+	ctx context.Context,
+	transaction *sql.Tx,
+	scaleSet, repository string,
+	retain int,
+	reason string,
+	requestedAt time.Time,
+) (int, error) {
+	result, err := transaction.ExecContext(ctx, `UPDATE runner_lifecycle
 		SET phase = 'reap_pending', reap_reason = ?, updated_at = ?
 		WHERE rowid IN (
 			SELECT rowid FROM runner_lifecycle
@@ -326,19 +337,7 @@ func (store *SQLiteDemandStore) RequestExcessWaitingRunnerReaps(
 	if err != nil {
 		return 0, fmt.Errorf("request excess waiting runner reaps: %w", err)
 	}
-	changed, err := lifecycleRowsAffected(result, "count excess waiting runner reaps")
-	if err != nil {
-		return 0, err
-	}
-	if _, err = store.database.ExecContext(ctx, `UPDATE libvirt_runner_lifecycle SET reap_requested = 1
-		WHERE EXISTS (SELECT 1 FROM runner_lifecycle lifecycle
-			WHERE lifecycle.scale_set = libvirt_runner_lifecycle.scale_set
-			  AND lifecycle.repository = libvirt_runner_lifecycle.repository
-			  AND lifecycle.runner_name = libvirt_runner_lifecycle.runner_name
-			  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = ?)`, reason); err != nil {
-		return 0, fmt.Errorf("mirror excess libvirt runner reaps: %w", err)
-	}
-	return changed, nil
+	return lifecycleRowsAffected(result, "count excess waiting runner reaps")
 }
 
 func (store *SQLiteDemandStore) PendingRunnerReaps(
@@ -370,7 +369,19 @@ func (store *SQLiteDemandStore) RunnerLifecycles(
 	rows, err := store.database.QueryContext(ctx, `SELECT node_id, scale_set, repository, provider, runner_name,
 		request_id, assignment_id, installation_id, github_scale_set_id, github_runner_id, phase,
 		created_at, waiting_since, updated_at, reap_reason
-		FROM runner_lifecycle WHERE scale_set = ? AND (? = '' OR repository = ?)
+		FROM (
+			SELECT lifecycle.node_id,
+				COALESCE(demand.scale_set, lifecycle.scale_set) AS scale_set,
+				COALESCE(demand.repository, lifecycle.repository) AS repository,
+				lifecycle.provider, lifecycle.runner_name,
+				COALESCE(demand.request_id, lifecycle.request_id) AS request_id,
+				COALESCE(lifecycle.assignment_id, 0) AS assignment_id,
+				lifecycle.installation_id, lifecycle.github_scale_set_id, lifecycle.github_runner_id,
+				lifecycle.phase, lifecycle.created_at, lifecycle.waiting_since, lifecycle.updated_at,
+				lifecycle.reap_reason
+			FROM runner_lifecycle lifecycle LEFT JOIN demand ON demand.demand_id = lifecycle.assignment_id
+		) authoritative_lifecycle
+		WHERE scale_set = ? AND (? = '' OR repository = ?)
 		ORDER BY repository, runner_name`, scaleSet, repository, repository)
 	if err != nil {
 		return nil, fmt.Errorf("load runner lifecycles: %w", err)
@@ -423,6 +434,11 @@ func confirmSQLiteRunnerReaped(ctx context.Context, transaction *sql.Tx, runner 
 	); err != nil {
 		return err
 	}
+	return deleteSQLiteGenericRunner(ctx, transaction, runner)
+}
+
+func deleteSQLiteGenericRunner(ctx context.Context, transaction *sql.Tx, runner RunnerLifecycle) error {
+	identity := runner.Identity()
 	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
 		[]any{runner.ScaleSet, runner.Repository},
 		`DELETE FROM runner_lifecycle WHERE scale_set = ? AND repository = ?
@@ -438,34 +454,7 @@ func confirmSQLiteRunnerReaped(ctx context.Context, transaction *sql.Tx, runner 
 	if err = requireSingleSQLiteIdentityChange(result, identity, "count confirmed runner reap"); err != nil {
 		return err
 	}
-	if runner.Provider == RunnerProviderLibvirt {
-		if err = confirmSQLiteMirroredRunnerReaped(ctx, transaction, runner); err != nil {
-			return err
-		}
-	}
 	return nil
-}
-
-func confirmSQLiteMirroredRunnerReaped(
-	ctx context.Context,
-	transaction *sql.Tx,
-	runner RunnerLifecycle,
-) error {
-	identity := runner.Identity()
-	result, err := executeSQLiteIdentityStatement(ctx, transaction, identity,
-		[]any{runner.ScaleSet, runner.Repository},
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND request_id = ?`,
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND runner_name = ?`,
-		`DELETE FROM libvirt_runner_lifecycle WHERE scale_set = ? AND repository = ?
-		AND reap_requested = 1 AND request_id = ? AND runner_name = ?`,
-		"confirm mirrored libvirt runner reap")
-	if err != nil {
-		return err
-	}
-	return requireAtMostOneSQLiteIdentityChange(result, identity,
-		"count confirmed mirrored libvirt runner reap")
 }
 
 func requireLifecycleChange(result sql.Result, operation string) error {

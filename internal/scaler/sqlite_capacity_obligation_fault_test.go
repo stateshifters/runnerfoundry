@@ -80,7 +80,7 @@ func TestSQLiteAssignedCapacityObservationReportsAdoptionFailure(t *testing.T) {
 func TestSQLiteAssignedCapacityObservationReportsQueuedCountFailure(t *testing.T) {
 	assertConfiguredAssignedObservationFailure(t, 0, func(mock sqlmock.Sqlmock, failure error) {
 		expectAssignedObservationThroughObsoleteRemoval(mock)
-		mock.ExpectQuery("SELECT COUNT").WillReturnError(failure)
+		mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM").WillReturnError(failure)
 	})
 }
 
@@ -96,6 +96,40 @@ func TestSQLiteAssignedCapacityObservationReportsCreationFailure(t *testing.T) {
 		expectAssignedObservationThroughCount(mock, 0)
 		mock.ExpectExec("INSERT INTO demand").WillReturnError(failure)
 	})
+}
+
+func TestSQLiteAssignedCapacityObservationReportsBlockingFailure(t *testing.T) {
+	observation := sqliteAssignedObservationForFailure
+	observation.AssignedJobs = 1
+	observation.BusyRunners = 1
+	assertCustomAssignedObservationFailure(t, observation, 0, func(mock sqlmock.Sqlmock, failure error) {
+		expectAssignedObservationThroughCounts(mock, 0, 0)
+		mock.ExpectExec("INSERT INTO demand").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("UPDATE demand").WillReturnError(failure)
+	})
+}
+
+func TestSQLiteAssignedCapacityObservationReportsUnblockingFailure(t *testing.T) {
+	observation := sqliteAssignedObservationForFailure
+	observation.AssignedJobs = 1
+	assertCustomAssignedObservationFailure(t, observation, 0, func(mock sqlmock.Sqlmock, failure error) {
+		expectAssignedObservationThroughCounts(mock, 0, 1)
+		mock.ExpectExec("UPDATE demand").WillReturnError(failure)
+	})
+}
+
+func assertCustomAssignedObservationFailure(
+	t *testing.T,
+	observation AssignedCapacityObservation,
+	active int,
+	configure func(sqlmock.Sqlmock, error),
+) {
+	t.Helper()
+	failure := errors.New("failed")
+	fixture := mockDemandStore(t)
+	configure(fixture.mock, failure)
+	fixture.mock.ExpectRollback()
+	assertAssignedCapacityObservationFailure(t, fixture.store, observation, active, failure)
 }
 
 func assertConfiguredAssignedObservationFailure(
@@ -139,8 +173,14 @@ func expectAssignedObligationAdoption(mock sqlmock.Sqlmock) {
 }
 
 func expectAssignedObservationThroughCount(mock sqlmock.Sqlmock, queued int) {
+	expectAssignedObservationThroughCounts(mock, queued, 0)
+}
+
+func expectAssignedObservationThroughCounts(mock sqlmock.Sqlmock, queued, blocked int) {
 	expectAssignedObservationThroughObsoleteRemoval(mock)
-	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(queued))
+	mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM").WillReturnRows(
+		sqlmock.NewRows([]string{"queued", "blocked"}).AddRow(queued, blocked),
+	)
 }
 
 func assertAssignedCapacityObservationFailure(

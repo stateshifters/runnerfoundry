@@ -113,10 +113,12 @@ type clusterAssignedJobBackend struct {
 	latestObservedAt time.Time
 }
 
-func (backend clusterAssignedJobBackend) observation(assignedJobs int) cluster.AssignedJobObservation {
+func (backend clusterAssignedJobBackend) observation(statistics scaler.AssignedCapacityStatistics) cluster.AssignedJobObservation {
 	return cluster.AssignedJobObservation{
 		AppID: backend.appID, Repository: backend.repository, ScaleSet: backend.scaleSet,
-		ControllerEpoch: backend.controllerEpoch, AssignedJobs: assignedJobs, ObservedAt: backend.now().UTC(),
+		ControllerEpoch: backend.controllerEpoch, AssignedJobs: statistics.AssignedJobs,
+		RunningJobs: statistics.RunningJobs, RegisteredRunners: statistics.RegisteredRunners,
+		BusyRunners: statistics.BusyRunners, ObservedAt: backend.now().UTC(),
 	}
 }
 
@@ -124,8 +126,15 @@ func (backend *clusterAssignedJobBackend) Prepare(
 	ctx context.Context,
 	assignedJobs int,
 ) (scaler.AssignedJobCapacity, error) {
-	backend.assignedJobs = assignedJobs
-	observation := backend.observation(assignedJobs)
+	return backend.PrepareStatistics(ctx, scaler.AssignedCapacityStatistics{AssignedJobs: assignedJobs})
+}
+
+func (backend *clusterAssignedJobBackend) PrepareStatistics(
+	ctx context.Context,
+	statistics scaler.AssignedCapacityStatistics,
+) (scaler.AssignedJobCapacity, error) {
+	backend.assignedJobs = statistics.AssignedJobs
+	observation := backend.observation(statistics)
 	result, err := backend.state.ObserveAssignedJobs(ctx, observation)
 	if err != nil {
 		return scaler.AssignedJobCapacity{}, fmt.Errorf("observe clustered assigned jobs: %w", err)
@@ -169,22 +178,47 @@ func (recovery *clusterAssignedJobRecovery) observe(
 	if recovery.backend == nil {
 		return errors.New("cluster assigned-job observation backend is required")
 	}
+	capacity, err := recovery.persistAssignedCapacity(ctx, statistics)
+	if err != nil {
+		return err
+	}
+	recovery.reportAssignedCapacity(ctx, statistics, trigger, capacity)
+	return nil
+}
+
+func (recovery *clusterAssignedJobRecovery) persistAssignedCapacity(
+	ctx context.Context,
+	statistics *upstream.RunnerScaleSetStatistic,
+) (scaler.AssignedJobCapacity, error) {
 	observationCtx, cancelObservation := context.WithTimeout(ctx, clusterCoordinationTimeout)
-	capacity, err := recovery.backend.Prepare(observationCtx, statistics.TotalAssignedJobs)
+	capacity, err := recovery.backend.PrepareStatistics(observationCtx, scaler.AssignedCapacityStatistics{
+		AssignedJobs: statistics.TotalAssignedJobs, RunningJobs: statistics.TotalRunningJobs,
+		RegisteredRunners: statistics.TotalRegisteredRunners, BusyRunners: statistics.TotalBusyRunners,
+	})
 	cancelObservation()
 	if err != nil {
-		return fmt.Errorf("persist clustered capacity obligations: %w", err)
+		return scaler.AssignedJobCapacity{}, fmt.Errorf("persist clustered capacity obligations: %w", err)
 	}
+	return capacity, nil
+}
+
+func (recovery *clusterAssignedJobRecovery) reportAssignedCapacity(
+	ctx context.Context,
+	statistics *upstream.RunnerScaleSetStatistic,
+	trigger string,
+	capacity scaler.AssignedJobCapacity,
+) {
 	recovery.logStatistics(ctx, statistics, trigger, "completed", nil,
 		slog.Int("runningRunners", capacity.ActiveRunners), slog.Int("queuedRunners", statistics.TotalAssignedJobs-capacity.ActiveRunners))
 	logCapacityObligationState(ctx, recovery.logger, recovery.generation, scaler.MessageUpdate{
 		Repository: recovery.repository, ScaleSet: recovery.scaleSet,
-		ControllerEpoch: recovery.controllerEpoch, ObservedAt: recovery.backend.latestObservedAt,
+		ControllerEpoch: recovery.controllerEpoch, AssignedJobs: statistics.TotalAssignedJobs,
+		RunningJobs: statistics.TotalRunningJobs, RegisteredRunners: statistics.TotalRegisteredRunners,
+		BusyRunners: statistics.TotalBusyRunners, ObservedAt: recovery.backend.latestObservedAt,
 	}, recovery.backend.latestResult.QueueUpdate)
 	if recovery.scheduler != nil {
 		recovery.scheduler.wake(ctx, recovery.scaleSet)
 	}
-	return nil
 }
 
 func (recovery *clusterAssignedJobRecovery) prepareInitial(

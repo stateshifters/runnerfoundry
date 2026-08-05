@@ -50,29 +50,20 @@ type runnerIdentityBindingStore interface {
 	RunnerLifecycles(ctx context.Context, scaleSet string, repository string) ([]RunnerLifecycle, error)
 }
 
-type libvirtIdentityContractStore interface {
-	RegisterLibvirtRunner(ctx context.Context, runner LibvirtRunnerLifecycle) error
-	CompleteJob(ctx context.Context, completion JobCompletion) error
-	PendingLibvirtReaps(
-		ctx context.Context,
-		scaleSet string,
-		repository string,
-	) ([]LibvirtRunnerLifecycle, error)
-	ConfirmLibvirtReaped(ctx context.Context, runner LibvirtRunnerLifecycle) error
-}
-
 func TestRunnerIdentityContractAcrossMemoryAndSQLite(t *testing.T) {
 	runRunnerIdentityContract(t, "memory", openMemoryIdentityContractStore)
 	runRunnerIdentityContract(t, "SQLite", openSQLiteIdentityContractStore)
 }
 
 func TestRunnerIdentityCompletionAndReapConfirmationAreExact(t *testing.T) {
-	t.Run("memory", func(t *testing.T) {
-		assertRunnerCompletionAndReapAreExact(t, NewMemoryDemandStore())
-	})
-	t.Run("SQLite", func(t *testing.T) {
-		assertRunnerCompletionAndReapAreExact(t, openSQLiteCapacityStore(t))
-	})
+	for _, provider := range []RunnerProvider{RunnerProviderDocker, RunnerProviderLibvirt} {
+		t.Run(string(provider)+"/memory", func(t *testing.T) {
+			assertRunnerCompletionAndReapAreExact(t, NewMemoryDemandStore(), provider)
+		})
+		t.Run(string(provider)+"/SQLite", func(t *testing.T) {
+			assertRunnerCompletionAndReapAreExact(t, openSQLiteCapacityStore(t), provider)
+		})
+	}
 }
 
 func TestRunnerIdentityBindingRejectsMirroredRequestOwner(t *testing.T) {
@@ -81,15 +72,6 @@ func TestRunnerIdentityBindingRejectsMirroredRequestOwner(t *testing.T) {
 	})
 	t.Run("SQLite", func(t *testing.T) {
 		assertRunnerBindingRejectsRequestOwner(t, openSQLiteCapacityStore(t))
-	})
-}
-
-func TestLibvirtRunnerIdentityCompletionAndConfirmationAreExact(t *testing.T) {
-	t.Run("memory", func(t *testing.T) {
-		assertLibvirtCompletionAndConfirmationAreExact(t, NewMemoryDemandStore())
-	})
-	t.Run("SQLite", func(t *testing.T) {
-		assertLibvirtCompletionAndConfirmationAreExact(t, openSQLiteCapacityStore(t))
 	})
 }
 
@@ -146,6 +128,10 @@ func seedRunnerIdentityContractCase(
 			RequestID: identity.RequestID, RunnerName: identity.RunnerName,
 			Phase: RunnerWaitingForJob, CreatedAt: time.Unix(1, 0).UTC(),
 		}
+		if sqliteStore, ok := store.(*SQLiteDemandStore); ok {
+			seedSQLiteGenericLifecycle(t, sqliteStore.database, runner)
+			continue
+		}
 		if err := store.RegisterRunner(context.Background(), runner); err != nil {
 			t.Fatal(err)
 		}
@@ -193,9 +179,13 @@ func assertRunnerIdentityContractOutcome(t *testing.T, err error, outcome runner
 	}
 }
 
-func assertRunnerCompletionAndReapAreExact(t *testing.T, store runnerLifecycleIdentityStore) {
+func assertRunnerCompletionAndReapAreExact(
+	t *testing.T,
+	store runnerLifecycleIdentityStore,
+	provider RunnerProvider,
+) {
 	t.Helper()
-	seedGenericIdentityRunners(t, store)
+	seedGenericIdentityRunners(t, store, provider)
 	completion := JobCompletion{
 		ScaleSet: "set", Repository: "repo",
 		RunnerIdentity: RunnerIdentity{RequestID: 1, RunnerName: "runner-two"},
@@ -207,14 +197,14 @@ func assertRunnerCompletionAndReapAreExact(t *testing.T, store runnerLifecycleId
 	assertRunnerLifecycleCount(t, store, 2)
 }
 
-func seedGenericIdentityRunners(t *testing.T, store runnerLifecycleIdentityStore) {
+func seedGenericIdentityRunners(t *testing.T, store runnerLifecycleIdentityStore, provider RunnerProvider) {
 	t.Helper()
 	for _, identity := range []RunnerIdentity{
 		{RequestID: 1, RunnerName: "runner-one"},
 		{RequestID: 2, RunnerName: "runner-two"},
 	} {
 		runner := RunnerLifecycle{
-			ScaleSet: "set", Repository: "repo", Provider: RunnerProviderDocker,
+			ScaleSet: "set", Repository: "repo", Provider: provider,
 			RequestID: identity.RequestID, RunnerName: identity.RunnerName,
 			Phase: RunnerWaitingForJob, CreatedAt: time.Unix(1, 0).UTC(),
 		}
@@ -285,58 +275,6 @@ func assertIdentityFreeRunnerRemainsWaiting(t *testing.T, store runnerIdentityBi
 			(runner.RequestID != 0 || runner.Phase != RunnerWaitingForJob) {
 			t.Fatalf("identity-free runner mutated after mirror conflict: %#v", runner)
 		}
-	}
-}
-
-func assertLibvirtCompletionAndConfirmationAreExact(t *testing.T, store libvirtIdentityContractStore) {
-	t.Helper()
-	seedLibvirtIdentityRunners(t, store)
-	mismatch := JobCompletion{
-		ScaleSet: "set", Repository: "repo",
-		RunnerIdentity: RunnerIdentity{RequestID: 1, RunnerName: "runner-two"},
-	}
-	assertIdentityError(t, store.CompleteJob(context.Background(), mismatch), ErrRunnerIdentityMismatch, "completion")
-	completeFirstLibvirtRunner(t, store)
-	confirmMismatchedLibvirtRunner(t, store)
-	assertPendingLibvirtRunner(t, store, "runner-one")
-}
-
-func seedLibvirtIdentityRunners(t *testing.T, store libvirtIdentityContractStore) {
-	t.Helper()
-	for _, runner := range []LibvirtRunnerLifecycle{
-		{ScaleSet: "set", Repository: "repo", RequestID: 1, RunnerName: "runner-one"},
-		{ScaleSet: "set", Repository: "repo", RequestID: 2, RunnerName: "runner-two"},
-	} {
-		if err := store.RegisterLibvirtRunner(context.Background(), runner); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func completeFirstLibvirtRunner(t *testing.T, store libvirtIdentityContractStore) {
-	t.Helper()
-	completion := JobCompletion{
-		ScaleSet: "set", Repository: "repo", RunnerIdentity: RunnerIdentity{RequestID: 1},
-	}
-	if err := store.CompleteJob(context.Background(), completion); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func confirmMismatchedLibvirtRunner(t *testing.T, store libvirtIdentityContractStore) {
-	t.Helper()
-	runner := LibvirtRunnerLifecycle{
-		ScaleSet: "set", Repository: "repo", RequestID: 1, RunnerName: "runner-two",
-	}
-	err := store.ConfirmLibvirtReaped(context.Background(), runner)
-	assertIdentityError(t, err, ErrRunnerIdentityMismatch, "reap confirmation")
-}
-
-func assertPendingLibvirtRunner(t *testing.T, store libvirtIdentityContractStore, expectedName string) {
-	t.Helper()
-	pending, err := store.PendingLibvirtReaps(context.Background(), "set", "repo")
-	if err != nil || len(pending) != 1 || pending[0].RunnerName != expectedName {
-		t.Fatalf("pending libvirt runners = %#v, %v", pending, err)
 	}
 }
 

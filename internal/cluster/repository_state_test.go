@@ -55,10 +55,10 @@ func TestPostgreSQLDiscoveryUsesGenerationForAuthoritativeDeletion(t *testing.T)
 	if err != nil || snapshot.Control.DiscoveryGeneration != 5 {
 		t.Fatalf("snapshot = %#v, %v", snapshot, err)
 	}
-	if len(transaction.executions) != 14 {
+	if len(transaction.executions) != 12 {
 		t.Fatalf("discovery executions = %#v", transaction.executions)
 	}
-	cleanup := transaction.executions[9]
+	cleanup := transaction.executions[8]
 	if len(cleanup.arguments) != 4 || cleanup.arguments[0] != int64(7) ||
 		cleanup.arguments[1] != githubapp.InstallationID(11) || cleanup.arguments[2] != int64(5) ||
 		cleanup.arguments[3] != completedAt {
@@ -161,8 +161,8 @@ func TestPostgreSQLRepositoryDiscoveryReportsEveryWriteFailure(t *testing.T) {
 
 func TestPostgreSQLDiscoveryReportsRepositoryReplacementFailure(t *testing.T) {
 	failure := errors.New("failed")
-	executionErrors := make([]error, 7)
-	executionErrors[6] = failure
+	executionErrors := make([]error, 6)
+	executionErrors[5] = failure
 	transaction := &fakeDatabaseTransaction{
 		execErrors: executionErrors,
 		rowResults: []fakeRow{repositoryControlRow(t, 1, 2, true)},
@@ -216,7 +216,7 @@ func TestDeleteRegistrationWithdrawsAssignedRunnersBeforeRegistration(t *testing
 	if err := store.DeleteRegistration(context.Background(), 7, 2, "repo", "linux"); err != nil {
 		t.Fatal(err)
 	}
-	if len(transaction.executions) != 5 {
+	if len(transaction.executions) != 4 {
 		t.Fatalf("registration withdrawal executions = %#v", transaction.executions)
 	}
 	cleanup := transaction.executions[0]
@@ -224,7 +224,7 @@ func TestDeleteRegistrationWithdrawsAssignedRunnersBeforeRegistration(t *testing
 		cleanup.arguments[2] != "repo" || cleanup.arguments[3] != "linux" {
 		t.Fatalf("registration cleanup arguments = %#v", cleanup.arguments)
 	}
-	deletion := transaction.executions[4]
+	deletion := transaction.executions[3]
 	if len(deletion.arguments) != 3 || deletion.arguments[0] != int64(7) ||
 		deletion.arguments[1] != "repo" || deletion.arguments[2] != "linux" {
 		t.Fatalf("registration deletion arguments = %#v", deletion.arguments)

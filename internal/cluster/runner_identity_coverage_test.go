@@ -87,13 +87,6 @@ func TestRunnerIdentityReapAndBindingErrorCoverage(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
-	t.Run("mirror invalid", func(t *testing.T) {
-		err := mirrorClusterRunnerReap(ctx, (&fakeDatabaseTransaction{}).databaseTransaction(),
-			"linux", "repo", scaler.RunnerIdentity{})
-		if !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
 	t.Run("binding inspection failure", func(t *testing.T) {
 		transaction := (&fakeDatabaseTransaction{rowResults: []fakeRow{{err: errors.New("lookup")}}}).databaseTransaction()
 		err := bindClusterRunnerIdentity(ctx, transaction, clusterRunnerIdentityScope{table: "runners", condition: "true"},
@@ -145,73 +138,45 @@ func TestRunnerIdentityBindingUpdateCoverage(t *testing.T) {
 			}
 		})
 	}
-	t.Run("mirror duplicate", func(t *testing.T) {
-		transaction := (&fakeDatabaseTransaction{execTags: []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 2")}}).databaseTransaction()
-		err := mirrorBoundClusterLibvirtIdentity(ctx, transaction, "linux", "repo", identity)
-		if !errors.Is(err, scaler.ErrRunnerIdentityInvariant) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-}
-
-func TestRunnerIdentityMirrorClassificationCoverage(t *testing.T) {
-	ctx := context.Background()
-	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner-42"}
-	t.Run("inspection failure", func(t *testing.T) {
-		transaction := (&fakeDatabaseTransaction{rowResults: []fakeRow{{err: errors.New("lookup")}}}).databaseTransaction()
-		if err := classifyUnchangedClusterLibvirtIdentity(ctx, transaction, "linux", "repo", identity); err == nil {
-			t.Fatal("expected inspection failure")
-		}
-	})
-	t.Run("duplicate component", func(t *testing.T) {
-		transaction := (&fakeDatabaseTransaction{rowResults: []fakeRow{
-			integerCountRow(t, 2), integerCountRow(t, 0),
-		}}).databaseTransaction()
-		if err := classifyUnchangedClusterLibvirtIdentity(ctx, transaction, "linux", "repo", identity); !errors.Is(err, scaler.ErrRunnerIdentityInvariant) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-}
-
-func TestRunnerIdentityMirrorExactCoverage(t *testing.T) {
-	ctx := context.Background()
-	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner-42"}
-	t.Run("exact lookup failure", func(t *testing.T) {
-		transaction := (&fakeDatabaseTransaction{rowResults: []fakeRow{
-			integerCountRow(t, 1), integerCountRow(t, 1), {err: errors.New("exact")},
-		}}).databaseTransaction()
-		if err := classifyUnchangedClusterLibvirtIdentity(ctx, transaction, "linux", "repo", identity); err == nil {
-			t.Fatal("expected exact lookup failure")
-		}
-	})
-	t.Run("exact invalid", func(t *testing.T) {
-		if _, err := countExactClusterLibvirtIdentity(ctx, (&fakeDatabaseTransaction{}).databaseTransaction(),
-			"linux", "repo", scaler.RunnerIdentity{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-	t.Run("exact duplicate", func(t *testing.T) {
-		transaction := (&fakeDatabaseTransaction{rowResults: []fakeRow{integerCountRow(t, 2)}}).databaseTransaction()
-		if _, err := countExactClusterLibvirtIdentity(ctx, transaction, "linux", "repo", identity); !errors.Is(err, scaler.ErrRunnerIdentityInvariant) {
-			t.Fatalf("error = %v", err)
-		}
-	})
 }
 
 func TestClusterCompletionCoverage(t *testing.T) {
 	ctx := context.Background()
 	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner-42"}
-	completion := JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerIdentity: identity}
+	completion := scaler.JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerIdentity: identity}
+	t.Run("invalid completion", func(t *testing.T) {
+		if err := (&Store{}).CompleteRunnerLifecycleJob(ctx, scaler.JobCompletion{}, time.Time{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
+			t.Fatalf("error = %v", err)
+		}
+	})
 	t.Run("connector failure", func(t *testing.T) {
 		store := &Store{connector: func(context.Context) (*databaseConnection, error) {
 			return nil, errors.New("connect")
 		}}
-		if err := store.CompleteJob(ctx, completion); err == nil {
+		if err := store.CompleteRunnerLifecycleJob(ctx, completion, time.Time{}); err == nil {
 			t.Fatal("expected connector failure")
 		}
 	})
+	t.Run("begin failure", func(t *testing.T) {
+		store := storeWithConnection(&fakeDatabaseConnection{beginErr: errors.New("begin")})
+		if err := store.CompleteRunnerLifecycleJob(ctx, completion, time.Time{}); err == nil {
+			t.Fatal("expected begin failure")
+		}
+	})
+	t.Run("commit failure", func(t *testing.T) {
+		store := storeWithConnection(&fakeDatabaseConnection{transaction: &fakeDatabaseTransaction{commitErr: errors.New("commit")}})
+		if err := store.CompleteRunnerLifecycleJob(ctx, completion, time.Time{}); err == nil {
+			t.Fatal("expected commit failure")
+		}
+	})
+}
+
+func TestClusterCompletionTransactionCoverage(t *testing.T) {
+	ctx := context.Background()
+	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner-42"}
+	completion := scaler.JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerIdentity: identity}
 	t.Run("invalid transaction completion", func(t *testing.T) {
-		if err := completeJobInTransaction(ctx, (&fakeDatabaseTransaction{}).databaseTransaction(), JobCompletion{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
+		if err := completeRunnerLifecycleJobInTransaction(ctx, (&fakeDatabaseTransaction{}).databaseTransaction(), scaler.JobCompletion{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -226,15 +191,21 @@ func TestClusterCompletionCoverage(t *testing.T) {
 func TestClusterCompletionDeleteAndConfirmationCoverage(t *testing.T) {
 	ctx := context.Background()
 	identity := scaler.RunnerIdentity{RequestID: 42, RunnerName: "runner-42"}
-	completion := JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerIdentity: identity}
+	completion := scaler.JobCompletion{ScaleSet: "linux", Repository: "repo", RunnerIdentity: identity}
 	t.Run("demand delete failure", func(t *testing.T) {
 		transaction := (&fakeDatabaseTransaction{execErrors: []error{nil, errors.New("delete")}}).databaseTransaction()
 		if err := completeClusterRequestDemand(ctx, transaction, completion); err == nil {
 			t.Fatal("expected demand delete failure")
 		}
 	})
-	t.Run("invalid libvirt confirmation", func(t *testing.T) {
-		if err := (&Store{}).ConfirmLibvirtReaped(ctx, LibvirtRunnerLifecycle{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
+	t.Run("assignment update failure", func(t *testing.T) {
+		transaction := (&fakeDatabaseTransaction{execErrors: []error{errors.New("update")}}).databaseTransaction()
+		if err := completeClusterRequestDemand(ctx, transaction, completion); err == nil {
+			t.Fatal("expected assignment update failure")
+		}
+	})
+	t.Run("invalid internal confirmation", func(t *testing.T) {
+		if err := confirmClusterRunnerReapedInTransaction(ctx, (&fakeDatabaseTransaction{}).databaseTransaction(), scaler.RunnerLifecycle{}); !errors.Is(err, scaler.ErrInvalidRunnerIdentity) {
 			t.Fatalf("error = %v", err)
 		}
 	})

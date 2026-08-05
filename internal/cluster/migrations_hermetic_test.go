@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -128,7 +129,7 @@ func TestMigrationStatusReportsEmptyZeroAndCurrentSchemas(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 7 {
+			if status.Current != test.wantCurrent || status.CompatibilityFloor != test.wantFloor || status.Target != 10 {
 				t.Fatalf("migration status = %#v", status)
 			}
 		})
@@ -261,8 +262,90 @@ func TestNewMigrationExecutorRequiresPostgreSQLConnectionAndLoadsCatalog(t *test
 		t.Fatal("expected concrete PostgreSQL migration connection requirement")
 	}
 	executor, err := store.newMigrationExecutor(context.Background(), &postgreSQLLeaderConnection{})
-	if err != nil || executor.target != 7 {
+	if err != nil || executor.target != 10 {
 		t.Fatalf("migration executor = %#v, %v", executor, err)
+	}
+}
+
+func TestMigrationEightFreshInstall(t *testing.T) {
+	fresh := &assignmentMigrationFake{}
+	mustMigrateAssignmentModel(t, fresh)
+	if fresh.version != 8 {
+		t.Fatalf("fresh schema version = %d", fresh.version)
+	}
+}
+
+func TestMigrationEightRoundTripPreservesRepresentativeState(t *testing.T) {
+	model := &assignmentMigrationFake{
+		version:     7,
+		assignments: []string{"job_available:42:running", "assigned_count:0:ready"},
+		lifecycles:  []string{"docker:busy", "libvirt:waiting_for_job"},
+	}
+	wantedAssignments := append([]string(nil), model.assignments...)
+	wantedLifecycles := append([]string(nil), model.lifecycles...)
+	mustMigrateAssignmentModel(t, model)
+	mustRollBackAssignmentModel(t, model)
+	mustMigrateAssignmentModel(t, model)
+	if model.version != 8 || !slices.Equal(model.assignments, wantedAssignments) ||
+		!slices.Equal(model.lifecycles, wantedLifecycles) {
+		t.Fatalf("round-trip state = version %d assignments %#v lifecycles %#v",
+			model.version, model.assignments, model.lifecycles)
+	}
+}
+
+func mustMigrateAssignmentModel(t *testing.T, model *assignmentMigrationFake) {
+	t.Helper()
+	connection := &fakeDatabaseConnection{rowResults: []fakeRow{int32Row(t, 8)}}
+	if err := storeWithMigrationExecutor(connection, model.executor(), nil).Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRollBackAssignmentModel(t *testing.T, model *assignmentMigrationFake) {
+	t.Helper()
+	connection := &fakeDatabaseConnection{rowResults: []fakeRow{booleanRow(t, true), booleanRow(t, false)}}
+	store := storeWithMigrationExecutor(connection, model.executor(), nil)
+	if err := store.MigrateDown(context.Background(), 7, time.Unix(100, 0), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationEightInvalidDataRefusalLeavesVersionSevenState(t *testing.T) {
+	model := &assignmentMigrationFake{
+		version: 7, invalid: true,
+		assignments: []string{"contradictory-source"},
+		lifecycles:  []string{"retained-history"},
+	}
+	err := storeWithMigrationExecutor(&fakeDatabaseConnection{}, model.executor(), nil).Migrate(context.Background())
+	if err == nil {
+		t.Fatal("expected migration preflight refusal")
+	}
+	if model.version != 7 || len(model.assignments) != 1 || len(model.lifecycles) != 1 {
+		t.Fatalf("refused migration mutated state: %#v", model)
+	}
+}
+
+type assignmentMigrationFake struct {
+	version     int32
+	invalid     bool
+	assignments []string
+	lifecycles  []string
+}
+
+func (model *assignmentMigrationFake) executor() *migrationExecutor {
+	return &migrationExecutor{
+		currentVersion: func(context.Context) (int32, error) { return model.version, nil },
+		migrateTo: func(_ context.Context, target int32) error {
+			if target == 8 && model.invalid {
+				return errors.New("aggregate preflight refused normalization")
+			}
+			if target != 7 && target != 8 {
+				return errors.New("unsupported fake migration target")
+			}
+			model.version = target
+			return nil
+		},
+		target: 8,
 	}
 }
 

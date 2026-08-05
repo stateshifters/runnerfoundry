@@ -104,17 +104,16 @@ func assignOldestInTransaction(
 
 func persistAssignment(ctx context.Context, transaction *databaseTransaction, obligation oldestDemand) error {
 	assignment := obligation.assignment
-	insertStatement := `INSERT INTO scaler_assignments (demand_id, node_id, state)
-		VALUES ($1, $2, 'reserved') RETURNING assignment_id`
+	insertStatement := `INSERT INTO scaler_assignments (demand_id, node_id, state, source)
+		VALUES ($1, $2, 'reserved', 'job_available') RETURNING assignment_id`
 	insertArguments := []any{obligation.demandID, assignment.NodeID}
 	assignment.State = AssignmentReserved
 	if assignment.IdentityFree {
 		insertStatement = `INSERT INTO scaler_assignments
-			(demand_id, assigned_observation_id, node_id, installation_id,
-			 github_scale_set_id, controller_epoch, state)
-			VALUES ($1, $2, $3, $4, $5, $6, 'ready') RETURNING assignment_id`
-		insertArguments = []any{obligation.demandID, obligation.assignedObservationID, assignment.NodeID,
-			assignment.InstallationID, assignment.GitHubScaleSetID, assignment.ControllerEpoch}
+			(demand_id, node_id, installation_id, github_scale_set_id, state, source)
+			VALUES ($1, $2, $3, $4, 'ready', 'assigned_count') RETURNING assignment_id`
+		insertArguments = []any{obligation.demandID, assignment.NodeID,
+			assignment.InstallationID, assignment.GitHubScaleSetID}
 		assignment.State = AssignmentReady
 	}
 	if err := transaction.QueryRow(ctx, insertStatement, insertArguments...).Scan(&assignment.ID); err != nil {
@@ -156,7 +155,7 @@ const loadOldestDemandSQL = `
 	LEFT JOIN scaler_registrations registration
 	  ON registration.app_id = assigned.app_id AND registration.repository_url = demand.repository
 	 AND registration.scale_set_name = demand.scale_set
-	WHERE demand.scale_set = $1 AND demand.next_attempt_at <= $2
+	WHERE demand.scale_set = $1 AND demand.blocked_reason IS NULL AND demand.next_attempt_at <= $2
 	  AND (demand.source = 'job_available' OR (
 	      assigned.controller_epoch = demand.controller_epoch
 	      AND control.controller_epoch = demand.controller_epoch
@@ -167,13 +166,6 @@ const loadOldestDemandSQL = `
 	      JOIN scaler_assignments lifecycle_assignment
 	        ON lifecycle_assignment.assignment_id = lifecycle.assignment_id
 	      WHERE lifecycle_assignment.demand_id = demand.demand_id
-	  )
-	  AND NOT EXISTS (
-	      SELECT 1 FROM scaler_libvirt_runner_lifecycle lifecycle
-	      WHERE lifecycle.scale_set = demand.scale_set
-	        AND lifecycle.repository = demand.repository
-	        AND lifecycle.request_id = COALESCE(demand.request_id, 0)
-	        AND lifecycle.reap_requested
 	  )
 	ORDER BY demand.queue_time, demand.observation_id
 	LIMIT 1
@@ -222,10 +214,8 @@ func selectContributor(
 		      SELECT COUNT(*)
 		      FROM scaler_assignments assignment
 		      LEFT JOIN scaler_demand assignment_demand ON assignment_demand.demand_id = assignment.demand_id
-		      LEFT JOIN scaler_assigned_job_observations assigned
-		        ON assigned.assigned_observation_id = assignment.assigned_observation_id
 		      WHERE assignment.node_id = contribution.node_id
-		        AND COALESCE(assignment_demand.scale_set, assigned.scale_set) = contribution.scale_set
+		        AND assignment_demand.scale_set = contribution.scale_set
 		        AND assignment.state <> 'complete'
 		  ) + (
 		      SELECT COUNT(*)

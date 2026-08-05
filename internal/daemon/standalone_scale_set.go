@@ -196,8 +196,11 @@ func registerCoordinatedRepository(
 		ScaleSet:      lifecycleConfig.ScaleSetConfig.Name,
 	}
 	lifecycleConfig.Coordinator.AddRepository(lifecycleConfig.RepositoryURL, worker)
-	if _, err := lifecycleConfig.Coordinator.ObserveAssignedCapacity(
-		ctx, lifecycleConfig.RepositoryURL, statistics.TotalAssignedJobs, time.Now().UTC(),
+	if _, err := lifecycleConfig.Coordinator.ObserveAssignedCapacityStatistics(
+		ctx, lifecycleConfig.RepositoryURL, scaler.AssignedCapacityStatistics{
+			AssignedJobs: statistics.TotalAssignedJobs, RunningJobs: statistics.TotalRunningJobs,
+			RegisteredRunners: statistics.TotalRegisteredRunners, BusyRunners: statistics.TotalBusyRunners,
+		}, time.Now().UTC(),
 	); err != nil {
 		lifecycleConfig.Coordinator.DetachRepository(lifecycleConfig.RepositoryURL)
 		return fmt.Errorf("persist initial assigned runner capacity: %w", err)
@@ -371,45 +374,6 @@ func reapPendingRunner(ctx context.Context, lifecycleConfig coordinatedLifecycle
 func runnerLogAttributes(runner scaler.RunnerLifecycle) []slog.Attr {
 	return []slog.Attr{slog.String("repository", runner.Repository), slog.String("scaleSet", runner.ScaleSet),
 		slog.String("runner", runner.RunnerName), slog.String("reason", runner.ReapReason)}
-}
-
-func runLibvirtReaper(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig, ticks <-chan time.Time) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticks:
-			reapPendingLibvirtRunners(ctx, lifecycleConfig)
-		}
-	}
-}
-
-func reapPendingLibvirtRunners(ctx context.Context, lifecycleConfig coordinatedLifecycleConfig) {
-	pending, err := lifecycleConfig.Coordinator.PendingLibvirtReaps(ctx, lifecycleConfig.RepositoryURL)
-	if err != nil {
-		logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap_load", err,
-			slog.String("repository", lifecycleConfig.RepositoryURL), slog.String("scaleSet", lifecycleConfig.ScaleSetConfig.Name))
-		return
-	}
-	for _, runner := range pending {
-		reapCtx, cancelReap := context.WithTimeout(ctx, libvirtReapTimeout)
-		reaped, reapErr := lifecycleConfig.Reconciler.ReapRunner(reapCtx, runner.RunnerName)
-		cancelReap()
-		if reapErr != nil {
-			logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap", reapErr,
-				slog.String("repository", runner.Repository), slog.String("scaleSet", runner.ScaleSet),
-				slog.String("runner", runner.RunnerName))
-			continue
-		}
-		if !reaped {
-			continue
-		}
-		if confirmErr := lifecycleConfig.Coordinator.ConfirmLibvirtReaped(ctx, runner); confirmErr != nil {
-			logActionFailure(ctx, lifecycleConfig.Logger, "libvirt_reap_confirm", confirmErr,
-				slog.String("repository", runner.Repository), slog.String("scaleSet", runner.ScaleSet),
-				slog.String("runner", runner.RunnerName))
-		}
-	}
 }
 
 func coordinatedScaleSetLifecycle(

@@ -95,47 +95,6 @@ func TestClusteredExecutorRetainsProviderIndependentReapsAtBoundaries(t *testing
 	}
 }
 
-func TestClusteredExecutorRetainsReapUntilSecondInspectionConfirmsAbsence(t *testing.T) {
-	configured := clusteredConfig(t)
-	configured.ScaleSets[0].Docker = nil
-	configured.ScaleSets[0].Libvirt = &config.LibvirtConfig{ConnectionURI: "test", DomainXMLTemplate: "test"}
-	runner := cluster.LibvirtRunnerLifecycle{
-		NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2",
-	}
-	state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
-	instance := scaler.RunnerInstance{ID: "domain", RunnerName: runner.RunnerName, State: scaler.RunnerStateRunning}
-	provider := &clusterReapingProvider{lists: [][]scaler.RunnerInstance{{instance}, {instance}, nil}}
-	daemon := clusteredDaemonForTest(state)
-	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
-	daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
-		return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: provider}}, nil
-	}
-
-	daemon.executeAssignments(context.Background())
-	if len(state.confirmedLibvirtReaps) != 0 || provider.destroyed != 1 {
-		t.Fatalf("first tick confirmations=%#v destroys=%d", state.confirmedLibvirtReaps, provider.destroyed)
-	}
-	daemon.executeAssignments(context.Background())
-	if len(state.confirmedLibvirtReaps) != 1 || state.confirmedLibvirtReaps[0] != runner {
-		t.Fatalf("second tick confirmations=%#v", state.confirmedLibvirtReaps)
-	}
-}
-
-func TestClusteredExecutorRetainsReapWhenLocalLibvirtConfigurationIsMissing(t *testing.T) {
-	configured := clusteredConfig(t)
-	runner := cluster.LibvirtRunnerLifecycle{
-		NodeID: "runner-host-1", ScaleSet: "missing", Repository: "repo", RequestID: 2, RunnerName: "missing-2",
-	}
-	state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
-	daemon := clusteredDaemonForTest(state)
-	daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
-
-	daemon.executeAssignments(context.Background())
-	if len(state.confirmedLibvirtReaps) != 0 {
-		t.Fatalf("missing configuration confirmed reaps %#v", state.confirmedLibvirtReaps)
-	}
-}
-
 type clusterReapingProvider struct {
 	lists     [][]scaler.RunnerInstance
 	destroyed int
@@ -152,51 +111,6 @@ func (provider *clusterReapingProvider) List(context.Context, string) ([]scaler.
 	instances := provider.lists[0]
 	provider.lists = provider.lists[1:]
 	return instances, nil
-}
-
-func TestClusteredExecutorRetainsReapsOnBoundaryFailures(t *testing.T) {
-	runClusterReapBoundaryFailure(t, "load", func(_ *clusteredDaemon, state *fakeClusterState) {
-		state.pendingLibvirtReapsErr = errors.New("load failed")
-	})
-	runClusterReapBoundaryFailure(t, "build", func(daemon *clusteredDaemon, _ *fakeClusterState) {
-		daemon.buildReconciler = func(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
-			return scaler.Reconciler{}, errors.New("build failed")
-		}
-	})
-	runClusterReapBoundaryFailure(t, "reap", func(daemon *clusteredDaemon, _ *fakeClusterState) {
-		daemon.buildReconciler = failingClusterReaperBuilder
-	})
-	runClusterReapBoundaryFailure(t, "confirm", func(daemon *clusteredDaemon, state *fakeClusterState) {
-		state.confirmLibvirtReapErr = errors.New("confirm failed")
-		daemon.buildReconciler = absentClusterReaperBuilder
-	})
-}
-
-func runClusterReapBoundaryFailure(
-	t *testing.T,
-	name string,
-	configure func(*clusteredDaemon, *fakeClusterState),
-) {
-	t.Helper()
-	t.Run(name, func(t *testing.T) {
-		runner := cluster.LibvirtRunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", RequestID: 2, RunnerName: "linux-2"}
-		state := &fakeClusterState{pendingLibvirtReaps: []cluster.LibvirtRunnerLifecycle{runner}}
-		daemon := clusteredDaemonForTest(state)
-		configured := clusteredConfig(t)
-		configured.ScaleSets[0].Docker = nil
-		configured.ScaleSets[0].Libvirt = &config.LibvirtConfig{}
-		daemon.nodeID, daemon.config, daemon.logger, daemon.assignments = "runner-host-1", configured, slog.Default(), state
-		configure(daemon, state)
-		daemon.executeAssignments(context.Background())
-	})
-}
-
-func failingClusterReaperBuilder(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
-	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{listErr: errors.New("list failed")}}}, nil
-}
-
-func absentClusterReaperBuilder(context.Context, string, config.ScaleSetConfig, scaleSetJITClient, int) (scaler.Reconciler, error) {
-	return scaler.Reconciler{ScaleSet: scaler.ScaleSetRuntime{Name: "linux", Provider: &clusterReapingProvider{}}}, nil
 }
 
 func (*clusterReapingProvider) Start(context.Context, scaler.RunnerStartRequest) error { return nil }
@@ -227,7 +141,7 @@ func clusteredAssignmentExecutorFixture(t *testing.T) (*clusteredDaemon, *fakeCl
 	daemonUnderTest.credentials = testAppCredentials(t)
 	daemonUnderTest.logger = slog.Default()
 	daemonUnderTest.nodes = state
-	daemonUnderTest.assignments = state
+	daemonUnderTest.assignments = newLifecycleClusterState(state)
 	daemonUnderTest.tryLeader = fakeTryLeader(state)
 	daemonUnderTest.waitForLeader = fakeWaitForLeader(state)
 	return daemonUnderTest, state, provider

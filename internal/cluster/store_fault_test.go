@@ -625,13 +625,6 @@ func TestAssignmentTransitionRejectsMissingOrStaleRows(t *testing.T) {
 	}
 }
 
-func storeWithConnection(connection *fakeDatabaseConnection) *Store {
-	store := NewStore(postgresconfig.Settings{})
-	store.connector = func(context.Context) (*databaseConnection, error) { return connection.databaseConnection(), nil }
-	store.directConnector = func(context.Context) (leaderConnection, error) { return connection, nil }
-	return store
-}
-
 func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnection {
 	return &databaseConnection{
 		begin:    connection.Begin,
@@ -643,6 +636,7 @@ func (connection *fakeDatabaseConnection) databaseConnection() *databaseConnecti
 }
 
 type fakeDatabaseConnection struct {
+	beginHook        func() (*databaseTransaction, error)
 	transaction      *fakeDatabaseTransaction
 	beginErr         error
 	execErrors       []error
@@ -663,6 +657,9 @@ type fakeDatabaseConnection struct {
 }
 
 func (connection *fakeDatabaseConnection) Begin(context.Context) (*databaseTransaction, error) {
+	if connection.beginHook != nil {
+		return connection.beginHook()
+	}
 	if connection.beginErr != nil {
 		return nil, connection.beginErr
 	}
@@ -695,25 +692,6 @@ func (connection *fakeDatabaseConnection) Exec(_ context.Context, statement stri
 func (connection *fakeDatabaseConnection) IsClosed() bool { return connection.closed }
 
 func (connection *fakeDatabaseConnection) Ping(context.Context) error { return connection.pingErr }
-
-func (connection *fakeDatabaseConnection) Query(context.Context, string, ...any) (*databaseRows, error) {
-	queryErr := connection.queryErr
-	if len(connection.queryErrors) > 0 {
-		queryErr = nextScriptedError(&connection.queryErrors)
-	}
-	if queryErr != nil {
-		return nil, queryErr
-	}
-	if len(connection.rowsResults) > 0 {
-		rows := connection.rowsResults[0]
-		connection.rowsResults = connection.rowsResults[1:]
-		return newDatabaseRows(rows), nil
-	}
-	if connection.rowsResult == nil {
-		connection.rowsResult = &fakeDatabaseRows{}
-	}
-	return newDatabaseRows(connection.rowsResult), nil
-}
 
 func (connection *fakeDatabaseConnection) QueryRow(_ context.Context, statement string, arguments ...any) databaseRow {
 	connection.queries = append(connection.queries, fakeDatabaseExecution{

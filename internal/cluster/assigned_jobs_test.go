@@ -73,7 +73,6 @@ func committedAssignedObservationTransaction(t *testing.T, oldestRunnableAt time
 			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("UPDATE 0"),
-			pgconn.NewCommandTag("UPDATE 0"),
 			pgconn.NewCommandTag("INSERT 0 2"),
 		},
 		rowResults: []fakeRow{
@@ -116,9 +115,34 @@ func TestObserveAssignedJobsCancelsNewestUnclaimedObligations(t *testing.T) {
 	if !strings.Contains(transaction.executions[3].statement, "UPDATE scaler_demand") {
 		t.Fatalf("newest cancellation ran before queued-obligation adoption: %#v", transaction.executions)
 	}
-	if !strings.Contains(lastExecution.statement, "ORDER BY demand.queue_time DESC, demand.observation_id DESC") ||
+	if !strings.Contains(lastExecution.statement, "demand.queue_time DESC, demand.observation_id DESC") ||
 		lastExecution.arguments[3] != 3 {
 		t.Fatalf("assigned obligation cancellation = %#v", lastExecution)
+	}
+}
+
+func TestObserveAssignedJobsBlocksConclusiveStrandedCapacity(t *testing.T) {
+	transaction := committedAssignedObservationTransaction(t, time.Unix(90, 0).UTC())
+	transaction.execTags = append(transaction.execTags, pgconn.NewCommandTag("UPDATE 1"))
+	observation := assignedObservationFixture()
+	observation.AssignedJobs = 2
+	observation.BusyRunners = 1
+
+	result, err := storeWithConnection(&fakeDatabaseConnection{transaction: transaction}).ObserveAssignedJobs(
+		context.Background(), observation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.QueueUpdate.AssignedObligations.Block != 1 {
+		t.Fatalf("stranded reconciliation = %#v", result.QueueUpdate.AssignedObligations)
+	}
+	lastExecution := transaction.executions[len(transaction.executions)-1]
+	if !strings.Contains(lastExecution.statement, "blocked_reason = 'stranded_upstream_assignment'") {
+		t.Fatalf("stranded obligation was not blocked: %s", lastExecution.statement)
+	}
+	if transaction.executions[5].arguments[4] != "stranded_upstream_assignment" {
+		t.Fatalf("stranded runner reap = %#v", transaction.executions[5])
 	}
 }
 
@@ -156,7 +180,7 @@ func findQueuedObligationAdoption(t *testing.T, executions []fakeDatabaseExecuti
 func assertQueuedObligationAdoption(t *testing.T, adoption fakeDatabaseExecution, expectedEpoch int64) {
 	t.Helper()
 	for _, required := range []string{
-		"SET controller_epoch = $4", "NOT EXISTS", "assignment.controller_epoch <> $4", "demand.app_id = $1",
+		"SET controller_epoch = $4", "NOT EXISTS", "demand.controller_epoch <> $4", "demand.app_id = $1",
 		"demand.repository = $2", "demand.scale_set = $3",
 	} {
 		if !strings.Contains(adoption.statement, required) {
@@ -241,14 +265,14 @@ func assertAssignedCapacity(t *testing.T, activeRunners int, availableCapacity i
 
 func assertAssignedObservationTransitions(t *testing.T, transaction *fakeDatabaseTransaction) {
 	t.Helper()
-	if len(transaction.executions) != 8 {
-		t.Fatalf("assigned observation executions = %d, want 8", len(transaction.executions))
+	if len(transaction.executions) != 7 {
+		t.Fatalf("assigned observation executions = %d, want 7", len(transaction.executions))
 	}
 	if !strings.Contains(transaction.executions[1].statement, "SET controller_epoch = $4") ||
 		!strings.Contains(transaction.executions[1].statement, "EXISTS") {
 		t.Fatalf("assigned epoch rollover did not adopt lifecycle-backed work: %s", transaction.executions[1].statement)
 	}
-	if !strings.Contains(transaction.executions[2].statement, "assignment.controller_epoch <> $4") ||
+	if !strings.Contains(transaction.executions[2].statement, "demand.controller_epoch <> $4") ||
 		!strings.Contains(transaction.executions[2].statement, "NOT EXISTS") {
 		t.Fatalf("assigned epoch rollover did not fence only unstarted work: %s", transaction.executions[2].statement)
 	}

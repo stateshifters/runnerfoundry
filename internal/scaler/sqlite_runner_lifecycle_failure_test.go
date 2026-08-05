@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -30,33 +31,23 @@ var sqliteRunnerCompletionFailureOperations = []func(demandStoreMock) error{
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(f.mock)
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
 		f.mock.ExpectRollback()
 		return f.store.CompleteRunnerLifecycleJob(context.Background(), sqliteRunnerCompletion, time.Now())
 	},
 	func(fixture demandStoreMock) error {
 		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(fixture.mock)
 		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
-		fixture.mock.ExpectRollback()
-		return fixture.store.CompleteRunnerLifecycleJob(context.Background(), sqliteRunnerCompletion, time.Now())
-	},
-	func(fixture demandStoreMock) error {
-		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
-		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("failed"))
 		fixture.mock.ExpectRollback()
 		return fixture.store.CompleteRunnerLifecycleJob(context.Background(), sqliteRunnerCompletion, time.Now())
 	},
 	func(fixture demandStoreMock) error {
 		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(fixture.mock)
 		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnError(errors.New("failed"))
 		fixture.mock.ExpectRollback()
@@ -64,9 +55,8 @@ var sqliteRunnerCompletionFailureOperations = []func(demandStoreMock) error{
 	},
 	func(fixture demandStoreMock) error {
 		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(fixture.mock)
 		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectCommit().WillReturnError(errors.New("failed"))
@@ -79,35 +69,39 @@ func TestSQLiteRunnerLifecycleCompletionReportsBoundaryFailures(t *testing.T) {
 }
 
 func TestSQLiteRunnerRegistrationReportsBoundaryFailures(t *testing.T) {
-	runner := genericSQLiteRunner()
-	operations := []func(demandStoreMock) error{
-		func(f demandStoreMock) error {
-			f.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnError(errors.New("failed"))
-			return f.store.RegisterRunner(context.Background(), runner)
-		},
-		func(fixture demandStoreMock) error {
-			fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(failingSQLResult{})
-			return fixture.store.RegisterRunner(context.Background(), runner)
-		},
-		func(fixture demandStoreMock) error {
-			fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
-			fixture.mock.ExpectQuery("SELECT provider").WillReturnError(errors.New("failed"))
-			return fixture.store.RegisterRunner(context.Background(), runner)
-		},
-		func(f demandStoreMock) error {
-			f.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
-			f.mock.ExpectQuery("SELECT provider").WillReturnRows(sqlmock.NewRows([]string{"provider", "request_id", "assignment_id", "phase"}).AddRow("libvirt", 42, 0, "provisioning"))
-			return f.store.RegisterRunner(context.Background(), runner)
-		},
-		func(f demandStoreMock) error {
-			candidate := runner
-			candidate.Provider = RunnerProviderLibvirt
-			f.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-			f.mock.ExpectExec("INSERT INTO libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
-			return f.store.RegisterRunner(context.Background(), candidate)
-		},
-	}
-	assertSQLiteLifecycleFailures(t, operations)
+	assertSQLiteLifecycleFailures(t, sqliteRunnerRegistrationFailureOperations)
+}
+
+var sqliteRunnerRegistrationFailureOperations = []func(demandStoreMock) error{
+	func(fixture demandStoreMock) error {
+		runner := genericSQLiteRunner()
+		fixture.mock.ExpectBegin().WillReturnError(errors.New("failed"))
+		return fixture.store.RegisterRunner(context.Background(), runner)
+	},
+	func(fixture demandStoreMock) error {
+		runner := genericSQLiteRunner()
+		fixture.mock.ExpectBegin()
+		fixture.mock.ExpectQuery("SELECT provider").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectRollback()
+		return fixture.store.RegisterRunner(context.Background(), runner)
+	},
+	func(fixture demandStoreMock) error {
+		runner := genericSQLiteRunner()
+		fixture.mock.ExpectBegin()
+		fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
+		fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectRollback()
+		return fixture.store.RegisterRunner(context.Background(), runner)
+	},
+	func(fixture demandStoreMock) error {
+		runner := genericSQLiteRunner()
+		fixture.mock.ExpectBegin()
+		fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
+		fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectRollback()
+		return fixture.store.RegisterRunner(context.Background(), runner)
+	},
 }
 
 var sqliteRunnerSimpleTransitionFailures = []func(demandStoreMock) error{
@@ -127,14 +121,14 @@ var sqliteRunnerSimpleTransitionFailures = []func(demandStoreMock) error{
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(f.mock)
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
 		f.mock.ExpectRollback()
 		return f.store.MarkRunnerBusy(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "runner"}, 1, time.Now())
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(f.mock)
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(failingSQLResult{})
 		f.mock.ExpectRollback()
 		return f.store.MarkRunnerBusy(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "runner"}, 1, time.Now())
@@ -147,25 +141,17 @@ var sqliteRunnerSimpleTransitionFailures = []func(demandStoreMock) error{
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(f.mock)
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
 		f.mock.ExpectRollback()
 		return f.store.RequestRunnerReap(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "runner"}, "reason", time.Now())
 	},
 	func(f demandStoreMock) error {
 		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(f.mock)
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(failingSQLResult{})
 		f.mock.ExpectRollback()
 		return f.store.RequestRunnerReap(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "runner"}, "reason", time.Now())
-	},
-	func(fixture demandStoreMock) error {
-		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
-		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
-		fixture.mock.ExpectRollback()
-		return fixture.store.RequestRunnerReap(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "runner"}, "reason", time.Now())
 	},
 }
 
@@ -175,34 +161,38 @@ func TestSQLiteRunnerSimpleTransitionsReportBoundaryFailures(t *testing.T) {
 
 var sqliteRunnerBulkReapFailures = []func(demandStoreMock) error{
 	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
+		f.mock.ExpectRollback()
 		_, err := f.store.RequestExpiredRunnerReaps(context.Background(), "linux", "repo", time.Now(), time.Now())
 		return err
 	},
 	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(failingSQLResult{})
+		f.mock.ExpectRollback()
 		_, err := f.store.RequestExpiredRunnerReaps(context.Background(), "linux", "repo", time.Now(), time.Now())
 		return err
 	},
 	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		f.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
+		f.mock.ExpectExec("UPDATE demand").WillReturnError(errors.New("failed"))
+		f.mock.ExpectRollback()
 		_, err := f.store.RequestExpiredRunnerReaps(context.Background(), "linux", "repo", time.Now(), time.Now())
 		return err
 	},
 	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(errors.New("failed"))
+		f.mock.ExpectRollback()
 		_, err := f.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", -1, "reason", time.Now())
 		return err
 	},
 	func(f demandStoreMock) error {
+		f.mock.ExpectBegin()
 		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(failingSQLResult{})
-		_, err := f.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", 0, "reason", time.Now())
-		return err
-	},
-	func(f demandStoreMock) error {
-		f.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		f.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
+		f.mock.ExpectRollback()
 		_, err := f.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", 0, "reason", time.Now())
 		return err
 	},
@@ -282,43 +272,33 @@ func TestSQLiteRunnerLifecycleQueriesReportCloseFailures(t *testing.T) {
 }
 
 var sqliteConfirmRunnerReapedFailures = []func(demandStoreMock) error{
-	func(f demandStoreMock) error {
-		f.mock.ExpectBegin().WillReturnError(errors.New("failed"))
-		return f.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
-	},
-	func(f demandStoreMock) error {
-		f.mock.ExpectBegin()
-		f.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnError(errors.New("failed"))
-		f.mock.ExpectRollback()
-		return f.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
-	},
-	func(f demandStoreMock) error {
-		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
-		f.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnError(errors.New("failed"))
-		f.mock.ExpectRollback()
-		return f.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
-	},
-	func(f demandStoreMock) error {
-		f.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(f.mock, "runner_lifecycle")
-		f.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnResult(failingSQLResult{})
-		f.mock.ExpectRollback()
-		return f.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
+	func(fixture demandStoreMock) error {
+		fixture.mock.ExpectBegin().WillReturnError(errors.New("failed"))
+		return fixture.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
 	},
 	func(fixture demandStoreMock) error {
-		candidate := genericSQLiteRunner()
-		candidate.Provider = RunnerProviderLibvirt
 		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
-		fixture.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("DELETE FROM libvirt_runner_lifecycle").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnError(errors.New("failed"))
 		fixture.mock.ExpectRollback()
-		return fixture.store.ConfirmRunnerReaped(context.Background(), candidate)
+		return fixture.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
 	},
 	func(fixture demandStoreMock) error {
 		fixture.mock.ExpectBegin()
-		expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(fixture.mock)
+		fixture.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnError(errors.New("failed"))
+		fixture.mock.ExpectRollback()
+		return fixture.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
+	},
+	func(fixture demandStoreMock) error {
+		fixture.mock.ExpectBegin()
+		expectSQLiteIdentityMatch(fixture.mock)
+		fixture.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnResult(failingSQLResult{})
+		fixture.mock.ExpectRollback()
+		return fixture.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())
+	},
+	func(fixture demandStoreMock) error {
+		fixture.mock.ExpectBegin()
+		expectSQLiteIdentityMatch(fixture.mock)
 		fixture.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 		fixture.mock.ExpectCommit().WillReturnError(errors.New("failed"))
 		return fixture.store.ConfirmRunnerReaped(context.Background(), genericSQLiteRunner())

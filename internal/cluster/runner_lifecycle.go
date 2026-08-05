@@ -9,44 +9,10 @@ import (
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-const registerClusterRunnerLifecycleSQL = `
-	INSERT INTO scaler_runner_lifecycle (
-		node_id, scale_set, repository, provider, runner_name, request_id, assignment_id,
-		installation_id, github_scale_set_id, github_runner_id, phase, created_at, updated_at
-	)
-	SELECT assignment.node_id, COALESCE(demand.scale_set, observation.scale_set),
-	       COALESCE(demand.repository, observation.repository_url), $3, $4,
-	       COALESCE(demand.request_id, 0),
-	       assignment.assignment_id, $5, $6, $7, 'provisioning', $8, $8
-	FROM scaler_assignments assignment
-	LEFT JOIN scaler_demand demand ON demand.demand_id = assignment.demand_id
-	LEFT JOIN scaler_assigned_job_observations observation
-	  ON observation.assigned_observation_id = assignment.assigned_observation_id
-	WHERE assignment.assignment_id = $1 AND assignment.node_id = $2 AND assignment.state <> 'complete'
-	  AND (assignment.assigned_observation_id IS NULL OR EXISTS (
-	      SELECT 1 FROM scaler_repository_controls control
-	      WHERE control.app_id = observation.app_id
-	        AND control.controller_epoch = assignment.controller_epoch
-	        AND observation.controller_epoch = assignment.controller_epoch
-	  ))
-	ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`
-
-const verifyClusterRunnerLifecycleSQL = `SELECT EXISTS (
-	SELECT 1 FROM scaler_runner_lifecycle
-	WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4
-	  AND provider = $5 AND request_id = $6 AND assignment_id = $7 AND phase <> 'reap_pending'
-)`
-
 const expireClusterRunnersSQL = `UPDATE scaler_runner_lifecycle
 	SET phase = 'reap_pending', reap_reason = 'job_start_timeout', updated_at = $1
 	WHERE scale_set = $2 AND ($3 = '' OR repository = $3) AND phase = 'waiting_for_job'
 	  AND waiting_since <= $4`
-
-const mirrorExpiredClusterRunnersSQL = `UPDATE scaler_libvirt_runner_lifecycle legacy SET reap_requested = true
-	WHERE EXISTS (SELECT 1 FROM scaler_runner_lifecycle lifecycle
-		WHERE lifecycle.node_id = legacy.node_id AND lifecycle.scale_set = legacy.scale_set
-		  AND lifecycle.repository = legacy.repository AND lifecycle.runner_name = legacy.runner_name
-		  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = 'job_start_timeout')`
 
 const releaseExpiredClusterAssignmentsSQL = `UPDATE scaler_assignments SET state = 'complete'
 	WHERE assignment_id IN (
@@ -55,51 +21,17 @@ const releaseExpiredClusterAssignmentsSQL = `UPDATE scaler_assignments SET state
 		  AND phase = 'reap_pending' AND reap_reason = 'job_start_timeout' AND updated_at = $3
 	) AND state <> 'complete'`
 
-func (store *Store) RegisterRunner(ctx context.Context, runner scaler.RunnerLifecycle) (resultErr error) {
-	connection, err := store.connector(ctx)
-	if err != nil {
-		return err
-	}
-	defer finishConnection(ctx, connection, &resultErr)
-	commandTag, err := connection.Exec(ctx, registerClusterRunnerLifecycleSQL,
-		runner.AssignmentID, runner.NodeID, runner.Provider, runner.RunnerName,
-		runner.InstallationID, runner.GitHubScaleSetID, runner.GitHubRunnerID, runner.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("register clustered runner lifecycle: %w", err)
-	}
-	if commandTag.RowsAffected() == 1 {
-		return store.mirrorClusterLibvirtRegistration(ctx, connection, runner)
-	}
-	var matches bool
-	if err = connection.QueryRow(ctx, verifyClusterRunnerLifecycleSQL,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RunnerName,
-		runner.Provider, runner.RequestID, runner.AssignmentID).Scan(&matches); err != nil {
-		return fmt.Errorf("verify clustered runner lifecycle: %w", err)
-	}
-	if !matches {
-		return &AssignmentTransitionError{AssignmentID: AssignmentID(runner.AssignmentID), Expected: AssignmentStarting}
-	}
-	return nil
-}
-
-func (store *Store) mirrorClusterLibvirtRegistration(
-	ctx context.Context,
-	connection *databaseConnection,
-	runner scaler.RunnerLifecycle,
-) error {
-	if runner.Provider != scaler.RunnerProviderLibvirt {
-		return nil
-	}
-	_, err := connection.Exec(ctx, `INSERT INTO scaler_libvirt_runner_lifecycle
-		(node_id, scale_set, repository, request_id, runner_name, reap_requested)
-		VALUES($1, $2, $3, $4, $5, false)
-		ON CONFLICT (node_id, scale_set, repository, runner_name) DO NOTHING`,
-		runner.NodeID, runner.ScaleSet, runner.Repository, runner.RequestID, runner.RunnerName)
-	if err != nil {
-		return fmt.Errorf("mirror clustered libvirt lifecycle: %w", err)
-	}
-	return nil
-}
+const deferExpiredClusterDemandsSQL = `UPDATE scaler_demand demand
+	SET attempt = demand.attempt + 1,
+	    next_attempt_at = CASE demand.attempt
+	        WHEN 0 THEN $4 WHEN 1 THEN $5 WHEN 2 THEN $6 WHEN 3 THEN $7 ELSE $8 END
+	FROM scaler_assignments assignment
+	JOIN scaler_runner_lifecycle lifecycle ON lifecycle.assignment_id = assignment.assignment_id
+	WHERE assignment.demand_id = demand.demand_id
+	  AND demand.source = 'assigned_count' AND demand.blocked_reason IS NULL
+	  AND lifecycle.scale_set = $1 AND ($2 = '' OR lifecycle.repository = $2)
+	  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = 'job_start_timeout'
+	  AND lifecycle.updated_at = $3`
 
 func (store *Store) ConfirmRunnerWaiting(
 	ctx context.Context,
@@ -163,19 +95,18 @@ func expireClusterRunnersInTransaction(
 		return 0, fmt.Errorf("request clustered expired runner reaps: %w", err)
 	}
 	changed := int(commandTag.RowsAffected())
-	if _, err = transaction.Exec(ctx, mirrorExpiredClusterRunnersSQL); err != nil {
-		return 0, fmt.Errorf("mirror clustered expired libvirt runner reaps: %w", err)
+	if _, err = transaction.Exec(ctx, deferExpiredClusterDemandsSQL, scaleSet, repository, requestedAt,
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(0)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(1)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(2)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(3)),
+		requestedAt.Add(scaler.CapacityObligationRetryDelay(4))); err != nil {
+		return 0, fmt.Errorf("defer expired runner capacity obligations: %w", err)
 	}
 	if _, err = transaction.Exec(ctx, releaseExpiredClusterAssignmentsSQL, scaleSet, repository, requestedAt); err != nil {
 		return 0, fmt.Errorf("release expired runner assignments: %w", err)
 	}
 	return changed, nil
-}
-
-func (*Store) RequestExcessWaitingRunnerReaps(
-	context.Context, string, string, int, string, time.Time,
-) (int, error) {
-	return 0, nil
 }
 
 func (store *Store) PendingRunnerReaps(
@@ -262,10 +193,8 @@ func scanClusterRunnerLifecycle(rows *databaseRows) (scaler.RunnerLifecycle, err
 }
 
 func (store *Store) ConfirmRunnerReaped(ctx context.Context, runner scaler.RunnerLifecycle) (resultErr error) {
-	identity := scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 4)
-	if err != nil {
-		return err
+	if err := runner.Identity().Validate(); err != nil {
+		return fmt.Errorf("validate clustered terminal runner identity: %w", err)
 	}
 	connection, err := store.connector(ctx)
 	if err != nil {
@@ -278,19 +207,27 @@ func (store *Store) ConfirmRunnerReaped(ctx context.Context, runner scaler.Runne
 	}
 	transactionOpen := true
 	defer finishTransaction(ctx, transaction, &transactionOpen, &resultErr)
-	if err = deleteClusterRunnerLifecycle(ctx, transaction, runner, identity, predicate); err != nil {
+	if err = confirmClusterRunnerReapedInTransaction(ctx, transaction, runner); err != nil {
 		return err
-	}
-	if runner.Provider == scaler.RunnerProviderLibvirt {
-		if err = deleteClusterLibvirtRunnerLifecycle(ctx, transaction, runner, identity, predicate); err != nil {
-			return err
-		}
 	}
 	transactionOpen = false
 	if err = transaction.Commit(ctx); err != nil {
 		return fmt.Errorf("commit clustered runner reap confirmation: %w", err)
 	}
 	return nil
+}
+
+func confirmClusterRunnerReapedInTransaction(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	runner scaler.RunnerLifecycle,
+) error {
+	identity := scaler.RunnerIdentity{RequestID: runner.RequestID, RunnerName: runner.RunnerName}
+	predicate, err := newClusterRunnerIdentityPredicate(identity, 4)
+	if err != nil {
+		return err
+	}
+	return deleteClusterRunnerLifecycle(ctx, transaction, runner, identity, predicate)
 }
 
 func deleteClusterRunnerLifecycle(
@@ -302,17 +239,6 @@ func deleteClusterRunnerLifecycle(
 ) error {
 	return deleteClusterReapedLifecycle(ctx, transaction, runner, identity, predicate,
 		"scaler_runner_lifecycle", "phase = 'reap_pending'", "confirm clustered runner reaped")
-}
-
-func deleteClusterLibvirtRunnerLifecycle(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	runner scaler.RunnerLifecycle,
-	identity scaler.RunnerIdentity,
-	predicate clusterRunnerIdentityPredicate,
-) error {
-	return deleteClusterReapedLifecycle(ctx, transaction, runner, identity, predicate,
-		"scaler_libvirt_runner_lifecycle", "reap_requested", "confirm mirrored clustered libvirt runner reap")
 }
 
 func deleteClusterReapedLifecycle(
@@ -340,3 +266,4 @@ func deleteClusterReapedLifecycle(
 }
 
 var _ scaler.RunnerLifecycleStore = (*Store)(nil)
+var _ scaler.RunnerJobCompletionStore = (*Store)(nil)

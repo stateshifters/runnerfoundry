@@ -13,13 +13,13 @@ import (
 
 func TestRemovedInstallationAssignedCleanupReportsEveryWriteFailure(t *testing.T) {
 	update := postgreSQLDiscoveryUpdate{appID: 7, generation: 2, completedAt: time.Unix(1, 0).UTC()}
-	assertAssignedCleanupWriteFailures(t, 4, func(transaction *databaseTransaction) error {
+	assertAssignedCleanupWriteFailures(t, 3, func(transaction *databaseTransaction) error {
 		return withdrawRemovedInstallationAssignedObservations(context.Background(), transaction, update)
 	})
 }
 
 func TestUndiscoveredRepositoryAssignedCleanupReportsEveryWriteFailure(t *testing.T) {
-	assertAssignedCleanupWriteFailures(t, 4, func(transaction *databaseTransaction) error {
+	assertAssignedCleanupWriteFailures(t, 3, func(transaction *databaseTransaction) error {
 		return withdrawUndiscoveredAssignedObservations(
 			context.Background(), transaction, 7, githubapp.InstallationID(11), 2, time.Unix(1, 0).UTC(),
 		)
@@ -27,7 +27,7 @@ func TestUndiscoveredRepositoryAssignedCleanupReportsEveryWriteFailure(t *testin
 }
 
 func TestRegistrationAssignedCleanupReportsEveryWriteFailure(t *testing.T) {
-	assertAssignedCleanupWriteFailures(t, 4, func(transaction *databaseTransaction) error {
+	assertAssignedCleanupWriteFailures(t, 3, func(transaction *databaseTransaction) error {
 		return withdrawRegistrationAssignedObservation(
 			context.Background(), transaction, 7, "repo", "linux", time.Unix(1, 0).UTC(),
 		)
@@ -69,7 +69,7 @@ func TestRepositoryReplacementReportsAssignedCleanupFailure(t *testing.T) {
 
 func TestRepositoryReplacementReportsDeletionFailure(t *testing.T) {
 	update := repositoryReplacementFixture()
-	assertRepositoryReplacementFailure(t, 5, func(transaction *databaseTransaction) error {
+	assertRepositoryReplacementFailure(t, 4, func(transaction *databaseTransaction) error {
 		return replacePostgreSQLRepositories(context.Background(), transaction, update)
 	})
 }
@@ -77,7 +77,7 @@ func TestRepositoryReplacementReportsDeletionFailure(t *testing.T) {
 func TestInstallationReplacementReportsDeletionFailure(t *testing.T) {
 	update := repositoryReplacementFixture()
 	update.installationIDs = nil
-	assertRepositoryReplacementFailure(t, 5, func(transaction *databaseTransaction) error {
+	assertRepositoryReplacementFailure(t, 4, func(transaction *databaseTransaction) error {
 		return replacePostgreSQLInstallations(context.Background(), transaction, update)
 	})
 }

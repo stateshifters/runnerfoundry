@@ -164,7 +164,7 @@ Pollers issue the next receive immediately after a successful empty or handled r
 
 Positive request identities and exact queue timestamps come from `JobAvailable` messages. These become `job_available` obligations with a present request ID. `JobStarted` requires either a positive request ID or a non-empty runner name. A runner-name-only message persists the lifecycle row matching that exact name as busy without inventing a request identity. Terminal `JobCompleted` atomically requests exact runner cleanup and removes terminal demand. In clustered mode, `JobStarted` retains demand and assignments; only `JobCompleted` makes them terminal.
 
-GitHub's authoritative `TotalAssignedJobs` statistic represents identity-free assigned capacity. Both modes persist the observation under the current controller epoch and materialize its deficit as `assigned_count` obligations in the same queue. Those rows have no request ID and retain their assigned-observation link. The controller never turns the aggregate count into a request identity; request ID `0` appears only when provider lifecycle APIs require the explicit no-identity adapter value.
+GitHub's authoritative aggregate statistics represent identity-free assigned capacity. Both modes persist assigned, running, registered-runner, and busy-runner counts under the current controller epoch and materialize the runnable deficit as `assigned_count` obligations in the same queue. A busy surplus with no registered runner and no corresponding running job is conclusively stranded. RunnerFoundry immediately reaps only identity-free waiting capacity for that surplus and durably blocks its newest aggregate obligations. Blocked obligations preserve aggregate accounting and FIFO identity but are excluded from scheduling and host capacity until later authoritative statistics recover or reduce the assigned count. These rows have no request ID and retain their assigned-observation link. The controller never turns the aggregate count into a request identity; request ID `0` appears only when provider lifecycle APIs require the explicit no-identity adapter value.
 
 ### Scale-set ownership and pruning
 
@@ -564,11 +564,10 @@ erDiagram
     SCALER_ASSIGNMENTS {
         bigint assignment_id PK
         bigint demand_id FK
-        bigint assigned_observation_id FK
+        text source FK
         text node_id FK
         bigint installation_id
         integer github_scale_set_id
-        bigint controller_epoch
         text state
     }
     SCALER_RUNNER_LIFECYCLE {
@@ -584,17 +583,9 @@ erDiagram
         timestamptz waiting_since
         text reap_reason
     }
-    SCALER_LIBVIRT_RUNNER_LIFECYCLE {
-        text node_id PK, FK
-        text scale_set PK
-        text repository PK
-        bigint request_id
-        text runner_name PK
-        boolean reap_requested "legacy compatibility"
-    }
 ```
 
-The schema enforces one active assignment per demand obligation with a partial unique index. `job_available` demand has a positive request ID; `assigned_count` demand has no request ID and references the assigned observation that justified it. Aggregate assignments reference both that demand and observation. The repository tables retain one App's fenced controller epoch, discovery generations, conclusively managed installations and repositories, and confirmed registration IDs. Assigned observations retain the latest aggregate count under that epoch. Demand rows retain attempt and next-attempt eligibility for oldest-runnable selection. The generic lifecycle table records provider, exact identities, lifecycle phase, timestamps, and reap reason. Additional indexes support repository generation cleanup, FIFO eligibility, active-assignment counts, assigned observations, waiting leases, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; runner lifecycle records remain until confirmed provider and GitHub absence.
+The schema enforces one active assignment per demand obligation with a partial unique index. `job_available` demand has a positive request ID; `assigned_count` demand has no request ID and references the assigned observation that justified it. Every assignment has one mandatory demand parent. Its constrained source copy can only match that parent, while observation and controller epoch remain demand-owned. The repository tables retain one App's fenced controller epoch, discovery generations, conclusively managed installations and repositories, and confirmed registration IDs. Assigned observations retain the latest aggregate count under that epoch. Demand rows retain attempt and next-attempt eligibility for oldest-runnable selection. The generic lifecycle table records provider, exact identities, lifecycle phase, timestamps, and reap reason. Database checks reject invalid source/state, identity, phase, and timestamp combinations. Additional indexes support repository generation cleanup, FIFO eligibility, active-assignment counts, assigned observations, waiting leases, and node-owned pending reaps. Node publication replaces all of one node's contributions in one transaction. It also removes demand only when no node declares the associated scale set; runner lifecycle records remain until confirmed provider and GitHub absence.
 
 Ordinary state calls use the primary PostgreSQL endpoint. Migrations and advisory-lock sessions use the optional direct endpoint, or the primary endpoint when it preserves session affinity. All sessions assume the configured stable role. Login credentials may rotate, but database objects and migration metadata remain owned by the stable role.
 
@@ -604,7 +595,7 @@ Configuration values may be literals, environment references, or file references
 
 Cluster startup inspects the schema and automatically migrates upward before contribution publication. A dedicated advisory lock serializes version inspection, migration, and compatibility validation among simultaneous nodes. Migrations are embedded, ordered, transactional, and reversible.
 
-`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. Migration 007 unifies `job_available` and `assigned_count` obligations in `scaler_demand`, makes request identity optional, links aggregate rows to their assigned observations, and adds durable attempt and next-attempt eligibility. It advances the compatibility floor and requires a coordinated rollout with every RunnerFoundry node stopped and the session-affine direct management endpoint retained. Start one upgraded node and wait for migration and repository-session convergence before starting a second; verify one leader and one standby before adding further nodes. The equivalent standalone change is SQLite schema version 6, applied automatically while the database has its exclusive process owner. `migrate down --to` must be run with the currently deployed binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. It also refuses to discard capacity or cleanup obligations that the target schema cannot represent. The compatibility row prevents a binary from using a schema generation below the schema's supported floor. After migration, ordinary operation remains multi-node.
+`migrate status` is read-only and reports an empty database as version zero without creating metadata. `migrate up` applies the current binary's target. Migration 009 aggregate-preflights the legacy and generic libvirt lifecycle representations, removes the expired bridge only when every legacy row is representable, and advances the compatibility floor to `9`. It requires a coordinated rollout with every RunnerFoundry node stopped and the session-affine direct management endpoint retained. Start one upgraded node and wait for migration and repository-session convergence before starting a second; verify one leader and one standby before adding further nodes. The equivalent standalone change is SQLite schema version 8, applied automatically while the database has its exclusive process owner. `migrate down --to 8` must be run with the generation-9 binary, acquires both migration and leader locks, and refuses rollback while a live leader or node heartbeat exists. Down reconstructs the legacy libvirt projection from generic lifecycle rows without changing generic lifecycle history. The compatibility row prevents a binary from using a schema generation below the schema's supported floor. After migration, ordinary operation remains multi-node.
 
 ### Reload, failover, and shutdown
 
@@ -807,7 +798,7 @@ The architecture protects the following invariants:
 | Redelivery does not create duplicate demand | Unique demand identity and idempotent upsert | External APIs and providers are still separate transaction domains |
 | Capacity is not exceeded | Standalone counts provider-visible runners and pending reaps; PostgreSQL counts active assignments and pending reaps per contributor | Pending cleanup deliberately retains capacity while provider state is ambiguous |
 | Accepted runner cleanup is not forgotten | Provider-independent lifecycle intent commits before `JobCompleted` acknowledgement and retries until provider and GitHub absence are confirmed | The owning host must regain its configuration and provider access; GitHub must respond |
-| Waiting capacity cannot strand demand forever | `job_start_timeout`, assigned-count reduction, and GitHub registration checks move unusable waiting runners to durable cleanup | Busy runners are protected; cleanup retains capacity while absence is ambiguous |
+| Waiting capacity cannot strand demand forever | `job_start_timeout` applies durable bounded retry, while conclusive busy-without-runner statistics quarantine the aggregate obligation until recovery | Busy runners are protected; cleanup retains capacity while absence is ambiguous |
 | A discovered repository cannot silently lose part of its configured registration set | Durable confirmed IDs and grouped audits retain successful creations and activate only complete repository session generations | Active generations remain in use while an audit result is inconclusive |
 | Interrupted provider starts do not blindly duplicate runners | Stable runner name is checked before and after start and during repair | A provider that cannot report accurate identity cannot provide this guarantee |
 | Cluster leadership has one active owner | Session advisory lock owns one term's repository sessions and pollers; stale epochs are rejected | PostgreSQL availability is required for leadership and shared scheduling |

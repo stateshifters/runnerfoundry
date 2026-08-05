@@ -147,7 +147,7 @@ func clusterEventFixtureForTest(t *testing.T) (context.Context, clusterEventFixt
 	daemon.discoverer = staticDiscoverer{}
 	daemon.logger = slog.Default()
 	daemon.nodes = state
-	daemon.assignments = state
+	daemon.assignments = newLifecycleClusterState(state)
 	daemon.tryLeader = fakeTryLeader(state)
 	daemon.waitForLeader = fakeWaitForLeader(state)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,7 +210,7 @@ func newSlowProviderHealthFixture(t *testing.T) *slowProviderHealthFixture {
 	fixture.daemon.logger = slog.Default()
 	fixture.daemon.providerHealthy = fixture.providerHealth
 	fixture.daemon.nodes = state
-	fixture.daemon.assignments = state
+	fixture.daemon.assignments = newLifecycleClusterState(state)
 	fixture.daemon.tryLeader = fakeTryLeader(state)
 	fixture.daemon.waitForLeader = fakeWaitForLeader(state)
 	return fixture
@@ -275,7 +275,7 @@ func TestClusterHeartbeatLogsPublicationFailure(t *testing.T) {
 		logger: newClusterLogSnapshotLogger(logs), loadConfig: daemonFixture.loadConfig, newDiscoverer: daemonFixture.newDiscoverer,
 		newGitHubClient: daemonFixture.newGitHubClient, providerHealthy: daemonFixture.providerHealthy,
 		buildReconciler: daemonFixture.buildReconciler, notifier: daemonFixture.notifier,
-		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+		nodes: state, assignments: newLifecycleClusterState(state), tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 	daemon.heartbeat(context.Background())
 	assertClusterLogSnapshot(t, logs,
@@ -780,7 +780,7 @@ func activeClusteredDaemon(t *testing.T, state *fakeClusterState) clusteredDaemo
 		loadConfig: boundaries.loadConfig, newDiscoverer: boundaries.newDiscoverer,
 		newGitHubClient: boundaries.newGitHubClient, providerHealthy: boundaries.providerHealthy,
 		buildReconciler: boundaries.buildReconciler, notifier: boundaries.notifier,
-		nodes: state, assignments: state, tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
+		nodes: state, assignments: newLifecycleClusterState(state), tryLeader: fakeTryLeader(state), waitForLeader: fakeWaitForLeader(state),
 	}
 }
 

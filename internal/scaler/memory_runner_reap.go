@@ -2,7 +2,6 @@ package scaler
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"time"
 )
@@ -20,24 +19,10 @@ func (store *MemoryDemandStore) transitionRunnerToReap(
 	if err != nil {
 		return err
 	}
-	var libvirtKey string
-	var libvirtLifecycle memoryLibvirtLifecycle
-	if runner.Provider == RunnerProviderLibvirt {
-		libvirtKey, libvirtLifecycle, err = store.resolveMemoryLibvirtRunner(
-			scaleSet, repository, identity, anyMemoryLibvirtRunner,
-		)
-		if err != nil && !errors.Is(err, ErrRunnerIdentityNotFound) {
-			return err
-		}
-	}
 	runner.Phase = RunnerReapPending
 	runner.ReapReason = reason
 	runner.UpdatedAt = requestedAt
 	store.runners[key] = runner
-	if libvirtKey != "" {
-		libvirtLifecycle.reapRequested = true
-		store.libvirtRunners[libvirtKey] = libvirtLifecycle
-	}
 	return nil
 }
 
@@ -52,14 +37,6 @@ func (store *MemoryDemandStore) RequestExpiredRunnerReaps(
 			runner.ReapReason = "job_start_timeout"
 			runner.UpdatedAt = requestedAt
 			store.runners[key] = runner
-			if runner.Provider == RunnerProviderLibvirt {
-				legacyKey := runnerLifecycleKey(LibvirtRunnerLifecycle{
-					ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerName: runner.RunnerName,
-				})
-				legacy := store.libvirtRunners[legacyKey]
-				legacy.reapRequested = true
-				store.libvirtRunners[legacyKey] = legacy
-			}
 			changed++
 		}
 	}
@@ -110,15 +87,6 @@ func (store *MemoryDemandStore) markMemoryRunnerReapPending(runner RunnerLifecyc
 	runner.ReapReason = reason
 	runner.UpdatedAt = requestedAt
 	store.runners[genericRunnerLifecycleKey(runner.ScaleSet, runner.Repository, runner.RunnerName)] = runner
-	if runner.Provider != RunnerProviderLibvirt {
-		return
-	}
-	legacyKey := runnerLifecycleKey(LibvirtRunnerLifecycle{
-		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerName: runner.RunnerName,
-	})
-	legacy := store.libvirtRunners[legacyKey]
-	legacy.reapRequested = true
-	store.libvirtRunners[legacyKey] = legacy
 }
 
 func (store *MemoryDemandStore) PendingRunnerReaps(_ context.Context, scaleSet, repository string) ([]RunnerLifecycle, error) {
@@ -138,7 +106,7 @@ func (store *MemoryDemandStore) PendingRunnerReaps(_ context.Context, scaleSet, 
 }
 
 func (store *MemoryDemandStore) ConfirmRunnerReaped(_ context.Context, runner RunnerLifecycle) error {
-	key, existing, err := store.resolveMemoryRunner(
+	key, _, err := store.resolveMemoryRunner(
 		runner.ScaleSet, runner.Repository, runner.Identity(), func(candidate RunnerLifecycle) bool {
 			return candidate.Phase == RunnerReapPending
 		},
@@ -147,17 +115,5 @@ func (store *MemoryDemandStore) ConfirmRunnerReaped(_ context.Context, runner Ru
 		return err
 	}
 	delete(store.runners, key)
-	if existing.Provider == RunnerProviderLibvirt {
-		libvirtKey, _, resolveErr := store.resolveMemoryLibvirtRunner(
-			runner.ScaleSet, runner.Repository, runner.Identity(), pendingMemoryLibvirtRunner,
-		)
-		if resolveErr != nil && !errors.Is(resolveErr, ErrRunnerIdentityNotFound) {
-			store.runners[key] = existing
-			return resolveErr
-		}
-		if resolveErr == nil {
-			delete(store.libvirtRunners, libvirtKey)
-		}
-	}
 	return nil
 }

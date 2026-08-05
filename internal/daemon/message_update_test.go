@@ -62,6 +62,23 @@ func TestClusterMessageSchedulesOnlyAfterAtomicCommit(t *testing.T) {
 	}
 }
 
+func TestClusterMessagePersistsAssignedCapacityStatistics(t *testing.T) {
+	state := &messageUpdateHandlerState{fakeClusterState: &fakeClusterState{}}
+	handler := messageUpdateClusterHandler(state)
+	message := &upstream.RunnerScaleSetMessage{Statistics: &upstream.RunnerScaleSetStatistic{
+		TotalAssignedJobs: 2, TotalRunningJobs: 3,
+		TotalRegisteredRunners: 4, TotalBusyRunners: 5,
+	}}
+
+	if err := handler.HandleMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if state.update.AssignedJobs != 2 || state.update.RunningJobs != 3 ||
+		state.update.RegisteredRunners != 4 || state.update.BusyRunners != 5 {
+		t.Fatalf("persisted statistics = %#v", state.update)
+	}
+}
+
 func TestClusterMessageReportsCommittedCapacityObligationState(t *testing.T) {
 	oldestRunnableAt := time.Unix(90, 0).UTC()
 	logs, handler := capacityObligationMessageHandler(oldestRunnableAt)
@@ -71,6 +88,29 @@ func TestClusterMessageReportsCommittedCapacityObligationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCapacityObligationMessageLog(t, logs.String())
+}
+
+func TestStrandedAssignmentLogsOnlyStateTransitions(t *testing.T) {
+	logs := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(logs, nil))
+	update := scaler.MessageUpdate{
+		Repository: "repo", ScaleSet: "windows", ControllerEpoch: 1,
+		AssignedJobs: 1, BusyRunners: 1, ObservedAt: time.Unix(100, 0).UTC(),
+	}
+	logCapacityObligationState(context.Background(), logger, 1, update, scaler.MessageUpdateResult{
+		AssignedObligations: scaler.AssignedObligationDecision{Block: 1},
+	})
+	logCapacityObligationState(context.Background(), logger, 1, update, scaler.MessageUpdateResult{})
+	update.BusyRunners = 0
+	logCapacityObligationState(context.Background(), logger, 1, update, scaler.MessageUpdateResult{
+		AssignedObligations: scaler.AssignedObligationDecision{Unblock: 1},
+	})
+
+	logged := logs.String()
+	if strings.Count(logged, `"action":"assigned_job_stranded"`) != 2 ||
+		!strings.Contains(logged, `"phase":"blocked"`) || !strings.Contains(logged, `"phase":"recovered"`) {
+		t.Fatalf("stranded transition logs = %s", logged)
+	}
 }
 
 func capacityObligationMessageHandler(oldestRunnableAt time.Time) (*bytes.Buffer, clusterMessageHandler) {
@@ -114,13 +154,15 @@ type messageUpdateHandlerState struct {
 	scheduleCalls  int
 	committed      bool
 	boundedContext bool
+	update         scaler.MessageUpdate
 }
 
 func (state *messageUpdateHandlerState) ApplyMessageUpdate(
 	ctx context.Context,
-	_ scaler.MessageUpdate,
+	update scaler.MessageUpdate,
 ) (scaler.MessageUpdateResult, error) {
 	state.applyCalls++
+	state.update = update
 	deadline, ok := ctx.Deadline()
 	state.boundedContext = ok && time.Until(deadline) <= messageUpdateTimeout && time.Until(deadline) > 0
 	if state.applyErr != nil {

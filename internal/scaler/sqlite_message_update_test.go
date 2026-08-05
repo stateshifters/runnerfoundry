@@ -32,7 +32,7 @@ func TestSQLiteMessageUpdateRollsBackDemandFailure(t *testing.T) {
 func TestSQLiteMessageUpdateRollsBackLifecycleFailure(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithStart(), func(mock sqlmock.Sqlmock, failure error) {
 		mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 0))
-		expectSQLiteIdentityMatch(mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(mock)
 		mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(failure)
 	})
 }
@@ -40,7 +40,7 @@ func TestSQLiteMessageUpdateRollsBackLifecycleFailure(t *testing.T) {
 func TestSQLiteMessageUpdateRollsBackCompletionFailure(t *testing.T) {
 	assertSQLiteMessageRollback(t, sqliteMessageUpdateWithCompletion(), func(mock sqlmock.Sqlmock, failure error) {
 		mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 0))
-		expectSQLiteIdentityMatch(mock, "runner_lifecycle")
+		expectSQLiteIdentityMatch(mock)
 		mock.ExpectExec("UPDATE runner_lifecycle").WillReturnError(failure)
 	})
 }
@@ -180,20 +180,18 @@ func registerSQLiteMessageIdentityRunner(
 	createdAt time.Time,
 ) {
 	t.Helper()
-	if err := store.RegisterRunner(context.Background(), RunnerLifecycle{
+	seedSQLiteGenericLifecycle(t, store.database, RunnerLifecycle{
 		ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderDocker,
 		RunnerName: identity.RunnerName, RequestID: identity.RequestID,
 		Phase: RunnerWaitingForJob, CreatedAt: createdAt,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 }
 
 func expectSQLiteMessageStatisticsFailure(mock sqlmock.Sqlmock, failure error) {
 	expectNoExistingSQLiteExactObligation(mock)
 	mock.ExpectExec("INSERT INTO demand").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
-	expectSQLiteIdentityMatch(mock, "runner_lifecycle")
+	expectSQLiteIdentityMatch(mock)
 	mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT controller_epoch").WillReturnRows(sqlmock.NewRows([]string{"controller_epoch", "observed_at"}))

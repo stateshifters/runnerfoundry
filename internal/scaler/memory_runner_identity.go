@@ -25,9 +25,6 @@ func (store *MemoryDemandStore) BindRunnerIdentity(
 	}
 	key, runner, err := store.resolveMemoryRunner(scaleSet, repository, identity, activeMemoryRunner)
 	if err == nil {
-		if err = store.bindMemoryLibvirtMirror(runner, identity); err != nil {
-			return err
-		}
 		store.markMemoryRunnerBusy(key, runner, identity, githubRunnerID, startedAt)
 		return nil
 	}

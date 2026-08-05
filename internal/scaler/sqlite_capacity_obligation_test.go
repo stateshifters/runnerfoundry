@@ -58,53 +58,6 @@ func assertAssignedObligation(t *testing.T, obligation QueuedDemand, epoch int64
 	}
 }
 
-func TestSQLiteCapacityObligationRetrySurvivesStoreReopen(t *testing.T) {
-	path, retryAt := createDeferredSQLiteObligation(t)
-	store, err := OpenSQLiteDemandStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	closeSQLiteStoreDuringCleanup(t, store)
-	ctx := context.Background()
-	if ready, readyErr := store.OrderedReady(ctx, "linux", retryAt.Add(-time.Nanosecond)); readyErr != nil || len(ready) != 0 {
-		t.Fatalf("premature retry = %#v, %v", ready, readyErr)
-	}
-	ready, err := store.OrderedReady(ctx, "linux", retryAt)
-	if err != nil || len(ready) != 1 || ready[0].Attempt != 1 || ready[0].NextAttemptAt != retryAt {
-		t.Fatalf("durable retry = %#v, %v", ready, err)
-	}
-}
-
-func createDeferredSQLiteObligation(t *testing.T) (string, time.Time) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "state.db")
-	store, err := OpenSQLiteDemandStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	observedAt := time.Unix(30, 0).UTC()
-	_, err = store.ObserveAssignedCapacity(ctx, AssignedCapacityObservation{
-		ScaleSet: "linux", Repository: "repo", ControllerEpoch: 1,
-		AssignedJobs: 1, ObservedAt: observedAt,
-	}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	demand, err := store.OrderedReady(ctx, "linux", observedAt)
-	if err != nil || len(demand) != 1 {
-		t.Fatalf("initial demand = %#v, %v", demand, err)
-	}
-	retryAt := observedAt.Add(time.Minute)
-	if err = store.RecordObligationFailure(ctx, demand[0].ObligationID, retryAt); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return path, retryAt
-}
-
 func TestSQLiteRepositoryAndScaleSetRemovalDiscardAssignedObservationAuthority(t *testing.T) {
 	for _, remove := range []func(context.Context, *SQLiteDemandStore) error{
 		func(ctx context.Context, store *SQLiteDemandStore) error {

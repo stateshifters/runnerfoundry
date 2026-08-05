@@ -40,12 +40,16 @@ func markClusterRunnerBusyInTransaction(
 	if err != nil {
 		return err
 	}
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
+	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	mutation := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
 		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		    updated_at = $2
+		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
+		FROM locked
 		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending'
 		  AND %s`, predicate.condition)
-	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	statement := clusterLifecycleLockedStatement(lockParameter, mutation)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return fmt.Errorf("mark clustered runner busy: %w", err)
@@ -54,7 +58,10 @@ func markClusterRunnerBusyInTransaction(
 		table: "scaler_runner_lifecycle", condition: "scale_set = $1 AND repository = $2 AND phase <> 'reap_pending'",
 		arguments: []any{scaleSet, repository},
 	}
-	return requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected())
+	if err = requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (store *Store) BindRunnerIdentity(
@@ -103,7 +110,7 @@ func bindClusterRunnerIdentityInTransaction(
 			return err
 		}
 	}
-	return mirrorBoundClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
+	return nil
 }
 
 func markExactClusterRunnerBusy(
@@ -115,11 +122,18 @@ func markExactClusterRunnerBusy(
 	startedAt time.Time,
 	predicate clusterRunnerIdentityPredicate,
 ) (int64, error) {
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
-		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
-		    updated_at = $2
-		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending' AND %s`, predicate.condition)
 	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	statement := fmt.Sprintf(`WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($%d, 0))
+	)
+	UPDATE scaler_runner_lifecycle
+		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
+		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
+		FROM locked
+		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending' AND %s`,
+		lockParameter, predicate.condition)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return 0, fmt.Errorf("mark exact clustered runner busy: %w", err)
@@ -159,10 +173,16 @@ func requestClusterRunnerReapInTransaction(
 	requestedAt time.Time,
 	predicate clusterRunnerIdentityPredicate,
 ) error {
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
-		SET phase = 'reap_pending', reap_reason = $1, updated_at = $2
-		WHERE scale_set = $3 AND repository = $4 AND %s`, predicate.condition)
 	arguments := append([]any{reason, requestedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	statement := fmt.Sprintf(`WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($%d, 0))
+	)
+	UPDATE scaler_runner_lifecycle
+		SET phase = 'reap_pending', reap_reason = $1, updated_at = $2
+		FROM locked
+		WHERE scale_set = $3 AND repository = $4 AND %s`, lockParameter, predicate.condition)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return fmt.Errorf("request clustered runner reap: %w", err)
@@ -174,27 +194,7 @@ func requestClusterRunnerReapInTransaction(
 	if err = requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected()); err != nil {
 		return err
 	}
-	return mirrorClusterRunnerReap(ctx, transaction, scaleSet, repository, identity)
-}
-
-func mirrorClusterRunnerReap(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return err
-	}
-	statement := fmt.Sprintf(`UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition)
-	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	commandTag, err := transaction.Exec(ctx, statement, arguments...)
-	if err != nil {
-		return fmt.Errorf("mirror clustered libvirt runner reap: %w", err)
-	}
-	return requireAtMostOneClusterRunnerIdentityMatch(identity, commandTag.RowsAffected())
+	return nil
 }
 
 func bindClusterRunnerIdentity(
@@ -259,12 +259,18 @@ func updateBoundClusterRunner(
 	githubRunnerID int64,
 	startedAt time.Time,
 ) error {
-	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
+	commandTag, err := transaction.Exec(ctx, `WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($7, 0))
+	)
+	UPDATE scaler_runner_lifecycle
 		SET request_id = $1, phase = 'busy',
-		    github_runner_id = CASE WHEN $2 > 0 THEN $2 ELSE github_runner_id END, updated_at = $3
+		    github_runner_id = CASE WHEN $2 > 0 THEN $2 ELSE github_runner_id END,
+		    waiting_since = COALESCE(waiting_since, $3), updated_at = $3
+		FROM locked
 		WHERE scale_set = $4 AND repository = $5 AND runner_name = $6 AND request_id = 0
 		  AND phase <> 'reap_pending'`, identity.RequestID, githubRunnerID, startedAt,
-		scaleSet, repository, identity.RunnerName)
+		scaleSet, repository, identity.RunnerName,
+		clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	if err != nil {
 		return fmt.Errorf("bind clustered runner identity: %w", err)
 	}
@@ -275,82 +281,4 @@ func updateBoundClusterRunner(
 		return &scaler.RunnerIdentityMismatchError{Identity: identity}
 	}
 	return nil
-}
-
-func mirrorBoundClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle candidate
-		SET request_id = $1
-		WHERE candidate.scale_set = $2 AND candidate.repository = $3
-		  AND candidate.runner_name = $4 AND candidate.request_id = 0
-		  AND NOT EXISTS (
-			SELECT 1 FROM scaler_libvirt_runner_lifecycle owner
-			WHERE owner.scale_set = $2 AND owner.repository = $3 AND owner.request_id = $1
-		  )`, identity.RequestID, scaleSet, repository, identity.RunnerName)
-	if err != nil {
-		return fmt.Errorf("bind clustered libvirt runner request identity: %w", err)
-	}
-	if commandTag.RowsAffected() > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: commandTag.RowsAffected()}
-	}
-	if commandTag.RowsAffected() == 1 {
-		return nil
-	}
-	return classifyUnchangedClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
-}
-
-func classifyUnchangedClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) error {
-	scope := clusterRunnerIdentityScope{
-		table: "scaler_libvirt_runner_lifecycle", condition: "scale_set = $1 AND repository = $2",
-		arguments: []any{scaleSet, repository},
-	}
-	matches, err := inspectClusterBindingCandidates(ctx, transaction, scope, identity)
-	if err != nil {
-		return err
-	}
-	if matches.request > 1 || matches.runner > 1 {
-		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: max(matches.request, matches.runner)}
-	}
-	if matches.request == 0 && matches.runner == 0 {
-		return nil
-	}
-	exactMatches, err := countExactClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
-	if err != nil {
-		return err
-	}
-	if exactMatches == 1 && matches.request == 1 && matches.runner == 1 {
-		return nil
-	}
-	return &scaler.RunnerIdentityMismatchError{Identity: identity}
-}
-
-func countExactClusterLibvirtIdentity(
-	ctx context.Context,
-	transaction *databaseTransaction,
-	scaleSet, repository string,
-	identity scaler.RunnerIdentity,
-) (int64, error) {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return 0, err
-	}
-	var exactMatches int64
-	exactArguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	if err = transaction.QueryRow(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM scaler_libvirt_runner_lifecycle
-		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition), exactArguments...).Scan(&exactMatches); err != nil {
-		return 0, fmt.Errorf("inspect clustered libvirt runner identity: %w", err)
-	}
-	if exactMatches > 1 {
-		return 0, &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: exactMatches}
-	}
-	return exactMatches, nil
 }

@@ -35,7 +35,6 @@ func TestSQLiteIdentityClassificationBranches(t *testing.T) {
 func assertSQLiteIdentityClassification(t *testing.T, identity RunnerIdentity) {
 	t.Helper()
 	assertSQLiteIdentityFreeClassification(t, identity)
-	assertSQLiteLibvirtClassification(t, identity)
 }
 
 func assertSQLiteIdentityFreeClassification(t *testing.T, identity RunnerIdentity) {
@@ -56,28 +55,6 @@ func assertSQLiteIdentityFreeClassification(t *testing.T, identity RunnerIdentit
 	}
 }
 
-func assertSQLiteLibvirtClassification(t *testing.T, identity RunnerIdentity) {
-	t.Helper()
-	for name, test := range map[string]struct {
-		counts     sqliteLibvirtBindingCounts
-		wantUpdate bool
-		want       error
-	}{
-		"missing mirror": {counts: sqliteLibvirtBindingCounts{}},
-		"exact mirror":   {counts: sqliteLibvirtBindingCounts{name: 1, exact: 1}},
-		"duplicates":     {counts: sqliteLibvirtBindingCounts{name: 2}, want: ErrRunnerIdentityInvariant},
-		"conflict":       {counts: sqliteLibvirtBindingCounts{name: 1, request: 1}, want: ErrRunnerIdentityMismatch},
-		"bind":           {counts: sqliteLibvirtBindingCounts{name: 1, identityFree: 1}, wantUpdate: true},
-	} {
-		t.Run("libvirt "+name, func(t *testing.T) {
-			update, err := classifySQLiteLibvirtBinding(identity, test.counts)
-			if update != test.wantUpdate || !errors.Is(err, test.want) {
-				t.Fatalf("classification = %v, %v; want %v, %v", update, err, test.wantUpdate, test.want)
-			}
-		})
-	}
-}
-
 func TestSQLiteIdentityResultAndExecutionFailures(t *testing.T) {
 	identity := RunnerIdentity{RequestID: 42}
 	if err := requireSingleSQLiteIdentityChange(sqlmock.NewResult(0, 2), identity, "change"); !errors.Is(err, ErrRunnerIdentityInvariant) {
@@ -88,6 +65,9 @@ func TestSQLiteIdentityResultAndExecutionFailures(t *testing.T) {
 	}
 	if err := requireAtMostOneSQLiteIdentityChange(sqlmock.NewResult(0, 2), identity, "change"); !errors.Is(err, ErrRunnerIdentityInvariant) {
 		t.Fatalf("at-most-one error = %v", err)
+	}
+	if err := requireAtMostOneSQLiteIdentityChange(sqlmock.NewResult(0, 1), identity, "change"); err != nil {
+		t.Fatalf("single change error = %v", err)
 	}
 }
 
@@ -139,41 +119,6 @@ func expectSQLiteCandidateFailure(mock sqlmock.Sqlmock, failureIndex int) {
 	}
 }
 
-func TestSQLiteLibvirtBindingCandidateBranches(t *testing.T) {
-	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
-	cases := [][]any{
-		{errors.New("name failed")},
-		{int64(0)},
-		{int64(1), errors.New("exact failed")},
-		{int64(1), int64(1)},
-		{int64(1), int64(0), errors.New("request failed")},
-		{int64(1), int64(0), int64(0), errors.New("free failed")},
-		{int64(1), int64(0), int64(0), int64(1)},
-	}
-	for _, outcomes := range cases {
-		fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
-		for _, outcome := range outcomes {
-			expectation := fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)")
-			if queryErr, ok := outcome.(error); ok {
-				expectation.WillReturnError(queryErr)
-			} else {
-				expectation.WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(outcome))
-			}
-		}
-		_, err := sqliteLibvirtBindingCandidateCounts(context.Background(), transaction, "set", "repo", identity)
-		assertSQLiteCandidateOutcome(t, outcomes, err)
-		rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
-	}
-}
-
-func assertSQLiteCandidateOutcome(t *testing.T, outcomes []any, err error) {
-	t.Helper()
-	_, expectsError := outcomes[len(outcomes)-1].(error)
-	if expectsError != (err != nil) {
-		t.Fatalf("candidate error = %v, expects error = %v", err, expectsError)
-	}
-}
-
 func TestSQLiteBindingAndMarkBoundaryBranches(t *testing.T) {
 	fixture := mockDemandStore(t)
 	fixture.mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
@@ -188,7 +133,7 @@ func TestSQLiteBindingAndMarkBoundaryBranches(t *testing.T) {
 
 	fixture = mockDemandStore(t)
 	fixture.mock.ExpectBegin()
-	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+	expectSQLiteIdentityMatch(fixture.mock)
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 	if err := fixture.store.MarkRunnerBusy(context.Background(), "set", "repo",
@@ -197,17 +142,10 @@ func TestSQLiteBindingAndMarkBoundaryBranches(t *testing.T) {
 	}
 }
 
-func TestSQLiteCompletionWithoutRequestDemandAndMirrorCountFailure(t *testing.T) {
+func TestSQLiteCompletionWithoutRequestDemand(t *testing.T) {
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
 	if err := removeSQLiteCompletedRequestDemand(context.Background(), transaction, JobCompletion{}); err != nil {
 		t.Fatal(err)
-	}
-	fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(failingSQLResult{})
-	err := mirrorSQLiteCompletedRunner(context.Background(), transaction, JobCompletion{
-		ScaleSet: "set", Repository: "repo", RunnerIdentity: RunnerIdentity{RequestID: 42},
-	})
-	if err == nil {
-		t.Fatal("expected mirrored affected-row failure")
 	}
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
@@ -228,28 +166,6 @@ func TestSQLiteIdentityFreeBindingMutationFailures(t *testing.T) {
 			expectSQLiteCoverageCounts(fixture.mock, 0, 1, 1)
 			fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
 			return bindSQLiteIdentityFreeRunner(context.Background(), transaction, "set", "repo", identity, 1, time.Now())
-		},
-	} {
-		assertSQLiteBindingOperationFails(t, name, operation)
-	}
-}
-
-func TestSQLiteLibvirtMirrorBindingMutationFailures(t *testing.T) {
-	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
-	for name, operation := range map[string]func(demandStoreMock, *sql.Tx) error{
-		"candidate count": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnError(errors.New("count failed"))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
-		},
-		"mirror update": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			expectSQLiteCoverageCounts(fixture.mock, 1, 0, 0, 1)
-			fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("update failed"))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
-		},
-		"mirror affected rows": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			expectSQLiteCoverageCounts(fixture.mock, 1, 0, 0, 1)
-			fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
 		},
 	} {
 		assertSQLiteBindingOperationFails(t, name, operation)
@@ -281,57 +197,10 @@ func TestSQLiteRunnerBindingRejectsDuplicateResolution(t *testing.T) {
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
 
-func TestSQLiteLibvirtMirrorBindingIgnoresMissingMirror(t *testing.T) {
-	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
-	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
-	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	if err := bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity); err != nil {
-		t.Fatalf("missing mirror error = %v", err)
-	}
-	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
-}
-
-func TestSQLiteRunnerBindingReturnsMirrorFailure(t *testing.T) {
-	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
-	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
-	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
-	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnError(errors.New("mirror failed"))
-	if err := bindSQLiteRunnerIdentity(context.Background(), transaction, "set", "repo", identity, 1, time.Now()); err == nil {
-		t.Fatal("expected mirror failure")
-	}
-	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
-}
-
 func TestSQLiteBusyUpdateRejectsInvalidIdentity(t *testing.T) {
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
 	if err := updateSQLiteRunnerBusy(context.Background(), transaction, "set", "repo", RunnerIdentity{}, 1, time.Now()); !errors.Is(err, ErrInvalidRunnerIdentity) {
 		t.Fatalf("invalid busy identity error = %v", err)
-	}
-	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
-}
-
-func TestSQLiteLibvirtAndMirrorAffectedRowFailures(t *testing.T) {
-	runner := sqliteLifecycleRunner()
-	fixture := mockDemandStore(t)
-	fixture.mock.ExpectBegin()
-	expectSQLiteIdentityMatch(fixture.mock, "libvirt_runner_lifecycle")
-	fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
-	fixture.mock.ExpectRollback()
-	if err := fixture.store.CompleteJob(context.Background(), JobCompletion{
-		ScaleSet: runner.ScaleSet, Repository: runner.Repository, RunnerIdentity: runner.Identity(),
-	}); !errors.Is(err, ErrRunnerIdentityNotFound) {
-		t.Fatalf("libvirt completion error = %v", err)
-	}
-
-	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
-	fixture.mock.ExpectExec("DELETE FROM libvirt_runner_lifecycle").WillReturnResult(failingSQLResult{})
-	candidate := RunnerLifecycle{
-		ScaleSet: "set", Repository: "repo", Provider: RunnerProviderLibvirt, RequestID: 42, RunnerName: "runner",
-	}
-	if err := confirmSQLiteMirroredRunnerReaped(context.Background(), transaction, candidate); err == nil {
-		t.Fatal("expected mirrored confirmation affected-row failure")
 	}
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }

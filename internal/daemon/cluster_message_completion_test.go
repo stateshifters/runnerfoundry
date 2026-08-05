@@ -86,7 +86,7 @@ func TestClusterMessageReportsRunnerNameCompletionAndDropsOnlyUnidentifiedComple
 	assertClusterLogSnapshot(t, logs, `{"level":"INFO","msg":"cluster_job_completion","action":"cluster_job_completion","phase":"completed","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"linux-legacy","runnerID":91,"identity":"runner_name"}
 {"level":"WARN","msg":"cluster_job_completion_invalid","action":"cluster_job_completion_invalid","phase":"dropped","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"","runnerID":0}
 {"level":"WARN","msg":"cluster_job_completion_invalid","action":"cluster_job_completion_invalid","phase":"dropped","repository":"repo","scaleSet":"linux","messageType":"JobCompleted","requestID":0,"runner":"","runnerID":0}
-{"level":"INFO","msg":"capacity_obligation","action":"capacity_obligation","phase":"reconciled","repository":"repo","scaleSet":"linux","jobAvailable":0,"assignedCount":0,"newlyQueued":0,"canceled":0,"createdAssigned":0,"canceledAssigned":0,"generation":0,"epoch":1}`)
+{"level":"INFO","msg":"capacity_obligation","action":"capacity_obligation","phase":"reconciled","repository":"repo","scaleSet":"linux","jobAvailable":0,"assignedCount":0,"newlyQueued":0,"canceled":0,"createdAssigned":0,"canceledAssigned":0,"blockedAssigned":0,"unblockedAssigned":0,"assignedJobs":0,"runningJobs":0,"registeredRunners":0,"busyRunners":0,"strandedAssigned":0,"runnableAssigned":0,"generation":0,"epoch":1}`)
 }
 
 func TestClusterPollerRetriesTransientRunnerNameCompletionReconciliationFailure(t *testing.T) {
