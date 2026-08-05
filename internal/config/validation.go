@@ -155,8 +155,8 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 	return nil
 }
 
-// JobStartDuration returns the validated maximum time a confirmed runner may
-// wait for JobStarted before it is replaced.
+// JobStartDuration returns the validated maximum time a provisioned runner may
+// wait for JobStarted before its one attempt fails.
 func (scaleSet ScaleSetConfig) JobStartDuration() (time.Duration, error) {
 	configuredTimeout := scaleSet.JobStartTimeout
 	if configuredTimeout == "" {

@@ -4,7 +4,7 @@ Read the repository [contribution contract](../../../CONTRIBUTING.md) before cha
 
 ## Create a migration
 
-Migration files are sequential and append-only once released. Name a new file `NNN_description.sql` using the next integer. Do not leave gaps, reuse or renumber an existing sequence, or edit a released migration.
+Migration files are sequential and append-only once released. Before the first release, an explicitly approved schema reset may replace the unreleased sequence with a fresh `001`; no compatibility or data conversion is implied. Otherwise, name a new file `NNN_description.sql` using the next integer. Do not leave gaps, reuse or renumber a released sequence, or edit a released migration.
 
 Each file uses tern's reversible format:
 
@@ -18,7 +18,7 @@ ALTER TABLE scaler_nodes DROP COLUMN availability_zone;
 
 SQL above the separator is Up and SQL below it is Down. Both directions run transactionally. Do not use `---- tern: disable-tx ----` without explicit maintainer approval for a PostgreSQL operation that cannot run in a transaction and a documented safe failure procedure.
 
-All scaler-owned schema creation, alteration, indexing, constraints, data transformations, and teardown SQL belong in migration files. Go code may orchestrate tern but must not duplicate schema-definition SQL.
+All RunnerFoundry-owned schema creation, alteration, indexing, constraints, data transformations, and teardown SQL belong in migration files. Go code may orchestrate tern but must not duplicate schema-definition SQL.
 
 ## Preserve rollback parity
 

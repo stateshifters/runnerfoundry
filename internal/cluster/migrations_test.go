@@ -37,37 +37,6 @@ func TestMigrationConnectionCloseReportsFailure(t *testing.T) {
 	}
 }
 
-func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
-	store := NewStore(postgresconfig.Settings{Role: "runnerfoundry"})
-	catalog, err := store.migrationCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target := migrationTarget(catalog); target != 10 {
-		t.Fatalf("migration target = %d, want 10", target)
-	}
-}
-
-func TestRepositoryStateMigrationIsReversibleAndRelational(t *testing.T) {
-	migrationSQL, err := fs.ReadFile(embeddedMigrations, "migrations/004_persist_repository_state.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{
-		"CREATE TABLE scaler_repository_controls",
-		"CREATE TABLE scaler_installations",
-		"CREATE TABLE scaler_repositories",
-		"CREATE TABLE scaler_registrations",
-		"FOREIGN KEY (app_id, repository_url)",
-		"---- create above / drop below ----",
-		"DROP TABLE scaler_repository_controls",
-	} {
-		if !strings.Contains(string(migrationSQL), required) {
-			t.Fatalf("repository-state migration missing %q", required)
-		}
-	}
-}
-
 func TestPostgreSQLMigrationErrorsRetainAllowedServerDiagnostics(t *testing.T) {
 	serverError := &pgconn.PgError{
 		Severity:         "ERROR",

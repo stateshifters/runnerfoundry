@@ -27,13 +27,6 @@ func TestSystemdNotifierSurfacesCanceledContext(t *testing.T) {
 	}
 }
 
-func TestNoopNotifierSupportsReloading(t *testing.T) {
-	notifier := noopNotifier{}
-	if err := notifier.Reloading(context.Background()); err != nil {
-		t.Fatalf("expected noop reloading success, got %v", err)
-	}
-}
-
 func TestSystemdNotifierSurfacesNotifySocketFailure(t *testing.T) {
 	failure := errors.New("failed")
 	if err := notifySystemd(context.Background(), "READY=1", func(bool, string) (bool, error) {

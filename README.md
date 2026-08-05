@@ -177,7 +177,7 @@ These settings belong to the GitHub adapter. GitHub runner scale-set terminology
 | `scale_sets[].name` | Required and unique | Runner Pool name and GitHub `runs-on` value. |
 | `scale_sets[].runner_group` | Optional; default `default` | GitHub runner group used for the published capacity. |
 | `scale_sets[].max_runners` | Required positive integer | Capacity contributed by this member. |
-| `scale_sets[].job_start_timeout` | Optional; default `10m` | Maximum wait for GitHub to start a job on a provisioned runner. |
+| `scale_sets[].job_start_timeout` | Optional; default `10m` | Maximum wait for GitHub to start a job on the provisioned runner. Expiry fails the job's only attempt. |
 | `prune` | Optional; default `false` | Remove GitHub runner scale sets not present in this configuration. Enable only when RunnerFoundry owns them. |
 
 Each `scale_sets` entry configures exactly one execution provider: `docker` or `libvirt`.
@@ -207,7 +207,7 @@ When `log.file` is omitted, logs go to standard output. Do not configure multipl
 
 ## Use PostgreSQL
 
-Create a stable non-login role and a separate login identity. RunnerFoundry assumes the stable role on each connection and does not manage PostgreSQL roles or grants.
+RunnerFoundry requires PostgreSQL 17 or later. Create a stable non-login role and a separate login identity. RunnerFoundry assumes the stable role on each connection and does not manage PostgreSQL roles or grants.
 
 ```sql
 CREATE ROLE runnerfoundry
@@ -318,7 +318,7 @@ Reload validates the replacement configuration before applying it. State-backend
 
 ### Upgrade
 
-Review the release notes, back up the selected state backend, stop the affected member or cluster, install the package on every affected host, and start the members again. Keep every member stopped while applying a PostgreSQL schema change that requires a maintenance window.
+Review the release notes, stop the affected member or cluster, install the package on every affected host, and start the members again. This unreleased schema has no upgrade path: after a schema change, recreate the selected SQLite database or PostgreSQL schema before starting RunnerFoundry. Do not attempt to migrate or reuse state created by an earlier development revision.
 
 ### Troubleshooting
 

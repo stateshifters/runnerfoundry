@@ -40,7 +40,7 @@ func TestMigrationStatusWritesMachineReadableStdout(t *testing.T) {
 	var capturedRequest migrationRequest
 	runMigration := func(_ context.Context, request migrationRequest) (migrationStatus, error) {
 		capturedRequest = request
-		return migrationStatus{Current: 1, Target: 2, CompatibilityFloor: 1, Minimum: 0}, nil
+		return migrationStatus{Current: 1, Target: 2, Minimum: 0}, nil
 	}
 	var stdout bytes.Buffer
 	if err := executeCommand(t.Context(), []string{"migrate", "status", "--config", "config.yaml"}, nil,
@@ -50,7 +50,7 @@ func TestMigrationStatusWritesMachineReadableStdout(t *testing.T) {
 	if capturedRequest.action != migrationStatusAction || capturedRequest.configPath != "config.yaml" {
 		t.Fatalf("migration request = %#v", capturedRequest)
 	}
-	if stdout.String() != "current=1 target=2 compatibility_floor=1 known=0..2\n" {
+	if stdout.String() != "current=1 target=2 known=0..2\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

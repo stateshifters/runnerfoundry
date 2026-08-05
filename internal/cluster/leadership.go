@@ -90,27 +90,6 @@ func closeConnectionWithContext(ctx context.Context, connection interface {
 	return nil
 }
 
-func finishConnection(ctx context.Context, connection interface {
-	Close(ctx context.Context) error
-}, resultErr *error) {
-	*resultErr = errors.Join(*resultErr, closeConnection(ctx, connection))
-}
-
-func rollbackTransaction(ctx context.Context, transaction *databaseTransaction) error {
-	if err := transaction.Rollback(context.WithoutCancel(ctx)); err != nil {
-		return fmt.Errorf("rollback PostgreSQL transaction: %w", err)
-	}
-	return nil
-}
-
-func finishTransaction(ctx context.Context, transaction *databaseTransaction, transactionOpen *bool, resultErr *error) {
-	if !*transactionOpen {
-		return
-	}
-	*transactionOpen = false
-	*resultErr = errors.Join(*resultErr, rollbackTransaction(ctx, transaction))
-}
-
 // Alive reports whether the lease's connection is open and responds to a
 // PostgreSQL ping using ctx. A nil or empty lease is not alive.
 func (lease *LeaderLease) Alive(ctx context.Context) bool {

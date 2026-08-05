@@ -1,54 +1,120 @@
-CREATE TABLE scaler_schema_compatibility (
-    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    oldest_binary_schema_generation integer NOT NULL CHECK (oldest_binary_schema_generation >= 0)
+CREATE TABLE public.runnerfoundry_members (
+    member_id uuid PRIMARY KEY,
+    heartbeat_at timestamptz NOT NULL
 );
-INSERT INTO scaler_schema_compatibility (oldest_binary_schema_generation) VALUES (1);
 
-CREATE TABLE scaler_nodes (
-    node_id text PRIMARY KEY CHECK (btrim(node_id) <> ''),
-    heartbeat_at timestamptz NOT NULL,
-    healthy boolean NOT NULL
+CREATE INDEX runnerfoundry_members_heartbeat_idx
+    ON public.runnerfoundry_members (heartbeat_at);
+
+CREATE TABLE public.runnerfoundry_member_runner_pools (
+    member_id uuid NOT NULL
+        REFERENCES public.runnerfoundry_members (member_id) ON DELETE CASCADE,
+    runner_pool text NOT NULL CHECK (btrim(runner_pool) <> ''),
+    capacity integer NOT NULL CHECK (capacity > 0),
+    PRIMARY KEY (member_id, runner_pool)
 );
-CREATE TABLE scaler_contributions (
-    node_id text NOT NULL REFERENCES scaler_nodes(node_id) ON DELETE CASCADE,
-    scale_set text NOT NULL CHECK (btrim(scale_set) <> ''),
-    runner_group text NOT NULL CHECK (btrim(runner_group) <> ''),
-    max_runners integer NOT NULL CHECK (max_runners >= 0),
-    healthy boolean NOT NULL,
-    PRIMARY KEY (node_id, scale_set)
-);
-CREATE TABLE scaler_demand (
-    demand_id bigserial PRIMARY KEY,
-    observation_id bigserial UNIQUE NOT NULL,
-    scale_set text NOT NULL CHECK (btrim(scale_set) <> ''),
-    repository text NOT NULL CHECK (btrim(repository) <> ''),
-    request_id bigint NOT NULL CHECK (request_id > 0),
-    queue_time timestamptz NOT NULL,
-    UNIQUE (scale_set, repository, request_id)
-);
-CREATE TABLE scaler_assignments (
-    assignment_id bigserial PRIMARY KEY,
-    demand_id bigint NOT NULL REFERENCES scaler_demand(demand_id) ON DELETE CASCADE,
-    node_id text NOT NULL REFERENCES scaler_nodes(node_id),
-    installation_id bigint CHECK (installation_id > 0),
-    github_scale_set_id integer CHECK (github_scale_set_id > 0),
-    state text NOT NULL CHECK (state IN ('reserved', 'acquiring', 'ready', 'starting', 'running', 'complete')),
-    CHECK (
-        state IN ('reserved', 'complete')
-        OR (installation_id IS NOT NULL AND github_scale_set_id IS NOT NULL)
+
+CREATE TABLE public.runnerfoundry_jobs (
+    job_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_name text NOT NULL CHECK (btrim(source_name) <> ''),
+    source_reference text NOT NULL CHECK (btrim(source_reference) <> ''),
+    runner_pool text NOT NULL CHECK (btrim(runner_pool) <> ''),
+    state text NOT NULL
+        CONSTRAINT runnerfoundry_jobs_state_value_check
+        CHECK (state IN ('queued', 'attempting', 'result_pending')),
+    enqueued_at timestamptz NOT NULL,
+    member_id uuid REFERENCES public.runnerfoundry_members (member_id),
+    claimed_at timestamptz,
+    acquisition_started_at timestamptz,
+    acquired_at timestamptz,
+    started_at timestamptz,
+    result text CHECK (result IN ('success', 'failure')),
+    result_origin text CHECK (result_origin IN ('runner', 'service')),
+    result_reason text,
+    UNIQUE (source_name, source_reference),
+    CONSTRAINT runnerfoundry_jobs_state_check CHECK (
+        (state = 'queued'
+            AND member_id IS NULL
+            AND claimed_at IS NULL
+            AND acquisition_started_at IS NULL
+            AND acquired_at IS NULL
+            AND started_at IS NULL
+            AND result IS NULL
+            AND result_origin IS NULL
+            AND result_reason IS NULL)
+        OR
+        (state = 'attempting'
+            AND member_id IS NOT NULL
+            AND claimed_at IS NOT NULL
+            AND (acquired_at IS NULL OR acquisition_started_at IS NOT NULL)
+            AND result IS NULL
+            AND result_origin IS NULL
+            AND result_reason IS NULL)
+        OR
+        (state = 'result_pending'
+            AND result IS NOT NULL
+            AND result_origin IS NOT NULL
+            AND (
+                (member_id IS NULL
+                    AND claimed_at IS NULL
+                    AND acquisition_started_at IS NULL
+                    AND acquired_at IS NULL
+                    AND started_at IS NULL)
+                OR
+                (member_id IS NOT NULL AND claimed_at IS NOT NULL)
+            ))
+    ),
+    CONSTRAINT runnerfoundry_jobs_acquisition_order_check CHECK (
+        (acquisition_started_at IS NULL
+            OR (member_id IS NOT NULL
+                AND claimed_at IS NOT NULL
+                AND acquisition_started_at >= claimed_at))
+        AND (acquired_at IS NULL
+            OR (acquisition_started_at IS NOT NULL AND acquired_at >= acquisition_started_at))
+    ),
+    CONSTRAINT runnerfoundry_jobs_started_ownership_check CHECK (
+        started_at IS NULL OR (member_id IS NOT NULL AND claimed_at IS NOT NULL)
     )
 );
-CREATE UNIQUE INDEX scaler_one_active_assignment_per_demand
-    ON scaler_assignments(demand_id) WHERE state <> 'complete';
-CREATE INDEX scaler_fifo_demand
-    ON scaler_demand(scale_set, queue_time, observation_id);
-CREATE INDEX scaler_active_assignments_by_node
-    ON scaler_assignments(node_id) WHERE state <> 'complete';
+
+CREATE INDEX runnerfoundry_jobs_fifo_idx
+    ON public.runnerfoundry_jobs (runner_pool, enqueued_at)
+    WHERE state = 'queued';
+
+CREATE INDEX runnerfoundry_jobs_member_ownership_idx
+    ON public.runnerfoundry_jobs (member_id, runner_pool, claimed_at)
+    WHERE member_id IS NOT NULL;
+
+CREATE INDEX runnerfoundry_jobs_pending_acquisition_idx
+    ON public.runnerfoundry_jobs (claimed_at)
+    WHERE state = 'attempting' AND acquired_at IS NULL;
+
+CREATE INDEX runnerfoundry_jobs_pending_result_idx
+    ON public.runnerfoundry_jobs (enqueued_at)
+    WHERE state = 'result_pending';
+
+CREATE TABLE public.runnerfoundry_source_receipts (
+    source_name text NOT NULL CHECK (btrim(source_name) <> ''),
+    source_reference text NOT NULL CHECK (btrim(source_reference) <> ''),
+    result text NOT NULL CHECK (result IN ('success', 'failure')),
+    result_origin text NOT NULL CHECK (result_origin IN ('runner', 'service')),
+    delivery text NOT NULL CHECK (delivery IN ('reported', 'runner_managed', 'unsupported')),
+    PRIMARY KEY (source_name, source_reference)
+);
+
+CREATE TABLE public.runnerfoundry_github_registrations (
+    repository_url text NOT NULL CHECK (btrim(repository_url) <> ''),
+    runner_pool text NOT NULL CHECK (btrim(runner_pool) <> ''),
+    installation_id bigint NOT NULL CHECK (installation_id > 0),
+    runner_group_id bigint NOT NULL CHECK (runner_group_id > 0),
+    scale_set_id bigint NOT NULL CHECK (scale_set_id > 0),
+    PRIMARY KEY (repository_url, runner_pool)
+);
 
 ---- create above / drop below ----
 
-DROP TABLE scaler_assignments;
-DROP TABLE scaler_demand;
-DROP TABLE scaler_contributions;
-DROP TABLE scaler_nodes;
-DROP TABLE scaler_schema_compatibility;
+DROP TABLE public.runnerfoundry_github_registrations;
+DROP TABLE public.runnerfoundry_source_receipts;
+DROP TABLE public.runnerfoundry_jobs;
+DROP TABLE public.runnerfoundry_member_runner_pools;
+DROP TABLE public.runnerfoundry_members;

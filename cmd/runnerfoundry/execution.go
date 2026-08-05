@@ -54,8 +54,8 @@ func executeMigrationCommand(
 		}
 		return nil
 	}
-	if _, err := fmt.Fprintf(stdout, "current=%d target=%d compatibility_floor=%d known=%d..%d\n",
-		status.Current, status.Target, status.CompatibilityFloor, status.Minimum, status.Target); err != nil {
+	if _, err := fmt.Fprintf(stdout, "current=%d target=%d known=%d..%d\n",
+		status.Current, status.Target, status.Minimum, status.Target); err != nil {
 		return fmt.Errorf("write migration status: %w", err)
 	}
 	return nil

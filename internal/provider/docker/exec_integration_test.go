@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -54,10 +53,11 @@ type jitPrivacyTestCase struct {
 
 func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
 	t.Helper()
-	t.Setenv("RUNNERFOUNDRY_PRESERVED", "inherited")
-	t.Setenv(JITConfigEnvironment, "parent-jit-value")
-	parentEnvironment := os.Environ()
-	recording := &recordingDockerExecution{echoCommandEnvironment: true}
+	parentEnvironment := []string{"RUNNERFOUNDRY_PRESERVED=inherited", JITConfigEnvironment + "=parent-jit-value"}
+	recording := &recordingDockerExecution{
+		echoCommandEnvironment: true,
+		inheritedEnvironment:   parentEnvironment,
+	}
 	provider := ComposeProvider{CommandRunner: recording.runner(), Config: ComposeConfig{Service: "runner"}}
 
 	err := provider.Start(context.Background(), StartRequest{
@@ -68,9 +68,6 @@ func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
 	}
 	assertPrivateJITArguments(t, recording.arguments, jitConfig)
 	assertPrivateJITEnvironment(t, recording.commandEnvironment, parentEnvironment, jitConfig)
-	if !slices.Equal(os.Environ(), parentEnvironment) {
-		t.Fatal("docker invocation mutated the parent environment")
-	}
 	assertJITFailureRedacted(t, err, jitConfig)
 }
 
@@ -119,6 +116,7 @@ type recordingDockerExecution struct {
 	output                 []byte
 	err                    error
 	echoCommandEnvironment bool
+	inheritedEnvironment   []string
 }
 
 func (recording *recordingDockerExecution) runner() ExecCommandRunner {
@@ -127,7 +125,7 @@ func (recording *recordingDockerExecution) runner() ExecCommandRunner {
 			recording.arguments = append([]string{name}, arguments...)
 			return &exec.Cmd{}
 		},
-		inheritedEnvironment: os.Environ,
+		inheritedEnvironment: func() []string { return slices.Clone(recording.inheritedEnvironment) },
 		combinedOutput: func(command *exec.Cmd) ([]byte, error) {
 			recording.commandEnvironment = slices.Clone(command.Env)
 			if recording.echoCommandEnvironment {

@@ -15,12 +15,6 @@ type logDestinationFactory interface {
 	Open(logConfig config.LogConfig) (io.WriteCloser, error)
 }
 
-type logDestinationFactoryFunc func(config.LogConfig) (io.WriteCloser, error)
-
-func (factory logDestinationFactoryFunc) Open(logConfig config.LogConfig) (io.WriteCloser, error) {
-	return factory(logConfig)
-}
-
 type loggingManager struct {
 	factory logDestinationFactory
 	handler *reloadableLogHandler

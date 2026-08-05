@@ -5,13 +5,9 @@ import (
 	"os"
 
 	"github.com/libtnb/logrotate"
-	"github.com/meza/RunnerFoundry/internal/scaler"
 )
 
-var (
-	newRotatingLogFile    = logrotate.New
-	openSQLiteDemandStore = scaler.OpenSQLiteDemandStore
-)
+var newRotatingLogFile = logrotate.New
 
 func newProductionLogDestinationFactory() productionLogDestinationFactory {
 	return productionLogDestinationFactory{
