@@ -146,6 +146,10 @@ func seedRunnerIdentityContractCase(
 			RequestID: identity.RequestID, RunnerName: identity.RunnerName,
 			Phase: RunnerWaitingForJob, CreatedAt: time.Unix(1, 0).UTC(),
 		}
+		if sqliteStore, ok := store.(*SQLiteDemandStore); ok {
+			seedSQLiteGenericLifecycle(t, sqliteStore.database, runner)
+			continue
+		}
 		if err := store.RegisterRunner(context.Background(), runner); err != nil {
 			t.Fatal(err)
 		}

@@ -40,12 +40,16 @@ func markClusterRunnerBusyInTransaction(
 	if err != nil {
 		return err
 	}
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
+	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	mutation := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
 		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
 		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
+		FROM locked
 		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending'
 		  AND %s`, predicate.condition)
-	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	statement := clusterLifecycleLockedStatement(lockParameter, mutation)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return fmt.Errorf("mark clustered runner busy: %w", err)
@@ -54,7 +58,10 @@ func markClusterRunnerBusyInTransaction(
 		table: "scaler_runner_lifecycle", condition: "scale_set = $1 AND repository = $2 AND phase <> 'reap_pending'",
 		arguments: []any{scaleSet, repository},
 	}
-	return requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected())
+	if err = requireClusterRunnerIdentityMatch(ctx, transaction, scope, identity, commandTag.RowsAffected()); err != nil {
+		return err
+	}
+	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
 }
 
 func (store *Store) BindRunnerIdentity(
@@ -115,11 +122,18 @@ func markExactClusterRunnerBusy(
 	startedAt time.Time,
 	predicate clusterRunnerIdentityPredicate,
 ) (int64, error) {
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
+	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	statement := fmt.Sprintf(`WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($%d, 0))
+	)
+	UPDATE scaler_runner_lifecycle
 		SET phase = 'busy', github_runner_id = CASE WHEN $1 > 0 THEN $1 ELSE github_runner_id END,
 		    waiting_since = COALESCE(waiting_since, $2), updated_at = $2
-		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending' AND %s`, predicate.condition)
-	arguments := append([]any{githubRunnerID, startedAt, scaleSet, repository}, predicate.arguments...)
+		FROM locked
+		WHERE scale_set = $3 AND repository = $4 AND phase <> 'reap_pending' AND %s`,
+		lockParameter, predicate.condition)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return 0, fmt.Errorf("mark exact clustered runner busy: %w", err)
@@ -159,10 +173,16 @@ func requestClusterRunnerReapInTransaction(
 	requestedAt time.Time,
 	predicate clusterRunnerIdentityPredicate,
 ) error {
-	statement := fmt.Sprintf(`UPDATE scaler_runner_lifecycle
-		SET phase = 'reap_pending', reap_reason = $1, updated_at = $2
-		WHERE scale_set = $3 AND repository = $4 AND %s`, predicate.condition)
 	arguments := append([]any{reason, requestedAt, scaleSet, repository}, predicate.arguments...)
+	lockParameter := len(arguments) + 1
+	statement := fmt.Sprintf(`WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($%d, 0))
+	)
+	UPDATE scaler_runner_lifecycle
+		SET phase = 'reap_pending', reap_reason = $1, updated_at = $2
+		FROM locked
+		WHERE scale_set = $3 AND repository = $4 AND %s`, lockParameter, predicate.condition)
+	arguments = append(arguments, clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	commandTag, err := transaction.Exec(ctx, statement, arguments...)
 	if err != nil {
 		return fmt.Errorf("request clustered runner reap: %w", err)
@@ -183,18 +203,7 @@ func mirrorClusterRunnerReap(
 	scaleSet, repository string,
 	identity scaler.RunnerIdentity,
 ) error {
-	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
-	if err != nil {
-		return err
-	}
-	statement := fmt.Sprintf(`UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition)
-	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
-	commandTag, err := transaction.Exec(ctx, statement, arguments...)
-	if err != nil {
-		return fmt.Errorf("mirror clustered libvirt runner reap: %w", err)
-	}
-	return requireAtMostOneClusterRunnerIdentityMatch(identity, commandTag.RowsAffected())
+	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
 }
 
 func bindClusterRunnerIdentity(
@@ -259,13 +268,18 @@ func updateBoundClusterRunner(
 	githubRunnerID int64,
 	startedAt time.Time,
 ) error {
-	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_runner_lifecycle
+	commandTag, err := transaction.Exec(ctx, `WITH locked AS MATERIALIZED (
+		SELECT pg_advisory_xact_lock(hashtextextended($7, 0))
+	)
+	UPDATE scaler_runner_lifecycle
 		SET request_id = $1, phase = 'busy',
 		    github_runner_id = CASE WHEN $2 > 0 THEN $2 ELSE github_runner_id END,
 		    waiting_since = COALESCE(waiting_since, $3), updated_at = $3
+		FROM locked
 		WHERE scale_set = $4 AND repository = $5 AND runner_name = $6 AND request_id = 0
 		  AND phase <> 'reap_pending'`, identity.RequestID, githubRunnerID, startedAt,
-		scaleSet, repository, identity.RunnerName)
+		scaleSet, repository, identity.RunnerName,
+		clusterLifecycleAdvisoryKey(scaleSet, repository, identity))
 	if err != nil {
 		return fmt.Errorf("bind clustered runner identity: %w", err)
 	}
@@ -284,16 +298,24 @@ func mirrorBoundClusterLibvirtIdentity(
 	scaleSet, repository string,
 	identity scaler.RunnerIdentity,
 ) error {
-	commandTag, err := transaction.Exec(ctx, `UPDATE scaler_libvirt_runner_lifecycle candidate
-		SET request_id = $1
-		WHERE candidate.scale_set = $2 AND candidate.repository = $3
-		  AND candidate.runner_name = $4 AND candidate.request_id = 0
-		  AND NOT EXISTS (
-			SELECT 1 FROM scaler_libvirt_runner_lifecycle owner
-			WHERE owner.scale_set = $2 AND owner.repository = $3 AND owner.request_id = $1
-		  )`, identity.RequestID, scaleSet, repository, identity.RunnerName)
+	return reconcileClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
+}
+
+func reconcileClusterLibvirtLifecycle(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet, repository string,
+	identity scaler.RunnerIdentity,
+) error {
+	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
 	if err != nil {
-		return fmt.Errorf("bind clustered libvirt runner request identity: %w", err)
+		return err
+	}
+	statement := fmt.Sprintf(reconcileClusterLibvirtLifecycleSQL, predicate.condition)
+	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
+	commandTag, err := transaction.Exec(ctx, statement, arguments...)
+	if err != nil {
+		return fmt.Errorf("reconcile clustered libvirt lifecycle transition: %w", err)
 	}
 	if commandTag.RowsAffected() > 1 {
 		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: commandTag.RowsAffected()}
@@ -301,7 +323,94 @@ func mirrorBoundClusterLibvirtIdentity(
 	if commandTag.RowsAffected() == 1 {
 		return nil
 	}
-	return classifyUnchangedClusterLibvirtIdentity(ctx, transaction, scaleSet, repository, identity)
+	return classifyUnreconciledClusterLibvirtLifecycle(ctx, transaction, scaleSet, repository, identity)
+}
+
+func classifyUnreconciledClusterLibvirtLifecycle(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet, repository string,
+	identity scaler.RunnerIdentity,
+) error {
+	predicate, err := newClusterRunnerIdentityPredicate(identity, 3)
+	if err != nil {
+		return err
+	}
+	authority, err := loadClusterLifecycleTransitionAuthority(
+		ctx, transaction, scaleSet, repository, predicate,
+	)
+	if err != nil {
+		return err
+	}
+	mirrorCount, err := countClusterLifecycleTransitionMirrors(
+		ctx, transaction, scaleSet, repository, authority,
+	)
+	if err != nil {
+		return err
+	}
+	return classifyClusterLifecycleTransitionConflict(scaleSet, repository, identity, authority, mirrorCount)
+}
+
+type clusterLifecycleTransitionAuthority struct {
+	nodeID     NodeID
+	provider   scaler.RunnerProvider
+	runnerName string
+}
+
+func loadClusterLifecycleTransitionAuthority(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet, repository string,
+	predicate clusterRunnerIdentityPredicate,
+) (clusterLifecycleTransitionAuthority, error) {
+	arguments := append([]any{scaleSet, repository}, predicate.arguments...)
+	var authority clusterLifecycleTransitionAuthority
+	err := transaction.QueryRow(ctx, fmt.Sprintf(`SELECT node_id, provider, runner_name FROM scaler_runner_lifecycle
+		WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition), arguments...).Scan(
+		&authority.nodeID, &authority.provider, &authority.runnerName,
+	)
+	if err != nil {
+		return authority, fmt.Errorf("inspect authoritative clustered lifecycle transition: %w", err)
+	}
+	return authority, nil
+}
+
+func countClusterLifecycleTransitionMirrors(
+	ctx context.Context,
+	transaction *databaseTransaction,
+	scaleSet, repository string,
+	authority clusterLifecycleTransitionAuthority,
+) (int64, error) {
+	var mirrorCount int64
+	err := transaction.QueryRow(ctx, `SELECT COUNT(*) FROM scaler_libvirt_runner_lifecycle
+		WHERE node_id = $1 AND scale_set = $2 AND repository = $3 AND runner_name = $4`,
+		authority.nodeID, scaleSet, repository, authority.runnerName).Scan(&mirrorCount)
+	if err != nil {
+		return 0, fmt.Errorf("inspect legacy clustered lifecycle transition: %w", err)
+	}
+	return mirrorCount, nil
+}
+
+func classifyClusterLifecycleTransitionConflict(
+	scaleSet, repository string,
+	identity scaler.RunnerIdentity,
+	authority clusterLifecycleTransitionAuthority,
+	mirrorCount int64,
+) error {
+	if mirrorCount > 1 {
+		return &scaler.RunnerIdentityInvariantError{Identity: identity, Matches: mirrorCount}
+	}
+	if authority.provider != scaler.RunnerProviderLibvirt && mirrorCount == 0 {
+		return nil
+	}
+	reason := "legacy lifecycle conflicts with authoritative transition"
+	if authority.provider != scaler.RunnerProviderLibvirt {
+		reason = "legacy libvirt lifecycle conflicts with authoritative provider"
+	}
+	return &scaler.RunnerLifecycleConsistencyError{
+		ScaleSet: scaleSet, Repository: repository, RunnerName: authority.runnerName,
+		Reason: reason,
+	}
 }
 
 func classifyUnchangedClusterLibvirtIdentity(

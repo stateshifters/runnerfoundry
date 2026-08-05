@@ -180,13 +180,11 @@ func registerSQLiteMessageIdentityRunner(
 	createdAt time.Time,
 ) {
 	t.Helper()
-	if err := store.RegisterRunner(context.Background(), RunnerLifecycle{
+	seedSQLiteGenericLifecycle(t, store.database, RunnerLifecycle{
 		ScaleSet: "linux", Repository: "repo", Provider: RunnerProviderDocker,
 		RunnerName: identity.RunnerName, RequestID: identity.RequestID,
 		Phase: RunnerWaitingForJob, CreatedAt: createdAt,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 }
 
 func expectSQLiteMessageStatisticsFailure(mock sqlmock.Sqlmock, failure error) {
@@ -195,6 +193,7 @@ func expectSQLiteMessageStatisticsFailure(mock sqlmock.Sqlmock, failure error) {
 	mock.ExpectExec("DELETE FROM demand").WillReturnResult(sqlmock.NewResult(0, 1))
 	expectSQLiteIdentityMatch(mock, "runner_lifecycle")
 	mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectSQLiteDockerMirrorReconciliation(mock)
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT controller_epoch").WillReturnRows(sqlmock.NewRows([]string{"controller_epoch", "observed_at"}))
 	mock.ExpectExec("INSERT INTO assigned_capacity_observations").WillReturnError(failure)

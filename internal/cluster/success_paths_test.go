@@ -133,8 +133,9 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	runner := scaler.RunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
 		RunnerName: "runner", RequestID: 1, AssignmentID: 2, CreatedAt: now}
+	registrationState := &hermeticClusterLifecycleState{}
+	assertNoError(t, storeWithConnection(registrationState.connection(runner)).RegisterRunner(context.Background(), runner))
 	store := storeWithConnection(&fakeDatabaseConnection{})
-	assertNoError(t, store.RegisterRunner(context.Background(), runner))
 	assertNoError(t, store.ConfirmRunnerWaiting(context.Background(), runner, now))
 	identity := scaler.RunnerIdentity{RequestID: 1, RunnerName: "runner"}
 	assertNoError(t, store.MarkRunnerBusy(context.Background(), "set", "repo", identity, 3, now))
@@ -143,7 +144,7 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 	if err != nil || changed != 1 {
 		t.Fatalf("expired = %d, %v", changed, err)
 	}
-	if changed, err = store.RequestExcessWaitingRunnerReaps(context.Background(), "set", "repo", 1, "excess", now); err != nil || changed != 0 {
+	if changed, err = store.RequestExcessWaitingRunnerReaps(context.Background(), "set", "repo", 1, "excess", now); err != nil || changed != 1 {
 		t.Fatalf("excess = %d, %v", changed, err)
 	}
 	assertNoError(t, store.ConfirmRunnerReaped(context.Background(), runner))
@@ -151,28 +152,37 @@ func TestRunnerLifecycleSuccessPathsUseInMemoryDatabase(t *testing.T) {
 
 func TestRunnerRegistrationAcceptsExistingAndNonLibvirtRunners(t *testing.T) {
 	runner := scaler.RunnerLifecycle{NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderDocker,
-		RunnerName: "runner", RequestID: 1, AssignmentID: 2}
-	assertNoError(t, storeWithConnection(&fakeDatabaseConnection{}).RegisterRunner(context.Background(), runner))
-	connection := &fakeDatabaseConnection{
-		execTag: pgconn.NewCommandTag("INSERT 0 0"), rowResults: []fakeRow{booleanRow(t, true)},
-	}
-	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
+		RunnerName: "runner", RequestID: 1, AssignmentID: 2, Phase: scaler.RunnerProvisioning}
+	state := &hermeticClusterLifecycleState{}
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(context.Background(), runner))
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(context.Background(), runner))
 }
 
 func TestRunnerRegistrationMirrorsIdentityFreeLibvirtLifecycle(t *testing.T) {
-	connection := &fakeDatabaseConnection{execTag: pgconn.NewCommandTag("INSERT 0 1")}
 	runner := scaler.RunnerLifecycle{
 		NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
-		RunnerName: "runner", RequestID: 0, AssignmentID: 2,
+		RunnerName: "runner", RequestID: 0, AssignmentID: 2, Phase: scaler.RunnerProvisioning,
 	}
+	state := &hermeticClusterLifecycleState{}
 
-	assertNoError(t, storeWithConnection(connection).RegisterRunner(context.Background(), runner))
-	if len(connection.executions) != 2 {
-		t.Fatalf("registration executions = %d, want 2", len(connection.executions))
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(context.Background(), runner))
+	if state.mirror == nil || state.mirror.requestID != 0 {
+		t.Fatalf("identity-free libvirt mirror = %#v", state.mirror)
 	}
-	mirrorArguments := connection.executions[1].arguments
-	if len(mirrorArguments) != 5 || mirrorArguments[3] != int64(0) {
-		t.Fatalf("identity-free libvirt mirror arguments = %#v", mirrorArguments)
+}
+
+func TestRunnerRegistrationRetryRepairsMissingLibvirtMirror(t *testing.T) {
+	runner := scaler.RunnerLifecycle{
+		NodeID: "node", ScaleSet: "set", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,
+		RunnerName: "runner", RequestID: 1, AssignmentID: 2, Phase: scaler.RunnerProvisioning,
+	}
+	state := &hermeticClusterLifecycleState{generic: cloneRunnerLifecycle(&runner)}
+
+	assertNoError(t, storeWithConnection(state.connection(runner)).RegisterRunner(
+		context.Background(), runner,
+	))
+	if state.mirror == nil || state.mirror.requestID != runner.RequestID {
+		t.Fatalf("repaired mirror = %#v", state.mirror)
 	}
 }
 
@@ -209,7 +219,8 @@ func TestMarkRunnerBusyBindsIdentityFreeRunnerToStartedRequest(t *testing.T) {
 		transaction.executions[1].arguments[0] != int64(42) {
 		t.Fatalf("runner request binding = %#v", transaction.executions[1])
 	}
-	if transaction.executions[2].arguments[0] != int64(42) {
+	if !strings.Contains(transaction.executions[2].statement, "INSERT INTO scaler_libvirt_runner_lifecycle") ||
+		transaction.executions[2].arguments[2] != int64(42) {
 		t.Fatalf("legacy runner request binding = %#v", transaction.executions[2])
 	}
 }

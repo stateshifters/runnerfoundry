@@ -234,12 +234,17 @@ func markSQLiteMessageRunnerBusy(
 		ctx, transaction, update.ScaleSet, update.Repository, activeSQLiteRunner, identity,
 	)
 	if resolveErr == nil {
-		return updateSQLiteRunnerBusy(ctx, transaction, update.ScaleSet, update.Repository,
-			identity, started.GitHubRunnerID, update.ObservedAt)
+		if err := updateSQLiteRunnerBusy(ctx, transaction, update.ScaleSet, update.Repository,
+			identity, started.GitHubRunnerID, update.ObservedAt); err != nil {
+			return err
+		}
+		return reconcileSQLiteMirrorForIdentity(
+			ctx, transaction, update.ScaleSet, update.Repository, identity,
+		)
 	}
 	if identity.isPair() && (errors.Is(resolveErr, ErrRunnerIdentityMismatch) ||
 		errors.Is(resolveErr, ErrRunnerIdentityNotFound)) {
-		return bindSQLiteIdentityFreeRunner(ctx, transaction, update.ScaleSet, update.Repository,
+		return bindSQLiteRunnerIdentity(ctx, transaction, update.ScaleSet, update.Repository,
 			identity, started.GitHubRunnerID, update.ObservedAt)
 	}
 	return resolveErr

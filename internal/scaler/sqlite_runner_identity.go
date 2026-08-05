@@ -277,10 +277,7 @@ func bindSQLiteRunnerIdentity(
 	if err != nil {
 		return err
 	}
-	if err = bindSQLiteLibvirtMirror(ctx, transaction, scaleSet, repository, identity); err != nil {
-		return err
-	}
-	return nil
+	return reconcileSQLiteMirrorForIdentity(ctx, transaction, scaleSet, repository, identity)
 }
 
 func bindSQLiteIdentityFreeRunner(
@@ -356,32 +353,6 @@ func classifySQLiteIdentityFreeBinding(
 		return &RunnerIdentityNotFoundError{Identity: identity}
 	}
 	return nil
-}
-
-func bindSQLiteLibvirtMirror(
-	ctx context.Context,
-	transaction *sql.Tx,
-	scaleSet, repository string,
-	identity RunnerIdentity,
-) error {
-	counts, err := sqliteLibvirtBindingCandidateCounts(ctx, transaction, scaleSet, repository, identity)
-	if err != nil {
-		return err
-	}
-	shouldUpdate, err := classifySQLiteLibvirtBinding(identity, counts)
-	if err != nil {
-		return err
-	}
-	if !shouldUpdate {
-		return nil
-	}
-	result, err := transaction.ExecContext(ctx, `UPDATE libvirt_runner_lifecycle SET request_id = ?
-		WHERE scale_set = ? AND repository = ? AND runner_name = ? AND request_id = 0`,
-		identity.RequestID, scaleSet, repository, identity.RunnerName)
-	if err != nil {
-		return fmt.Errorf("bind mirrored libvirt runner identity: %w", err)
-	}
-	return requireSingleSQLiteIdentityChange(result, identity, "count bound mirrored libvirt runner identity")
 }
 
 func sqliteLibvirtBindingCandidateCounts(

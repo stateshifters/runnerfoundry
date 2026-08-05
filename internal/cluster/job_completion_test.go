@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
@@ -34,6 +35,17 @@ func TestClusterJobCompletionReconcilesInvalidRequestByRunnerNameOnly(t *testing
 	}
 	if !strings.Contains(transaction.executions[3].statement, "source = 'assigned_count'") {
 		t.Fatalf("identity-free obligation completion statement = %s", transaction.executions[3].statement)
+	}
+}
+
+func TestClusterStoreBridgesGenericRunnerLifecycleCompletion(t *testing.T) {
+	var completionStore scaler.RunnerJobCompletionStore = storeWithConnection(&fakeDatabaseConnection{})
+	err := completionStore.CompleteRunnerLifecycleJob(context.Background(), scaler.JobCompletion{
+		ScaleSet: "linux", Repository: "repo",
+		RunnerIdentity: scaler.RunnerIdentity{RequestID: 42, RunnerName: "linux-42"},
+	}, time.Unix(10, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

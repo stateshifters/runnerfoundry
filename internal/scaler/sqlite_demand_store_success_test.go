@@ -177,30 +177,58 @@ func TestSQLiteRunnerLifecycleSucceedsInMemory(t *testing.T) {
 	now := time.Unix(1, 2).UTC()
 	runner := genericSQLiteRunner()
 	runner.CreatedAt = now
+	registerSQLiteRunnerLifecycleSuccessfully(t, fixture, runner)
+	confirmSQLiteRunnerWaitingSuccessfully(t, fixture, runner, now)
+	markSQLiteRunnerBusySuccessfully(t, fixture, now)
+	requestSQLiteRunnerReapSuccessfully(t, fixture, now)
+	assertBulkRunnerReapsSucceed(t, fixture, now)
+}
+
+func registerSQLiteRunnerLifecycleSuccessfully(t *testing.T, fixture demandStoreMock, runner RunnerLifecycle) {
+	t.Helper()
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
+	fixture.mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnError(sql.ErrNoRows)
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(1, 1))
+	fixture.mock.ExpectCommit()
 	if err := fixture.store.RegisterRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func confirmSQLiteRunnerWaitingSuccessfully(t *testing.T, fixture demandStoreMock, runner RunnerLifecycle, now time.Time) {
+	t.Helper()
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := fixture.store.ConfirmRunnerWaiting(context.Background(), runner, now); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func markSQLiteRunnerBusySuccessfully(t *testing.T, fixture demandStoreMock, now time.Time) {
+	t.Helper()
 	fixture.mock.ExpectBegin()
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectSQLiteDockerMirrorReconciliation(fixture.mock)
 	fixture.mock.ExpectCommit()
 	if err := fixture.store.MarkRunnerBusy(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}, 7, now); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func requestSQLiteRunnerReapSuccessfully(t *testing.T, fixture demandStoreMock, now time.Time) {
+	t.Helper()
 	fixture.mock.ExpectBegin()
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectSQLiteDockerMirrorReconciliation(fixture.mock)
 	fixture.mock.ExpectCommit()
 	if err := fixture.store.RequestRunnerReap(context.Background(), "linux", "repo", RunnerIdentity{RequestID: 42, RunnerName: "linux-42"}, "done", now); err != nil {
 		t.Fatal(err)
 	}
-	assertBulkRunnerReapsSucceed(t, fixture, now)
 }
 
 func TestSQLiteRunnerCompletionAndQueriesSucceedInMemory(t *testing.T) {
@@ -217,8 +245,12 @@ func completeSQLiteRunnerLifecycle(t *testing.T, fixture demandStoreMock, comple
 	fixture.mock.ExpectBegin()
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
 	for _, statement := range []string{
-		"UPDATE runner_lifecycle", "UPDATE libvirt_runner_lifecycle", "DELETE FROM demand", "DELETE FROM demand",
+		"UPDATE runner_lifecycle", "UPDATE libvirt_runner_lifecycle",
 	} {
+		fixture.mock.ExpectExec(statement).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	expectSQLiteDockerMirrorReconciliation(fixture.mock)
+	for _, statement := range []string{"DELETE FROM demand", "DELETE FROM demand"} {
 		fixture.mock.ExpectExec(statement).WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	fixture.mock.ExpectCommit()
@@ -246,6 +278,7 @@ func confirmSQLiteRunnerLifecycleReaped(t *testing.T, fixture demandStoreMock, r
 	t.Helper()
 	fixture.mock.ExpectBegin()
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
+	expectSQLiteTerminalAuthoritativeDocker(fixture.mock)
 	fixture.mock.ExpectExec("DELETE FROM runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
 	fixture.mock.ExpectCommit()
 	if err := fixture.store.ConfirmRunnerReaped(context.Background(), runner); err != nil {
@@ -256,16 +289,29 @@ func confirmSQLiteRunnerLifecycleReaped(t *testing.T, fixture demandStoreMock, r
 func TestSQLiteLibvirtRunnerRegistrationSucceedsInMemory(t *testing.T) {
 	fixture := mockDemandStore(t)
 	runner := genericSQLiteRunner()
+	runner.Provider = RunnerProviderLibvirt
+	fixture.mock.ExpectBegin()
+	fixture.mock.ExpectQuery("SELECT provider").WillReturnError(sql.ErrNoRows)
+	fixture.mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnError(sql.ErrNoRows)
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(1, 1))
 	fixture.mock.ExpectExec("INSERT INTO libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(1, 1))
-	runner.Provider = RunnerProviderLibvirt
+	fixture.mock.ExpectCommit()
 	if err := fixture.store.RegisterRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
-	fixture.mock.ExpectExec("INSERT INTO runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
+	fixture.mock.ExpectBegin()
 	fixture.mock.ExpectQuery("SELECT provider").WillReturnRows(sqlmock.NewRows(
 		[]string{"provider", "request_id", "assignment_id", "phase"},
 	).AddRow("libvirt", runner.RequestID, runner.AssignmentID, "waiting_for_job"))
+	fixture.mock.ExpectQuery("SELECT request_id, reap_requested").WillReturnRows(sqlmock.NewRows(
+		[]string{"request_id", "reap_requested"},
+	).AddRow(runner.RequestID, false))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM runner_lifecycle").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	fixture.mock.ExpectExec("INSERT INTO libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	fixture.mock.ExpectCommit()
 	if err := fixture.store.RegisterRunner(context.Background(), runner); err != nil {
 		t.Fatal(err)
 	}
@@ -360,8 +406,12 @@ func assertBulkRunnerReapsSucceed(t *testing.T, fixture demandStoreMock, now tim
 			return fixture.store.RequestExcessWaitingRunnerReaps(context.Background(), "linux", "repo", 1, "excess", now)
 		},
 	} {
+		fixture.mock.ExpectBegin()
 		fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-		fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+		fixture.mock.ExpectQuery("SELECT repository").WillReturnRows(sqlmock.NewRows(
+			[]string{"repository", "provider", "runner_name", "request_id", "phase"},
+		))
+		fixture.mock.ExpectCommit()
 		if changed, err := operation(); err != nil || changed != 1 {
 			t.Fatalf("changed = %d, %v", changed, err)
 		}

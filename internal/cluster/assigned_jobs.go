@@ -55,14 +55,6 @@ WHERE lifecycle.node_id = excess.node_id AND lifecycle.scale_set = excess.scale_
   AND lifecycle.repository = excess.repository AND lifecycle.runner_name = excess.runner_name
   AND lifecycle.phase = 'waiting_for_job'`
 
-const mirrorExcessAssignedRunnerReapsSQL = `UPDATE scaler_libvirt_runner_lifecycle legacy
-	SET reap_requested = true
-	WHERE legacy.scale_set = $1 AND legacy.repository = $2
-	  AND EXISTS (SELECT 1 FROM scaler_runner_lifecycle lifecycle
-		WHERE lifecycle.node_id = legacy.node_id AND lifecycle.scale_set = legacy.scale_set
-		  AND lifecycle.repository = legacy.repository AND lifecycle.runner_name = legacy.runner_name
-		  AND lifecycle.phase = 'reap_pending' AND lifecycle.reap_reason = 'assigned_jobs_decreased')`
-
 const completeExcessAssignedAssignmentsSQL = `UPDATE scaler_assignments assignment SET state = 'complete'
 	WHERE assignment.assignment_id IN (
 		SELECT assignment_id FROM scaler_runner_lifecycle
@@ -366,9 +358,10 @@ func reconcileExcessAssignedRunners(
 		observation.Repository, observation.ObservedAt); err != nil {
 		return fmt.Errorf("request excess assigned runner reaps: %w", err)
 	}
-	if _, err := transaction.Exec(ctx, mirrorExcessAssignedRunnerReapsSQL,
-		observation.ScaleSet, observation.Repository); err != nil {
-		return fmt.Errorf("mirror excess assigned runner reaps: %w", err)
+	if err := reconcileClusterBulkLibvirtReaps(
+		ctx, transaction, observation.ScaleSet, observation.Repository, "assigned_jobs_decreased",
+	); err != nil {
+		return err
 	}
 	if _, err := transaction.Exec(ctx, completeExcessAssignedAssignmentsSQL,
 		observation.ScaleSet, observation.Repository); err != nil {

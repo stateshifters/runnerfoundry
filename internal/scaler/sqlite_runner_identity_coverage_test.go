@@ -190,6 +190,7 @@ func TestSQLiteBindingAndMarkBoundaryBranches(t *testing.T) {
 	fixture.mock.ExpectBegin()
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectSQLiteDockerMirrorReconciliation(fixture.mock)
 	fixture.mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 	if err := fixture.store.MarkRunnerBusy(context.Background(), "set", "repo",
 		RunnerIdentity{RequestID: 42}, 1, time.Now()); err == nil {
@@ -234,28 +235,6 @@ func TestSQLiteIdentityFreeBindingMutationFailures(t *testing.T) {
 	}
 }
 
-func TestSQLiteLibvirtMirrorBindingMutationFailures(t *testing.T) {
-	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
-	for name, operation := range map[string]func(demandStoreMock, *sql.Tx) error{
-		"candidate count": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnError(errors.New("count failed"))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
-		},
-		"mirror update": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			expectSQLiteCoverageCounts(fixture.mock, 1, 0, 0, 1)
-			fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnError(errors.New("update failed"))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
-		},
-		"mirror affected rows": func(fixture demandStoreMock, transaction *sql.Tx) error {
-			expectSQLiteCoverageCounts(fixture.mock, 1, 0, 0, 1)
-			fixture.mock.ExpectExec("UPDATE libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 0))
-			return bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity)
-		},
-	} {
-		assertSQLiteBindingOperationFails(t, name, operation)
-	}
-}
-
 func assertSQLiteBindingOperationFails(
 	t *testing.T,
 	name string,
@@ -281,12 +260,17 @@ func TestSQLiteRunnerBindingRejectsDuplicateResolution(t *testing.T) {
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
 }
 
-func TestSQLiteLibvirtMirrorBindingIgnoresMissingMirror(t *testing.T) {
+func TestSQLiteLibvirtMirrorBindingRepairsMissingMirror(t *testing.T) {
 	identity := RunnerIdentity{RequestID: 42, RunnerName: "runner"}
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
-	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	if err := bindSQLiteLibvirtMirror(context.Background(), transaction, "set", "repo", identity); err != nil {
+	fixture.mock.ExpectQuery("SELECT provider, runner_name").WillReturnRows(sqlmock.NewRows(
+		[]string{"provider", "runner_name", "request_id", "phase"},
+	).AddRow("libvirt", "runner", 42, "busy"))
+	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM libvirt_runner_lifecycle").WillReturnRows(
+		sqlmock.NewRows([]string{"count"}).AddRow(0))
+	fixture.mock.ExpectQuery("SELECT request_id FROM libvirt_runner_lifecycle").WillReturnError(sql.ErrNoRows)
+	fixture.mock.ExpectExec("INSERT INTO libvirt_runner_lifecycle").WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := reconcileSQLiteMirrorForIdentity(context.Background(), transaction, "set", "repo", identity); err != nil {
 		t.Fatalf("missing mirror error = %v", err)
 	}
 	rollbackSQLiteIdentityCoverageTransaction(t, fixture, transaction)
@@ -297,7 +281,7 @@ func TestSQLiteRunnerBindingReturnsMirrorFailure(t *testing.T) {
 	fixture, transaction := beginSQLiteIdentityCoverageTransaction(t)
 	expectSQLiteIdentityMatch(fixture.mock, "runner_lifecycle")
 	fixture.mock.ExpectExec("UPDATE runner_lifecycle").WillReturnResult(sqlmock.NewResult(0, 1))
-	fixture.mock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnError(errors.New("mirror failed"))
+	fixture.mock.ExpectQuery("SELECT provider, runner_name").WillReturnError(errors.New("mirror failed"))
 	if err := bindSQLiteRunnerIdentity(context.Background(), transaction, "set", "repo", identity, 1, time.Now()); err == nil {
 		t.Fatal("expected mirror failure")
 	}

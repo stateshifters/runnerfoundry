@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,23 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 	"github.com/meza/RunnerFoundry/internal/scaler"
 )
+
+func TestClusterRunnerRegistrationRollsBackGenericLifecycleWhenMirrorFails(t *testing.T) {
+	failure := errors.New("mirror unavailable")
+	runner := testRunnerLifecycle()
+	runner.Phase = scaler.RunnerProvisioning
+	state := &hermeticClusterLifecycleState{mirrorFailure: failure}
+
+	err := storeWithConnection(state.connection(runner)).RegisterRunner(
+		context.Background(), runner,
+	)
+	if !errors.Is(err, failure) {
+		t.Fatalf("registration error = %v, want mirror failure", err)
+	}
+	if state.generic != nil {
+		t.Fatalf("failed registration committed generic lifecycle = %#v", state.generic)
+	}
+}
 
 func testRunnerLifecycle() scaler.RunnerLifecycle {
 	return scaler.RunnerLifecycle{NodeID: "runner-host-1", ScaleSet: "linux", Repository: "repo", Provider: scaler.RunnerProviderLibvirt,

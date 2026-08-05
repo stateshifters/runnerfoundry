@@ -83,8 +83,16 @@ func mirrorSQLiteCompletedRunner(ctx context.Context, transaction *sql.Tx, compl
 	if err != nil {
 		return err
 	}
-	return requireAtMostOneSQLiteIdentityChange(result, completion.RunnerIdentity,
-		"count mirrored completed runner reap")
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count mirrored completed runner reap: %w", err)
+	}
+	if changed > 1 {
+		return &RunnerIdentityInvariantError{Identity: completion.RunnerIdentity, Matches: changed}
+	}
+	return reconcileSQLiteMirrorForIdentity(
+		ctx, transaction, completion.ScaleSet, completion.Repository, completion.RunnerIdentity,
+	)
 }
 
 func removeSQLiteCompletedRunnerDemand(ctx context.Context, transaction *sql.Tx, completion JobCompletion) error {

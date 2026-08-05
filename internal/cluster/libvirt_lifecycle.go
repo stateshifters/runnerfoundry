@@ -138,6 +138,11 @@ func applyClusterJobCompletionAssociations(
 	predicate clusterRunnerIdentityPredicate,
 	arguments []any,
 ) error {
+	if err := reconcileClusterLibvirtLifecycle(
+		ctx, transaction, completion.ScaleSet, completion.Repository, completion.RunnerIdentity,
+	); err != nil {
+		return err
+	}
 	operations := clusterJobCompletionAssociationOperations(predicate)
 	for _, operation := range operations {
 		if err := applyClusterJobCompletionAssociation(
@@ -158,17 +163,8 @@ func clusterJobCompletionAssociationOperations(
 	predicate clusterRunnerIdentityPredicate,
 ) []clusterJobCompletionAssociationOperation {
 	return []clusterJobCompletionAssociationOperation{
-		clusterLibvirtReapOperation(predicate),
 		clusterAssignmentCompletionOperation(predicate),
 		clusterDemandCompletionOperation(predicate),
-	}
-}
-
-func clusterLibvirtReapOperation(predicate clusterRunnerIdentityPredicate) clusterJobCompletionAssociationOperation {
-	return clusterJobCompletionAssociationOperation{
-		statement: fmt.Sprintf(`UPDATE scaler_libvirt_runner_lifecycle SET reap_requested = true
-			WHERE scale_set = $1 AND repository = $2 AND %s`, predicate.condition),
-		failure: "request clustered libvirt runner reap",
 	}
 }
 
