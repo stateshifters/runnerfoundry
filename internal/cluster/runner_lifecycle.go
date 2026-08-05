@@ -24,7 +24,8 @@ const releaseExpiredClusterAssignmentsSQL = `UPDATE scaler_assignments SET state
 const deferExpiredClusterDemandsSQL = `UPDATE scaler_demand demand
 	SET attempt = demand.attempt + 1,
 	    next_attempt_at = CASE demand.attempt
-	        WHEN 0 THEN $4 WHEN 1 THEN $5 WHEN 2 THEN $6 WHEN 3 THEN $7 ELSE $8 END
+	        WHEN 0 THEN $4::timestamptz WHEN 1 THEN $5::timestamptz
+	        WHEN 2 THEN $6::timestamptz WHEN 3 THEN $7::timestamptz ELSE $8::timestamptz END
 	FROM scaler_assignments assignment
 	JOIN scaler_runner_lifecycle lifecycle ON lifecycle.assignment_id = assignment.assignment_id
 	WHERE assignment.demand_id = demand.demand_id
