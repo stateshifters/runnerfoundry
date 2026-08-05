@@ -10,8 +10,12 @@ import (
 )
 
 type MembershipStore interface {
-	HeartbeatMember(ctx context.Context, member core.MemberID, heartbeatAt time.Time) error
-	PublishRunnerPoolCapacity(ctx context.Context, member core.MemberID, runnerPool core.RunnerPool, capacity int) error
+	PublishMemberState(
+		ctx context.Context,
+		member core.MemberID,
+		heartbeatAt time.Time,
+		capacities []core.RunnerPoolCapacity,
+	) error
 	ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
 	CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error)
 	ExpireMember(ctx context.Context, member core.MemberID) error
@@ -46,17 +50,11 @@ func NewMembershipService(
 }
 
 func (service *MembershipService) Heartbeat(ctx context.Context) error {
-	if err := service.store.HeartbeatMember(ctx, service.member, service.currentTime()); err != nil {
-		return fmt.Errorf("heartbeat member %q: %w", service.member, err)
+	if err := service.store.PublishMemberState(
+		ctx, service.member, service.currentTime(), service.localCapacity,
+	); err != nil {
+		return fmt.Errorf("publish member %q state: %w", service.member, err)
 	}
-	for _, capacity := range service.localCapacity {
-		if err := service.store.PublishRunnerPoolCapacity(
-			ctx, service.member, capacity.RunnerPool, capacity.Capacity,
-		); err != nil {
-			return fmt.Errorf("publish member %q Runner Pool %q capacity: %w", service.member, capacity.RunnerPool, err)
-		}
-	}
-
 	return nil
 }
 
@@ -69,15 +67,18 @@ func (service *MembershipService) Expire(ctx context.Context, cutoff time.Time) 
 	expired := 0
 	expirationErrors := make([]error, 0)
 	for _, member := range members {
+		attemptsTerminalized := true
 		if _, err = service.failer.FailExpiredMember(ctx, member); err != nil {
+			attemptsTerminalized = false
 			expirationErrors = append(expirationErrors, fmt.Errorf("fail attempts for expired member %q: %w", member, err))
-			continue
 		}
 		if err = service.store.ExpireMember(ctx, member); err != nil {
 			expirationErrors = append(expirationErrors, fmt.Errorf("expire member %q: %w", member, err))
 			continue
 		}
-		expired++
+		if attemptsTerminalized {
+			expired++
+		}
 	}
 
 	return expired, errors.Join(expirationErrors...)

@@ -28,9 +28,7 @@ func TestJobAvailableCreatesOneSourceNeutralJobBeforeAcknowledgement(t *testing.
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 
-	if err := adapter.PollOnce(context.Background()); err != nil {
-		t.Fatalf("poll available job: %v", err)
-	}
+	assertReceivedWithCapacity(t, &adapter, client, 7)
 
 	sourceID := mustSourceID(t, 42)
 	want := core.JobRequest{
@@ -62,7 +60,7 @@ func TestJobStartedAndCompletedTranslateBeforeAcknowledgement(t *testing.T) {
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 
-	if err := adapter.PollOnce(context.Background()); err != nil {
+	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
 		t.Fatalf("poll lifecycle message: %v", err)
 	}
 
@@ -93,7 +91,7 @@ func TestStatisticsAndAssignedCountsDoNotCreateDemand(t *testing.T) {
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 
-	if err := adapter.PollOnce(context.Background()); err != nil {
+	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
 		t.Fatalf("poll count-only message: %v", err)
 	}
 
@@ -118,13 +116,13 @@ func TestDurableFailureLeavesMessageForRedelivery(t *testing.T) {
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 
-	if err := adapter.PollOnce(context.Background()); err == nil {
+	if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
 		t.Fatal("first delivery succeeded despite durable failure")
 	}
 	if len(client.acknowledged) != 0 {
 		t.Fatalf("failed durable handling acknowledged messages %#v", client.acknowledged)
 	}
-	if err := adapter.PollOnce(context.Background()); err != nil {
+	if _, err := adapter.PollOnce(context.Background(), 0); err != nil {
 		t.Fatalf("redeliver message: %v", err)
 	}
 
@@ -151,15 +149,7 @@ func TestAvailableBatchHandlesEveryRequestBeforeReturningError(t *testing.T) {
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
 
-	if err := adapter.PollOnce(context.Background()); err == nil {
-		t.Fatal("PollOnce() error = nil, want unresolved available requests")
-	}
-	if len(handler.requests) != 2 {
-		t.Fatalf("durably handled requests = %#v, want both available requests", handler.requests)
-	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("unresolved batch acknowledgements = %#v", client.acknowledged)
-	}
+	assertFailedAvailableBatch(t, &adapter, handler, client)
 	wantEvents := []string{
 		"request:github:" + mustSourceID(t, 72),
 		"request:github:" + mustSourceID(t, 73),
@@ -249,9 +239,11 @@ type recordingClient struct {
 	events       []string
 	receiveErr   error
 	deleteErr    error
+	maxCapacity  int
 }
 
-func (client *recordingClient) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
+func (client *recordingClient) GetMessage(_ context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+	client.maxCapacity = maxCapacity
 	if client.receiveErr != nil {
 		return nil, client.receiveErr
 	}
@@ -300,4 +292,34 @@ func mustSourceID(t *testing.T, requestID int64) string {
 		t.Fatalf("encode source identity: %v", err)
 	}
 	return sourceID
+}
+
+func assertReceivedWithCapacity(t *testing.T, adapter *githubsource.Adapter, client *recordingClient, capacity int) {
+	t.Helper()
+	received, err := adapter.PollOnce(context.Background(), capacity)
+	if err != nil {
+		t.Fatalf("poll available job: %v", err)
+	}
+	if !received || client.maxCapacity != capacity {
+		t.Fatalf("poll result = (%t, capacity %d), want (true, capacity %d)",
+			received, client.maxCapacity, capacity)
+	}
+}
+
+func assertFailedAvailableBatch(
+	t *testing.T,
+	adapter *githubsource.Adapter,
+	handler *recordingEventHandler,
+	client *recordingClient,
+) {
+	t.Helper()
+	if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
+		t.Fatal("PollOnce() error = nil, want unresolved available requests")
+	}
+	if len(handler.requests) != 2 {
+		t.Fatalf("durably handled requests = %#v, want both available requests", handler.requests)
+	}
+	if len(client.acknowledged) != 0 {
+		t.Fatalf("unresolved batch acknowledgements = %#v", client.acknowledged)
+	}
 }

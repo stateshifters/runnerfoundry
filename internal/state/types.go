@@ -23,7 +23,14 @@ type RegistrationStore interface {
 }
 
 type MemberRegistry interface {
-	HeartbeatMember(ctx context.Context, memberID core.MemberID, heartbeatAt time.Time) error
+	// PublishMemberState atomically renews the member lease and replaces its complete
+	// Runner Pool capacity snapshot. Omitted and non-positive capacities are withdrawn.
+	PublishMemberState(
+		ctx context.Context,
+		memberID core.MemberID,
+		heartbeatAt time.Time,
+		capacities []core.RunnerPoolCapacity,
+	) error
 	ListLiveMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
 	ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
 	CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error)
@@ -31,6 +38,7 @@ type MemberRegistry interface {
 }
 
 type RunnerPoolCapacityStore interface {
-	PublishRunnerPoolCapacity(ctx context.Context, memberID core.MemberID, runnerPool core.RunnerPool, capacity int) error
-	AggregateRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
+	// AvailableRunnerPoolCapacity returns live member capacity minus queued and attempting
+	// jobs for the pool, clamped to zero. Result-pending jobs do not consume capacity.
+	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
 }

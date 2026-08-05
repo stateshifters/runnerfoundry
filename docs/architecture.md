@@ -41,9 +41,17 @@ Each execution attempt ends in success or failure. Failure includes failure to p
 
 ## Capacity boundary
 
-Runner Pool registration and capacity publication are orthogonal to the job lifecycle. The runner service manages available capacity, and the source adapter translates that capacity into the source's representation. Capacity updates do not create jobs.
+Runner Pool registration and capacity publication are orthogonal to the job lifecycle. Members atomically renew a lease and publish their complete configured-capacity snapshot. Expired or gracefully withdrawn members contribute no capacity.
 
-For GitHub, the adapter represents Runner Pool capacity with runner scale sets. That representation is not part of the core queue or execution interfaces.
+The state store calculates one shared value for each Runner Pool:
+
+`available = max(0, live configured capacity - queued jobs - attempting jobs)`
+
+Recording a terminal result releases capacity because `result_pending` does not require a runner. Capacity queries observe jobs but cannot create, claim, reorder, transition, or remove them.
+
+For GitHub, one leader owns repository discovery and message sessions. Each repository-scoped runner scale set representing a Runner Pool receives that pool's shared availability immediately before its message request. Repository requests run concurrently, while each session has at most one request in flight. After a message arrives, other requests for that pool are cancelled and restarted with fresh availability. Independent source requests can still observe the same pre-ingestion snapshot; RunnerFoundry does not add reservations or another scheduler to hide that external consistency limit.
+
+The GitHub representation supports repositories installed under a personal account and is not part of the core queue or execution interfaces. Leadership publishes capacity and ingests messages only; every member with a local slot independently asks the shared queue for the oldest job in its Runner Pool.
 
 ## Deployment boundary
 

@@ -4,9 +4,32 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	executors := []Executor{
+		{begin: failingBegin(protocolErr)},
+		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})},
+		{begin: transactionBeginning(transactionFailingExecute(2, protocolErr))},
+		{begin: transactionBeginning(transactionFailingExecute(3, protocolErr))},
+		{begin: transactionBeginning(Transaction{execute: successfulExecute,
+			commit: failingCompletion(protocolErr), rollback: successfulCompletion})},
+		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr),
+			rollback: failingCompletion(protocolErr)})},
+	}
+	for index, executor := range executors {
+		if err := NewStore(executor).PublishMemberState(context.Background(), testMemberID, fixedTime(),
+			[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); err == nil {
+			t.Fatalf("case %d: expected protocol error", index)
+		}
+	}
+}
+
+func TestRegistrationMutationReportsEachProtocolFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	executors := []Executor{
@@ -18,8 +41,8 @@ func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
 			rollback: failingCompletion(protocolErr)})},
 	}
 	for index, executor := range executors {
-		if err := NewStore(executor).HeartbeatMember(context.Background(), testMemberID, fixedTime()); err == nil {
-			t.Fatalf("case %d: expected protocol error", index)
+		if err := NewStore(executor).DeleteRegistration(context.Background(), "repo", "linux"); err == nil {
+			t.Fatalf("case %d: expected registration mutation error", index)
 		}
 	}
 }
@@ -67,7 +90,7 @@ func TestScalarQueriesReportProtocolFailures(t *testing.T) {
 	if _, err := store.CountLiveMembers(context.Background(), fixedTime()); err == nil {
 		t.Fatal("expected count error")
 	}
-	if _, err := store.AggregateRunnerPoolCapacity(context.Background(), "linux", fixedTime()); err == nil {
+	if _, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", fixedTime()); err == nil {
 		t.Fatal("expected aggregate error")
 	}
 }

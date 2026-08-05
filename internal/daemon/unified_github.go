@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -18,7 +17,7 @@ type githubManagerRuntime interface {
 }
 
 type capacityAggregator interface {
-	AggregateRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
+	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
 }
 
 type githubSourceRuntime struct {
@@ -32,6 +31,8 @@ type githubSourceRuntime struct {
 	nextDiscovery     time.Time
 	nextMemberRefresh time.Time
 	adapters          []*githubsource.Adapter
+	polls             map[*githubsource.Adapter]*githubPollAttempt
+	leaderInstalled   bool
 }
 
 func newGitHubSourceRuntime(
@@ -46,6 +47,7 @@ func newGitHubSourceRuntime(
 	return &githubSourceRuntime{
 		manager: manager, capacities: capacities, owner: owner, handler: handler,
 		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
+		polls: make(map[*githubsource.Adapter]*githubPollAttempt),
 	}
 }
 
@@ -61,6 +63,9 @@ func (source *githubSourceRuntime) RefreshMembers(ctx context.Context) error {
 }
 
 func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
+	if source.leaderInstalled {
+		return nil
+	}
 	return source.reconcileAndOpen(ctx)
 }
 
@@ -71,59 +76,34 @@ func (source *githubSourceRuntime) reconcileAndOpen(ctx context.Context) error {
 	if err := source.manager.RefreshMembers(ctx); err != nil {
 		return fmt.Errorf("refresh GitHub member routes: %w", err)
 	}
+	previousAdapters := source.adapters
+	if err := source.stopAllPolls(ctx); err != nil {
+		return err
+	}
 	adapters, err := source.manager.OpenLeader(ctx, source.owner, source.handler)
 	if err == nil || adapters != nil {
 		source.adapters = adapters
+		source.leaderInstalled = true
 		source.nextDiscovery = source.currentTime().Add(source.discoveryInterval)
 		source.nextMemberRefresh = source.nextDiscovery
 	}
 	if err != nil {
+		if adapters == nil {
+			source.adapters = previousAdapters
+		}
 		return fmt.Errorf("open GitHub leader sessions: %w", err)
 	}
 	return nil
 }
 
-func (source *githubSourceRuntime) PublishCapacity(ctx context.Context, liveMemberCutoff time.Time) error {
-	if !source.currentTime().Before(source.nextDiscovery) {
-		if err := source.reconcileAndOpen(ctx); err != nil {
-			return err
-		}
-	}
-
-	capacityByPool := make(map[core.RunnerPool]int, len(source.config.RunnerPools))
-	capacityErrors := make([]error, 0)
-	for _, adapter := range source.adapters {
-		capacity, found := capacityByPool[adapter.RunnerPool]
-		if !found {
-			var err error
-			capacity, err = source.capacities.AggregateRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
-			if err != nil {
-				capacityErrors = append(capacityErrors,
-					fmt.Errorf("aggregate Runner Pool %q capacity: %w", adapter.RunnerPool, err))
-				continue
-			}
-			capacityByPool[adapter.RunnerPool] = capacity
-		}
-		adapter.MaxCapacity = capacity
-	}
-	return errors.Join(capacityErrors...)
-}
-
-func (source *githubSourceRuntime) Poll(ctx context.Context) error {
-	pollErrors := make([]error, 0)
-	for _, adapter := range source.adapters {
-		if err := adapter.PollOnce(ctx); err != nil {
-			pollErrors = append(pollErrors,
-				fmt.Errorf("poll GitHub Runner Pool %q for %q: %w", adapter.RunnerPool, adapter.Repository, err))
-		}
-	}
-	return errors.Join(pollErrors...)
-}
-
 func (source *githubSourceRuntime) CloseLeader(ctx context.Context) error {
-	source.adapters = nil
+	if err := source.stopAllPolls(ctx); err != nil {
+		return err
+	}
 	if err := source.manager.CloseLeader(ctx); err != nil {
 		return fmt.Errorf("close GitHub leader sessions: %w", err)
 	}
+	source.adapters = nil
+	source.leaderInstalled = false
 	return nil
 }

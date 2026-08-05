@@ -257,13 +257,15 @@ func (*builderStoreFake) Lookup(context.Context, core.JobID) (core.JobRecord, bo
 	return core.JobRecord{}, false, nil
 }
 
-func (store *builderStoreFake) HeartbeatMember(context.Context, core.MemberID, time.Time) error {
+func (store *builderStoreFake) PublishMemberState(
+	context.Context,
+	core.MemberID,
+	time.Time,
+	[]core.RunnerPoolCapacity,
+) error {
 	store.heartbeats++
-	store.heartbeat <- struct{}{}
-	return nil
-}
-func (store *builderStoreFake) PublishRunnerPoolCapacity(context.Context, core.MemberID, core.RunnerPool, int) error {
 	store.capacities++
+	store.heartbeat <- struct{}{}
 	store.capacityPublished <- struct{}{}
 	return nil
 }
@@ -272,7 +274,7 @@ func (*builderStoreFake) ListExpiredMembers(context.Context, time.Time) ([]core.
 }
 func (*builderStoreFake) CountLiveMembers(context.Context, time.Time) (int, error) { return 1, nil }
 func (*builderStoreFake) ExpireMember(context.Context, core.MemberID) error        { return nil }
-func (*builderStoreFake) AggregateRunnerPoolCapacity(context.Context, core.RunnerPool, time.Time) (int, error) {
+func (*builderStoreFake) AvailableRunnerPoolCapacity(context.Context, core.RunnerPool, time.Time) (int, error) {
 	return 1, nil
 }
 func (store *builderStoreFake) UpsertRegistration(_ context.Context, registration state.Registration) error {

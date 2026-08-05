@@ -69,7 +69,7 @@ func TestManagerOpensPollAdaptersAndClosesLeaderSessions(t *testing.T) {
 	if len(adapters) != 1 {
 		t.Fatalf("poll adapters = %#v, want one", adapters)
 	}
-	if err := adapters[0].PollOnce(context.Background()); err != nil {
+	if _, err := adapters[0].PollOnce(context.Background(), 0); err != nil {
 		t.Fatalf("poll opened session: %v", err)
 	}
 	if err := fixture.manager.Source().Acquire(
@@ -82,6 +82,27 @@ func TestManagerOpensPollAdaptersAndClosesLeaderSessions(t *testing.T) {
 	}
 	if !fixture.session.closed {
 		t.Fatal("leader session was not closed")
+	}
+}
+
+func TestManagerRetriesFailedLeaderSessionClosure(t *testing.T) {
+	t.Parallel()
+
+	fixture := openLeaderManagerFixture(t)
+	if _, err := fixture.manager.OpenLeader(context.Background(), "member-1", fixture.handler); err != nil {
+		t.Fatalf("open leader: %v", err)
+	}
+	wantErr := errors.New("close failed")
+	fixture.session.closeErr = wantErr
+	if err := fixture.manager.CloseLeader(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("first close error = %v, want %v", err, wantErr)
+	}
+	fixture.session.closeErr = nil
+	if err := fixture.manager.CloseLeader(context.Background()); err != nil {
+		t.Fatalf("retry close: %v", err)
+	}
+	if fixture.session.closes != 2 {
+		t.Fatalf("session close attempts = %d, want 2", fixture.session.closes)
 	}
 }
 
@@ -276,6 +297,7 @@ type managerSessionFake struct {
 	messages []*upstream.RunnerScaleSetMessage
 	events   []string
 	closed   bool
+	closes   int
 	closeErr error
 }
 
@@ -293,6 +315,7 @@ func (session *managerSessionFake) GetMessage(context.Context, int, int) (*upstr
 func (*managerSessionFake) DeleteMessage(context.Context, int) error    { return nil }
 func (*managerSessionFake) AcquireRequest(context.Context, int64) error { return nil }
 func (session *managerSessionFake) Close(context.Context) error {
+	session.closes++
 	session.closed = true
 	return session.closeErr
 }

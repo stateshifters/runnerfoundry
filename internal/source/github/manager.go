@@ -134,6 +134,7 @@ type Manager struct {
 	registrations RegistrationRepository
 	source        *Source
 	leaders       []ManagedSession
+	retiring      []ManagedSession
 	members       []MemberRoute
 }
 
@@ -331,20 +332,21 @@ func (manager *Manager) OpenLeader(
 	if owner == "" || handler == nil {
 		return nil, errors.New("GitHub leader owner and event handler are required")
 	}
+	cleanupErr := manager.retryRetiring(ctx)
 	records, err := manager.registrations.Registrations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub registrations: %w", err)
+		return nil, errors.Join(cleanupErr, fmt.Errorf("list GitHub registrations: %w", err))
 	}
 	sessions, adapters, err := manager.openLeaderRecords(ctx, records, owner, handler)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(cleanupErr, err)
 	}
 	if err := manager.source.ReplaceRoutes(asLeaderSessions(sessions), manager.members); err != nil {
-		return nil, manager.closeOpened(ctx, sessions, err)
+		return nil, errors.Join(cleanupErr, manager.closeOpened(ctx, sessions, err))
 	}
 	oldSessions := manager.leaders
 	manager.leaders = sessions
-	return adapters, closeSessions(ctx, oldSessions)
+	return adapters, errors.Join(cleanupErr, manager.retireSessions(ctx, oldSessions))
 }
 
 func (manager *Manager) openLeaderRecords(
@@ -402,7 +404,7 @@ func transportRegistration(record statecontract.Registration) transport.Registra
 }
 
 func (manager *Manager) closeOpened(ctx context.Context, sessions []ManagedSession, cause error) error {
-	return errors.Join(cause, closeSessions(ctx, sessions))
+	return errors.Join(cause, manager.retireSessions(ctx, sessions))
 }
 
 // CloseLeader removes every leader acquisition route before closing its
@@ -411,9 +413,10 @@ func (manager *Manager) CloseLeader(ctx context.Context) error {
 	if err := manager.source.ReplaceRoutes(nil, manager.members); err != nil {
 		return fmt.Errorf("remove GitHub leader routes: %w", err)
 	}
-	sessions := manager.leaders
+	sessions := append(manager.retiring, manager.leaders...)
 	manager.leaders = nil
-	return closeSessions(ctx, sessions)
+	manager.retiring = nil
+	return manager.retireSessions(ctx, sessions)
 }
 
 func asLeaderSessions(sessions []ManagedSession) []LeaderSession {
@@ -424,12 +427,19 @@ func asLeaderSessions(sessions []ManagedSession) []LeaderSession {
 	return leaders
 }
 
-func closeSessions(ctx context.Context, sessions []ManagedSession) error {
+func (manager *Manager) retireSessions(ctx context.Context, sessions []ManagedSession) error {
 	var joined error
 	for _, session := range sessions {
 		if err := session.Close(ctx); err != nil {
+			manager.retiring = append(manager.retiring, session)
 			joined = errors.Join(joined, fmt.Errorf("close GitHub message session: %w", err))
 		}
 	}
 	return joined
+}
+
+func (manager *Manager) retryRetiring(ctx context.Context) error {
+	sessions := manager.retiring
+	manager.retiring = nil
+	return manager.retireSessions(ctx, sessions)
 }

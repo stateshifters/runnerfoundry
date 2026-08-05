@@ -19,7 +19,7 @@ func TestConnectionStoreDelegatesOwnedProtocol(t *testing.T) {
 		return rowFromValues([]any{4})
 	}}
 	store := NewConnectionStore(connection)
-	if err := store.HeartbeatMember(context.Background(), testMemberIDA, fixedTime()); err != nil {
+	if err := store.PublishMemberState(context.Background(), testMemberIDA, fixedTime(), nil); err != nil {
 		t.Fatalf("heartbeat through connection: %v", err)
 	}
 	if count, err := store.CountLiveMembers(context.Background(), fixedTime()); err != nil || count != 4 {

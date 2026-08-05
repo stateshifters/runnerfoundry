@@ -57,11 +57,9 @@ func TestStorePublicCapacityBehaviors(t *testing.T) {
 	now := fixedTime()
 	store := NewStore(successfulBehaviorExecutor(now))
 	ctx := context.Background()
-	if operationErr := store.HeartbeatMember(ctx, testMemberID, now); operationErr != nil {
-		t.Fatalf("heartbeat: %v", operationErr)
-	}
-	if operationErr := store.PublishRunnerPoolCapacity(ctx, testMemberID, "linux", 0); operationErr != nil {
-		t.Fatalf("remove capacity: %v", operationErr)
+	if operationErr := store.PublishMemberState(ctx, testMemberID, now,
+		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); operationErr != nil {
+		t.Fatalf("publish member state: %v", operationErr)
 	}
 	members, operationErr := store.ListLiveMembers(ctx, now)
 	assertMembers(t, members, operationErr)
@@ -70,7 +68,7 @@ func TestStorePublicCapacityBehaviors(t *testing.T) {
 	if count, countErr := store.CountLiveMembers(ctx, now); countErr != nil || count != 1 {
 		t.Fatalf("live count = %d, %v", count, countErr)
 	}
-	if capacity, capacityErr := store.AggregateRunnerPoolCapacity(ctx, "linux", now); capacityErr != nil || capacity != 2 {
+	if capacity, capacityErr := store.AvailableRunnerPoolCapacity(ctx, "linux", now); capacityErr != nil || capacity != 2 {
 		t.Fatalf("capacity = %d, %v", capacity, capacityErr)
 	}
 }
@@ -132,8 +130,8 @@ func successfulBehaviorQueryRow(jobValues, registrationValues []any) func(contex
 		switch statement {
 		case countLiveMembersSQL:
 			return rowFromValues([]any{1})
-		case aggregateCapacitySQL:
-			return rowFromValues([]any{2})
+		case availableCapacitySQL:
+			return rowFromValues([]any{2, 0, 0})
 		case registrationSQL:
 			return rowFromValues(registrationValues)
 		case lookupReceiptSQL:

@@ -21,8 +21,7 @@ type leadershipRuntime interface {
 type sourceRuntime interface {
 	RefreshMembers(ctx context.Context) error
 	OpenLeader(ctx context.Context) error
-	PublishCapacity(ctx context.Context, liveMemberCutoff time.Time) error
-	Poll(ctx context.Context) error
+	Poll(ctx context.Context, liveMemberCutoff time.Time) error
 	CloseLeader(ctx context.Context) error
 }
 
@@ -62,14 +61,15 @@ type UnifiedEngineConfig struct {
 // UnifiedEngine advances one source-neutral lifecycle for a member. Cycles are
 // sequential; callers own scheduling and must not call Cycle concurrently.
 type UnifiedEngine struct {
-	currentTime func() time.Time
-	memberTTL   time.Duration
-	membership  membershipRuntime
-	leadership  leadershipRuntime
-	source      sourceRuntime
-	lifecycle   lifecycleRuntime
-	pools       []RunnerPoolRuntime
-	leaderOpen  bool
+	currentTime   func() time.Time
+	memberTTL     time.Duration
+	membership    membershipRuntime
+	leadership    leadershipRuntime
+	source        sourceRuntime
+	lifecycle     lifecycleRuntime
+	pools         []RunnerPoolRuntime
+	leaderOpen    bool
+	leaderClosing bool
 }
 
 func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
@@ -120,6 +120,11 @@ func (engine *UnifiedEngine) runLeaderWork(ctx context.Context, liveMemberCutoff
 	if !leader {
 		return engine.closeLostLeadership(ctx)
 	}
+	if engine.leaderClosing {
+		if closeErrors := engine.closeSourceLeadership(ctx, "finish closing source leadership"); len(closeErrors) != 0 {
+			return closeErrors
+		}
+	}
 	if err = engine.openLeadership(ctx); err != nil {
 		return []error{err}
 	}
@@ -130,10 +135,16 @@ func (engine *UnifiedEngine) closeLostLeadership(ctx context.Context) []error {
 	if !engine.leaderOpen {
 		return nil
 	}
-	engine.leaderOpen = false
+	engine.leaderClosing = true
+	return engine.closeSourceLeadership(ctx, "close lost source leadership")
+}
+
+func (engine *UnifiedEngine) closeSourceLeadership(ctx context.Context, description string) []error {
 	if err := engine.source.CloseLeader(ctx); err != nil {
-		return []error{fmt.Errorf("close lost source leadership: %w", err)}
+		return []error{fmt.Errorf("%s: %w", description, err)}
 	}
+	engine.leaderOpen = false
+	engine.leaderClosing = false
 	return nil
 }
 
@@ -150,13 +161,10 @@ func (engine *UnifiedEngine) openLeadership(ctx context.Context) error {
 
 func (engine *UnifiedEngine) runOwnedLeaderWork(ctx context.Context, liveMemberCutoff time.Time) []error {
 	leaderErrors := make([]error, 0, 2)
-	if err := engine.source.PublishCapacity(ctx, liveMemberCutoff); err != nil {
-		leaderErrors = append(leaderErrors, fmt.Errorf("publish aggregate source capacity: %w", err))
-	}
 	if err := engine.lifecycle.RecoverInterruptedAcquisitions(ctx); err != nil {
 		leaderErrors = append(leaderErrors, fmt.Errorf("recover interrupted acquisitions: %w", err))
 	}
-	if err := engine.source.Poll(ctx); err != nil {
+	if err := engine.source.Poll(ctx, liveMemberCutoff); err != nil {
 		leaderErrors = append(leaderErrors, fmt.Errorf("poll source requests: %w", err))
 	}
 	return leaderErrors
@@ -185,9 +193,9 @@ func (engine *UnifiedEngine) Close(ctx context.Context) error {
 	if !engine.leaderOpen {
 		return nil
 	}
-	engine.leaderOpen = false
-	if err := engine.source.CloseLeader(ctx); err != nil {
-		return fmt.Errorf("close source leadership: %w", err)
+	engine.leaderClosing = true
+	if closeErrors := engine.closeSourceLeadership(ctx, "close source leadership"); len(closeErrors) != 0 {
+		return errors.Join(closeErrors...)
 	}
 	return nil
 }

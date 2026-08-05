@@ -120,20 +120,46 @@ func TestSetResultPendingRejectsDifferentResult(t *testing.T) {
 
 func TestCapacityPublicationCannotMutateJobs(t *testing.T) {
 	t.Parallel()
-	var statement string
+	var statements []string
 	transaction := Transaction{
 		execute: func(_ context.Context, query string, _ ...any) (Result, error) {
-			statement = query
+			statements = append(statements, query)
 			return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
 		},
 		commit: func(context.Context) error { return nil }, rollback: func(context.Context) error { return nil },
 	}
 	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return transaction, nil }})
-	if err := store.PublishRunnerPoolCapacity(context.Background(), testMemberID, "linux", 2); err != nil {
-		t.Fatalf("publish capacity: %v", err)
+	if err := store.PublishMemberState(context.Background(), testMemberID, fixedTime(), []core.RunnerPoolCapacity{
+		{RunnerPool: "linux", Capacity: 2}, {RunnerPool: "disabled", Capacity: 0},
+	}); err != nil {
+		t.Fatalf("publish member state: %v", err)
 	}
-	if strings.Contains(statement, "runnerfoundry_jobs") || !strings.Contains(statement, "member_runner_pools") {
-		t.Fatalf("capacity statement crossed job boundary: %s", statement)
+	if len(statements) != 3 || !strings.Contains(statements[0], "runnerfoundry_members") ||
+		!strings.Contains(statements[1], "DELETE FROM runnerfoundry_member_runner_pools") ||
+		!strings.Contains(statements[2], "INSERT INTO runnerfoundry_member_runner_pools") {
+		t.Fatalf("member state statements = %#v", statements)
+	}
+	for _, statement := range statements {
+		if strings.Contains(statement, "runnerfoundry_jobs") {
+			t.Fatalf("capacity statement crossed job boundary: %s", statement)
+		}
+	}
+}
+
+func TestAvailableCapacityUsesOneSnapshot(t *testing.T) {
+	t.Parallel()
+
+	var arguments []any
+	queryCalls := 0
+	store := NewStore(Executor{queryRow: func(_ context.Context, _ string, values ...any) Row {
+		queryCalls++
+		arguments = values
+		return rowFromValues([]any{30, 7, 5})
+	}})
+	capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", fixedTime())
+	if err != nil || capacity != 18 || queryCalls != 1 || len(arguments) != 2 || arguments[0] != "linux" {
+		t.Fatalf("available capacity = %d, queries=%d arguments=%#v error=%v",
+			capacity, queryCalls, arguments, err)
 	}
 }
 

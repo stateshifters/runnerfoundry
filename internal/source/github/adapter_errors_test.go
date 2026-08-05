@@ -32,7 +32,7 @@ func TestPollOnceValidatesTransportResultsAndDependencies(t *testing.T) {
 	for testName, adapter := range tests {
 		t.Run(testName, func(t *testing.T) {
 			t.Parallel()
-			if err := adapter.PollOnce(context.Background()); err == nil {
+			if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
 				t.Fatal("PollOnce() error = nil, want failure")
 			}
 		})
@@ -46,8 +46,12 @@ func TestPollOnceTreatsNoMessageAsSuccess(t *testing.T) {
 		Client:  &recordingClient{},
 		Handler: &recordingEventHandler{events: &[]string{}},
 	}
-	if err := adapter.PollOnce(context.Background()); err != nil {
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err != nil {
 		t.Fatalf("empty poll: %v", err)
+	}
+	if received {
+		t.Fatal("empty poll reported a received message")
 	}
 }
 
@@ -63,8 +67,12 @@ func TestAcknowledgementFailureDoesNotAdvanceCursor(t *testing.T) {
 		Handler:       &recordingEventHandler{events: &client.events},
 		LastMessageID: 22,
 	}
-	if err := adapter.PollOnce(context.Background()); err == nil {
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err == nil {
 		t.Fatal("PollOnce() error = nil, want acknowledgement failure")
+	}
+	if !received {
+		t.Fatal("acknowledgement failure hid the received message")
 	}
 	if adapter.LastMessageID != 22 {
 		t.Fatalf("cursor = %d, want 22", adapter.LastMessageID)
@@ -94,7 +102,7 @@ func TestPollOnceRejectsNilJobEventsWithoutAcknowledgement(t *testing.T) {
 			t.Parallel()
 			client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 			adapter := githubsource.Adapter{Client: client, Handler: &recordingEventHandler{events: &client.events}}
-			if err := adapter.PollOnce(context.Background()); err == nil {
+			if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
 				t.Fatal("PollOnce() error = nil, want invalid event failure")
 			}
 			if len(client.acknowledged) != 0 {
@@ -139,8 +147,12 @@ func assertFailedObservationNotAcknowledged(
 	adapter := githubsource.Adapter{
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 	}
-	if err := adapter.PollOnce(context.Background()); err == nil {
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err == nil {
 		t.Fatal("PollOnce() error = nil, want durable observation failure")
+	}
+	if !received {
+		t.Fatal("durable observation failure hid the received message")
 	}
 	if len(client.acknowledged) != 0 {
 		t.Fatalf("failed observation acknowledgements = %#v", client.acknowledged)

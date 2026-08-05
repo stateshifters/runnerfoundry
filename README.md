@@ -2,7 +2,7 @@
 
 RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runners. It queues each job for a Runner Pool, gives the oldest matching job to that pool, attempts execution, reports success or failure to the source, and removes the internal job.
 
-GitHub Actions is the only supported Git source. Docker Compose and libvirt are the supported execution providers.
+GitHub Actions is the only supported Git source. RunnerFoundry is designed for personal GitHub accounts that need to share self-hosted capacity across repositories without organization-level runners. Docker Compose and libvirt are the supported execution providers.
 
 The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the system boundaries without defining another lifecycle.
 
@@ -17,6 +17,8 @@ The normative behavior and terminology live in the [product contract](docs/PRD.m
 5. RunnerFoundry reports success or failure through the adapter, then removes the internal job.
 
 Runner registration and capacity publication are separate from this job flow. A failed or removed job is not requeued internally; another attempt starts only with another request from GitHub.
+
+Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts all queued and attempting jobs from the capacity contributed by live members. A terminal job waiting for result delivery no longer consumes runner capacity.
 
 ## Deployment choices
 
@@ -58,7 +60,7 @@ sudo install -m 0640 -o root -g runnerfoundry \
   github-app.pem /etc/runnerfoundry/github-app.pem
 ```
 
-The GitHub adapter represents Runner Pools as GitHub runner scale sets. `scale_sets[].name` is therefore both the Runner Pool name inside RunnerFoundry and the `runs-on` value exposed by GitHub.
+The GitHub adapter represents Runner Pools as repository-scoped GitHub runner scale sets. `scale_sets[].name` is therefore both the Runner Pool name inside RunnerFoundry and the `runs-on` value exposed by GitHub. Install the App on each personal-account repository that should share that Runner Pool.
 
 ### Prepare Docker capacity
 
@@ -324,6 +326,7 @@ Review the release notes, stop the affected member or cluster, install the packa
 
 - **Configuration rejected:** Read the first validation error in the service log. Check unknown fields, App credentials, state-backend selection, positive capacity, and exactly one provider per Runner Pool.
 - **GitHub capacity missing:** Verify App permissions, installation scope, the configured GitHub runner group, and the private-key file.
+- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued and attempting jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
 - **Jobs remain queued:** Confirm that workflow `runs-on` matches `scale_sets[].name`, provider validation succeeds, and the Runner Pool has capacity.
 - **Docker unavailable:** Run `docker compose -f <file> config --services` as the service account.
 - **libvirt unavailable:** Run `virsh --connect <uri> list --all` as the service account and validate the domain XML and referenced storage.

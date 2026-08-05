@@ -16,36 +16,76 @@ var _ statecontract.RunnerPoolCapacityStore = (*Store)(nil)
 
 const heartbeatMemberSQL = `INSERT INTO runnerfoundry_members(member_id, heartbeat_at) VALUES(?, ?)
 	ON CONFLICT(member_id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at`
-const publishCapacitySQL = `INSERT INTO runnerfoundry_member_runner_pools(member_id, runner_pool, capacity)
-	VALUES(?, ?, ?) ON CONFLICT(member_id, runner_pool) DO UPDATE SET capacity = excluded.capacity`
-const removeCapacitySQL = `DELETE FROM runnerfoundry_member_runner_pools WHERE member_id = ? AND runner_pool = ?`
+const insertCapacitySQL = `INSERT INTO runnerfoundry_member_runner_pools(member_id, runner_pool, capacity)
+	VALUES(?, ?, ?)`
 const removeMemberCapacitiesSQL = `DELETE FROM runnerfoundry_member_runner_pools WHERE member_id = ?`
 const expireMemberSQL = `DELETE FROM runnerfoundry_members WHERE member_id = ?
 	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_jobs WHERE member_id = ?)`
 const listLiveMembersSQL = `SELECT member_id FROM runnerfoundry_members WHERE heartbeat_at >= ? ORDER BY member_id`
 const listExpiredMembersSQL = `SELECT member_id FROM runnerfoundry_members WHERE heartbeat_at < ? ORDER BY member_id`
 const countLiveMembersSQL = `SELECT COUNT(*) FROM runnerfoundry_members WHERE heartbeat_at >= ?`
-const aggregateCapacitySQL = `SELECT COALESCE(SUM(pools.capacity), 0)
-	FROM runnerfoundry_member_runner_pools pools
-	JOIN runnerfoundry_members members ON members.member_id = pools.member_id
-	WHERE pools.runner_pool = ? AND members.heartbeat_at >= ?`
+const availableCapacitySQL = `SELECT
+	COALESCE((
+		SELECT SUM(pools.capacity)
+		FROM runnerfoundry_member_runner_pools pools
+		JOIN runnerfoundry_members members ON members.member_id = pools.member_id
+		WHERE pools.runner_pool = ?1 AND members.heartbeat_at >= ?2
+	), 0), (
+		SELECT COUNT(*) FROM runnerfoundry_jobs
+		WHERE runner_pool = ?1 AND state = 'queued'
+	), (
+		SELECT COUNT(*) FROM runnerfoundry_jobs
+		WHERE runner_pool = ?1 AND state = 'attempting' AND member_id IS NOT NULL
+	)`
 
-func (store *Store) HeartbeatMember(ctx context.Context, memberID core.MemberID, heartbeatAt time.Time) error {
-	return store.executeTransaction(ctx, "heartbeat member", heartbeatMemberSQL, memberID.String(), heartbeatAt.UnixNano())
-}
-
-func (store *Store) PublishRunnerPoolCapacity(
+func (store *Store) PublishMemberState(
 	ctx context.Context,
 	memberID core.MemberID,
-	runnerPool core.RunnerPool,
-	capacity int,
-) error {
-	if capacity <= 0 {
-		return store.executeTransaction(ctx, "remove runner pool capacity", removeCapacitySQL,
-			memberID.String(), string(runnerPool))
+	heartbeatAt time.Time,
+	capacities []core.RunnerPoolCapacity,
+) (resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin publish member state: %w", err)
 	}
-	return store.executeTransaction(ctx, "publish runner pool capacity", publishCapacitySQL,
-		memberID.String(), string(runnerPool), capacity)
+	open := true
+	defer func() {
+		if open {
+			resultErr = errors.Join(resultErr, transaction.Rollback(context.WithoutCancel(ctx)))
+		}
+	}()
+	if _, err := transaction.Execute(ctx, heartbeatMemberSQL, memberID.String(), heartbeatAt.UnixNano()); err != nil {
+		return fmt.Errorf("publish member heartbeat: %w", err)
+	}
+	if _, err := transaction.Execute(ctx, removeMemberCapacitiesSQL, memberID.String()); err != nil {
+		return fmt.Errorf("replace member capacities: %w", err)
+	}
+	if err := insertMemberCapacities(ctx, transaction, memberID, capacities); err != nil {
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit publish member state: %w", err)
+	}
+	open = false
+	return nil
+}
+
+func insertMemberCapacities(
+	ctx context.Context,
+	transaction Transaction,
+	memberID core.MemberID,
+	capacities []core.RunnerPoolCapacity,
+) error {
+	for _, capacity := range capacities {
+		if capacity.Capacity <= 0 {
+			continue
+		}
+		if _, err := transaction.Execute(ctx, insertCapacitySQL,
+			memberID.String(), string(capacity.RunnerPool), capacity.Capacity); err != nil {
+			return fmt.Errorf("publish Runner Pool %q capacity: %w", capacity.RunnerPool, err)
+		}
+	}
+	return nil
 }
 
 func (store *Store) ExpireMember(ctx context.Context, memberID core.MemberID) error {
@@ -125,16 +165,17 @@ func (store *Store) CountLiveMembers(ctx context.Context, cutoff time.Time) (int
 	return count, nil
 }
 
-func (store *Store) AggregateRunnerPoolCapacity(
+func (store *Store) AvailableRunnerPoolCapacity(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
 	cutoff time.Time,
 ) (int, error) {
-	var capacity int
-	if err := store.executor.QueryRow(ctx, aggregateCapacitySQL, string(runnerPool), cutoff.UnixNano()).Scan(&capacity); err != nil {
-		return 0, fmt.Errorf("aggregate runner pool capacity: %w", err)
+	var liveCapacity, queuedJobs, attemptingJobs int
+	if err := store.executor.QueryRow(ctx, availableCapacitySQL,
+		string(runnerPool), cutoff.UnixNano()).Scan(&liveCapacity, &queuedJobs, &attemptingJobs); err != nil {
+		return 0, fmt.Errorf("available runner pool capacity: %w", err)
 	}
-	return capacity, nil
+	return statecontract.CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, attemptingJobs), nil
 }
 
 func (store *Store) executeTransaction(

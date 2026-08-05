@@ -53,6 +53,31 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 	}
 }
 
+func TestProductionRuntimeCloseTerminalizesAttemptsAndWithdrawsMember(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("terminal transition failed")
+	store := &shutdownStoreFake{builderStoreFake: newBuilderStoreFake(), resultErr: wantErr}
+	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
+	if err != nil {
+		t.Fatalf("create memory logger: %v", err)
+	}
+	runtime := &productionRuntime{logging: logging, state: &productionState{
+		store: store, member: daemonTestID(7),
+	}}
+
+	if err := runtime.Close(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("close error = %v, want transition failure", err)
+	}
+	if len(store.results) != 1 || store.results[0].Outcome != core.OutcomeFailure ||
+		store.results[0].Origin != core.ResultOriginService {
+		t.Fatalf("shutdown results = %#v, want one service failure", store.results)
+	}
+	if len(store.expired) != 1 || store.expired[0] != daemonTestID(7) {
+		t.Fatalf("withdrawn members = %#v, want member 7 despite transition failure", store.expired)
+	}
+}
+
 func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 	t.Helper()
 	originalBuild := buildDaemonGeneration
@@ -75,8 +100,29 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 		t.Fatalf("create memory logger: %v", err)
 	}
 	return &productionRuntime{
-		logging: logging, state: &productionState{member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
+		logging: logging, state: &productionState{store: newBuilderStoreFake(), member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
 	}, &builds
+}
+
+type shutdownStoreFake struct {
+	*builderStoreFake
+	results   []core.Result
+	expired   []core.MemberID
+	resultErr error
+}
+
+func (store *shutdownStoreFake) SetMemberAttemptsResultPending(
+	_ context.Context,
+	_ core.MemberID,
+	result core.Result,
+) ([]core.JobRecord, error) {
+	store.results = append(store.results, result)
+	return nil, store.resultErr
+}
+
+func (store *shutdownStoreFake) ExpireMember(_ context.Context, member core.MemberID) error {
+	store.expired = append(store.expired, member)
+	return nil
 }
 
 func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {

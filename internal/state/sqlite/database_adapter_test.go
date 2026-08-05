@@ -191,6 +191,7 @@ func TestDatabaseAdapterReportsTransactionProtocolFailures(t *testing.T) {
 		func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(heartbeatMemberSQL)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(removeMemberCapacitiesSQL)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectCommit().WillReturnError(protocolErr)
 		},
 		func(mock sqlmock.Sqlmock) {
@@ -205,7 +206,7 @@ func TestDatabaseAdapterReportsTransactionProtocolFailures(t *testing.T) {
 			t.Fatalf("case %d: create fake: %v", index, err)
 		}
 		configure(mock)
-		if err := NewDatabaseStore(database).HeartbeatMember(context.Background(), testMemberID, fixedTime()); err == nil {
+		if err := NewDatabaseStore(database).PublishMemberState(context.Background(), testMemberID, fixedTime(), nil); err == nil {
 			t.Fatalf("case %d: expected adapter error", index)
 		}
 	}

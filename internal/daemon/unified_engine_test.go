@@ -25,7 +25,7 @@ func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
 			}
 
 			want := []string{
-				"heartbeat", "expire", "refresh-members", "leadership", "open-leader", "publish-capacity",
+				"heartbeat", "expire", "refresh-members", "leadership", "open-leader",
 				"recover-acquisitions", "poll", "retry-results", "request:linux", "start:linux",
 				"timeout:linux", "reconcile:linux",
 			}
@@ -120,7 +120,7 @@ func TestUnifiedEngineJoinsIndependentOperationFailures(t *testing.T) {
 	engine := unifiedEngineFixture(&events)
 	engine.membership = membershipFake{events: &events, heartbeatErr: wantErr, expireErr: wantErr}
 	engine.source = sourceRuntimeFake{
-		events: &events, refreshErr: wantErr, publishErr: wantErr, pollErr: wantErr,
+		events: &events, refreshErr: wantErr, pollErr: wantErr,
 	}
 	engine.lifecycle = lifecycleRuntimeFake{events: &events, recoverErr: wantErr, retryErr: wantErr}
 	engine.pools[0].runtime = poolRuntimeFake{
@@ -154,19 +154,37 @@ func TestUnifiedEngineReportsLeadershipCloseFailures(t *testing.T) {
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
 	engine.source = sourceRuntimeFake{events: &events, closeErr: wantErr}
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("open leadership: %v", err)
-	}
+	mustRunEngineCycle(t, engine)
 	engine.leadership = leadershipFake{events: &events}
-	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("lost leadership close error = %v", err)
+	assertEngineCycleError(t, engine, wantErr, "lost leadership close")
+	assertEngineCycleError(t, engine, wantErr, "lost leadership close retry")
+	if occurrences(events, "close-leader") != 2 {
+		t.Fatalf("close attempts = %d, want retry", occurrences(events, "close-leader"))
 	}
-	engine.leaderOpen = true
+	engine.leadership = leadershipFake{leader: true, events: &events}
+	assertEngineCycleError(t, engine, wantErr, "regained leadership close")
+	engine.source = sourceRuntimeFake{events: &events}
+	mustRunEngineCycle(t, engine)
 	if err := engine.openLeadership(context.Background()); err != nil {
 		t.Fatalf("open existing leadership: %v", err)
 	}
+	engine.source = sourceRuntimeFake{events: &events, closeErr: wantErr}
 	if err := engine.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("engine close error = %v", err)
+	}
+}
+
+func mustRunEngineCycle(t *testing.T, engine *UnifiedEngine) {
+	t.Helper()
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("run engine cycle: %v", err)
+	}
+}
+
+func assertEngineCycleError(t *testing.T, engine *UnifiedEngine, want error, operation string) {
+	t.Helper()
+	if err := engine.Cycle(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("%s error = %v, want %v", operation, err, want)
 	}
 }
 
@@ -228,7 +246,6 @@ type sourceRuntimeFake struct {
 	events     *[]string
 	refreshErr error
 	openErr    error
-	publishErr error
 	pollErr    error
 	closeErr   error
 }
@@ -241,11 +258,7 @@ func (fake sourceRuntimeFake) OpenLeader(context.Context) error {
 	*fake.events = append(*fake.events, "open-leader")
 	return fake.openErr
 }
-func (fake sourceRuntimeFake) PublishCapacity(context.Context, time.Time) error {
-	*fake.events = append(*fake.events, "publish-capacity")
-	return fake.publishErr
-}
-func (fake sourceRuntimeFake) Poll(context.Context) error {
+func (fake sourceRuntimeFake) Poll(context.Context, time.Time) error {
 	*fake.events = append(*fake.events, "poll")
 	return fake.pollErr
 }

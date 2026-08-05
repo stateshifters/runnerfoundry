@@ -51,37 +51,38 @@ type Adapter struct {
 	Handler       EventHandler
 	Repository    string
 	RunnerPool    core.RunnerPool
-	MaxCapacity   int
 	LastMessageID int
 }
 
 // PollOnce receives and processes at most one GitHub message. It acknowledges
-// the message only after every translated event has been durably handled.
-func (adapter *Adapter) PollOnce(ctx context.Context) error {
+// the message only after every translated event has been durably handled. The
+// returned boolean reports whether GitHub supplied a message, including when
+// durable handling or acknowledgement subsequently fails.
+func (adapter *Adapter) PollOnce(ctx context.Context, maxCapacity int) (bool, error) {
 	if adapter.Client == nil {
-		return errors.New("GitHub message client is required")
+		return false, errors.New("GitHub message client is required")
 	}
 	if adapter.Handler == nil {
-		return errors.New("GitHub event handler is required")
+		return false, errors.New("GitHub event handler is required")
 	}
-	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, adapter.MaxCapacity)
+	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, maxCapacity)
 	if errors.Is(err, ErrNoMessage) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("receive GitHub scale-set message: %w", err)
+		return false, fmt.Errorf("receive GitHub scale-set message: %w", err)
 	}
 	if message == nil {
-		return errors.New("GitHub message client returned nil without ErrNoMessage")
+		return false, errors.New("GitHub message client returned nil without ErrNoMessage")
 	}
 	if err := adapter.handleMessage(ctx, message); err != nil {
-		return err
+		return true, err
 	}
 	if err := adapter.Client.DeleteMessage(ctx, message.MessageID); err != nil {
-		return fmt.Errorf("acknowledge GitHub scale-set message %d: %w", message.MessageID, err)
+		return true, fmt.Errorf("acknowledge GitHub scale-set message %d: %w", message.MessageID, err)
 	}
 	adapter.LastMessageID = message.MessageID
-	return nil
+	return true, nil
 }
 
 func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
