@@ -19,7 +19,7 @@ func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 		rowFromValues(queuedJobValues(testJobID1, request)), rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
 	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", claim)
-	if err != nil || !result.Taken || result.Processing.ClaimedAt != claim.ClaimedAt ||
+	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.ClaimedAt != claim.ClaimedAt ||
 		result.Processing.InventoryEndpointID != claim.InventoryEndpointID || protocol.commitCalls != 1 {
 		t.Fatalf("claim = (%#v, %v), commits=%d", result, err, protocol.commitCalls)
 	}
@@ -45,7 +45,7 @@ func TestClaimOldestReportsEveryTransactionFailure(t *testing.T) {
 		t.Fatal("claim candidate failure was ignored")
 	}
 	protocol = &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
-	if result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err != nil || result.Taken {
+	if result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err != nil || result.Outcome != core.ClaimEmpty {
 		t.Fatalf("lost claim = (%#v, %v)", result, err)
 	}
 	protocol = &recordedTransaction{rows: recoveryQueuedRows(request), commitErr: protocolErr}
@@ -134,7 +134,7 @@ func recoveryConstantRow(row Row) func(context.Context, string, ...any) Row {
 func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 	protocol := &recordedTransaction{rows: []Row{{scan: func(...any) error { return sql.ErrNoRows }}}}
 	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{})
-	if err != nil || result.Taken || protocol.commitCalls != 1 {
+	if err != nil || result.Outcome != core.ClaimEmpty || protocol.commitCalls != 1 {
 		t.Fatalf("empty claim = (%#v, %v), commits=%d", result, err, protocol.commitCalls)
 	}
 }
@@ -157,7 +157,7 @@ func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 	request := core.JobRequest{Source: processing.Job.Source, RunnerPool: "linux", EnqueuedAt: processing.Job.EnqueuedAt}
 	protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
 	result, err := NewStore(protocol.executor()).RecoverUnstartedProcessing(context.Background(), processing)
-	if err != nil || !result.Applied || protocol.commitCalls != 1 || len(protocol.statements) != 3 ||
+	if err != nil || result.Outcome != core.RetryRequeued || protocol.commitCalls != 1 || len(protocol.statements) != 3 ||
 		!strings.Contains(protocol.statements[1], "claimed_at = $2") ||
 		!strings.Contains(protocol.statements[1], "NOT processing.runner_started") ||
 		!strings.Contains(protocol.statements[1], "source_tombstones") {
@@ -166,7 +166,7 @@ func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 
 	protocol = &recordedTransaction{rows: []Row{{scan: func(...any) error { return sql.ErrNoRows }}}}
 	result, err = NewStore(protocol.executor()).RecoverUnstartedProcessing(context.Background(), processing)
-	if err != nil || result.Applied || protocol.commitCalls != 1 {
+	if err != nil || result.Outcome != core.RetryMissing || protocol.commitCalls != 1 {
 		t.Fatalf("raced recovery = (%#v, %v), commits=%d", result, err, protocol.commitCalls)
 	}
 }
@@ -175,12 +175,12 @@ func TestNamedStoreResultsDescribeLegacyProtocolOutcomes(t *testing.T) {
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux", EnqueuedAt: fixedTime()}
 	queueProtocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
 	queued, err := NewStore(queueProtocol.executor()).Queue(context.Background(), request)
-	if err != nil || !queued.Enqueued || queued.Job.ID != testJobID1 {
+	if err != nil || queued.Outcome != core.QueueQueued || queued.Job.ID != testJobID1 {
 		t.Fatalf("queue = (%#v, %v)", queued, err)
 	}
 	transitionProtocol := &recordedTransaction{}
 	store := NewStore(transitionProtocol.executor())
-	if result, err := store.RemoveTerminal(context.Background(), testJobID1); err != nil || !result.Applied {
+	if result, err := store.RemoveTerminal(context.Background(), testJobID1); err != nil || result.Outcome != core.TerminalRemoved {
 		t.Fatalf("remove = (%#v, %v)", result, err)
 	}
 }

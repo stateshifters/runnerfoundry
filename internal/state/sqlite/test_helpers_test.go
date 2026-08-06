@@ -14,6 +14,12 @@ func successfulExecute(context.Context, string, ...any) (Result, error) {
 	return successfulResult(), nil
 }
 
+func unstartedProcessingValues() []any {
+	values := processingJobValues()
+	values[5], values[6] = false, false
+	return values
+}
+
 func successfulCompletion(context.Context) error { return nil }
 
 func assignDestinations(destinations, values []any) error {

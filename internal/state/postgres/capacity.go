@@ -88,32 +88,6 @@ func (store *Store) WithdrawMemberCapacity(ctx context.Context, memberID core.Me
 	return store.executeTransaction(ctx, "withdraw member capacity", removeMemberCapacitiesSQL, memberID)
 }
 
-func (store *Store) executeConditionalTransaction(
-	ctx context.Context,
-	description, statement string,
-	arguments ...any,
-) (_ bool, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin %s: %w", description, err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	result, err := transaction.Execute(ctx, statement, arguments...)
-	if err != nil {
-		return false, fmt.Errorf("%s: %w", description, err)
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("read %s count: %w", description, err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit %s: %w", description, err)
-	}
-	open = false
-	return rowsAffected == 1, nil
-}
-
 func (store *Store) CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error) {
 	var count int
 	if err := store.executor.QueryRow(ctx, countLiveMembersSQL, cutoff).Scan(&count); err != nil {

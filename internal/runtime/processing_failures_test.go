@@ -50,6 +50,21 @@ func TestProcessOneRetriesFailedBootstrapAtQueueTail(t *testing.T) {
 	}
 }
 
+func TestProcessCarriesAConcurrentSourceOutcomeThroughProvisioningFailure(t *testing.T) {
+	jobID := uuid.New()
+	store := processingStore(jobID, nil)
+	store.retryOutcome = core.RetrySourceTerminal
+	bootstrapper := &bootstrapGeneratorFake{generate: func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error) {
+		return execution.Bootstrap{}, errors.New("bootstrap failed")
+	}}
+	provider := &providerFake{}
+	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member", testCurrentTime)
+	result, err := orchestrator.Process(context.Background(), "linux")
+	if err == nil || result.Outcome != runtimeengine.ProcessRetry || result.RetryOutcome != core.RetrySourceTerminal {
+		t.Fatalf("Process() = (%#v, %v)", result, err)
+	}
+}
+
 func TestProcessOneReportsBootstrapAndRemovalFailures(t *testing.T) {
 	jobID := uuid.New()
 	bootstrapErr := errors.New("bootstrap failed")

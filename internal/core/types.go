@@ -55,16 +55,52 @@ type ProcessingClaim struct {
 }
 
 type EnqueueResult struct {
-	Job      Job
-	Enqueued bool
+	Job     Job
+	Outcome QueueOutcome
 }
 
-type TakeResult struct {
+type QueueOutcome string
+
+const (
+	QueueQueued         QueueOutcome = "queued"
+	QueueAlreadyQueued  QueueOutcome = "already_queued"
+	QueueProcessing     QueueOutcome = "processing"
+	QueueSourceTerminal QueueOutcome = "source_terminal"
+)
+
+type ClaimResult struct {
 	Processing ProcessingJob
-	Taken      bool
+	Outcome    ClaimOutcome
 }
 
-type TransitionResult struct{ Applied bool }
+type ClaimOutcome string
+
+const (
+	ClaimClaimed ClaimOutcome = "claimed"
+	ClaimEmpty   ClaimOutcome = "empty"
+)
+
+type RetryResult struct{ Outcome RetryOutcome }
+
+type RetryOutcome string
+
+const (
+	RetryRequeued       RetryOutcome = "requeued"
+	RetryMissing        RetryOutcome = "missing"
+	RetryRunnerStarted  RetryOutcome = "runner_started"
+	RetrySourceTerminal RetryOutcome = "source_terminal"
+	RetryClaimChanged   RetryOutcome = "claim_changed"
+)
+
+type TerminalRemovalResult struct{ Outcome TerminalRemovalOutcome }
+
+type TerminalRemovalOutcome string
+
+const (
+	TerminalRemoved     TerminalRemovalOutcome = "removed"
+	TerminalMissing     TerminalRemovalOutcome = "missing"
+	TerminalNotTerminal TerminalRemovalOutcome = "not_terminal"
+)
 
 type RunnerPoolCapacity struct {
 	RunnerPool RunnerPool
@@ -83,10 +119,10 @@ type JobQueueStore interface {
 
 // ProcessingJobStore owns processing records and their guarded transitions.
 // ClaimOldest serializes FIFO claims for a Runner Pool. Recovery and removal
-// must compare the persisted claim state and return Applied=false when a
-// concurrent source observation won; callers may safely retry errors.
+// compare persisted claim state and return the exact no-op or applied outcome;
+// callers may safely retry errors without losing a concurrent source event.
 type ProcessingClaimer interface {
-	ClaimOldest(ctx context.Context, runnerPool RunnerPool, claim ProcessingClaim) (TakeResult, error)
+	ClaimOldest(ctx context.Context, runnerPool RunnerPool, claim ProcessingClaim) (ClaimResult, error)
 }
 
 type ProcessingReader interface {
@@ -95,9 +131,9 @@ type ProcessingReader interface {
 }
 
 type ProcessingTransitions interface {
-	RetryUnstarted(ctx context.Context, jobID JobID) (TransitionResult, error)
-	RecoverUnstartedProcessing(ctx context.Context, job ProcessingJob) (TransitionResult, error)
-	RemoveTerminal(ctx context.Context, jobID JobID) (TransitionResult, error)
+	RetryUnstarted(ctx context.Context, jobID JobID) (RetryResult, error)
+	RecoverUnstartedProcessing(ctx context.Context, job ProcessingJob) (RetryResult, error)
+	RemoveTerminal(ctx context.Context, jobID JobID) (TerminalRemovalResult, error)
 }
 
 type ProcessingJobStore interface {

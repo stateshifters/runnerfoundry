@@ -8,7 +8,7 @@ import (
 )
 
 type WorkCoordinator interface {
-	ProcessOne(ctx context.Context, runnerPool core.RunnerPool) (bool, error)
+	Process(ctx context.Context, runnerPool core.RunnerPool) (ProcessResult, error)
 	OccupiedSlots(ctx context.Context, runnerPool core.RunnerPool) (int, error)
 }
 
@@ -30,19 +30,19 @@ func NewPoolWorker(
 
 // RequestWork claims at most one job only when the provider reports an
 // available local slot. Existing instances occupy slots until cleanup removes them.
-func (worker *PoolWorker) RequestWork(ctx context.Context) (bool, error) {
+func (worker *PoolWorker) RequestWork(ctx context.Context) (ProcessResult, error) {
 	occupied, err := worker.coordinator.OccupiedSlots(ctx, worker.runnerPool)
 	if err != nil {
-		return false, fmt.Errorf("inspect local capacity for Runner Pool %q: %w", worker.runnerPool, err)
+		return ProcessResult{}, fmt.Errorf("inspect local capacity for Runner Pool %q: %w", worker.runnerPool, err)
 	}
 	if occupied >= worker.localCapacity {
-		return false, nil
+		return ProcessResult{Outcome: ProcessNoWork}, nil
 	}
 
-	started, err := worker.coordinator.ProcessOne(ctx, worker.runnerPool)
+	result, err := worker.coordinator.Process(ctx, worker.runnerPool)
 	if err != nil {
-		return false, fmt.Errorf("request work for Runner Pool %q: %w", worker.runnerPool, err)
+		return result, fmt.Errorf("request work for Runner Pool %q: %w", worker.runnerPool, err)
 	}
 
-	return started, nil
+	return result, nil
 }

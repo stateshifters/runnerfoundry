@@ -32,7 +32,7 @@ func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 	claim := core.ProcessingClaim{MemberID: testMemberID, ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", claim)
-	if err != nil || !result.Taken || result.Processing.InventoryEndpointID != claim.InventoryEndpointID || commits != 1 ||
+	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.InventoryEndpointID != claim.InventoryEndpointID || commits != 1 ||
 		!strings.Contains(statements[1], "claimed_at, inventory_endpoint_id") || len(arguments[1]) != 7 {
 		t.Fatalf("claim = (%#v, %v), statements=%#v args=%#v", result, err, statements, arguments)
 	}
@@ -45,7 +45,7 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 	}, commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{})
-	if err != nil || result.Taken || commits != 1 {
+	if err != nil || result.Outcome != core.ClaimEmpty || commits != 1 {
 		t.Fatalf("empty claim = (%#v, %v), commits=%d", result, err, commits)
 	}
 }
@@ -74,7 +74,7 @@ func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 		ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		RecoverUnstartedProcessing(context.Background(), processing)
-	if err != nil || !result.Applied || len(statements) != 2 ||
+	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 ||
 		!strings.Contains(statements[0], "claimed_at = ?") || !strings.Contains(statements[0], "runner_started = 0") ||
 		!strings.Contains(statements[0], "source_tombstones") {
 		t.Fatalf("recovery = (%#v, %v), statements=%#v", result, err, statements)
@@ -92,10 +92,10 @@ func TestNamedQueueAndTerminalResults(t *testing.T) {
 	queued, err := store.Queue(context.Background(), core.JobRequest{
 		Source: core.SourceReference{Adapter: "github", ID: "request-3"}, RunnerPool: "linux", EnqueuedAt: fixedTime(),
 	})
-	if err != nil || !queued.Enqueued || queued.Job.ID != testJobID {
+	if err != nil || queued.Outcome != core.QueueQueued || queued.Job.ID != testJobID {
 		t.Fatalf("queue = (%#v, %v)", queued, err)
 	}
-	if removed, err := store.RemoveTerminal(context.Background(), testJobID); err != nil || !removed.Applied {
+	if removed, err := store.RemoveTerminal(context.Background(), testJobID); err != nil || removed.Outcome != core.TerminalRemoved {
 		t.Fatalf("remove = (%#v, %v)", removed, err)
 	}
 }

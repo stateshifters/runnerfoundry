@@ -52,9 +52,9 @@ func recoveryDecision(
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 			return []core.ProcessingJob{processing}, nil
 		},
-		recover: func(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
+		recover: func(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 			recovered = true
-			return core.TransitionResult{Applied: true}, nil
+			return core.RetryResult{Outcome: core.RetryRequeued}, nil
 		},
 	}
 	provider := &providerFake{}
@@ -105,8 +105,8 @@ func TestReconcilePoolReportsExpiredProcessingRecoveryFailureAfterCleanup(t *tes
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 			return []core.ProcessingJob{processing}, nil
 		},
-		recover: func(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
-			return core.TransitionResult{}, wantErr
+		recover: func(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+			return core.RetryResult{}, wantErr
 		},
 	}
 	provider := &providerFake{
@@ -138,11 +138,11 @@ func TestReconcilePoolRetainsExpiredProcessingWhenRecoveryTransitionDoesNotApply
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 			return []core.ProcessingJob{processing}, nil
 		},
-		recover: func(_ context.Context, recovered core.ProcessingJob) (core.TransitionResult, error) {
+		recover: func(_ context.Context, recovered core.ProcessingJob) (core.RetryResult, error) {
 			if recovered.Job.EnqueuedAt != now {
 				t.Fatalf("recovered enqueue time = %v, want %v", recovered.Job.EnqueuedAt, now)
 			}
-			return core.TransitionResult{Applied: false}, nil
+			return core.RetryResult{Outcome: core.RetryClaimChanged}, nil
 		},
 	}
 	provider := &providerFake{}

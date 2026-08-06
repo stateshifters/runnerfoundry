@@ -22,12 +22,12 @@ func newExpiredRecoveryOrchestrator(
 		ClaimedAt: now.Add(-5 * time.Minute), InventoryEndpointID: "test:endpoint"}
 	store := &jobStoreFake{list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 		return []core.ProcessingJob{processing}, nil
-	}, recover: func(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
+	}, recover: func(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 		if recovered != nil {
 			*recovered = true
 		}
 		appendRecoveryEvent(events, "recover")
-		return core.TransitionResult{Applied: recoverErr == nil}, recoverErr
+		return core.RetryResult{Outcome: core.RetryRequeued}, recoverErr
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()),

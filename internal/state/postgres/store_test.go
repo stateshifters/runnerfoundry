@@ -19,7 +19,7 @@ func TestEnqueueCreatesQueuedJob(t *testing.T) {
 		RunnerPool: "linux", EnqueuedAt: fixedTime()}
 	protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
 	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
-	if err != nil || !result.Enqueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
+	if err != nil || result.Outcome != core.QueueQueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
 		t.Fatalf("queue = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 	if len(protocol.statements) != 2 || !strings.Contains(protocol.statements[0], "pg_advisory_xact_lock") ||
@@ -37,7 +37,7 @@ func TestEnqueueReturnsExistingQueuedJob(t *testing.T) {
 		rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
 	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
-	if err != nil || result.Enqueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
+	if err != nil || result.Outcome != core.QueueAlreadyQueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
 		t.Fatalf("redelivery = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 }
@@ -48,9 +48,10 @@ func TestEnqueueIgnoresProcessingOrTombstonedSource(t *testing.T) {
 	protocol := &recordedTransaction{rows: []Row{
 		{scan: func(...any) error { return sql.ErrNoRows }},
 		{scan: func(...any) error { return sql.ErrNoRows }},
+		rowFromValues([]any{string(core.QueueProcessing)}),
 	}}
 	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
-	if err != nil || result.Enqueued || result.Job != (core.Job{}) || protocol.commitCalls != 1 {
+	if err != nil || result.Outcome != core.QueueProcessing || result.Job != (core.Job{}) || protocol.commitCalls != 1 {
 		t.Fatalf("ignored queue = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 }
@@ -64,7 +65,7 @@ func TestTakeOldestMovesQueueEntryAtomically(t *testing.T) {
 		rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
 	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
-	if err != nil || !result.Taken || result.Processing.Job.ID != testJobID1 || result.Processing.MemberID != testMemberIDA ||
+	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.Job.ID != testJobID1 || result.Processing.MemberID != testMemberIDA ||
 		protocol.commitCalls != 1 {
 		t.Fatalf("claim = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
@@ -82,10 +83,10 @@ func TestTakeOldestLeavesEmptyQueueUnchanged(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{rows: []Row{{scan: func(...any) error { return sql.ErrNoRows }}}}
 	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
-	if err != nil || result.Taken || result.Processing != (core.ProcessingJob{}) || len(protocol.statements) != 2 ||
+	if err != nil || result.Outcome != core.ClaimEmpty || result.Processing != (core.ProcessingJob{}) || len(protocol.statements) != 2 ||
 		protocol.commitCalls != 1 {
-		t.Fatalf("empty take = %#v, %t, statements=%d, commits=%d, error=%v",
-			result.Processing, result.Taken, len(protocol.statements), protocol.commitCalls, err)
+		t.Fatalf("empty take = %#v, %s, statements=%d, commits=%d, error=%v",
+			result.Processing, result.Outcome, len(protocol.statements), protocol.commitCalls, err)
 	}
 }
 
@@ -107,7 +108,7 @@ func TestRemoveTerminalProcessingDeletesOnlyTerminalJob(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{}
 	result, err := NewStore(protocol.executor()).RemoveTerminal(context.Background(), testJobID1)
-	if err != nil || !result.Applied || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
+	if err != nil || result.Outcome != core.TerminalRemoved || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
 		len(protocol.arguments[0]) != 1 || protocol.arguments[0][0] != testJobID1 {
 		t.Fatalf("remove statements=%#v arguments=%#v commits=%d error=%v",
 			protocol.statements, protocol.arguments, protocol.commitCalls, err)

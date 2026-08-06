@@ -14,24 +14,24 @@ func claimOldestInTransaction(
 	transaction Transaction,
 	runnerPool core.RunnerPool,
 	claim core.ProcessingClaim,
-) (core.TakeResult, error) {
+) (core.ClaimResult, error) {
 	if _, err := transaction.Execute(ctx, serializeRunnerPoolClaimSQL, string(runnerPool)); err != nil {
-		return core.TakeResult{}, fmt.Errorf("serialize Runner Pool claim: %w", err)
+		return core.ClaimResult{}, fmt.Errorf("serialize Runner Pool claim: %w", err)
 	}
 	candidate, found, err := selectOldestQueuedJob(ctx, transaction, runnerPool)
 	if err != nil || !found {
-		return core.TakeResult{}, err
+		return core.ClaimResult{Outcome: core.ClaimEmpty}, err
 	}
 	job, taken, err := takeQueuedJob(ctx, transaction, candidate)
 	if err != nil || !taken {
-		return core.TakeResult{}, err
+		return core.ClaimResult{Outcome: core.ClaimEmpty}, err
 	}
 	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID, job.Source.Adapter,
 		job.Source.ID, string(job.RunnerPool), claim.MemberID, claim.ClaimedAt, claim.InventoryEndpointID); err != nil {
-		return core.TakeResult{}, fmt.Errorf("insert processing claim: %w", err)
+		return core.ClaimResult{}, fmt.Errorf("insert processing claim: %w", err)
 	}
-	return core.TakeResult{Processing: core.ProcessingJob{Job: job, MemberID: claim.MemberID,
-		ClaimedAt: claim.ClaimedAt, InventoryEndpointID: claim.InventoryEndpointID}, Taken: true}, nil
+	return core.ClaimResult{Processing: core.ProcessingJob{Job: job, MemberID: claim.MemberID,
+		ClaimedAt: claim.ClaimedAt, InventoryEndpointID: claim.InventoryEndpointID}, Outcome: core.ClaimClaimed}, nil
 }
 
 func selectOldestQueuedJob(

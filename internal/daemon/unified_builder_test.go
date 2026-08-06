@@ -223,8 +223,8 @@ func newBuilderStoreFake() *builderStoreFake {
 func (*builderStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, nil
 }
-func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.TakeResult, error) {
-	return core.TakeResult{}, store.operationErr
+func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.ClaimResult, error) {
+	return core.ClaimResult{Outcome: core.ClaimEmpty}, store.operationErr
 }
 func (*builderStoreFake) TerminalizeSource(context.Context, core.SourceReference) error { return nil }
 func (*builderStoreFake) MarkRunnerStarted(context.Context, core.SourceReference) error { return nil }
@@ -234,14 +234,14 @@ func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID
 func (store *builderStoreFake) ProcessingByPool(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
-func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.TransitionResult, error) {
-	return core.TransitionResult{}, nil
+func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
-func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
-	return core.TransitionResult{}, nil
+func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
-func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TransitionResult, error) {
-	return core.TransitionResult{}, nil
+func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TerminalRemovalResult, error) {
+	return core.TerminalRemovalResult{Outcome: core.TerminalMissing}, nil
 }
 
 func (store *builderStoreFake) PublishMemberState(

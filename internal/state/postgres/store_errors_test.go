@@ -59,7 +59,7 @@ func TestTakeOldestHandlesCandidateCancelledWhileWaitingForSourceLock(t *testing
 	}, nil)
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
-	if err != nil || result.Taken || result.Processing != (core.ProcessingJob{}) {
+	if err != nil || result.Outcome != core.ClaimEmpty || result.Processing != (core.ProcessingJob{}) {
 		t.Fatalf("vanished claim = %#v, %v", result, err)
 	}
 	commitFailure := transactionWithRows([]Row{

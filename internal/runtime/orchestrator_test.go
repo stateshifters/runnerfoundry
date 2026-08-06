@@ -42,27 +42,37 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 }
 
 type jobStoreFake struct {
-	enqueue        func(context.Context, core.JobRequest) (core.Job, bool, error)
-	take           func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
-	terminalize    func(context.Context, core.SourceReference) error
-	started        func(context.Context, core.SourceReference) error
-	list           func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
-	retry          func(context.Context, core.JobID) (bool, error)
-	recover        func(context.Context, core.ProcessingJob) (core.TransitionResult, error)
-	remove         func(context.Context, core.JobID) error
-	removeTerminal func(context.Context, core.JobID) (bool, error)
+	enqueue         func(context.Context, core.JobRequest) (core.Job, bool, error)
+	take            func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
+	terminalize     func(context.Context, core.SourceReference) error
+	started         func(context.Context, core.SourceReference) error
+	list            func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
+	retry           func(context.Context, core.JobID) (bool, error)
+	retryOutcome    core.RetryOutcome
+	recover         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	remove          func(context.Context, core.JobID) error
+	removeTerminal  func(context.Context, core.JobID) (bool, error)
+	terminalOutcome core.TerminalRemovalOutcome
 }
 
-func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool, claim core.ProcessingClaim) (core.TakeResult, error) {
+func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool, claim core.ProcessingClaim) (core.ClaimResult, error) {
 	job, taken, err := store.take(ctx, pool, claim.MemberID)
 	job.ClaimedAt = claim.ClaimedAt
 	job.InventoryEndpointID = claim.InventoryEndpointID
-	return core.TakeResult{Processing: job, Taken: taken}, err
+	outcome := core.ClaimEmpty
+	if taken {
+		outcome = core.ClaimClaimed
+	}
+	return core.ClaimResult{Processing: job, Outcome: outcome}, err
 }
 
 func (store *jobStoreFake) Queue(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
 	job, enqueued, err := store.enqueue(ctx, request)
-	return core.EnqueueResult{Job: job, Enqueued: enqueued}, err
+	outcome := core.QueueAlreadyQueued
+	if enqueued {
+		outcome = core.QueueQueued
+	}
+	return core.EnqueueResult{Job: job, Outcome: outcome}, err
 }
 func (store *jobStoreFake) TerminalizeSource(ctx context.Context, source core.SourceReference) error {
 	return store.terminalize(ctx, source)
@@ -79,28 +89,42 @@ func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.M
 func (store *jobStoreFake) ProcessingByPool(ctx context.Context, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	return store.ProcessingByMember(ctx, "", pool)
 }
-func (store *jobStoreFake) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
+func (store *jobStoreFake) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.RetryResult, error) {
 	if store.retry == nil {
-		return core.TransitionResult{Applied: true}, nil
+		if store.retryOutcome != "" {
+			return core.RetryResult{Outcome: store.retryOutcome}, nil
+		}
+		return core.RetryResult{Outcome: core.RetryRequeued}, nil
 	}
 	applied, err := store.retry(ctx, jobID)
-	return core.TransitionResult{Applied: applied}, err
+	outcome := core.RetryClaimChanged
+	if applied {
+		outcome = core.RetryRequeued
+	}
+	return core.RetryResult{Outcome: outcome}, err
 }
-func (store *jobStoreFake) RecoverUnstartedProcessing(ctx context.Context, job core.ProcessingJob) (core.TransitionResult, error) {
+func (store *jobStoreFake) RecoverUnstartedProcessing(ctx context.Context, job core.ProcessingJob) (core.RetryResult, error) {
 	if store.recover != nil {
 		return store.recover(ctx, job)
 	}
-	return core.TransitionResult{Applied: true}, nil
+	return core.RetryResult{Outcome: core.RetryRequeued}, nil
 }
-func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
+func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TerminalRemovalResult, error) {
+	if store.terminalOutcome != "" {
+		return core.TerminalRemovalResult{Outcome: store.terminalOutcome}, nil
+	}
 	if store.removeTerminal != nil {
 		applied, err := store.removeTerminal(ctx, jobID)
-		return core.TransitionResult{Applied: applied}, err
+		outcome := core.TerminalNotTerminal
+		if applied {
+			outcome = core.TerminalRemoved
+		}
+		return core.TerminalRemovalResult{Outcome: outcome}, err
 	}
 	if store.remove == nil {
-		return core.TransitionResult{Applied: true}, nil
+		return core.TerminalRemovalResult{Outcome: core.TerminalRemoved}, nil
 	}
-	return core.TransitionResult{Applied: true}, store.remove(ctx, jobID)
+	return core.TerminalRemovalResult{Outcome: core.TerminalRemoved}, store.remove(ctx, jobID)
 }
 
 type bootstrapGeneratorFake struct {

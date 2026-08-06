@@ -29,7 +29,7 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 
 	result, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
 
-	if err != nil || !result.Taken || result.Processing.Job.ID != testJobID || result.Processing.MemberID != testMemberID {
+	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.Job.ID != testJobID || result.Processing.MemberID != testMemberID {
 		t.Fatalf("claim oldest = %#v, %v", result, err)
 	}
 	if commits != 1 || len(statements) != 3 {
@@ -76,7 +76,7 @@ func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 	}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
-	if err != nil || result.Taken {
+	if err != nil || result.Outcome != core.ClaimEmpty {
 		t.Fatalf("empty queue = %#v, %v", result, err)
 	}
 }
@@ -117,7 +117,10 @@ func TestMarkRunnerStartedTombstonesAQueuedRetry(t *testing.T) {
 func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 2)
+	processingValues := processingJobValues()
+	processingValues[5], processingValues[6] = false, false
 	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(processingValues) },
 		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
 			statements = append(statements, statement)
 			return successfulResult(), nil
@@ -126,8 +129,8 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 	}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		RetryUnstarted(context.Background(), testJobID)
-	if err != nil || !result.Applied || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
-		!strings.Contains(statements[1], "runner_started = 0") {
+	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
+		!strings.Contains(statements[0], "runner_started = 0") {
 		t.Fatalf("retry statements=%#v result=%#v error=%v", statements, result, err)
 	}
 }

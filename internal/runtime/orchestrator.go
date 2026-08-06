@@ -37,7 +37,10 @@ const (
 // ProcessResult reports whether a cycle found no demand, claimed demand,
 // started a runner, or retained/requeued work for retry. Errors describe the
 // failed boundary and do not weaken the durable outcome.
-type ProcessResult struct{ Outcome ProcessOutcome }
+type ProcessResult struct {
+	Outcome      ProcessOutcome
+	RetryOutcome core.RetryOutcome
+}
 
 func NewOrchestrator(
 	store core.ProcessingJobStore,
@@ -69,31 +72,33 @@ func (orchestrator *Orchestrator) Process(ctx context.Context, runnerPool core.R
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf("take queued work for Runner Pool %q: %w", runnerPool, err)
 	}
-	if !take.Taken {
+	if take.Outcome == core.ClaimEmpty {
 		return ProcessResult{Outcome: ProcessNoWork}, nil
 	}
 	processing := take.Processing
 	runnerName := runnerName(processing.Job.ID)
 	bootstrap, err := orchestrator.bootstrapper.GenerateBootstrap(ctx, processing.Job, runnerName)
 	if err != nil {
-		return ProcessResult{Outcome: ProcessRetry}, errors.Join(
+		retryOutcome, retryErr := orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
+		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome}, errors.Join(
 			fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err),
-			orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID),
+			retryErr,
 		)
 	}
 	if err = orchestrator.launcher.Start(ctx, execution.StartRequest{
 		RunnerPool: runnerPool, EndpointID: orchestrator.launcher.EndpointID(), RunnerName: runnerName, Bootstrap: bootstrap,
 	}); err != nil {
 		startErr := fmt.Errorf("start runner for job %s: %w", processing.Job.ID, err)
-		return ProcessResult{Outcome: ProcessRetry}, errors.Join(startErr, orchestrator.cleanupFailedStart(ctx, processing))
+		retryOutcome, cleanupErr := orchestrator.cleanupFailedStart(ctx, processing)
+		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome}, errors.Join(startErr, cleanupErr)
 	}
 	return ProcessResult{Outcome: ProcessRunnerStarted}, nil
 }
 
-func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, processing core.ProcessingJob) error {
+func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, processing core.ProcessingJob) (core.RetryOutcome, error) {
 	instances, err := orchestrator.inventory.InspectEndpoint(ctx, processing.InventoryEndpointID)
 	if err != nil {
-		return fmt.Errorf("inspect partial runner for job %s: %w", processing.Job.ID, err)
+		return "", fmt.Errorf("inspect partial runner for job %s: %w", processing.Job.ID, err)
 	}
 	name := runnerName(processing.Job.ID)
 	for _, instance := range instances {
@@ -101,16 +106,17 @@ func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, proces
 			continue
 		}
 		if err = orchestrator.inventory.Destroy(ctx, instance); err != nil {
-			return fmt.Errorf("destroy partial runner %q: %w", instance.ID, err)
+			return "", fmt.Errorf("destroy partial runner %q: %w", instance.ID, err)
 		}
 		return orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
 	}
 	return orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
 }
 
-func (orchestrator *Orchestrator) retryUnstartedProcessing(ctx context.Context, jobID core.JobID) error {
-	if _, err := orchestrator.store.RetryUnstarted(ctx, jobID); err != nil {
-		return fmt.Errorf("retry unstarted processing job %s: %w", jobID, err)
+func (orchestrator *Orchestrator) retryUnstartedProcessing(ctx context.Context, jobID core.JobID) (core.RetryOutcome, error) {
+	result, err := orchestrator.store.RetryUnstarted(ctx, jobID)
+	if err != nil {
+		return "", fmt.Errorf("retry unstarted processing job %s: %w", jobID, err)
 	}
-	return nil
+	return result.Outcome, nil
 }

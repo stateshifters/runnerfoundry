@@ -22,6 +22,12 @@ type PoolReconciliation struct {
 
 type reconciliationPurpose uint8
 
+type reconciliationChange struct {
+	removedRunners     int
+	removedProcessing  int
+	noLongerProcessing int
+}
+
 const (
 	preserveRunning reconciliationPurpose = iota
 	terminateRunning
@@ -118,10 +124,10 @@ func (orchestrator *Orchestrator) reconcileOwnedProcessing(
 		if present {
 			instanceReference = &instance
 		}
-		removedRunner, removedProcessing, err := orchestrator.reconcileProcessing(ctx, job, instanceReference, purpose)
-		result.RemovedRunners += removedRunner
-		result.RemovedProcessing += removedProcessing
-		result.RemainingProcessing -= removedProcessing
+		change, err := orchestrator.reconcileProcessing(ctx, job, instanceReference, purpose)
+		result.RemovedRunners += change.removedRunners
+		result.RemovedProcessing += change.removedProcessing
+		result.RemainingProcessing -= change.noLongerProcessing
 		failures = appendFailure(failures, err)
 	}
 	return result, errors.Join(failures...)
@@ -156,9 +162,9 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 	processing core.ProcessingJob,
 	instance *execution.RunnerInstance,
 	purpose reconciliationPurpose,
-) (removedRunners, removedProcessing int, resultErr error) {
+) (reconciliationChange, error) {
 	if processing.InventoryEndpointID != "" && !orchestrator.inventory.KnowsEndpoint(processing.InventoryEndpointID) {
-		return 0, 0, nil
+		return reconciliationChange{}, nil
 	}
 	if processing.SourceTerminal {
 		return orchestrator.cleanupTerminalProcessing(ctx, processing, instance)
@@ -167,77 +173,88 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 		return orchestrator.recoverExpiredProcessing(ctx, processing, instance)
 	}
 	if instance == nil {
-		retriedProcessing, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
-		return 0, retriedProcessing, retryErr
+		removed, gone, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
+		return reconciliationChange{removedProcessing: removed, noLongerProcessing: gone}, retryErr
 	}
 	if purpose == preserveRunning && instance.State == execution.RunnerStateRunning {
-		return 0, 0, nil
+		return reconciliationChange{}, nil
 	}
 	if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
-		return 0, 0, fmt.Errorf("destroy runner %q: %w", instance.ID, err)
+		return reconciliationChange{}, fmt.Errorf("destroy runner %q: %w", instance.ID, err)
 	}
-	retriedProcessing, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
-	return 1, retriedProcessing, retryErr
+	removed, gone, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
+	return reconciliationChange{removedRunners: 1, removedProcessing: removed, noLongerProcessing: gone}, retryErr
 }
 
 func (orchestrator *Orchestrator) recoverExpiredProcessing(
 	ctx context.Context,
 	processing core.ProcessingJob,
 	instance *execution.RunnerInstance,
-) (removedRunners, removedProcessing int, resultErr error) {
+) (reconciliationChange, error) {
 	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(unstartedProcessingLease)) {
-		return 0, 0, nil
+		return reconciliationChange{}, nil
 	}
+	change := reconciliationChange{}
 	if instance != nil {
 		if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
-			return 0, 0, fmt.Errorf("destroy expired unstarted runner %q: %w", instance.ID, err)
+			return reconciliationChange{}, fmt.Errorf("destroy expired unstarted runner %q: %w", instance.ID, err)
 		}
-		removedRunners = 1
+		change.removedRunners = 1
 	}
 	processing.Job.EnqueuedAt = orchestrator.currentTime()
 	transition, err := orchestrator.store.RecoverUnstartedProcessing(ctx, processing)
 	if err != nil {
-		return removedRunners, 0, fmt.Errorf("recover expired processing job %s: %w", processing.Job.ID, err)
+		return change, fmt.Errorf("recover expired processing job %s: %w", processing.Job.ID, err)
 	}
-	if transition.Applied {
-		removedProcessing = 1
+	if transition.Outcome == core.RetryRequeued {
+		change.removedProcessing = 1
 	}
-	return removedRunners, removedProcessing, nil
+	if transition.Outcome == core.RetryRequeued || transition.Outcome == core.RetryMissing {
+		change.noLongerProcessing = 1
+	}
+	return change, nil
 }
 
 func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 	ctx context.Context,
 	processing core.ProcessingJob,
 	instance *execution.RunnerInstance,
-) (removedRunners, removedProcessing int, resultErr error) {
+) (reconciliationChange, error) {
+	change := reconciliationChange{}
 	if instance != nil {
 		if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
-			return 0, 0, fmt.Errorf("destroy terminal runner %q: %w", instance.ID, err)
+			return reconciliationChange{}, fmt.Errorf("destroy terminal runner %q: %w", instance.ID, err)
 		}
-		removedRunners = 1
+		change.removedRunners = 1
 	}
 	transition, err := orchestrator.store.RemoveTerminal(ctx, processing.Job.ID)
 	if err != nil {
-		return removedRunners, 0, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
+		return change, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
 	}
-	if transition.Applied {
-		removedProcessing = 1
+	if transition.Outcome == core.TerminalRemoved {
+		change.removedProcessing = 1
 	}
-	return removedRunners, removedProcessing, nil
+	if transition.Outcome == core.TerminalRemoved || transition.Outcome == core.TerminalMissing {
+		change.noLongerProcessing = 1
+	}
+	return change, nil
 }
 
-func (orchestrator *Orchestrator) retryIfUnstarted(ctx context.Context, processing core.ProcessingJob) (int, error) {
+func (orchestrator *Orchestrator) retryIfUnstarted(ctx context.Context, processing core.ProcessingJob) (removed, gone int, resultErr error) {
 	if processing.RunnerStarted {
-		return 0, nil
+		return 0, 0, nil
 	}
 	transition, err := orchestrator.store.RetryUnstarted(ctx, processing.Job.ID)
 	if err != nil {
-		return 0, fmt.Errorf("retry unstarted processing job %s: %w", processing.Job.ID, err)
+		return 0, 0, fmt.Errorf("retry unstarted processing job %s: %w", processing.Job.ID, err)
 	}
-	if transition.Applied {
-		return 1, nil
+	if transition.Outcome == core.RetryRequeued {
+		return 1, 1, nil
 	}
-	return 0, nil
+	if transition.Outcome == core.RetryMissing {
+		return 0, 1, nil
+	}
+	return 0, 0, nil
 }
 
 func appendFailure(failures []error, err error) []error {

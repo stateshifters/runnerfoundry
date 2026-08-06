@@ -10,35 +10,52 @@ import (
 )
 
 func TestPoolWorkerProcessesOnlyWhenLocalCapacityIsFree(t *testing.T) {
-	for name, occupied := range map[string]int{"free": 1, "full": 2} {
+	for name, test := range map[string]struct {
+		occupied int
+		outcome  runtimeengine.ProcessOutcome
+		calls    int
+	}{"free": {occupied: 1, outcome: runtimeengine.ProcessRunnerStarted, calls: 1},
+		"full": {occupied: 2, outcome: runtimeengine.ProcessNoWork}} {
 		t.Run(name, func(t *testing.T) {
 			processedCalls := 0
 			coordinator := &workCoordinatorFake{
-				occupied: func(context.Context, core.RunnerPool) (int, error) { return occupied, nil },
-				process:  func(context.Context, core.RunnerPool) (bool, error) { processedCalls++; return true, nil },
+				occupied: func(context.Context, core.RunnerPool) (int, error) { return test.occupied, nil },
+				process: func(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error) {
+					processedCalls++
+					return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRunnerStarted}, nil
+				},
 			}
 			worker := runtimeengine.NewPoolWorker(coordinator, "linux", 2)
 			processed, err := worker.RequestWork(context.Background())
-			if err != nil || processed != (occupied < 2) || processedCalls != map[bool]int{true: 1, false: 0}[occupied < 2] {
+			if err != nil || processed.Outcome != test.outcome || processedCalls != test.calls {
 				t.Fatalf("RequestWork() = (%v, %v), calls=%d", processed, err, processedCalls)
 			}
 		})
 	}
 }
 
-func TestPoolWorkerReportsInspectionAndProcessingFailures(t *testing.T) {
+func TestPoolWorkerPreservesOutcomesWhileReportingFailures(t *testing.T) {
 	wantErr := errors.New("failed")
-	for name, coordinator := range map[string]*workCoordinatorFake{
-		"inspect": {occupied: func(context.Context, core.RunnerPool) (int, error) { return 0, wantErr }},
+	for name, test := range map[string]struct {
+		coordinator *workCoordinatorFake
+		want        runtimeengine.ProcessResult
+	}{
+		"inspect": {coordinator: &workCoordinatorFake{occupied: func(context.Context, core.RunnerPool) (int, error) { return 0, wantErr }}},
 		"process": {
-			occupied: func(context.Context, core.RunnerPool) (int, error) { return 0, nil },
-			process:  func(context.Context, core.RunnerPool) (bool, error) { return false, wantErr },
+			coordinator: &workCoordinatorFake{
+				occupied: func(context.Context, core.RunnerPool) (int, error) { return 0, nil },
+				process: func(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error) {
+					return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerStarted}, wantErr
+				},
+			},
+			want: runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerStarted},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			worker := runtimeengine.NewPoolWorker(coordinator, "linux", 1)
-			if _, err := worker.RequestWork(context.Background()); !errors.Is(err, wantErr) {
-				t.Fatalf("RequestWork() error = %v", err)
+			worker := runtimeengine.NewPoolWorker(test.coordinator, "linux", 1)
+			result, err := worker.RequestWork(context.Background())
+			if !errors.Is(err, wantErr) || result != test.want {
+				t.Fatalf("RequestWork() = (%#v, %v), want (%#v, %v)", result, err, test.want, wantErr)
 			}
 		})
 	}
@@ -46,12 +63,12 @@ func TestPoolWorkerReportsInspectionAndProcessingFailures(t *testing.T) {
 
 type workCoordinatorFake struct {
 	occupied func(context.Context, core.RunnerPool) (int, error)
-	process  func(context.Context, core.RunnerPool) (bool, error)
+	process  func(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error)
 }
 
 func (coordinator *workCoordinatorFake) OccupiedSlots(ctx context.Context, pool core.RunnerPool) (int, error) {
 	return coordinator.occupied(ctx, pool)
 }
-func (coordinator *workCoordinatorFake) ProcessOne(ctx context.Context, pool core.RunnerPool) (bool, error) {
+func (coordinator *workCoordinatorFake) Process(ctx context.Context, pool core.RunnerPool) (runtimeengine.ProcessResult, error) {
 	return coordinator.process(ctx, pool)
 }

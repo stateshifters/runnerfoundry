@@ -34,12 +34,19 @@ func TestEnqueueProtocolFailures(t *testing.T) {
 func TestEnqueueIgnoresAnExistingTombstone(t *testing.T) {
 	t.Parallel()
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
+	queryCalls := 0
 	tombstoned := Transaction{execute: func(context.Context, string, ...any) (Result, error) {
 		return Result{rowsAffected: func() (int64, error) { return 0, nil }}, nil
-	}, queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}), commit: successfulCompletion,
+	}, queryRow: func(context.Context, string, ...any) Row {
+		queryCalls++
+		if queryCalls == 1 {
+			return Row{scan: func(...any) error { return sql.ErrNoRows }}
+		}
+		return rowFromValues([]any{string(core.QueueSourceTerminal)})
+	}, commit: successfulCompletion,
 		rollback: successfulCompletion}
 	result, err := NewStore(Executor{begin: transactionBeginning(tombstoned)}).Queue(context.Background(), request)
-	if err != nil || result.Enqueued || result.Job != (core.Job{}) {
+	if err != nil || result.Outcome != core.QueueSourceTerminal || result.Job != (core.Job{}) {
 		t.Fatalf("tombstoned queue=%#v %v", result, err)
 	}
 }

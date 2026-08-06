@@ -17,11 +17,11 @@ func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-3"},
 		RunnerPool: "linux", EnqueuedAt: fixedTime()}
 	queued, err := store.Queue(ctx, request)
-	if err != nil || !queued.Enqueued || queued.Job.ID != testJobID {
+	if err != nil || queued.Outcome != core.QueueQueued || queued.Job.ID != testJobID {
 		t.Fatalf("queue = %#v, %v", queued, err)
 	}
 	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{MemberID: testMemberID})
-	if err != nil || !claimed.Taken || claimed.Processing.MemberID != testMemberID {
+	if err != nil || claimed.Outcome != core.ClaimClaimed || claimed.Processing.MemberID != testMemberID {
 		t.Fatalf("claim = %#v, %v", claimed, err)
 	}
 	processingJobs, err := store.ProcessingByMember(ctx, testMemberID, "linux")
@@ -42,7 +42,7 @@ func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
 	if err := store.TerminalizeSource(ctx, source); err != nil {
 		t.Fatalf("terminalize: %v", err)
 	}
-	if result, err := store.RemoveTerminal(ctx, testJobID); err != nil || !result.Applied {
+	if result, err := store.RemoveTerminal(ctx, testJobID); err != nil || result.Outcome != core.TerminalRemoved {
 		t.Fatalf("remove processing: %#v, %v", result, err)
 	}
 }
