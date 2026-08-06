@@ -6,13 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
 
 func TestMembershipPublishesCompleteStateAndCountsLiveMembers(t *testing.T) {
-	memberID := uuid.New()
+	memberID := core.MemberID("member")
 	now := time.Unix(10, 0)
 	capacities := []core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 3}}
 	store := &membershipStoreFake{
@@ -35,39 +34,34 @@ func TestMembershipPublishesCompleteStateAndCountsLiveMembers(t *testing.T) {
 	}
 }
 
-func TestMembershipExpiresMembersIndependently(t *testing.T) {
-	first := uuid.New()
-	second := uuid.New()
-	wantErr := errors.New("delete failed")
-	store := &membershipStoreFake{
-		list: func(context.Context, time.Time) ([]core.MemberID, error) { return []core.MemberID{first, second}, nil },
-		expire: func(_ context.Context, member core.MemberID) error {
-			if member == first {
-				return wantErr
-			}
-			return nil
-		},
+func TestMembershipWithdrawsOnlyLocalCapacity(t *testing.T) {
+	withdrawn := core.MemberID("")
+	store := &membershipStoreFake{withdraw: func(_ context.Context, member core.MemberID) error {
+		withdrawn = member
+		return nil
+	}}
+	service := runtimeengine.NewMembershipService(store, "member", nil, func() time.Time { return time.Unix(2, 0) })
+	if err := service.Withdraw(context.Background()); err != nil {
+		t.Fatalf("Withdraw() error = %v", err)
 	}
-	service := runtimeengine.NewMembershipService(store, uuid.New(), nil, func() time.Time { return time.Unix(2, 0) })
-	count, err := service.Expire(context.Background(), time.Unix(1, 0))
-	if count != 1 || !errors.Is(err, wantErr) {
-		t.Fatalf("Expire() = (%d, %v)", count, err)
+	if withdrawn != "member" {
+		t.Fatalf("withdrawn member = %q", withdrawn)
 	}
 }
 
 func TestMembershipReportsBoundaryFailures(t *testing.T) {
 	wantErr := errors.New("state failed")
 	store := &membershipStoreFake{
-		publish: func(context.Context, core.MemberID, time.Time, []core.RunnerPoolCapacity) error { return wantErr },
-		list:    func(context.Context, time.Time) ([]core.MemberID, error) { return nil, wantErr },
-		count:   func(context.Context, time.Time) (int, error) { return 0, wantErr },
+		publish:  func(context.Context, core.MemberID, time.Time, []core.RunnerPoolCapacity) error { return wantErr },
+		count:    func(context.Context, time.Time) (int, error) { return 0, wantErr },
+		withdraw: func(context.Context, core.MemberID) error { return wantErr },
 	}
-	service := runtimeengine.NewMembershipService(store, uuid.New(), nil, func() time.Time { return time.Unix(2, 0) })
+	service := runtimeengine.NewMembershipService(store, "member", nil, func() time.Time { return time.Unix(2, 0) })
 	if err := service.Heartbeat(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("Heartbeat() error = %v", err)
 	}
-	if _, err := service.Expire(context.Background(), time.Time{}); !errors.Is(err, wantErr) {
-		t.Fatalf("Expire() error = %v", err)
+	if err := service.Withdraw(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Withdraw() error = %v", err)
 	}
 	if _, err := service.CountLive(context.Background(), time.Time{}); !errors.Is(err, wantErr) {
 		t.Fatalf("CountLive() error = %v", err)
@@ -75,21 +69,17 @@ func TestMembershipReportsBoundaryFailures(t *testing.T) {
 }
 
 type membershipStoreFake struct {
-	publish func(context.Context, core.MemberID, time.Time, []core.RunnerPoolCapacity) error
-	list    func(context.Context, time.Time) ([]core.MemberID, error)
-	count   func(context.Context, time.Time) (int, error)
-	expire  func(context.Context, core.MemberID) error
+	publish  func(context.Context, core.MemberID, time.Time, []core.RunnerPoolCapacity) error
+	count    func(context.Context, time.Time) (int, error)
+	withdraw func(context.Context, core.MemberID) error
 }
 
 func (store *membershipStoreFake) PublishMemberState(ctx context.Context, member core.MemberID, at time.Time, capacities []core.RunnerPoolCapacity) error {
 	return store.publish(ctx, member, at, capacities)
 }
-func (store *membershipStoreFake) ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error) {
-	return store.list(ctx, cutoff)
-}
 func (store *membershipStoreFake) CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error) {
 	return store.count(ctx, cutoff)
 }
-func (store *membershipStoreFake) ExpireMember(ctx context.Context, member core.MemberID) error {
-	return store.expire(ctx, member)
+func (store *membershipStoreFake) WithdrawMemberCapacity(ctx context.Context, member core.MemberID) error {
+	return store.withdraw(ctx, member)
 }

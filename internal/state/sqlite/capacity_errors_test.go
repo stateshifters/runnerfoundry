@@ -26,23 +26,23 @@ func TestPublishMemberStateProtocolFailures(t *testing.T) {
 	}
 }
 
-func TestExpireMemberProtocolFailures(t *testing.T) {
+func TestWithdrawMemberCapacityProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	if err := NewStore(Executor{begin: failingBegin(protocolErr)}).ExpireMember(context.Background(), testMemberID); err == nil {
-		t.Fatal("expected expiry begin failure")
+	if err := NewStore(Executor{begin: failingBegin(protocolErr)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
+		t.Fatal("expected withdrawal begin failure")
 	}
 	for index, transaction := range []Transaction{
-		transactionFailingExecute(1, protocolErr), transactionFailingExecute(2, protocolErr),
+		transactionFailingExecute(1, protocolErr),
 		{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	} {
-		if err := NewStore(Executor{begin: transactionBeginning(transaction)}).ExpireMember(context.Background(), testMemberID); err == nil {
-			t.Fatalf("expiry case %d", index)
+		if err := NewStore(Executor{begin: transactionBeginning(transaction)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
+			t.Fatalf("withdrawal case %d", index)
 		}
 	}
 	if err := NewStore(Executor{begin: transactionBeginning(Transaction{execute: successfulExecute,
-		commit: successfulCompletion, rollback: successfulCompletion})}).ExpireMember(context.Background(), testMemberID); err != nil {
-		t.Fatalf("expire member: %v", err)
+		commit: successfulCompletion, rollback: successfulCompletion})}).WithdrawMemberCapacity(context.Background(), testMemberID); err != nil {
+		t.Fatalf("withdraw member capacity: %v", err)
 	}
 }
 
@@ -64,24 +64,5 @@ func TestCapacityScalarProtocolFailures(t *testing.T) {
 	}
 	if _, err := brokenScalar.AvailableRunnerPoolCapacity(context.Background(), "linux", fixedTime()); err == nil {
 		t.Fatal("expected capacity error")
-	}
-}
-
-func TestMemberListProtocolFailures(t *testing.T) {
-	t.Parallel()
-	protocolErr := errors.New("protocol")
-	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).ListExpiredMembers(context.Background(), fixedTime()); err == nil {
-		t.Fatal("expected begin failure")
-	}
-	for index, transaction := range failingListTransactions(protocolErr) {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ListLiveMembers(context.Background(), fixedTime()); err == nil {
-			t.Fatalf("list case %d", index)
-		}
-	}
-	invalidUUID := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
-		return rowsFromValues([][]any{{"invalid"}}), nil
-	}, rollback: successfulCompletion}
-	if _, err := NewStore(Executor{begin: transactionBeginning(invalidUUID)}).ListLiveMembers(context.Background(), fixedTime()); err == nil {
-		t.Fatal("expected invalid member UUID")
 	}
 }

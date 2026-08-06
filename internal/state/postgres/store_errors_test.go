@@ -40,7 +40,6 @@ func TestTakeOldestReportsTransactionalFailures(t *testing.T) {
 		transactionFailingAtExecuteWithRows(2, protocolErr, candidate),
 		transactionWithRows([]Row{candidate, {scan: func(...any) error { return protocolErr }}}, nil),
 		transactionFailingAtExecuteWithRows(3, protocolErr, candidate, candidate),
-		transactionFailingAtExecuteWithRows(4, protocolErr, candidate, candidate),
 		transactionWithRows([]Row{candidate, candidate}, protocolErr),
 	}
 	for index, transaction := range tests {
@@ -73,19 +72,25 @@ func TestTakeOldestHandlesCandidateCancelledWhileWaitingForSourceLock(t *testing
 	}
 }
 
-func TestCancelQueuedReportsTransactionalFailures(t *testing.T) {
+func TestTerminalizeSourceReportsTransactionalFailures(t *testing.T) {
 	t.Parallel()
-	protocolErr := errors.New("protocol")
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	for failureCall := 1; failureCall <= 3; failureCall++ {
+	assertTransactionalMutationFailures(t, 3,
+		func(store *Store) error { return store.TerminalizeSource(context.Background(), source) })
+}
+
+func assertTransactionalMutationFailures(t *testing.T, executeCalls int, operation func(*Store) error) {
+	t.Helper()
+	protocolErr := errors.New("protocol")
+	for failureCall := 1; failureCall <= executeCalls; failureCall++ {
 		store := NewStore(Executor{begin: transactionBeginning(transactionFailingAtExecute(failureCall, protocolErr))})
-		if err := store.CancelQueued(context.Background(), source); err == nil {
-			t.Fatalf("execute %d: expected cancellation error", failureCall)
+		if err := operation(store); err == nil {
+			t.Fatalf("execute %d: expected mutation failure", failureCall)
 		}
 	}
 	transaction := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
-	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).CancelQueued(context.Background(), source); err == nil {
-		t.Fatal("expected cancellation commit error")
+	if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
+		t.Fatal("expected mutation commit failure")
 	}
 }
 

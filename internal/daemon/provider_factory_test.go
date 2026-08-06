@@ -72,6 +72,7 @@ func TestBuildExecutionProviderRejectsMissingProvider(t *testing.T) {
 
 type dockerCommandsFake struct {
 	services string
+	runners  string
 }
 
 type dockerCommandsErrorFake struct{ err error }
@@ -108,8 +109,8 @@ func (dockerCommandsFake) StartComposeRunner(context.Context, dockerprovider.Com
 	return nil
 }
 
-func (dockerCommandsFake) ListComposeRunners(context.Context, string) (string, error) {
-	return "", nil
+func (commands dockerCommandsFake) ListComposeRunners(context.Context, string) (string, error) {
+	return commands.runners, nil
 }
 
 func (dockerCommandsFake) RemoveComposeRunner(context.Context, string) error {

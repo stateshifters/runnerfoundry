@@ -9,7 +9,7 @@ import (
 
 type JobID = uuid.UUID
 
-type MemberID = uuid.UUID
+type MemberID string
 
 type RunnerPool string
 
@@ -32,8 +32,10 @@ type Job struct {
 }
 
 type ProcessingJob struct {
-	Job      Job
-	MemberID MemberID
+	Job            Job
+	MemberID       MemberID
+	RunnerStarted  bool
+	SourceTerminal bool
 }
 
 type RunnerPoolCapacity struct {
@@ -41,12 +43,17 @@ type RunnerPoolCapacity struct {
 	Capacity   int
 }
 
-// JobStore owns current queued and member-processed work. Taking work moves it
-// atomically out of the FIFO queue; no completed-job history is retained here.
-type JobStore interface {
+// JobQueueStore owns source demand and source lifecycle observations.
+type JobQueueStore interface {
 	Enqueue(ctx context.Context, request JobRequest) (Job, bool, error)
+	TerminalizeSource(ctx context.Context, source SourceReference) error
+	MarkRunnerStarted(ctx context.Context, source SourceReference) error
+}
+
+// ProcessingJobStore owns member processing records and their guarded transitions.
+type ProcessingJobStore interface {
 	TakeOldest(ctx context.Context, runnerPool RunnerPool, member MemberID) (ProcessingJob, bool, error)
-	CancelQueued(ctx context.Context, source SourceReference) error
 	ProcessingByMember(ctx context.Context, member MemberID, runnerPool RunnerPool) ([]ProcessingJob, error)
-	RemoveProcessing(ctx context.Context, jobID JobID) error
+	RetryUnstartedProcessing(ctx context.Context, jobID JobID) (bool, error)
+	RemoveTerminalProcessing(ctx context.Context, jobID JobID) (bool, error)
 }

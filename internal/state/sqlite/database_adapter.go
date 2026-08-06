@@ -42,11 +42,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 var sqliteSchemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_members (
-		member_id TEXT NOT NULL PRIMARY KEY CHECK(length(member_id) = 36
-			AND substr(member_id, 9, 1) = '-' AND substr(member_id, 14, 1) = '-'
-			AND substr(member_id, 19, 1) = '-' AND substr(member_id, 24, 1) = '-'
-			AND length(replace(member_id, '-', '')) = 32
-			AND replace(member_id, '-', '') NOT GLOB '*[^0-9a-f]*'),
+		member_id TEXT NOT NULL PRIMARY KEY CHECK(length(trim(member_id)) > 0),
 		heartbeat_at INTEGER NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_queued_jobs (
@@ -68,7 +64,8 @@ var sqliteSchemaStatements = []string{
 		source_name TEXT NOT NULL,
 		source_reference TEXT NOT NULL,
 		runner_pool TEXT NOT NULL,
-		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id) ON DELETE CASCADE,
+		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id),
+		runner_started INTEGER NOT NULL DEFAULT 0 CHECK(runner_started IN (0, 1)),
 		UNIQUE(source_name, source_reference)
 	)`,
 	`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_member_pool
@@ -96,8 +93,8 @@ var sqliteSchemaStatements = []string{
 	)`,
 }
 
-const sqliteSchemaVersion = 102
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 102"
+const sqliteSchemaVersion = 103
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 103"
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)

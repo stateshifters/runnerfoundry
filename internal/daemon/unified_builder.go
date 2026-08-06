@@ -15,7 +15,8 @@ import (
 )
 
 type unifiedStore interface {
-	core.JobStore
+	core.JobQueueStore
+	core.ProcessingJobStore
 	runtimeengine.MembershipStore
 	statecontract.RegistrationStore
 	statecontract.RunnerPoolCapacityStore
@@ -26,6 +27,7 @@ type unifiedBuilderDependencies struct {
 	manager     *githubsource.Manager
 	member      core.MemberID
 	providers   map[core.RunnerPool]execution.ExecutionProvider
+	inventory   execution.RunnerInventory
 	leadership  leadershipRuntime
 	currentTime func() time.Time
 	memberTTL   time.Duration
@@ -64,7 +66,7 @@ func buildConfiguredEngine(
 	discoveryInterval time.Duration,
 ) *UnifiedEngine {
 	source := newGitHubSourceRuntime(
-		dependencies.manager, dependencies.store, dependencies.member.String(), runtimeengine.NewQueueHandler(dependencies.store),
+		dependencies.manager, dependencies.store, string(dependencies.member), runtimeengine.NewQueueHandler(dependencies.store),
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
 	membership := runtimeengine.NewMembershipService(
@@ -122,7 +124,7 @@ func (assembled *assembledRuntime) appendScaleSet(
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
 	orchestrator := runtimeengine.NewOrchestrator(
-		dependencies.store, dependencies.manager.Source(), provider, dependencies.member,
+		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
 	)
 	assembled.localCapacity = append(assembled.localCapacity, core.RunnerPoolCapacity{
 		RunnerPool: runnerPool, Capacity: scaleSet.MaxRunners,
@@ -143,9 +145,9 @@ func (assembled *assembledRuntime) appendScaleSet(
 }
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
-	if dependencies.store == nil || dependencies.manager == nil || dependencies.member == (core.MemberID{}) ||
+	if dependencies.store == nil || dependencies.manager == nil || dependencies.member == "" ||
 		dependencies.leadership == nil || dependencies.currentTime == nil || dependencies.ticker == nil ||
-		dependencies.processGate == nil {
+		dependencies.processGate == nil || dependencies.inventory == nil {
 		return errors.New("state, GitHub manager, member, leadership, clock, ticker, and process gate are required")
 	}
 	if dependencies.memberTTL <= 0 {
@@ -176,10 +178,12 @@ func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.Run
 	return nil
 }
 
-func (pool orchestrationPool) Cleanup(ctx context.Context) error {
-	_, err := pool.orchestrator.CleanupPool(ctx, pool.runnerPool)
+func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerPool }
+
+func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
+	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
 	if err != nil {
-		return fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
+		return result.RemainingProcessing, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
-	return nil
+	return result.RemainingProcessing, nil
 }

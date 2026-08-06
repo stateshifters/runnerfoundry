@@ -10,7 +10,7 @@ import (
 	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
-func TestStorePublicQueueAndProcessingBehaviors(t *testing.T) {
+func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	t.Parallel()
 	store := NewStore(successfulBehaviorExecutor())
 	ctx := context.Background()
@@ -25,14 +25,25 @@ func TestStorePublicQueueAndProcessingBehaviors(t *testing.T) {
 		t.Fatalf("take = %#v, %t, %v", processing, found, err)
 	}
 	processingJobs, err := store.ProcessingByMember(ctx, testMemberID, "linux")
-	if err != nil || len(processingJobs) != 1 || processingJobs[0].Job.ID != testJobID {
+	if err != nil || len(processingJobs) != 1 || processingJobs[0].Job.ID != testJobID ||
+		!processingJobs[0].RunnerStarted || !processingJobs[0].SourceTerminal {
 		t.Fatalf("processing = %#v, %v", processingJobs, err)
 	}
-	if err := store.CancelQueued(ctx, request.Source); err != nil {
-		t.Fatalf("cancel: %v", err)
+}
+
+func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
+	t.Parallel()
+	store := NewStore(successfulBehaviorExecutor())
+	ctx := context.Background()
+	source := core.SourceReference{Adapter: "github", ID: "request-3"}
+	if err := store.MarkRunnerStarted(ctx, source); err != nil {
+		t.Fatalf("mark started: %v", err)
 	}
-	if err := store.RemoveProcessing(ctx, testJobID); err != nil {
-		t.Fatalf("remove processing: %v", err)
+	if err := store.TerminalizeSource(ctx, source); err != nil {
+		t.Fatalf("terminalize: %v", err)
+	}
+	if removed, err := store.RemoveTerminalProcessing(ctx, testJobID); err != nil || !removed {
+		t.Fatalf("remove processing: %t, %v", removed, err)
 	}
 }
 
@@ -44,15 +55,14 @@ func TestStorePublicCapacityBehaviors(t *testing.T) {
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	liveMembers, err := store.ListLiveMembers(ctx, now)
-	assertMembers(t, liveMembers, err)
-	expiredMembers, err := store.ListExpiredMembers(ctx, now)
-	assertMembers(t, expiredMembers, err)
 	if count, err := store.CountLiveMembers(ctx, now); err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
 	if capacity, err := store.AvailableRunnerPoolCapacity(ctx, "linux", now); err != nil || capacity != 2 {
 		t.Fatalf("capacity=%d err=%v", capacity, err)
+	}
+	if err := store.WithdrawMemberCapacity(ctx, testMemberID); err != nil {
+		t.Fatalf("withdraw=%v", err)
 	}
 }
 
@@ -78,13 +88,6 @@ func TestStorePublicRegistrationBehaviors(t *testing.T) {
 	}
 }
 
-func assertMembers(t *testing.T, members []core.MemberID, err error) {
-	t.Helper()
-	if err != nil || len(members) != 1 || members[0] != testMemberID {
-		t.Fatalf("members = %#v, %v", members, err)
-	}
-}
-
 func TestStoreCloseUsesOptionalDatabaseCloser(t *testing.T) {
 	t.Parallel()
 	if err := NewStore(Executor{}).Close(); err != nil {
@@ -102,8 +105,6 @@ func successfulBehaviorExecutor() Executor {
 		execute: successfulExecute,
 		query: func(_ context.Context, statement string, _ ...any) (Rows, error) {
 			switch statement {
-			case listLiveMembersSQL, listExpiredMembersSQL:
-				return rowsFromValues([][]any{{testMemberIDText}}), nil
 			case registrationsSQL:
 				return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
 			case processingByMemberSQL:
@@ -130,7 +131,7 @@ func successfulBehaviorExecutor() Executor {
 }
 
 func processingJobValues() []any {
-	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText}
+	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText, true, true}
 }
 
 func rowFromValues(values []any) Row {

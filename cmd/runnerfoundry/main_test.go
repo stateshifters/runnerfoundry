@@ -23,6 +23,25 @@ func TestRunMainWritesExecutionErrorsToStderr(t *testing.T) {
 	}
 }
 
+func TestRunMainWritesInvalidActiveRunnerPolicyDiagnosticSnapshot(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := runMain(
+		[]string{"--config", "config.yaml", "--active-runner-policy", "invalid"},
+		io.Discard,
+		&stderr,
+		nil,
+		nil,
+		testProcessLifecycle(),
+	)
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	expected := "active runner policy must be leave or terminate\n"
+	if stderr.String() != expected {
+		t.Fatalf("stderr snapshot mismatch\nexpected: %q\nactual:   %q", expected, stderr.String())
+	}
+}
+
 func TestRunMainWritesPostgreSQLMigrationDiagnosticSnapshot(t *testing.T) {
 	runMigration := func(context.Context, migrationRequest) (migrationStatus, error) {
 		return migrationStatus{}, errors.New(

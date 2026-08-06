@@ -10,8 +10,9 @@ import (
 )
 
 type Options struct {
-	ConfigPath     string
-	ReloadRequests <-chan struct{}
+	ConfigPath         string
+	ReloadRequests     <-chan struct{}
+	ActiveRunnerPolicy ActiveRunnerPolicy
 }
 
 type serviceNotifier interface {
@@ -29,6 +30,10 @@ var (
 )
 
 func Run(ctx context.Context, options Options) (resultErr error) {
+	policy, err := resolveActiveRunnerPolicy(options.ActiveRunnerPolicy)
+	if err != nil {
+		return err
+	}
 	initial, err := loadDaemonConfig(options.ConfigPath)
 	if err != nil {
 		return err
@@ -44,7 +49,7 @@ func Run(ctx context.Context, options Options) (resultErr error) {
 	build := func(buildContext context.Context, configured config.Config) (generation, error) {
 		return runtime.Build(buildContext, configured)
 	}
-	return superviseDaemonRuntime(ctx, options.ReloadRequests, load, build, newSystemdNotifier(), runtime.report)
+	return superviseDaemonRuntime(ctx, options.ReloadRequests, load, build, newSystemdNotifier(), runtime.report, policy)
 }
 
 type productionRuntime struct {
@@ -102,8 +107,8 @@ func (runtime *productionRuntime) Close(ctx context.Context) error {
 }
 
 func (runtime *productionRuntime) withdrawMember(ctx context.Context) error {
-	if err := runtime.state.store.ExpireMember(ctx, runtime.state.member); err != nil {
-		return fmt.Errorf("withdraw member %q: %w", runtime.state.member, err)
+	if err := runtime.state.store.WithdrawMemberCapacity(ctx, runtime.state.member); err != nil {
+		return fmt.Errorf("withdraw member %q capacity: %w", runtime.state.member, err)
 	}
 	return nil
 }

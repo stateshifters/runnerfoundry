@@ -58,7 +58,7 @@ func TestProductionRuntimeCloseWithdrawsMember(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("member withdrawal failed")
-	store := &shutdownStoreFake{builderStoreFake: newBuilderStoreFake(), expireErr: wantErr}
+	store := &shutdownStoreFake{builderStoreFake: newBuilderStoreFake(), withdrawErr: wantErr}
 	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
 	if err != nil {
 		t.Fatalf("create memory logger: %v", err)
@@ -70,8 +70,8 @@ func TestProductionRuntimeCloseWithdrawsMember(t *testing.T) {
 	if err := runtime.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("close error = %v, want transition failure", err)
 	}
-	if len(store.expired) != 1 || store.expired[0] != daemonTestID(7) {
-		t.Fatalf("withdrawn members = %#v, want member 7", store.expired)
+	if len(store.withdrawn) != 1 || store.withdrawn[0] != daemonTestID(7) {
+		t.Fatalf("withdrawn member capacities = %#v, want member 7", store.withdrawn)
 	}
 }
 
@@ -104,13 +104,13 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 
 type shutdownStoreFake struct {
 	*builderStoreFake
-	expired   []core.MemberID
-	expireErr error
+	withdrawn   []core.MemberID
+	withdrawErr error
 }
 
-func (store *shutdownStoreFake) ExpireMember(_ context.Context, member core.MemberID) error {
-	store.expired = append(store.expired, member)
-	return store.expireErr
+func (store *shutdownStoreFake) WithdrawMemberCapacity(_ context.Context, member core.MemberID) error {
+	store.withdrawn = append(store.withdrawn, member)
+	return store.withdrawErr
 }
 
 func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {
@@ -118,6 +118,22 @@ func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {
 	loads := installRunBoundaries(t, runtime)
 	if err := Run(context.Background(), Options{ConfigPath: "config.yml"}); err != nil || *loads != 2 {
 		t.Fatalf("Run = %v, loads %d", err, *loads)
+	}
+}
+
+func TestRunRejectsInvalidActiveRunnerPolicyBeforeLoadingConfiguration(t *testing.T) {
+	restoreRunGlobals(t)
+	loaded := false
+	loadDaemonConfig = func(string) (config.Config, error) {
+		loaded = true
+		return config.Config{}, nil
+	}
+
+	if err := Run(context.Background(), Options{ActiveRunnerPolicy: "destroy"}); err == nil {
+		t.Fatal("Run accepted an invalid active runner policy")
+	}
+	if loaded {
+		t.Fatal("Run loaded configuration before validating active runner policy")
 	}
 }
 
@@ -143,6 +159,7 @@ func TestRunReportsApplicationBoundaryFailures(t *testing.T) {
 		installRunBoundaries(t, runtime)
 		superviseDaemonRuntime = func(
 			context.Context, <-chan struct{}, func() (config.Config, error), generationBuilder, serviceNotifier, func(error),
+			ActiveRunnerPolicy,
 		) error {
 			return wantErr
 		}
@@ -176,7 +193,11 @@ func installRunBoundaries(t *testing.T, runtime *productionRuntime) *int {
 		build generationBuilder,
 		_ serviceNotifier,
 		_ func(error),
+		policy ActiveRunnerPolicy,
 	) error {
+		if policy != LeaveActiveRunners {
+			t.Fatalf("default active runner policy = %q", policy)
+		}
 		configured, loadErr := load()
 		if loadErr != nil {
 			return loadErr

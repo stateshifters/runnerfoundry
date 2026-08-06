@@ -199,11 +199,6 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 }
 
 func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	switch instance.State {
-	case RunnerStateRunning, RunnerStateCompleted:
-	default:
-		return nil
-	}
 	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
 	if err != nil {
 		return fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err)

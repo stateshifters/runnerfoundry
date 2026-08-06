@@ -36,7 +36,8 @@ type MessageClient interface {
 // idempotently because acknowledgement can fail after durable handling.
 type EventHandler interface {
 	Request(ctx context.Context, request core.JobRequest) error
-	Cancel(ctx context.Context, source core.SourceReference) error
+	RunnerStarted(ctx context.Context, source core.SourceReference) error
+	Terminalize(ctx context.Context, source core.SourceReference) error
 }
 
 // Adapter receives GitHub scale-set messages and translates their job events
@@ -100,7 +101,10 @@ func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.Run
 	if err := adapter.persistRequests(ctx, effects.Assigned); err != nil {
 		return err
 	}
-	return adapter.persistCancellations(ctx, effects.Cancellations)
+	if err := adapter.persistStarted(ctx, effects.Started); err != nil {
+		return err
+	}
+	return adapter.persistCompleted(ctx, effects.Completed)
 }
 
 func (adapter *Adapter) acquireAvailable(ctx context.Context, effects messageEffects) ([]identifiedRequest, error) {
@@ -132,10 +136,19 @@ func (adapter *Adapter) persistRequests(ctx context.Context, requests []identifi
 	return nil
 }
 
-func (adapter *Adapter) persistCancellations(ctx context.Context, cancellations []identifiedCancellation) error {
-	for _, cancellation := range cancellations {
-		if err := adapter.Handler.Cancel(ctx, cancellation.Source); err != nil {
-			return fmt.Errorf("durably cancel GitHub request %d: %w", cancellation.RequestID, err)
+func (adapter *Adapter) persistStarted(ctx context.Context, started []identifiedObservation) error {
+	for _, observation := range started {
+		if err := adapter.Handler.RunnerStarted(ctx, observation.Source); err != nil {
+			return fmt.Errorf("durably record GitHub request %d started: %w", observation.RequestID, err)
+		}
+	}
+	return nil
+}
+
+func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identifiedObservation) error {
+	for _, observation := range completed {
+		if err := adapter.Handler.Terminalize(ctx, observation.Source); err != nil {
+			return fmt.Errorf("durably terminalize GitHub request %d: %w", observation.RequestID, err)
 		}
 	}
 	return nil
@@ -146,16 +159,17 @@ type identifiedRequest struct {
 	JobRequest core.JobRequest
 }
 
-type identifiedCancellation struct {
+type identifiedObservation struct {
 	RequestID int64
 	Source    core.SourceReference
 }
 
 type messageEffects struct {
-	Available     map[int64]core.JobRequest
-	AvailableIDs  []int64
-	Assigned      []identifiedRequest
-	Cancellations []identifiedCancellation
+	Available    map[int64]core.JobRequest
+	AvailableIDs []int64
+	Assigned     []identifiedRequest
+	Started      []identifiedObservation
+	Completed    []identifiedObservation
 }
 
 func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage) (messageEffects, error) {
@@ -167,12 +181,16 @@ func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage)
 	if err != nil {
 		return messageEffects{}, err
 	}
-	cancellations, err := adapter.validateCancellations(message.JobCompletedMessages)
+	started, err := adapter.validateStarted(message.JobStartedMessages)
+	if err != nil {
+		return messageEffects{}, err
+	}
+	completed, err := adapter.validateCompleted(message.JobCompletedMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
 	return messageEffects{
-		Available: available, AvailableIDs: requestIDs, Assigned: assigned, Cancellations: cancellations,
+		Available: available, AvailableIDs: requestIDs, Assigned: assigned, Started: started, Completed: completed,
 	}, nil
 }
 
@@ -212,24 +230,36 @@ func (adapter *Adapter) validateAssigned(events []*upstream.JobAssigned) ([]iden
 	return assigned, nil
 }
 
-func (adapter *Adapter) validateCancellations(
-	events []*upstream.JobCompleted,
-) ([]identifiedCancellation, error) {
-	cancellations := make([]identifiedCancellation, 0, len(events))
+func (adapter *Adapter) validateStarted(events []*upstream.JobStarted) ([]identifiedObservation, error) {
+	started := make([]identifiedObservation, 0, len(events))
 	for _, event := range events {
 		if event == nil {
-			return nil, errors.New("GitHub JobCompleted message is nil")
-		}
-		if event.Result != "canceled" {
-			continue
+			return nil, errors.New("GitHub JobStarted message is nil")
 		}
 		source, err := adapter.sourceReference(event.RunnerRequestID)
 		if err != nil {
 			return nil, err
 		}
-		cancellations = append(cancellations, identifiedCancellation{RequestID: event.RunnerRequestID, Source: source})
+		started = append(started, identifiedObservation{RequestID: event.RunnerRequestID, Source: source})
 	}
-	return cancellations, nil
+	return started, nil
+}
+
+func (adapter *Adapter) validateCompleted(
+	events []*upstream.JobCompleted,
+) ([]identifiedObservation, error) {
+	completed := make([]identifiedObservation, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			return nil, errors.New("GitHub JobCompleted message is nil")
+		}
+		source, err := adapter.sourceReference(event.RunnerRequestID)
+		if err != nil {
+			return nil, err
+		}
+		completed = append(completed, identifiedObservation{RequestID: event.RunnerRequestID, Source: source})
+	}
+	return completed, nil
 }
 
 func (adapter *Adapter) jobRequest(requestID int64, enqueuedAt time.Time) (core.JobRequest, error) {

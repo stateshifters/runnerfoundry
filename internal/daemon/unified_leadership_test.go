@@ -99,17 +99,46 @@ func TestLocalLeadershipHandsSQLiteLeaderToReplacementAfterOldGenerationCloses(t
 	gate := &localLeadershipGate{}
 	active := gate.NewLeadership()
 	replacement := gate.NewLeadership()
-	if leader, err := active.IsLeader(context.Background()); err != nil || !leader {
-		t.Fatalf("active leadership = %t, %v", leader, err)
+	assertLocalFollower(t, active, "unactivated")
+	assertNoTestError(t, active.Activate(), "activate initial leadership")
+	assertLocalLeader(t, active, "activated")
+	assertLocalFollower(t, replacement, "replacement overlap")
+	if err := replacement.Activate(); err == nil {
+		t.Fatal("replacement activated while initial generation owned leadership")
 	}
-	if leader, err := replacement.IsLeader(context.Background()); err != nil || leader {
-		t.Fatalf("replacement overlap leadership = %t, %v, want follower", leader, err)
+	assertNoTestError(t, active.Close(context.Background()), "close active leadership")
+	assertLocalFollower(t, replacement, "replacement before activation")
+	assertNoTestError(t, replacement.Activate(), "activate replacement leadership")
+	assertLocalLeader(t, replacement, "replacement")
+}
+
+func assertLocalLeader(t *testing.T, leadership *localLeadership, phase string) {
+	t.Helper()
+	leader, err := leadership.IsLeader(context.Background())
+	if err != nil || !leader {
+		t.Fatalf("%s leadership = %t, %v, want leader", phase, leader, err)
 	}
-	if err := active.Close(context.Background()); err != nil {
-		t.Fatalf("close active leadership: %v", err)
+}
+
+func assertLocalFollower(t *testing.T, leadership *localLeadership, phase string) {
+	t.Helper()
+	leader, err := leadership.IsLeader(context.Background())
+	if err != nil || leader {
+		t.Fatalf("%s leadership = %t, %v, want follower", phase, leader, err)
 	}
-	if leader, err := replacement.IsLeader(context.Background()); err != nil || !leader {
-		t.Fatalf("replacement handoff leadership = %t, %v", leader, err)
+}
+
+func assertNoTestError(t *testing.T, err error, operation string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", operation, err)
+	}
+}
+
+func assertTestError(t *testing.T, err error, operation string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s unexpectedly succeeded", operation)
 	}
 }
 

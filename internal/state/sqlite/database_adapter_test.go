@@ -330,6 +330,7 @@ func sqliteQueuedJobRows(now time.Time) *sqlmock.Rows {
 }
 
 func sqliteProcessingJobRows() *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "member_id"}).
-		AddRow(testJobIDText, "github", "request-3", "linux", testMemberIDText)
+	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "member_id",
+		"runner_started", "source_terminal"}).
+		AddRow(testJobIDText, "github", "request-3", "linux", testMemberIDText, false, false)
 }

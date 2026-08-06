@@ -22,8 +22,42 @@ func TestExecuteCommandRunsDaemonWithConfigAndReloadRequests(t *testing.T) {
 		io.Discard, io.Discard, runDaemon, nil); err != nil {
 		t.Fatalf("run daemon: %v", err)
 	}
-	if capturedOptions.ConfigPath != "config.yaml" || capturedOptions.ReloadRequests != reloadRequests {
+	if capturedOptions.ConfigPath != "config.yaml" || capturedOptions.ReloadRequests != reloadRequests ||
+		capturedOptions.ActiveRunnerPolicy != daemon.LeaveActiveRunners {
 		t.Fatalf("daemon options = %#v", capturedOptions)
+	}
+}
+
+func TestExecuteCommandPropagatesExplicitActiveRunnerPolicies(t *testing.T) {
+	for _, policy := range []daemon.ActiveRunnerPolicy{daemon.LeaveActiveRunners, daemon.TerminateActiveRunners} {
+		t.Run(string(policy), func(t *testing.T) {
+			var capturedOptions daemon.Options
+			runDaemon := func(_ context.Context, options daemon.Options) error {
+				capturedOptions = options
+				return nil
+			}
+			if err := executeCommand(t.Context(), []string{
+				"--config", "config.yaml", "--active-runner-policy", string(policy),
+			}, nil, io.Discard, io.Discard, runDaemon, nil); err != nil {
+				t.Fatalf("run daemon: %v", err)
+			}
+			if capturedOptions.ActiveRunnerPolicy != policy {
+				t.Fatalf("active runner policy = %q, want %q", capturedOptions.ActiveRunnerPolicy, policy)
+			}
+		})
+	}
+}
+
+func TestExecuteCommandRejectsInvalidActiveRunnerPolicy(t *testing.T) {
+	runDaemon := func(context.Context, daemon.Options) error {
+		t.Fatal("daemon must not run for an invalid active runner policy")
+		return nil
+	}
+	err := executeCommand(t.Context(), []string{
+		"--config", "config.yaml", "--active-runner-policy", "invalid",
+	}, nil, io.Discard, io.Discard, runDaemon, nil)
+	if err == nil || !strings.Contains(err.Error(), "active runner policy") {
+		t.Fatalf("invalid policy error = %v", err)
 	}
 }
 

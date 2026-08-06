@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
@@ -19,9 +18,6 @@ const heartbeatMemberSQL = `INSERT INTO runnerfoundry_members(member_id, heartbe
 const insertCapacitySQL = `INSERT INTO runnerfoundry_member_runner_pools(member_id, runner_pool, capacity)
 	VALUES(?, ?, ?)`
 const removeMemberCapacitiesSQL = `DELETE FROM runnerfoundry_member_runner_pools WHERE member_id = ?`
-const expireMemberSQL = `DELETE FROM runnerfoundry_members WHERE member_id = ?`
-const listLiveMembersSQL = `SELECT member_id FROM runnerfoundry_members WHERE heartbeat_at >= ? ORDER BY member_id`
-const listExpiredMembersSQL = `SELECT member_id FROM runnerfoundry_members WHERE heartbeat_at < ? ORDER BY member_id`
 const countLiveMembersSQL = `SELECT COUNT(*) FROM runnerfoundry_members WHERE heartbeat_at >= ?`
 const availableCapacitySQL = `SELECT
 	COALESCE((
@@ -54,10 +50,10 @@ func (store *Store) PublishMemberState(
 			resultErr = errors.Join(resultErr, transaction.Rollback(context.WithoutCancel(ctx)))
 		}
 	}()
-	if _, err := transaction.Execute(ctx, heartbeatMemberSQL, memberID.String(), heartbeatAt.UnixNano()); err != nil {
+	if _, err := transaction.Execute(ctx, heartbeatMemberSQL, string(memberID), heartbeatAt.UnixNano()); err != nil {
 		return fmt.Errorf("publish member heartbeat: %w", err)
 	}
-	if _, err := transaction.Execute(ctx, removeMemberCapacitiesSQL, memberID.String()); err != nil {
+	if _, err := transaction.Execute(ctx, removeMemberCapacitiesSQL, string(memberID)); err != nil {
 		return fmt.Errorf("replace member capacities: %w", err)
 	}
 	if err := insertMemberCapacities(ctx, transaction, memberID, capacities); err != nil {
@@ -81,80 +77,41 @@ func insertMemberCapacities(
 			continue
 		}
 		if _, err := transaction.Execute(ctx, insertCapacitySQL,
-			memberID.String(), string(capacity.RunnerPool), capacity.Capacity); err != nil {
+			string(memberID), string(capacity.RunnerPool), capacity.Capacity); err != nil {
 			return fmt.Errorf("publish Runner Pool %q capacity: %w", capacity.RunnerPool, err)
 		}
 	}
 	return nil
 }
 
-func (store *Store) ExpireMember(ctx context.Context, memberID core.MemberID) (resultErr error) {
+func (store *Store) WithdrawMemberCapacity(ctx context.Context, memberID core.MemberID) error {
+	return store.executeTransaction(ctx, "withdraw member capacity", removeMemberCapacitiesSQL, string(memberID))
+}
+
+func (store *Store) executeConditionalTransaction(
+	ctx context.Context,
+	description, statement string,
+	arguments ...any,
+) (_ bool, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin expire member: %w", err)
+		return false, fmt.Errorf("begin %s: %w", description, err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err := transaction.Execute(ctx, removeMemberCapacitiesSQL, memberID.String()); err != nil {
-		return fmt.Errorf("remove expired member capacities: %w", err)
+	result, err := transaction.Execute(ctx, statement, arguments...)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", description, err)
 	}
-	if _, err := transaction.Execute(ctx, expireMemberSQL, memberID.String()); err != nil {
-		return fmt.Errorf("remove expired member: %w", err)
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read %s count: %w", description, err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit expire member: %w", err)
+		return false, fmt.Errorf("commit %s: %w", description, err)
 	}
 	open = false
-	return nil
-}
-
-func (store *Store) ListLiveMembers(ctx context.Context, cutoff time.Time) (members []core.MemberID, resultErr error) {
-	return store.listMembers(ctx, "live", listLiveMembersSQL, cutoff.UnixNano())
-}
-
-func (store *Store) ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error) {
-	return store.listMembers(ctx, "expired", listExpiredMembersSQL, cutoff.UnixNano())
-}
-
-func (store *Store) listMembers(ctx context.Context, description, statement string, cutoff any) (members []core.MemberID, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin list %s members: %w", description, err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	rows, err := transaction.Query(ctx, statement, cutoff)
-	if err != nil {
-		return nil, fmt.Errorf("query %s members: %w", description, err)
-	}
-	members, resultErr = scanMemberRows(rows)
-	if resultErr != nil {
-		return nil, resultErr
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit list live members: %w", err)
-	}
-	open = false
-	return members, nil
-}
-
-func scanMemberRows(rows Rows) (members []core.MemberID, resultErr error) {
-	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
-	for rows.Next() {
-		var memberID string
-		if err := rows.Scan(&memberID); err != nil {
-			return nil, fmt.Errorf("scan member: %w", err)
-		}
-		parsedMemberID, err := uuid.Parse(memberID)
-		if err != nil {
-			return nil, fmt.Errorf("parse member UUID: %w", err)
-		}
-		members = append(members, parsedMemberID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate members: %w", err)
-	}
-	return members, nil
+	return rowsAffected == 1, nil
 }
 
 func (store *Store) CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error) {

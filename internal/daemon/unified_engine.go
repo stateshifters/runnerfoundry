@@ -11,7 +11,6 @@ import (
 
 type membershipRuntime interface {
 	Heartbeat(ctx context.Context) error
-	Expire(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 type leadershipRuntime interface {
@@ -82,9 +81,6 @@ func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 
 	if err := engine.membership.Heartbeat(ctx); err != nil {
 		cycleErrors = append(cycleErrors, fmt.Errorf("heartbeat member: %w", err))
-	}
-	if _, err := engine.membership.Expire(ctx, liveMemberCutoff); err != nil {
-		cycleErrors = append(cycleErrors, fmt.Errorf("expire members: %w", err))
 	}
 	if err := engine.source.RefreshMembers(ctx); err != nil {
 		cycleErrors = append(cycleErrors, fmt.Errorf("refresh source member routes: %w", err))

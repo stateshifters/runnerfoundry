@@ -14,14 +14,18 @@ The normative behavior and terminology live in the [product contract](docs/PRD.m
 2. The adapter creates an internal job associated with a Runner Pool.
 3. The job remains in that Runner Pool's FIFO queue until a member picks it up.
 4. Pickup atomically moves the oldest queued job into member-owned processing.
-5. RunnerFoundry provisions one ephemeral runner and retains processing ownership until provider cleanup completes.
-6. The runner reports the workflow result directly to GitHub.
+5. RunnerFoundry provisions one ephemeral runner. A failed provisioning attempt is cleaned up and moves the same job to the queue tail.
+6. GitHub's `JobStarted` message durably ends provisioning retries for that job.
+7. The runner reports the workflow result directly to GitHub.
+8. Every `JobCompleted` message terminalizes the job, after which RunnerFoundry finishes provider cleanup and removes processing.
 
-Runner registration and capacity publication are separate from this job flow. A failed or removed job is not requeued internally; another attempt starts only with another request from GitHub. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
+Runner registration and capacity publication are separate from this job flow. Before `JobStarted`, RunnerFoundry retries provisioning indefinitely from the queue tail after successful cleanup, without a retry count, delay, backoff, or timeout. After `JobStarted`, missing or failed runner resources never cause an internal retry. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
 
 Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts queued jobs and processing jobs owned by live members from the capacity contributed by live members. Moving a job from queued to processing does not change availability.
 
-GitHub does not expose a supported operation for reporting a provisioning failure for an individual job. RunnerFoundry therefore cleans up the provider resource without inventing a GitHub result. If a future source supports such reporting, it remains inside that source adapter and does not create a persisted result lifecycle.
+`available = max(0, live configured capacity - queued jobs - processing jobs owned by live members)`
+
+GitHub does not expose a supported operation for reporting a provisioning failure for an individual job. RunnerFoundry therefore cleans up and retries the same job without inventing a GitHub result. If a future source supports such reporting, it remains inside that source adapter and does not create a persisted result lifecycle.
 
 ## Deployment choices
 
@@ -197,6 +201,19 @@ Configure exactly one state backend:
 
 One member using `state.postgres` is standalone. Multiple members sharing it form a cluster. Changing backends or PostgreSQL settings requires a restart.
 
+Each member uses its trimmed operating-system hostname as its stable identity. Hostnames must be unique within a cluster, and only one RunnerFoundry daemon may run for a hostname. A member that has not heartbeated for 30 seconds contributes no advertised capacity, but its processing and provider resources remain owned by that hostname. Restarting on the same hostname resumes their reconciliation.
+
+### Active runner policy
+
+`--active-runner-policy` controls active resources during configuration reload and graceful shutdown. It is a daemon option, not a YAML setting, and accepts `leave` or `terminate`. The default is `leave`.
+
+```sh
+runnerfoundry --config /etc/runnerfoundry/config.yaml \
+  --active-runner-policy=terminate
+```
+
+`leave` preserves active runners and processing. `terminate` destroys affected resources and returns only unstarted jobs to the queue after cleanup succeeds. Started jobs remain in processing until GitHub sends `JobCompleted`.
+
 ### Logging settings
 
 | Setting | Default | Accepted values |
@@ -318,7 +335,13 @@ sudo journalctl -u runnerfoundry -f
 sudo systemctl reload runnerfoundry
 ```
 
-Reload validates the replacement configuration before applying it. State-backend changes require a restart.
+Reload validates and prepares the replacement configuration before applying it. A failure leaves the current configuration running. State-backend changes require a restart.
+
+Runner reconciliation is provider-agnostic. It searches every Docker mechanism and libvirt connection represented by the active configuration for the deterministic runner name. A complete inventory that does not find an unstarted runner allows that job to return to the queue; an inventory error retains processing because absence was not established. A runner found through any active inventory is retained regardless of which provider is configured to launch new work for its Runner Pool.
+
+For a removed Runner Pool or one changed between Docker and libvirt, `leave` applies the replacement without destroying its active runners. Removing or changing an inventory endpoint can make old resources invisible; cleaned-up or invisible unstarted work may then requeue into the active configuration, while started work always waits for `JobCompleted`. Resources left behind on an endpoint the operator removed are operator-owned cleanup. With `terminate`, RunnerFoundry uses the old provider before replacement to destroy affected resources, requeues cleaned-up unstarted jobs, and leaves started jobs awaiting `JobCompleted`. Cleanup failures retain processing without rejecting the otherwise-valid replacement.
+
+On graceful shutdown, `leave` withdraws capacity and preserves all active runners and processing. `terminate` destroys owned runners, requeues unstarted jobs only after successful cleanup, and preserves started processing until GitHub terminalizes it.
 
 ### Upgrade
 

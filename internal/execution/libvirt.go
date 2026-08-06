@@ -11,6 +11,10 @@ type LibvirtProvider struct {
 	provider providerlibvirt.Provider
 }
 
+func (provider LibvirtProvider) runnerInventoryIdentity() string {
+	return "libvirt:" + provider.provider.Config.ConnectionURI
+}
+
 func NewLibvirtProvider(
 	transport providerlibvirt.CommandRunner,
 	config providerlibvirt.Config,

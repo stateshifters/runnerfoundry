@@ -62,8 +62,8 @@ type permanentLeadership struct{}
 func (permanentLeadership) IsLeader(context.Context) (bool, error) { return true, nil }
 
 // localLeadershipGate prevents overlapping runtime generations in one
-// process. A replacement remains inactive until the previous generation has
-// closed, including SQLite where no database advisory lock exists.
+// process. A prepared replacement remains inactive until the supervisor
+// explicitly activates it after the previous generation has closed.
 type localLeadershipGate struct {
 	mutex sync.Mutex
 	owner *localLeadership
@@ -80,10 +80,17 @@ type localLeadership struct {
 func (leadership *localLeadership) IsLeader(context.Context) (bool, error) {
 	leadership.gate.mutex.Lock()
 	defer leadership.gate.mutex.Unlock()
-	if leadership.gate.owner == nil {
-		leadership.gate.owner = leadership
-	}
 	return leadership.gate.owner == leadership, nil
+}
+
+func (leadership *localLeadership) Activate() error {
+	leadership.gate.mutex.Lock()
+	defer leadership.gate.mutex.Unlock()
+	if leadership.gate.owner != nil && leadership.gate.owner != leadership {
+		return errors.New("another runtime generation is active")
+	}
+	leadership.gate.owner = leadership
+	return nil
 }
 
 func (leadership *localLeadership) Close(context.Context) error {

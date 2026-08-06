@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -11,9 +10,8 @@ import (
 
 type MembershipStore interface {
 	PublishMemberState(ctx context.Context, memberID core.MemberID, heartbeatAt time.Time, capacities []core.RunnerPoolCapacity) error
-	ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
 	CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error)
-	ExpireMember(ctx context.Context, memberID core.MemberID) error
+	WithdrawMemberCapacity(ctx context.Context, memberID core.MemberID) error
 }
 
 type MembershipService struct {
@@ -42,21 +40,13 @@ func (service *MembershipService) Heartbeat(ctx context.Context) error {
 	return nil
 }
 
-func (service *MembershipService) Expire(ctx context.Context, cutoff time.Time) (int, error) {
-	members, err := service.store.ListExpiredMembers(ctx, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("list members expired before %s: %w", cutoff, err)
+// Withdraw removes this member's advertised capacity without deleting its
+// durable identity or processing ownership.
+func (service *MembershipService) Withdraw(ctx context.Context) error {
+	if err := service.store.WithdrawMemberCapacity(ctx, service.member); err != nil {
+		return fmt.Errorf("withdraw member %q capacity: %w", service.member, err)
 	}
-	expired := 0
-	failures := make([]error, 0)
-	for _, member := range members {
-		if err = service.store.ExpireMember(ctx, member); err != nil {
-			failures = append(failures, fmt.Errorf("expire member %q: %w", member, err))
-			continue
-		}
-		expired++
-	}
-	return expired, errors.Join(failures...)
+	return nil
 }
 
 func (service *MembershipService) CountLive(ctx context.Context, cutoff time.Time) (int, error) {

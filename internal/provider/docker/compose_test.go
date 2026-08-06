@@ -181,7 +181,7 @@ func TestDestroyAndValidateSucceed(t *testing.T) {
 	}
 }
 
-func TestDestroyLeavesTransitionalOrUnknownRunnerToDocker(t *testing.T) {
+func TestDestroyRemovesTransitionalOrUnknownRunner(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := ComposeProvider{CommandRunner: commandRunner}
 
@@ -190,10 +190,11 @@ func TestDestroyLeavesTransitionalOrUnknownRunnerToDocker(t *testing.T) {
 		RunnerName: "linux-1",
 		State:      RunnerStateUnknown,
 	}); err != nil {
-		t.Fatalf("expected unknown runner destroy to be ignored, got %v", err)
+		t.Fatalf("expected unknown runner destroy to succeed, got %v", err)
 	}
-	if len(commandRunner.commands) != 0 {
-		t.Fatalf("expected no docker command, got %#v", commandRunner.commands)
+	expected := []string{"rm", "--force", "runner-id"}
+	if len(commandRunner.commands) != 1 || !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {
+		t.Fatalf("expected unknown runner removal command %#v, got %#v", expected, commandRunner.commands)
 	}
 }
 

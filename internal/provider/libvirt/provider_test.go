@@ -150,12 +150,12 @@ func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
 	}
 }
 
-func TestDestroyTerminalForceStopsPausedOrSuspendedDomain(t *testing.T) {
+func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	for _, state := range []string{"paused", "pmsuspended"} {
 		t.Run(state, func(t *testing.T) {
 			commandRunner := &recordingCommandRunner{}
 			provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
-			if err := provider.DestroyTerminal(context.Background(), RunnerInstance{
+			if err := provider.Destroy(context.Background(), RunnerInstance{
 				ID: "vm-set-1", RunnerName: "vm-set-1", State: libvirtState(state),
 			}); err != nil {
 				t.Fatal(err)
@@ -167,17 +167,10 @@ func TestDestroyTerminalForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	}
 }
 
-func TestDestroyTerminalReportsCommandFailure(t *testing.T) {
+func TestDestroyUnknownReportsCommandFailure(t *testing.T) {
 	provider := Provider{CommandRunner: failingCommandRunner{}}
-	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
-		t.Fatal("expected terminal destroy failure")
-	}
-}
-
-func TestDestroyTerminalAcceptsAlreadyInactiveDomain(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}}
-	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateCompleted}); err != nil {
-		t.Fatal(err)
+	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
+		t.Fatal("expected unknown destroy failure")
 	}
 }
 

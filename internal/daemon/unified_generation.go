@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 type cycleEngine interface {
@@ -23,7 +25,8 @@ type runtimeCloser interface {
 }
 
 type runtimeFinalizer interface {
-	Cleanup(ctx context.Context) error
+	RunnerPool() core.RunnerPool
+	Terminate(ctx context.Context) (remainingProcessing int, err error)
 }
 
 type gatedCycleEngine struct {
@@ -33,11 +36,19 @@ type gatedCycleEngine struct {
 
 type generationLeadership interface {
 	leadershipRuntime
+	Activate() error
 	Close(ctx context.Context) error
 }
 
 func newGatedCycleEngine(engine cycleEngine, leadership generationLeadership) *gatedCycleEngine {
 	return &gatedCycleEngine{engine: engine, leadership: leadership}
+}
+
+func (engine *gatedCycleEngine) Activate() error {
+	if err := engine.leadership.Activate(); err != nil {
+		return fmt.Errorf("activate local generation leadership: %w", err)
+	}
+	return nil
 }
 
 func (engine *gatedCycleEngine) Cycle(ctx context.Context) error {
@@ -65,11 +76,12 @@ type unifiedGeneration struct {
 	closers    []runtimeCloser
 	finalizers []runtimeFinalizer
 
-	mutex     sync.Mutex
-	cancel    context.CancelFunc
-	done      chan struct{}
-	closed    bool
-	finalized bool
+	mutex      sync.Mutex
+	cancel     context.CancelFunc
+	done       chan struct{}
+	activation chan struct{}
+	activated  bool
+	closed     bool
 }
 
 func newUnifiedGeneration(
@@ -89,30 +101,18 @@ func newUnifiedGeneration(
 	}
 }
 
-// Shutdown performs process-final cleanup after stopping claims and source
-// polls. Reloads call Stop directly and therefore preserve active runners.
-func (generation *unifiedGeneration) Shutdown(ctx context.Context) error {
-	stopErr := generation.Stop(ctx)
-	generation.mutex.Lock()
-	if generation.finalized {
-		generation.mutex.Unlock()
-		return stopErr
+func (generation *unifiedGeneration) Finalizers(runnerPools []core.RunnerPool) []runtimeFinalizer {
+	wanted := make(map[core.RunnerPool]struct{}, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		wanted[runnerPool] = struct{}{}
 	}
-	generation.mutex.Unlock()
-
-	cleanupErrors := make([]error, 0, len(generation.finalizers))
+	selected := make([]runtimeFinalizer, 0, len(generation.finalizers))
 	for _, finalizer := range generation.finalizers {
-		if err := finalizer.Cleanup(ctx); err != nil {
-			cleanupErrors = append(cleanupErrors, err)
+		if _, exists := wanted[finalizer.RunnerPool()]; exists {
+			selected = append(selected, finalizer)
 		}
 	}
-	cleanupErr := errors.Join(cleanupErrors...)
-	if cleanupErr == nil {
-		generation.mutex.Lock()
-		generation.finalized = true
-		generation.mutex.Unlock()
-	}
-	return errors.Join(stopErr, cleanupErr)
+	return selected
 }
 
 func (generation *unifiedGeneration) Start(ctx context.Context) error {
@@ -127,13 +127,41 @@ func (generation *unifiedGeneration) Start(ctx context.Context) error {
 	runContext, cancel := context.WithCancel(ctx)
 	generation.cancel = cancel
 	generation.done = make(chan struct{})
+	generation.activation = make(chan struct{})
 	go generation.run(runContext)
+	return nil
+}
+
+func (generation *unifiedGeneration) Activate() error {
+	generation.mutex.Lock()
+	defer generation.mutex.Unlock()
+	if generation.cancel == nil {
+		return errors.New("runtime generation is not started")
+	}
+	if generation.closed {
+		return errors.New("runtime generation is already closed")
+	}
+	if generation.activated {
+		return errors.New("runtime generation is already active")
+	}
+	if activator, ok := generation.engine.(interface{ Activate() error }); ok {
+		if err := activator.Activate(); err != nil {
+			return fmt.Errorf("activate generation engine: %w", err)
+		}
+	}
+	generation.activated = true
+	close(generation.activation)
 	return nil
 }
 
 func (generation *unifiedGeneration) run(ctx context.Context) {
 	defer close(generation.done)
-	generation.runCycle(ctx)
+	select {
+	case <-ctx.Done():
+		return
+	case <-generation.activation:
+		generation.runCycle(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():

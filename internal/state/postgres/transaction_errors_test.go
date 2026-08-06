@@ -71,7 +71,7 @@ func TestPublishMemberStateReportsCapacityReplacementFailures(t *testing.T) {
 	}
 }
 
-func TestExpireMemberReportsEachProtocolFailure(t *testing.T) {
+func TestWithdrawMemberCapacityReportsEachProtocolFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	for _, testCase := range []struct {
@@ -84,33 +84,16 @@ func TestExpireMemberReportsEachProtocolFailure(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store := NewStore(Executor{begin: transactionBeginning(testCase.transaction)})
-			if err := store.ExpireMember(context.Background(), testMemberIDA); err == nil {
-				t.Fatal("expected expiry error")
+			if err := store.WithdrawMemberCapacity(context.Background(), testMemberIDA); err == nil {
+				t.Fatal("expected withdrawal error")
 			}
 		})
 	}
 	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) {
 		return Transaction{}, protocolErr
 	}})
-	if err := store.ExpireMember(context.Background(), testMemberIDA); err == nil {
+	if err := store.WithdrawMemberCapacity(context.Background(), testMemberIDA); err == nil {
 		t.Fatal("expected begin error")
-	}
-}
-
-func TestMemberQueriesReportEachProtocolFailure(t *testing.T) {
-	t.Parallel()
-	protocolErr := errors.New("protocol")
-	for index, transaction := range failingListTransactions(protocolErr) {
-		store := NewStore(Executor{begin: transactionBeginning(transaction)})
-		if _, err := store.ListLiveMembers(context.Background(), fixedTime()); err == nil {
-			t.Fatalf("case %d: expected member query error", index)
-		}
-	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) {
-		return Transaction{}, protocolErr
-	}})
-	if _, err := store.ListExpiredMembers(context.Background(), fixedTime()); err == nil {
-		t.Fatal("expected member begin error")
 	}
 }
 

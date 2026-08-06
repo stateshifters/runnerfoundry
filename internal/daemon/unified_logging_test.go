@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 func TestLoggingGenerationActivatesOnlyAfterRuntimeStarts(t *testing.T) {
@@ -21,10 +23,13 @@ func TestLoggingGenerationActivatesOnlyAfterRuntimeStarts(t *testing.T) {
 	if want := []string{"start", "activate"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
+	if err := wrapped.Activate(); err != nil {
+		t.Fatalf("activate runtime generation: %v", err)
+	}
 	if err := wrapped.Stop(context.Background()); err != nil {
 		t.Fatalf("stop logging generation: %v", err)
 	}
-	if want := []string{"start", "activate", "stop"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"start", "activate", "activate-runtime", "stop"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
 }
@@ -60,6 +65,20 @@ func TestLoggingGenerationReportsActivationFailure(t *testing.T) {
 	}
 }
 
+func TestLoggingGenerationReportsRuntimeActivationFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("runtime activation failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
+		generation: &orderedGenerationFake{events: &events, activateErr: wantErr},
+		prepared:   &preparedLogFake{events: &events},
+	}
+	if err := wrapper.Activate(); !errors.Is(err, wantErr) {
+		t.Fatalf("runtime activation error = %v", err)
+	}
+}
+
 func TestLoggingGenerationReportsUnactivatedStopFailures(t *testing.T) {
 	t.Parallel()
 
@@ -88,53 +107,33 @@ func TestLoggingGenerationReportsActivatedStopFailure(t *testing.T) {
 	}
 }
 
-func TestLoggingGenerationReportsActivatedShutdownFailure(t *testing.T) {
-	t.Parallel()
-
-	wantErr := errors.New("failed")
-	events := make([]string, 0)
-	wrapper := &loggingGeneration{
-		generation: &orderedGenerationFake{events: &events, stopErr: wantErr},
-		prepared:   &preparedLogFake{events: &events}, activated: true,
-	}
-	if err := wrapper.Shutdown(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("activated shutdown error = %v", err)
-	}
-}
-
-func TestLoggingGenerationDelegatesFinalShutdown(t *testing.T) {
+func TestLoggingGenerationDelegatesFinalizers(t *testing.T) {
 	t.Parallel()
 
 	events := make([]string, 0)
+	finalizer := &supervisorFinalizerFake{runnerPool: "linux"}
 	wrapper := &loggingGeneration{
-		generation: &orderedGenerationFake{events: &events},
+		generation: &orderedGenerationFake{events: &events, finalizers: []runtimeFinalizer{finalizer}},
 		prepared:   &preparedLogFake{events: &events},
 		activated:  true,
 	}
-	if err := wrapper.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shut down active logging generation: %v", err)
-	}
-	if want := []string{"shutdown"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("active shutdown events = %#v, want %#v", events, want)
-	}
-
-	events = nil
-	wrapper = &loggingGeneration{
-		generation: &orderedGenerationFake{events: &events},
-		prepared:   &preparedLogFake{events: &events},
-	}
-	if err := wrapper.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shut down inactive logging generation: %v", err)
-	}
-	if want := []string{"shutdown", "close-prepared"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("inactive shutdown events = %#v, want %#v", events, want)
+	selected := wrapper.Finalizers([]core.RunnerPool{"linux"})
+	if len(selected) != 1 || selected[0] != finalizer {
+		t.Fatalf("delegated finalizers = %#v", selected)
 	}
 }
 
 type orderedGenerationFake struct {
-	events   *[]string
-	startErr error
-	stopErr  error
+	events      *[]string
+	startErr    error
+	stopErr     error
+	activateErr error
+	finalizers  []runtimeFinalizer
+}
+
+func (fake *orderedGenerationFake) Activate() error {
+	*fake.events = append(*fake.events, "activate-runtime")
+	return fake.activateErr
 }
 
 func (fake *orderedGenerationFake) Start(context.Context) error {
@@ -145,9 +144,8 @@ func (fake *orderedGenerationFake) Stop(context.Context) error {
 	*fake.events = append(*fake.events, "stop")
 	return fake.stopErr
 }
-func (fake *orderedGenerationFake) Shutdown(context.Context) error {
-	*fake.events = append(*fake.events, "shutdown")
-	return fake.stopErr
+func (fake *orderedGenerationFake) Finalizers([]core.RunnerPool) []runtimeFinalizer {
+	return fake.finalizers
 }
 
 type preparedLogFake struct {

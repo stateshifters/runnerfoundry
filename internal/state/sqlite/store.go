@@ -10,6 +10,10 @@ import (
 )
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`
+const processingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
+	runner_started, EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 
 const insertQueuedJobSQL = `INSERT INTO runnerfoundry_queued_jobs
 	(job_id, source_name, source_reference, runner_pool, enqueued_at)
@@ -33,16 +37,40 @@ const insertTombstoneSQL = `INSERT INTO runnerfoundry_source_tombstones(source_n
 const deleteQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs WHERE job_id = ?`
 const cancelQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs
 	WHERE source_name = ? AND source_reference = ?`
-const processingByMemberSQL = `SELECT job_id, source_name, source_reference, runner_pool, member_id
+const markProcessingStartedSQL = `UPDATE runnerfoundry_processing_jobs SET runner_started = 1
+	WHERE source_name = ? AND source_reference = ?
+	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
+		WHERE source_name = ? AND source_reference = ?)`
+const tombstoneDelayedStartSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
+	SELECT ?, ? WHERE EXISTS (SELECT 1 FROM runnerfoundry_queued_jobs
+		WHERE source_name = ? AND source_reference = ?)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const processingByMemberSQL = `SELECT ` + processingJobColumns + `
 	FROM runnerfoundry_processing_jobs WHERE member_id = ? AND runner_pool = ?`
-const deleteProcessingJobSQL = `DELETE FROM runnerfoundry_processing_jobs WHERE job_id = ?`
+const retryProcessingSQL = `INSERT INTO runnerfoundry_queued_jobs
+	(job_id, source_name, source_reference, runner_pool, enqueued_at)
+	SELECT job_id, source_name, source_reference, runner_pool,
+		CAST((julianday('now') - 2440587.5) * 86400000000000 AS INTEGER)
+	FROM runnerfoundry_processing_jobs processing
+	WHERE processing.job_id = ? AND processing.runner_started = 0
+	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = processing.source_name
+		AND tombstones.source_reference = processing.source_reference)`
+const deleteRetriedProcessingSQL = `DELETE FROM runnerfoundry_processing_jobs
+	WHERE job_id = ? AND runner_started = 0`
+const deleteTerminalProcessingSQL = `DELETE FROM runnerfoundry_processing_jobs
+	WHERE job_id = ? AND EXISTS (
+		SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference)`
 
 type Store struct {
 	executor Executor
 	close    func() error
 }
 
-var _ core.JobStore = (*Store)(nil)
+var _ core.JobQueueStore = (*Store)(nil)
+var _ core.ProcessingJobStore = (*Store)(nil)
 
 func NewStore(executor Executor) *Store { return &Store{executor: executor} }
 
@@ -120,11 +148,8 @@ func moveOldestToProcessing(
 		return core.ProcessingJob{}, false, fmt.Errorf("select oldest queued job: %w", err)
 	}
 	if _, err := transaction.Execute(ctx, insertProcessingJobSQL, job.ID.String(), job.Source.Adapter,
-		job.Source.ID, string(job.RunnerPool), memberID.String()); err != nil {
+		job.Source.ID, string(job.RunnerPool), string(memberID)); err != nil {
 		return core.ProcessingJob{}, false, fmt.Errorf("insert processing job: %w", err)
-	}
-	if _, err := transaction.Execute(ctx, insertTombstoneSQL, job.Source.Adapter, job.Source.ID); err != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("tombstone processing job: %w", err)
 	}
 	if _, err := transaction.Execute(ctx, deleteQueuedJobSQL, job.ID.String()); err != nil {
 		return core.ProcessingJob{}, false, fmt.Errorf("remove job from queue: %w", err)
@@ -132,21 +157,46 @@ func moveOldestToProcessing(
 	return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
 }
 
-func (store *Store) CancelQueued(ctx context.Context, source core.SourceReference) (resultErr error) {
+func (store *Store) TerminalizeSource(ctx context.Context, source core.SourceReference) (resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin cancel queued job: %w", err)
+		return fmt.Errorf("begin terminalize source: %w", err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
 	if _, err := transaction.Execute(ctx, insertTombstoneSQL, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("tombstone canceled job: %w", err)
+		return fmt.Errorf("tombstone terminal source: %w", err)
 	}
 	if _, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("remove canceled queued job: %w", err)
+		return fmt.Errorf("remove terminal queued job: %w", err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit cancel queued job: %w", err)
+		return fmt.Errorf("commit source terminalization: %w", err)
+	}
+	open = false
+	return nil
+}
+
+func (store *Store) MarkRunnerStarted(ctx context.Context, source core.SourceReference) (resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mark runner started: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	if _, err := transaction.Execute(ctx, markProcessingStartedSQL,
+		source.Adapter, source.ID, source.Adapter, source.ID); err != nil {
+		return fmt.Errorf("mark processing runner started: %w", err)
+	}
+	if _, err := transaction.Execute(ctx, tombstoneDelayedStartSQL,
+		source.Adapter, source.ID, source.Adapter, source.ID); err != nil {
+		return fmt.Errorf("tombstone delayed runner start: %w", err)
+	}
+	if _, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID); err != nil {
+		return fmt.Errorf("remove delayed-start queued job: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit runner start: %w", err)
 	}
 	open = false
 	return nil
@@ -163,7 +213,7 @@ func (store *Store) ProcessingByMember(
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	rows, err := transaction.Query(ctx, processingByMemberSQL, memberID.String(), string(runnerPool))
+	rows, err := transaction.Query(ctx, processingByMemberSQL, string(memberID), string(runnerPool))
 	if err != nil {
 		return nil, fmt.Errorf("query processing jobs: %w", err)
 	}
@@ -178,6 +228,42 @@ func (store *Store) ProcessingByMember(
 	return jobs, nil
 }
 
-func (store *Store) RemoveProcessing(ctx context.Context, jobID core.JobID) error {
-	return store.executeTransaction(ctx, "remove processing job", deleteProcessingJobSQL, jobID.String())
+func (store *Store) RetryUnstartedProcessing(ctx context.Context, jobID core.JobID) (_ bool, resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin retry processing job: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	retried, err := retryUnstartedProcessing(ctx, transaction, jobID)
+	if err != nil {
+		return false, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit processing retry: %w", err)
+	}
+	open = false
+	return retried, nil
+}
+
+func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobID core.JobID) (bool, error) {
+	result, err := transaction.Execute(ctx, retryProcessingSQL, jobID.String())
+	if err != nil {
+		return false, fmt.Errorf("return processing job to queue: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read processing retry count: %w", err)
+	}
+	if rowsAffected == 0 {
+		return false, nil
+	}
+	if _, removalErr := transaction.Execute(ctx, deleteRetriedProcessingSQL, jobID.String()); removalErr != nil {
+		return false, fmt.Errorf("remove retried processing ownership: %w", removalErr)
+	}
+	return true, nil
+}
+
+func (store *Store) RemoveTerminalProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
+	return store.executeConditionalTransaction(ctx, "remove terminal processing job", deleteTerminalProcessingSQL, jobID.String())
 }

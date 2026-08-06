@@ -10,7 +10,7 @@ import (
 	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
 
-func TestQueueHandlerPersistsAssignmentsAndCancellations(t *testing.T) {
+func TestQueueHandlerPersistsAssignment(t *testing.T) {
 	request := core.JobRequest{
 		Source:     core.SourceReference{Adapter: "github", ID: "request-1"},
 		RunnerPool: "linux", EnqueuedAt: time.Unix(1, 0),
@@ -22,33 +22,56 @@ func TestQueueHandlerPersistsAssignmentsAndCancellations(t *testing.T) {
 			}
 			return core.Job{}, true, nil
 		},
-		cancel: func(_ context.Context, source core.SourceReference) error {
-			if source != request.Source {
-				t.Fatalf("cancel source = %#v", source)
-			}
-			return nil
-		},
 	}
 	handler := runtimeengine.NewQueueHandler(store)
 	if err := handler.Request(context.Background(), request); err != nil {
 		t.Fatalf("Request() error = %v", err)
 	}
-	if err := handler.Cancel(context.Background(), request.Source); err != nil {
-		t.Fatalf("Cancel() error = %v", err)
+}
+
+func TestQueueHandlerPersistsRunnerStart(t *testing.T) {
+	source := core.SourceReference{Adapter: "github", ID: "request-1"}
+	store := &jobStoreFake{started: func(_ context.Context, actual core.SourceReference) error {
+		if actual != source {
+			t.Fatalf("started source = %#v", actual)
+		}
+		return nil
+	}}
+	handler := runtimeengine.NewQueueHandler(store)
+	if err := handler.RunnerStarted(context.Background(), source); err != nil {
+		t.Fatalf("RunnerStarted() error = %v", err)
+	}
+}
+
+func TestQueueHandlerPersistsTerminalEvent(t *testing.T) {
+	source := core.SourceReference{Adapter: "github", ID: "request-1"}
+	store := &jobStoreFake{terminalize: func(_ context.Context, actual core.SourceReference) error {
+		if actual != source {
+			t.Fatalf("terminal source = %#v", actual)
+		}
+		return nil
+	}}
+	handler := runtimeengine.NewQueueHandler(store)
+	if err := handler.Terminalize(context.Background(), source); err != nil {
+		t.Fatalf("Terminalize() error = %v", err)
 	}
 }
 
 func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 	wantErr := errors.New("state unavailable")
 	store := &jobStoreFake{
-		enqueue: func(context.Context, core.JobRequest) (core.Job, bool, error) { return core.Job{}, false, wantErr },
-		cancel:  func(context.Context, core.SourceReference) error { return wantErr },
+		enqueue:     func(context.Context, core.JobRequest) (core.Job, bool, error) { return core.Job{}, false, wantErr },
+		started:     func(context.Context, core.SourceReference) error { return wantErr },
+		terminalize: func(context.Context, core.SourceReference) error { return wantErr },
 	}
 	handler := runtimeengine.NewQueueHandler(store)
 	if err := handler.Request(context.Background(), core.JobRequest{}); !errors.Is(err, wantErr) {
 		t.Fatalf("Request() error = %v", err)
 	}
-	if err := handler.Cancel(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
-		t.Fatalf("Cancel() error = %v", err)
+	if err := handler.RunnerStarted(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
+		t.Fatalf("RunnerStarted() error = %v", err)
+	}
+	if err := handler.Terminalize(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Terminalize() error = %v", err)
 	}
 }

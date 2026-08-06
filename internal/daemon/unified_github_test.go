@@ -487,8 +487,11 @@ func (*stubbornCapacityMessageClient) AcquireRequests(_ context.Context, request
 
 type eventHandlerFake struct{}
 
-func (eventHandlerFake) Request(context.Context, core.JobRequest) error     { return nil }
-func (eventHandlerFake) Cancel(context.Context, core.SourceReference) error { return nil }
+func (eventHandlerFake) Request(context.Context, core.JobRequest) error { return nil }
+func (eventHandlerFake) RunnerStarted(context.Context, core.SourceReference) error {
+	return nil
+}
+func (eventHandlerFake) Terminalize(context.Context, core.SourceReference) error { return nil }
 
 func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
 	t.Helper()

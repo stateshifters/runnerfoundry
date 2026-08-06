@@ -13,7 +13,7 @@ import (
 
 func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 	jobID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	memberID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	memberID := core.MemberID("member-2")
 	job := core.Job{ID: jobID, RunnerPool: "linux", EnqueuedAt: time.Unix(1, 0)}
 	store := &jobStoreFake{take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 		return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
@@ -30,7 +30,7 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 		}
 		return nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, memberID)
+	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID)
 
 	processed, err := orchestrator.ProcessOne(context.Background(), "linux")
 	if err != nil {
@@ -42,11 +42,14 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 }
 
 type jobStoreFake struct {
-	enqueue func(context.Context, core.JobRequest) (core.Job, bool, error)
-	take    func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
-	cancel  func(context.Context, core.SourceReference) error
-	list    func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
-	remove  func(context.Context, core.JobID) error
+	enqueue        func(context.Context, core.JobRequest) (core.Job, bool, error)
+	take           func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
+	terminalize    func(context.Context, core.SourceReference) error
+	started        func(context.Context, core.SourceReference) error
+	list           func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
+	retry          func(context.Context, core.JobID) (bool, error)
+	remove         func(context.Context, core.JobID) error
+	removeTerminal func(context.Context, core.JobID) (bool, error)
 }
 
 func (store *jobStoreFake) Enqueue(ctx context.Context, request core.JobRequest) (core.Job, bool, error) {
@@ -55,8 +58,11 @@ func (store *jobStoreFake) Enqueue(ctx context.Context, request core.JobRequest)
 func (store *jobStoreFake) TakeOldest(ctx context.Context, pool core.RunnerPool, member core.MemberID) (core.ProcessingJob, bool, error) {
 	return store.take(ctx, pool, member)
 }
-func (store *jobStoreFake) CancelQueued(ctx context.Context, source core.SourceReference) error {
-	return store.cancel(ctx, source)
+func (store *jobStoreFake) TerminalizeSource(ctx context.Context, source core.SourceReference) error {
+	return store.terminalize(ctx, source)
+}
+func (store *jobStoreFake) MarkRunnerStarted(ctx context.Context, source core.SourceReference) error {
+	return store.started(ctx, source)
 }
 func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.MemberID, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	if store.list == nil {
@@ -64,15 +70,31 @@ func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.M
 	}
 	return store.list(ctx, member, pool)
 }
-func (store *jobStoreFake) RemoveProcessing(ctx context.Context, jobID core.JobID) error {
-	if store.remove == nil {
-		return nil
+func (store *jobStoreFake) RetryUnstartedProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
+	if store.retry == nil {
+		return true, nil
 	}
-	return store.remove(ctx, jobID)
+	return store.retry(ctx, jobID)
+}
+func (store *jobStoreFake) RemoveTerminalProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
+	if store.removeTerminal != nil {
+		return store.removeTerminal(ctx, jobID)
+	}
+	if store.remove == nil {
+		return true, nil
+	}
+	return true, store.remove(ctx, jobID)
 }
 
 type bootstrapGeneratorFake struct {
 	generate func(context.Context, core.Job, string) (execution.Bootstrap, error)
+}
+
+type launcherFake struct{}
+
+func (launcherFake) Validate(context.Context) error { return nil }
+func (launcherFake) Start(context.Context, execution.StartRequest) error {
+	return nil
 }
 
 func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name string) (execution.Bootstrap, error) {

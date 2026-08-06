@@ -10,7 +10,7 @@ import (
 	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
-func TestPublishAndExpireMember(t *testing.T) {
+func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
 	transaction := Transaction{execute: successfulExecute, commit: successfulCompletion, rollback: successfulCompletion}
@@ -19,24 +19,17 @@ func TestPublishAndExpireMember(t *testing.T) {
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 30}, {RunnerPool: "disabled", Capacity: 0}}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	if err := store.ExpireMember(context.Background(), testMemberIDA); err != nil {
-		t.Fatalf("expire: %v", err)
+	if err := store.WithdrawMemberCapacity(context.Background(), testMemberIDA); err != nil {
+		t.Fatalf("withdraw: %v", err)
 	}
 }
 
 func TestMemberQueries(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
-	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
-		return rowsFromValues([][]any{{testMemberIDA}}), nil
-	}, commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction), queryRow: func(context.Context, string, ...any) Row {
+	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
 		return rowFromValues([]any{1})
 	}})
-	live, err := store.ListLiveMembers(context.Background(), now)
-	assertSingleMember(t, live, err)
-	expired, err := store.ListExpiredMembers(context.Background(), now)
-	assertSingleMember(t, expired, err)
 	if count, err := store.CountLiveMembers(context.Background(), now); err != nil || count != 1 {
 		t.Fatalf("count = %d, %v", count, err)
 	}
@@ -50,13 +43,6 @@ func TestAvailableCapacity(t *testing.T) {
 	now := fixedTime()
 	if capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", now); err != nil || capacity != 18 {
 		t.Fatalf("capacity = %d, %v", capacity, err)
-	}
-}
-
-func assertSingleMember(t *testing.T, members []core.MemberID, err error) {
-	t.Helper()
-	if err != nil || len(members) != 1 || members[0] != testMemberIDA {
-		t.Fatalf("members = %#v, %v", members, err)
 	}
 }
 

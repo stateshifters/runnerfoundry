@@ -25,7 +25,7 @@ func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
 			}
 
 			want := []string{
-				"heartbeat", "expire", "refresh-members", "leadership", "open-leader",
+				"heartbeat", "refresh-members", "leadership", "open-leader",
 				"poll", "reconcile:linux", "request:linux",
 			}
 			if !reflect.DeepEqual(events, want) {
@@ -47,7 +47,7 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 	}
 
 	want := []string{
-		"heartbeat", "expire", "refresh-members", "leadership", "reconcile:linux", "request:linux",
+		"heartbeat", "refresh-members", "leadership", "reconcile:linux", "request:linux",
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
@@ -131,7 +131,7 @@ func TestUnifiedEngineJoinsIndependentOperationFailures(t *testing.T) {
 	wantErr := errors.New("operation failed")
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
-	engine.membership = membershipFake{events: &events, heartbeatErr: wantErr, expireErr: wantErr}
+	engine.membership = membershipFake{events: &events, heartbeatErr: wantErr}
 	engine.source = sourceRuntimeFake{
 		events: &events, refreshErr: wantErr, pollErr: wantErr,
 	}
@@ -216,22 +216,18 @@ func unifiedEngineFixture(events *[]string) *UnifiedEngine {
 type membershipFake struct {
 	events       *[]string
 	heartbeatErr error
-	expireErr    error
 }
 
 func (fake membershipFake) Heartbeat(context.Context) error {
 	*fake.events = append(*fake.events, "heartbeat")
 	return fake.heartbeatErr
 }
-func (fake membershipFake) Expire(context.Context, time.Time) (int, error) {
-	*fake.events = append(*fake.events, "expire")
-	return 0, fake.expireErr
-}
 
 type leadershipFake struct {
-	leader bool
-	events *[]string
-	err    error
+	leader      bool
+	events      *[]string
+	err         error
+	activateErr error
 }
 
 func (fake leadershipFake) IsLeader(context.Context) (bool, error) {
@@ -239,6 +235,7 @@ func (fake leadershipFake) IsLeader(context.Context) (bool, error) {
 	return fake.leader, fake.err
 }
 func (leadershipFake) Close(context.Context) error { return nil }
+func (fake leadershipFake) Activate() error        { return fake.activateErr }
 
 type changingLeadershipFake struct {
 	results []bool

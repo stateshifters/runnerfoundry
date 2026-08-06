@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 func TestSupervisorReplacesGenerationOnlyAfterReplacementStarts(t *testing.T) {
@@ -28,17 +29,12 @@ func TestSupervisorReplacesGenerationOnlyAfterReplacementStarts(t *testing.T) {
 		},
 		notifier,
 		func(error) {},
+		LeaveActiveRunners,
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.starts != 1 || first.stops != 1 || first.shutdowns != 0 ||
-		second.starts != 1 || second.stops != 0 || second.shutdowns != 1 {
-		t.Fatalf("generation calls first=%+v second=%+v", first, second)
-	}
-	if notifier.ready != 2 || notifier.reloading != 1 {
-		t.Fatalf("notification calls = %+v", notifier)
-	}
+	assertNoTestError(t, err, "supervise generations")
+	assertGenerationCalls(t, first, 1, 1, 1)
+	assertGenerationCalls(t, second, 1, 1, 1)
+	assertNotifierCalls(t, notifier, 2, 1)
 }
 
 func TestSupervisorKeepsActiveGenerationWhenReloadBuildFails(t *testing.T) {
@@ -56,11 +52,12 @@ func TestSupervisorKeepsActiveGenerationWhenReloadBuildFails(t *testing.T) {
 		builder,
 		notifier,
 		func(err error) { reported = err },
+		LeaveActiveRunners,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.starts != 1 || first.stops != 0 || first.shutdowns != 1 {
+	if first.starts != 1 || first.activations != 1 || first.stops != 1 {
 		t.Fatalf("active generation calls = %+v", first)
 	}
 	if !errors.Is(reported, wantErr) {
@@ -102,50 +99,70 @@ func TestSupervisorReportsStartupFailures(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("failed")
-	if _, err := startGeneration(context.Background(), func() (config.Config, error) {
+	if _, err := startInitialGeneration(context.Background(), func() (config.Config, error) {
 		return config.Config{}, wantErr
-	}, nil, "initial"); !errors.Is(err, wantErr) {
+	}, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("load error = %v", err)
 	}
-	if _, err := startGeneration(context.Background(), func() (config.Config, error) {
+	if _, err := startInitialGeneration(context.Background(), func() (config.Config, error) {
 		return config.Config{}, nil
-	}, func(context.Context, config.Config) (generation, error) { return nil, wantErr }, "initial"); !errors.Is(err, wantErr) {
+	}, func(context.Context, config.Config) (generation, error) { return nil, wantErr }); !errors.Is(err, wantErr) {
 		t.Fatalf("build error = %v", err)
 	}
 	failed := &fakeGeneration{startErr: wantErr, stopErr: wantErr}
-	if _, err := startGeneration(context.Background(), func() (config.Config, error) {
+	if _, err := startInitialGeneration(context.Background(), func() (config.Config, error) {
 		return config.Config{}, nil
-	}, func(context.Context, config.Config) (generation, error) { return failed, nil }, "initial"); !errors.Is(err, wantErr) {
+	}, func(context.Context, config.Config) (generation, error) { return failed, nil }); !errors.Is(err, wantErr) {
 		t.Fatalf("start error = %v", err)
+	}
+	failed = &fakeGeneration{activateErr: wantErr, stopErr: wantErr}
+	if _, err := startInitialGeneration(context.Background(), func() (config.Config, error) {
+		return config.Config{}, nil
+	}, func(context.Context, config.Config) (generation, error) { return failed, nil }); !errors.Is(err, wantErr) {
+		t.Fatalf("activation error = %v", err)
 	}
 }
 
-func TestSupervisorReportsNotificationAndReplacementFailures(t *testing.T) {
+func TestSupervisorReportsReplacementStopFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("failed")
 	active := &managedGeneration{generation: &fakeGeneration{stopErr: wantErr}}
 	replacement := &managedGeneration{generation: &fakeGeneration{stopErr: wantErr}}
-	if err := replaceActiveGeneration(context.Background(), &active, replacement); !errors.Is(err, wantErr) {
+	handoff := &generationHandoff{policy: LeaveActiveRunners, active: active}
+	if err := replaceActiveGeneration(context.Background(), handoff, replacement); !errors.Is(err, wantErr) {
 		t.Fatalf("replace error = %v", err)
 	}
+}
+
+func TestSupervisorReportsReloadingNotificationFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("failed")
 	notifier := &fakeSupervisorNotifier{reloadingErr: wantErr}
-	if err := reloadGeneration(context.Background(), nil, nil, notifier, &active); !errors.Is(err, wantErr) {
+	handoff := &generationHandoff{policy: LeaveActiveRunners, active: &managedGeneration{generation: &fakeGeneration{}}}
+	if err := reloadGeneration(context.Background(), nil, nil, notifier, handoff); !errors.Is(err, wantErr) {
 		t.Fatalf("reloading notification error = %v", err)
 	}
-	active = &managedGeneration{generation: &fakeGeneration{}}
-	notifier = &fakeSupervisorNotifier{readyErr: wantErr}
+}
+
+func TestSupervisorReportsReplacementReadyAndHandoffFailures(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("failed")
+	handoff := &generationHandoff{policy: LeaveActiveRunners, active: &managedGeneration{generation: &fakeGeneration{}}}
+	notifier := &fakeSupervisorNotifier{readyErr: wantErr}
 	loads := 0
 	load := func() (config.Config, error) { loads++; return config.Config{}, nil }
 	build := func(context.Context, config.Config) (generation, error) { return &fakeGeneration{}, nil }
-	if err := reloadGeneration(context.Background(), load, build, notifier, &active); !errors.Is(err, wantErr) {
+	if err := reloadGeneration(context.Background(), load, build, notifier, handoff); !errors.Is(err, wantErr) {
 		t.Fatalf("ready notification error = %v", err)
 	}
 	if loads != 1 {
 		t.Fatalf("loads = %d", loads)
 	}
-	active = &managedGeneration{generation: &fakeGeneration{stopErr: wantErr}}
-	if err := reloadGeneration(context.Background(), load, build, &fakeSupervisorNotifier{}, &active); !errors.Is(err, wantErr) {
+	handoff.active = &managedGeneration{generation: &fakeGeneration{stopErr: wantErr}}
+	if err := reloadGeneration(context.Background(), load, build, &fakeSupervisorNotifier{}, handoff); !errors.Is(err, wantErr) {
 		t.Fatalf("replacement handoff error = %v", err)
 	}
 }
@@ -157,8 +174,8 @@ func TestSupervisorReportsInitialReadyFailureAndStopsGeneration(t *testing.T) {
 	err := supervise(context.Background(), nil,
 		func() (config.Config, error) { return config.Config{}, nil },
 		func(context.Context, config.Config) (generation, error) { return active, nil },
-		&fakeSupervisorNotifier{readyErr: wantErr}, func(error) {})
-	if !errors.Is(err, wantErr) || active.shutdowns != 1 {
+		&fakeSupervisorNotifier{readyErr: wantErr}, func(error) {}, LeaveActiveRunners)
+	if !errors.Is(err, wantErr) || active.stops != 1 {
 		t.Fatalf("supervise error=%v generation=%+v", err, active)
 	}
 }
@@ -168,19 +185,44 @@ func TestSupervisorReportsInitialStartFailure(t *testing.T) {
 	wantErr := errors.New("load failed")
 	err := supervise(context.Background(), nil,
 		func() (config.Config, error) { return config.Config{}, wantErr }, nil,
-		&fakeSupervisorNotifier{}, func(error) {})
+		&fakeSupervisorNotifier{}, func(error) {}, LeaveActiveRunners)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("supervise error = %v", err)
 	}
 }
 
 type fakeGeneration struct {
-	starts    int
-	stops     int
-	shutdowns int
-	onStart   func()
-	startErr  error
-	stopErr   error
+	starts      int
+	activations int
+	stops       int
+	onStart     func()
+	onActivate  func()
+	startErr    error
+	activateErr error
+	stopErr     error
+	finalizers  []runtimeFinalizer
+}
+
+func assertGenerationCalls(t *testing.T, candidate *fakeGeneration, starts int, activations int, stops int) {
+	t.Helper()
+	if candidate.starts != starts || candidate.activations != activations || candidate.stops != stops {
+		t.Fatalf("generation calls = %+v, want starts=%d activations=%d stops=%d", candidate, starts, activations, stops)
+	}
+}
+
+func assertNotifierCalls(t *testing.T, notifier *fakeSupervisorNotifier, ready int, reloading int) {
+	t.Helper()
+	if notifier.ready != ready || notifier.reloading != reloading {
+		t.Fatalf("notification calls = %+v, want ready=%d reloading=%d", notifier, ready, reloading)
+	}
+}
+
+func (generation *fakeGeneration) Activate() error {
+	generation.activations++
+	if generation.onActivate != nil {
+		generation.onActivate()
+	}
+	return generation.activateErr
 }
 
 func (generation *fakeGeneration) Start(context.Context) error {
@@ -196,9 +238,18 @@ func (generation *fakeGeneration) Stop(context.Context) error {
 	return generation.stopErr
 }
 
-func (generation *fakeGeneration) Shutdown(context.Context) error {
-	generation.shutdowns++
-	return generation.stopErr
+func (generation *fakeGeneration) Finalizers(runnerPools []core.RunnerPool) []runtimeFinalizer {
+	wanted := make(map[core.RunnerPool]struct{}, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		wanted[runnerPool] = struct{}{}
+	}
+	selected := make([]runtimeFinalizer, 0, len(generation.finalizers))
+	for _, finalizer := range generation.finalizers {
+		if _, exists := wanted[finalizer.RunnerPool()]; exists {
+			selected = append(selected, finalizer)
+		}
+	}
+	return selected
 }
 
 type fakeSupervisorNotifier struct {

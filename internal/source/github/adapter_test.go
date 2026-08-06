@@ -29,7 +29,15 @@ func TestPollOnceAcquiresAvailableWorkBeforePersistingBatchEffects(t *testing.T)
 	if !received {
 		t.Fatal("poll did not report received message")
 	}
-	assertBatchEffects(t, queueTime, client, handler)
+	assertPollCapacity(t, client, 7)
+	assertAcquisitionRequests(t, client, [][]int64{{41, 42}})
+	assertPersistedRequests(t, handler, []core.JobRequest{
+		jobRequest(t, 42, queueTime.Add(time.Second)),
+		jobRequest(t, 43, queueTime.Add(2*time.Second)),
+	})
+	assertStartedObservations(t, handler, []core.SourceReference{sourceReference(t, 44)})
+	assertTerminalObservations(t, handler, []core.SourceReference{sourceReference(t, 44), sourceReference(t, 45)})
+	assertEvents(t, client.events, batchEffectEvents(t))
 }
 
 func messageWithAllEffects(queueTime time.Time) *upstream.RunnerScaleSetMessage {
@@ -52,37 +60,52 @@ func messageWithAllEffects(queueTime time.Time) *upstream.RunnerScaleSetMessage 
 	}
 }
 
-func assertBatchEffects(
-	t *testing.T,
-	queueTime time.Time,
-	client *recordingClient,
-	handler *recordingEventHandler,
-) {
+func assertPollCapacity(t *testing.T, client *recordingClient, want int) {
 	t.Helper()
-	if client.maxCapacity != 7 {
-		t.Fatalf("poll capacity = %d, want 7", client.maxCapacity)
+	if client.maxCapacity != want {
+		t.Fatalf("poll capacity = %d, want %d", client.maxCapacity, want)
 	}
-	if !reflect.DeepEqual(client.requested, [][]int64{{41, 42}}) {
-		t.Fatalf("acquisition requests = %#v, want [[41 42]]", client.requested)
+}
+
+func assertAcquisitionRequests(t *testing.T, client *recordingClient, want [][]int64) {
+	t.Helper()
+	if !reflect.DeepEqual(client.requested, want) {
+		t.Fatalf("acquisition requests = %#v, want %#v", client.requested, want)
 	}
-	wantRequests := []core.JobRequest{
-		jobRequest(t, 42, queueTime.Add(time.Second)),
-		jobRequest(t, 43, queueTime.Add(2*time.Second)),
+}
+
+func assertPersistedRequests(t *testing.T, handler *recordingEventHandler, want []core.JobRequest) {
+	t.Helper()
+	if !reflect.DeepEqual(handler.requests, want) {
+		t.Fatalf("requests = %#v, want %#v", handler.requests, want)
 	}
-	if !reflect.DeepEqual(handler.requests, wantRequests) {
-		t.Fatalf("requests = %#v, want %#v", handler.requests, wantRequests)
+}
+
+func assertStartedObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
+	t.Helper()
+	if !reflect.DeepEqual(handler.started, want) {
+		t.Fatalf("started = %#v, want %#v", handler.started, want)
 	}
-	wantCancel := sourceReference(t, 45)
-	if !reflect.DeepEqual(handler.cancellations, []core.SourceReference{wantCancel}) {
-		t.Fatalf("cancellations = %#v, want [%#v]", handler.cancellations, wantCancel)
+}
+
+func assertTerminalObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
+	t.Helper()
+	if !reflect.DeepEqual(handler.completed, want) {
+		t.Fatalf("completed = %#v, want %#v", handler.completed, want)
 	}
-	assertEvents(t, client.events, []string{
+}
+
+func batchEffectEvents(t *testing.T) []string {
+	t.Helper()
+	return []string{
 		"acquire:41,42",
 		"request:" + sourceReference(t, 42).ID,
 		"request:" + sourceReference(t, 43).ID,
-		"cancel:" + sourceReference(t, 45).ID,
+		"started:" + sourceReference(t, 44).ID,
+		"completed:" + sourceReference(t, 44).ID,
+		"completed:" + sourceReference(t, 45).ID,
 		"ack:17",
-	})
+	}
 }
 
 func TestPollOnceRejectsUnknownAcquiredRequestBeforeDurableEffects(t *testing.T) {
@@ -103,58 +126,86 @@ func TestPollOnceRejectsUnknownAcquiredRequestBeforeDurableEffects(t *testing.T)
 	}
 }
 
-func TestPollOnceLeavesMessageWhenAcquisitionOrDurableEffectFails(t *testing.T) {
+func TestPollOnceLeavesMessageWhenAcquisitionFails(t *testing.T) {
 	t.Parallel()
 
-	for testName, testCase := range durableFailureCases() {
-		t.Run(testName, func(t *testing.T) {
-			t.Parallel()
-			testCase.client.messages = []*upstream.RunnerScaleSetMessage{testCase.message}
-			testCase.handler.events = &testCase.client.events
-			adapter := newAdapter(testCase.client, testCase.handler)
-			received, err := adapter.PollOnce(context.Background(), 0)
-			if err == nil || !received {
-				t.Fatalf("poll = (%t, %v), want received failure", received, err)
-			}
-			if len(testCase.client.acknowledged) != 0 {
-				t.Fatalf("failed message acknowledgements = %#v", testCase.client.acknowledged)
-			}
-		})
+	assertMessageRemainsAfterFailure(
+		t,
+		availableMessage(19, 61),
+		&recordingClient{acquireErr: errors.New("acquire failed")},
+		&recordingEventHandler{},
+	)
+}
+
+func TestPollOnceLeavesMessageWhenAcquiredRequestCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	assertMessageRemainsAfterFailure(
+		t,
+		availableMessage(20, 62),
+		&recordingClient{acquired: []int64{62}},
+		&recordingEventHandler{requestErr: errors.New("persist failed")},
+	)
+}
+
+func TestPollOnceLeavesMessageWhenAssignedRequestCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{MessageID: 20, JobAssignedMessages: []*upstream.JobAssigned{{
+		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64},
+	}}}
+	assertMessageRemainsAfterFailure(
+		t,
+		message,
+		&recordingClient{},
+		&recordingEventHandler{requestErr: errors.New("persist assigned failed")},
+	)
+}
+
+func TestPollOnceLeavesMessageWhenStartedObservationCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{MessageID: 21, JobStartedMessages: []*upstream.JobStarted{{
+		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 63},
+	}}}
+	assertMessageRemainsAfterFailure(
+		t,
+		message,
+		&recordingClient{},
+		&recordingEventHandler{startedErr: errors.New("started failed")},
+	)
+}
+
+func TestPollOnceLeavesMessageWhenCompletionCannotBePersisted(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{MessageID: 21, JobCompletedMessages: []*upstream.JobCompleted{{
+		Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 63},
+	}}}
+	assertMessageRemainsAfterFailure(
+		t,
+		message,
+		&recordingClient{},
+		&recordingEventHandler{completedErr: errors.New("completion failed")},
+	)
+}
+
+func assertMessageRemainsAfterFailure(
+	t *testing.T,
+	message *upstream.RunnerScaleSetMessage,
+	client *recordingClient,
+	handler *recordingEventHandler,
+) {
+	t.Helper()
+	client.messages = []*upstream.RunnerScaleSetMessage{message}
+	handler.events = &client.events
+	adapter := newAdapter(client, handler)
+	received, err := adapter.PollOnce(context.Background(), 0)
+	if err == nil || !received {
+		t.Fatalf("poll = (%t, %v), want received failure", received, err)
 	}
-}
-
-type durableFailureCase struct {
-	message *upstream.RunnerScaleSetMessage
-	client  *recordingClient
-	handler *recordingEventHandler
-}
-
-func durableFailureCases() map[string]durableFailureCase {
-	return map[string]durableFailureCase{
-		"acquisition": {
-			message: availableMessage(19, 61),
-			client:  &recordingClient{acquireErr: errors.New("acquire failed")},
-			handler: &recordingEventHandler{},
-		},
-		"request": {
-			message: availableMessage(20, 62),
-			client:  &recordingClient{acquired: []int64{62}},
-			handler: &recordingEventHandler{requestErr: errors.New("persist failed")},
-		},
-		"assigned request": {
-			message: &upstream.RunnerScaleSetMessage{MessageID: 20, JobAssignedMessages: []*upstream.JobAssigned{{
-				JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64},
-			}}},
-			client:  &recordingClient{},
-			handler: &recordingEventHandler{requestErr: errors.New("persist assigned failed")},
-		},
-		"cancellation": {
-			message: &upstream.RunnerScaleSetMessage{MessageID: 21, JobCompletedMessages: []*upstream.JobCompleted{{
-				Result: "canceled", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 63},
-			}}},
-			client:  &recordingClient{},
-			handler: &recordingEventHandler{cancelErr: errors.New("cancel failed")},
-		},
+	if len(client.acknowledged) != 0 {
+		t.Fatalf("failed message acknowledgements = %#v", client.acknowledged)
 	}
 }
 
@@ -162,12 +213,14 @@ func TestPollOnceValidatesRelevantEventsBeforeAcquisition(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]*upstream.RunnerScaleSetMessage{
-		"nil available":        {MessageID: 22, JobAvailableMessages: []*upstream.JobAvailable{nil}},
-		"invalid available":    availableMessage(23, 0),
-		"nil assigned":         {MessageID: 24, JobAssignedMessages: []*upstream.JobAssigned{nil}},
-		"invalid assigned":     {MessageID: 25, JobAssignedMessages: []*upstream.JobAssigned{{}}},
-		"nil completion":       {MessageID: 26, JobCompletedMessages: []*upstream.JobCompleted{nil}},
-		"invalid cancellation": {MessageID: 27, JobCompletedMessages: []*upstream.JobCompleted{{Result: "canceled"}}},
+		"nil available":      {MessageID: 22, JobAvailableMessages: []*upstream.JobAvailable{nil}},
+		"invalid available":  availableMessage(23, 0),
+		"nil assigned":       {MessageID: 24, JobAssignedMessages: []*upstream.JobAssigned{nil}},
+		"invalid assigned":   {MessageID: 25, JobAssignedMessages: []*upstream.JobAssigned{{}}},
+		"nil started":        {MessageID: 26, JobStartedMessages: []*upstream.JobStarted{nil}},
+		"invalid started":    {MessageID: 27, JobStartedMessages: []*upstream.JobStarted{{}}},
+		"nil completion":     {MessageID: 28, JobCompletedMessages: []*upstream.JobCompleted{nil}},
+		"invalid completion": {MessageID: 29, JobCompletedMessages: []*upstream.JobCompleted{{Result: "succeeded"}}},
 	}
 	for testName, message := range tests {
 		t.Run(testName, func(t *testing.T) {
@@ -209,12 +262,85 @@ func TestPollOncePreservesAcknowledgementCursor(t *testing.T) {
 	}
 }
 
+func TestPollOnceRedeliversDurableEffectsWhenAcknowledgementFails(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{
+		MessageID: 30,
+		JobStartedMessages: []*upstream.JobStarted{{
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 71},
+		}},
+		JobCompletedMessages: []*upstream.JobCompleted{{
+			Result: "failed", JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 72},
+		}},
+	}
+	client := &recordingClient{
+		messages:  []*upstream.RunnerScaleSetMessage{message},
+		deleteErr: errors.New("acknowledgement failed"),
+	}
+	handler := &recordingEventHandler{events: &client.events}
+	adapter := newAdapter(client, handler)
+
+	if received, err := adapter.PollOnce(context.Background(), 0); err == nil || !received {
+		t.Fatalf("first poll = (%t, %v), want received acknowledgement failure", received, err)
+	}
+	client.deleteErr = nil
+	client.messages = []*upstream.RunnerScaleSetMessage{message}
+	if received, err := adapter.PollOnce(context.Background(), 0); err != nil || !received {
+		t.Fatalf("redelivery = (%t, %v), want received success", received, err)
+	}
+
+	assertEvents(t, client.events, acknowledgementRedeliveryEvents(t))
+}
+
+func acknowledgementRedeliveryEvents(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"started:" + sourceReference(t, 71).ID,
+		"completed:" + sourceReference(t, 72).ID,
+		"started:" + sourceReference(t, 71).ID,
+		"completed:" + sourceReference(t, 72).ID,
+		"ack:30",
+	}
+}
+
+func TestPollOnceTerminalizesEveryGitHubCompletionResult(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{MessageID: 31}
+	for requestOffset, result := range []string{"", "succeeded", "failed", "canceled", "unknown"} {
+		message.JobCompletedMessages = append(message.JobCompletedMessages, &upstream.JobCompleted{
+			Result: result,
+			JobMessageBase: upstream.JobMessageBase{
+				RunnerRequestID: int64(80 + requestOffset),
+			},
+		})
+	}
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+	handler := &recordingEventHandler{events: &client.events}
+	adapter := newAdapter(client, handler)
+
+	if received, err := adapter.PollOnce(context.Background(), 0); err != nil || !received {
+		t.Fatalf("poll = (%t, %v), want received success", received, err)
+	}
+
+	wantCompleted := make([]core.SourceReference, len(message.JobCompletedMessages))
+	for requestOffset := range wantCompleted {
+		wantCompleted[requestOffset] = sourceReference(t, int64(80+requestOffset))
+	}
+	if !reflect.DeepEqual(handler.completed, wantCompleted) {
+		t.Fatalf("completed = %#v, want %#v", handler.completed, wantCompleted)
+	}
+}
+
 type recordingEventHandler struct {
-	events        *[]string
-	requests      []core.JobRequest
-	cancellations []core.SourceReference
-	requestErr    error
-	cancelErr     error
+	events       *[]string
+	requests     []core.JobRequest
+	started      []core.SourceReference
+	completed    []core.SourceReference
+	requestErr   error
+	startedErr   error
+	completedErr error
 }
 
 func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) error {
@@ -225,12 +351,20 @@ func (handler *recordingEventHandler) Request(_ context.Context, request core.Jo
 	return handler.requestErr
 }
 
-func (handler *recordingEventHandler) Cancel(_ context.Context, source core.SourceReference) error {
-	handler.cancellations = append(handler.cancellations, source)
+func (handler *recordingEventHandler) RunnerStarted(_ context.Context, source core.SourceReference) error {
+	handler.started = append(handler.started, source)
 	if handler.events != nil {
-		*handler.events = append(*handler.events, "cancel:"+source.ID)
+		*handler.events = append(*handler.events, "started:"+source.ID)
 	}
-	return handler.cancelErr
+	return handler.startedErr
+}
+
+func (handler *recordingEventHandler) Terminalize(_ context.Context, source core.SourceReference) error {
+	handler.completed = append(handler.completed, source)
+	if handler.events != nil {
+		*handler.events = append(*handler.events, "completed:"+source.ID)
+	}
+	return handler.completedErr
 }
 
 type recordingClient struct {

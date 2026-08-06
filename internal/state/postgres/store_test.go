@@ -68,13 +68,12 @@ func TestTakeOldestMovesQueueEntryAtomically(t *testing.T) {
 		protocol.commitCalls != 1 {
 		t.Fatalf("take = %#v, %t, commits=%d, error=%v", processing, taken, protocol.commitCalls, err)
 	}
-	if len(protocol.statements) != 6 || !strings.Contains(protocol.statements[1], "ORDER BY enqueued_at LIMIT 1") ||
+	if len(protocol.statements) != 5 || !strings.Contains(protocol.statements[1], "ORDER BY enqueued_at LIMIT 1") ||
 		strings.Contains(protocol.statements[1], "ORDER BY enqueued_at,") ||
 		strings.Contains(protocol.statements[1], "FOR UPDATE") ||
 		!strings.Contains(protocol.statements[2], "pg_advisory_xact_lock") ||
 		!strings.Contains(protocol.statements[3], "DELETE FROM public.runnerfoundry_queued_jobs") ||
-		!strings.Contains(protocol.statements[4], "runnerfoundry_processing_jobs") ||
-		!strings.Contains(protocol.statements[5], "runnerfoundry_source_tombstones") {
+		!strings.Contains(protocol.statements[4], "runnerfoundry_processing_jobs") {
 		t.Fatalf("take protocol = %#v", protocol.statements)
 	}
 }
@@ -90,34 +89,25 @@ func TestTakeOldestLeavesEmptyQueueUnchanged(t *testing.T) {
 	}
 }
 
-func TestCancelQueuedTombstonesBeforeDeleting(t *testing.T) {
-	t.Parallel()
-	protocol := &recordedTransaction{}
-	err := NewStore(protocol.executor()).CancelQueued(context.Background(),
-		core.SourceReference{Adapter: "github", ID: "request-1"})
-	if err != nil || protocol.commitCalls != 1 || len(protocol.statements) != 3 ||
-		!strings.Contains(protocol.statements[1], "runnerfoundry_source_tombstones") ||
-		!strings.Contains(protocol.statements[2], "runnerfoundry_queued_jobs") {
-		t.Fatalf("cancel statements=%#v commits=%d error=%v", protocol.statements, protocol.commitCalls, err)
-	}
-}
-
 func TestProcessingByMemberReturnsCurrentOwnership(t *testing.T) {
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
-	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{processingJobValues(job, testMemberIDA)})}
+	values := processingJobValues(job, testMemberIDA)
+	values[5], values[6] = true, true
+	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{values})}
 	processing, err := NewStore(protocol.executor()).ProcessingByMember(context.Background(), testMemberIDA, "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job != job || processing[0].MemberID != testMemberIDA ||
-		protocol.commitCalls != 1 {
+		!processing[0].RunnerStarted || !processing[0].SourceTerminal || protocol.commitCalls != 1 ||
+		len(protocol.statements) != 1 || !strings.Contains(protocol.statements[0], "source_tombstones") {
 		t.Fatalf("processing = %#v, commits=%d, error=%v", processing, protocol.commitCalls, err)
 	}
 }
 
-func TestRemoveProcessingDeletesOnlyRequestedJob(t *testing.T) {
+func TestRemoveTerminalProcessingDeletesOnlyTerminalJob(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{}
-	err := NewStore(protocol.executor()).RemoveProcessing(context.Background(), testJobID1)
-	if err != nil || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
+	removed, err := NewStore(protocol.executor()).RemoveTerminalProcessing(context.Background(), testJobID1)
+	if err != nil || !removed || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
 		len(protocol.arguments[0]) != 1 || protocol.arguments[0][0] != testJobID1 {
 		t.Fatalf("remove statements=%#v arguments=%#v commits=%d error=%v",
 			protocol.statements, protocol.arguments, protocol.commitCalls, err)
@@ -134,12 +124,20 @@ func TestStoreOperationsReportProtocolFailures(t *testing.T) {
 			_, _, err := store.TakeOldest(context.Background(), "linux", testMemberIDA)
 			return err
 		},
-		func(store *Store) error { return store.CancelQueued(context.Background(), request.Source) },
+		func(store *Store) error { return store.TerminalizeSource(context.Background(), request.Source) },
+		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), request.Source) },
 		func(store *Store) error {
 			_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
 			return err
 		},
-		func(store *Store) error { return store.RemoveProcessing(context.Background(), testJobID1) },
+		func(store *Store) error {
+			_, err := store.RetryUnstartedProcessing(context.Background(), testJobID1)
+			return err
+		},
+		func(store *Store) error {
+			_, err := store.RemoveTerminalProcessing(context.Background(), testJobID1)
+			return err
+		},
 	}
 	for index, operation := range operations {
 		store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }})
@@ -198,7 +196,7 @@ func queuedJobValues(identifier core.JobID, request core.JobRequest) []any {
 }
 
 func processingJobValues(job core.Job, memberID core.MemberID) []any {
-	return []any{job.ID, job.Source.Adapter, job.Source.ID, string(job.RunnerPool), memberID}
+	return []any{job.ID, job.Source.Adapter, job.Source.ID, string(job.RunnerPool), memberID, false, false}
 }
 
 func rowFromValues(values []any) Row {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 type preparedLogChange interface {
@@ -29,6 +31,13 @@ func (wrapped *loggingGeneration) Start(ctx context.Context) error {
 	return nil
 }
 
+func (wrapped *loggingGeneration) Activate() error {
+	if err := wrapped.generation.Activate(); err != nil {
+		return fmt.Errorf("activate logging runtime generation: %w", err)
+	}
+	return nil
+}
+
 func (wrapped *loggingGeneration) Stop(ctx context.Context) error {
 	if wrapped.activated {
 		if err := wrapped.generation.Stop(ctx); err != nil {
@@ -39,12 +48,6 @@ func (wrapped *loggingGeneration) Stop(ctx context.Context) error {
 	return errors.Join(wrapped.generation.Stop(ctx), wrapped.prepared.Close())
 }
 
-func (wrapped *loggingGeneration) Shutdown(ctx context.Context) error {
-	if wrapped.activated {
-		if err := wrapped.generation.Shutdown(ctx); err != nil {
-			return fmt.Errorf("shut down logging generation: %w", err)
-		}
-		return nil
-	}
-	return errors.Join(wrapped.generation.Shutdown(ctx), wrapped.prepared.Close())
+func (wrapped *loggingGeneration) Finalizers(runnerPools []core.RunnerPool) []runtimeFinalizer {
+	return wrapped.generation.Finalizers(runnerPools)
 }

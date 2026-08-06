@@ -66,22 +66,28 @@ func TestTakeOldestProtocolFailures(t *testing.T) {
 	}
 }
 
-func TestCancelQueuedProtocolFailures(t *testing.T) {
+func TestTerminalizeSourceProtocolFailures(t *testing.T) {
 	t.Parallel()
-	protocolErr := errors.New("protocol")
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	if err := NewStore(Executor{begin: failingBegin(protocolErr)}).CancelQueued(context.Background(), source); err == nil {
-		t.Fatal("expected cancel begin failure")
+	assertTransactionalMutationFailures(t, 2,
+		func(store *Store) error { return store.TerminalizeSource(context.Background(), source) })
+}
+
+func assertTransactionalMutationFailures(t *testing.T, executeCalls int, operation func(*Store) error) {
+	t.Helper()
+	protocolErr := errors.New("protocol")
+	if err := operation(NewStore(Executor{begin: failingBegin(protocolErr)})); err == nil {
+		t.Fatal("expected mutation begin failure")
 	}
-	for failureCall := 1; failureCall <= 2; failureCall++ {
+	for failureCall := 1; failureCall <= executeCalls; failureCall++ {
 		transaction := transactionFailingExecute(failureCall, protocolErr)
-		if err := NewStore(Executor{begin: transactionBeginning(transaction)}).CancelQueued(context.Background(), source); err == nil {
-			t.Fatalf("cancel execute %d", failureCall)
+		if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
+			t.Fatalf("execute %d: expected mutation failure", failureCall)
 		}
 	}
-	cancelCommitFailure := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
-	if err := NewStore(Executor{begin: transactionBeginning(cancelCommitFailure)}).CancelQueued(context.Background(), source); err == nil {
-		t.Fatal("expected cancel commit failure")
+	transaction := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
+	if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
+		t.Fatal("expected mutation commit failure")
 	}
 }
 

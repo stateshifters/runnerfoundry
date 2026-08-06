@@ -18,11 +18,6 @@ func TestJobScannersRejectInvalidPersistedUUIDs(t *testing.T) {
 	if _, err := scanProcessingJob(rowFromValues(invalidProcessingJob)); err == nil {
 		t.Fatal("expected invalid processing job UUID")
 	}
-	invalidMember := processingJobValues()
-	invalidMember[4] = "invalid"
-	if _, err := scanProcessingJob(rowFromValues(invalidMember)); err == nil {
-		t.Fatal("expected invalid member UUID")
-	}
 }
 
 func TestRollbackReportsProtocolFailureAndIgnoresClosedTransaction(t *testing.T) {

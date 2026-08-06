@@ -23,11 +23,15 @@ func executeCommand(
 	if len(args) > 0 && args[0] == "migrate" {
 		return executeMigrationCommand(ctx, args[1:], stdout, commandOutput, runMigration)
 	}
-	configPath, err := parseConfigPath(args, commandOutput)
+	request, err := parseDaemonRequest(args, commandOutput)
 	if err != nil {
 		return err
 	}
-	if err := runDaemon(ctx, daemon.Options{ConfigPath: configPath, ReloadRequests: reloadRequests}); err != nil {
+	if err := runDaemon(ctx, daemon.Options{
+		ConfigPath:         request.configPath,
+		ReloadRequests:     reloadRequests,
+		ActiveRunnerPolicy: request.activeRunnerPolicy,
+	}); err != nil {
 		return fmt.Errorf("run RunnerFoundry: %w", err)
 	}
 	return nil

@@ -52,13 +52,13 @@ func TestProductionAdaptersUseInjectedBoundaries(t *testing.T) {
 	}
 }
 
-func TestProductionStateGeneratesMemberIdentityOnce(t *testing.T) {
+func TestProductionStateUsesTrimmedHostnameIdentity(t *testing.T) {
 	restore := replaceProductionStateBoundaries()
 	t.Cleanup(restore)
 	calls := 0
-	productionMemberIdentifier = func() (core.MemberID, error) {
+	productionReadHostname = func() (string, error) {
 		calls++
-		return daemonTestID(7), nil
+		return "  runner-host-7\n", nil
 	}
 
 	state, err := openProductionState(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}})
@@ -135,9 +135,21 @@ func TestProductionStateReportsMemberIdentityFailure(t *testing.T) {
 	restore := replaceProductionStateBoundaries()
 	t.Cleanup(restore)
 	wantErr := errors.New("identity unavailable")
-	productionMemberIdentifier = func() (core.MemberID, error) { return core.MemberID{}, wantErr }
+	productionReadHostname = func() (string, error) { return "", wantErr }
 	if _, err := openProductionState(context.Background(), config.Config{}); !errors.Is(err, wantErr) {
 		t.Fatalf("member identity error = %v", err)
+	}
+	productionReadHostname = func() (string, error) { return " \n", nil }
+	if _, err := openProductionState(context.Background(), config.Config{}); err == nil {
+		t.Fatal("empty member hostname was accepted")
+	}
+}
+
+func TestProductionMemberIdentityRequiresHostnameReader(t *testing.T) {
+	t.Parallel()
+
+	if _, err := productionMemberIdentity(nil); err == nil {
+		t.Fatal("nil hostname reader was accepted")
 	}
 }
 
@@ -146,8 +158,8 @@ func replaceProductionStateBoundaries() func() {
 	originalCluster, originalMigrate := newProductionClusterStore, migrateProductionCluster
 	originalPool, originalConnection, originalStore := openProductionClusterPool, newProductionPGConnection, newProductionPGStore
 	originalPoolClose, originalLeader := closeProductionPool, tryProductionLeader
-	originalMemberIdentifier := productionMemberIdentifier
-	productionMemberIdentifier = func() (core.MemberID, error) { return daemonTestID(1), nil }
+	originalReadHostname := productionReadHostname
+	productionReadHostname = func() (string, error) { return string(daemonTestID(1)), nil }
 	openProductionSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return &sqlitestate.Store{}, nil }
 	closeProductionSQLite = func(*sqlitestate.Store) error { return nil }
 	newProductionClusterStore = func(settings postgresconfig.Settings) *cluster.Store { return cluster.NewStore(settings) }
@@ -164,36 +176,7 @@ func replaceProductionStateBoundaries() func() {
 		newProductionClusterStore, migrateProductionCluster = originalCluster, originalMigrate
 		openProductionClusterPool, newProductionPGConnection, newProductionPGStore = originalPool, originalConnection, originalStore
 		closeProductionPool, tryProductionLeader = originalPoolClose, originalLeader
-		productionMemberIdentifier = originalMemberIdentifier
-	}
-}
-
-func TestProductionProviderComposition(t *testing.T) {
-	configured := config.Config{ScaleSets: []config.ScaleSetConfig{
-		{Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yml", Service: "runner"}},
-		{Name: "libvirt", Libvirt: &config.LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"}},
-	}}
-	providers, err := buildConfiguredProviders(context.Background(), configured, executionDependencies{
-		dockerCommands: dockerCommandsFake{services: "runner\n"}, libvirtCommands: libvirtCommandsFake{},
-		readTemplate: func(string) ([]byte, error) {
-			return []byte(`<domain type="kvm"><name>template</name></domain>`), nil
-		},
-	})
-	if err != nil || len(providers) != 2 {
-		t.Fatalf("providers = (%d, %v)", len(providers), err)
-	}
-	if _, err = buildConfiguredProviders(context.Background(), config.Config{ScaleSets: []config.ScaleSetConfig{{Name: "bad"}}}, executionDependencies{}); err == nil {
-		t.Fatal("invalid provider composition succeeded")
-	}
-	if providers[core.RunnerPool("docker")] == nil {
-		t.Fatal("Docker provider is missing")
-	}
-}
-
-func TestProductionProviderShellAcceptsEmptyConfiguration(t *testing.T) {
-	providers, err := buildProductionProviders(context.Background(), config.Config{})
-	if err != nil || len(providers) != 0 {
-		t.Fatalf("empty production providers = (%d, %v)", len(providers), err)
+		productionReadHostname = originalReadHostname
 	}
 }
 
@@ -309,7 +292,8 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildTimedProductionGeneration(
 		builderConfig(), state, &localLeadershipGate{}, func(error) {}, newBuilderManager(t, store),
-		map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}}, daemonTestID(1),
+		map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		builderProviderFake{}, daemonTestID(1),
 	)
 	if err != nil || generation == nil {
 		t.Fatalf("timed generation = (%v, %v)", generation, err)
@@ -323,7 +307,7 @@ func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) 
 	store := newBuilderStoreFake()
 	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	if _, err := buildTimedProductionGeneration(
-		config.Config{}, state, &localLeadershipGate{}, nil, newBuilderManager(t, store), nil, daemonTestID(1),
+		config.Config{}, state, &localLeadershipGate{}, nil, newBuilderManager(t, store), nil, nil, daemonTestID(1),
 	); err == nil {
 		t.Fatal("invalid timed generation was accepted")
 	}
@@ -363,8 +347,13 @@ func configureProductionGenerationBoundaries(manager *githubsource.Manager) {
 	) (*githubsource.Manager, error) {
 		return manager, nil
 	}
-	buildProductionProviderSet = func(context.Context, config.Config) (map[core.RunnerPool]execution.ExecutionProvider, error) {
-		return map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}}, nil
+	buildProductionProviderSet = func(
+		context.Context,
+		config.Config,
+	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+		provider := builderProviderFake{}
+		inventory := execution.NewAggregateRunnerInventory(provider)
+		return map[core.RunnerPool]execution.ExecutionProvider{"linux": provider}, inventory, nil
 	}
 	newProductionTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
 	productionCurrentTime = builderTime
@@ -426,8 +415,11 @@ func (fixture productionGenerationFailureFixture) useManager() {
 func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testing.T) {
 	t.Helper()
 	fixture.useManager()
-	buildProductionProviderSet = func(context.Context, config.Config) (map[core.RunnerPool]execution.ExecutionProvider, error) {
-		return nil, fixture.wantErr
+	buildProductionProviderSet = func(
+		context.Context,
+		config.Config,
+	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+		return nil, execution.AggregateRunnerInventory{}, fixture.wantErr
 	}
 	if _, err := fixture.build(); !errors.Is(err, fixture.wantErr) {
 		t.Fatalf("provider composition error = %v", err)

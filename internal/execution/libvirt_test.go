@@ -166,6 +166,7 @@ type recordingLibvirtTransport struct {
 	createErr           error
 	domains             string
 	listErr             error
+	listCalls           int
 	domainXMLByName     map[string]string
 	domainStateByName   map[string]string
 	destroyedDomain     string
@@ -185,6 +186,7 @@ func (transport *recordingLibvirtTransport) CreateDomain(
 }
 
 func (transport *recordingLibvirtTransport) ListDomains(context.Context, string) (string, error) {
+	transport.listCalls++
 	return transport.domains, transport.listErr
 }
 

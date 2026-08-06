@@ -32,7 +32,7 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 	if err != nil || !found || processing.Job.ID != testJobID || processing.MemberID != testMemberID {
 		t.Fatalf("take oldest = %#v, %t, %v", processing, found, err)
 	}
-	if commits != 1 || len(statements) != 4 {
+	if commits != 1 || len(statements) != 3 {
 		t.Fatalf("transaction effects = %#v, commits=%d", statements, commits)
 	}
 	if !strings.Contains(statements[0], "ORDER BY enqueued_at LIMIT 1") {
@@ -43,7 +43,7 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 func TestTakeOldestRollsBackEveryPartialMove(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	for failureCall := 1; failureCall <= 3; failureCall++ {
+	for failureCall := 1; failureCall <= 2; failureCall++ {
 		failureCall := failureCall
 		executeCalls, rollbacks := 0, 0
 		transaction := Transaction{
@@ -81,7 +81,7 @@ func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 	}
 }
 
-func TestCancelQueuedAlwaysTombstonesTheSource(t *testing.T) {
+func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 2)
 	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
@@ -90,12 +90,45 @@ func TestCancelQueuedAlwaysTombstonesTheSource(t *testing.T) {
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
 	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		CancelQueued(context.Background(), source); err != nil {
-		t.Fatalf("cancel queued: %v", err)
+		TerminalizeSource(context.Background(), source); err != nil {
+		t.Fatalf("terminalize source: %v", err)
 	}
 	if len(statements) != 2 || !strings.Contains(statements[0], "source_tombstones") ||
 		!strings.Contains(statements[1], "queued_jobs") {
 		t.Fatalf("cancellation effects = %#v", statements)
+	}
+}
+
+func TestMarkRunnerStartedTombstonesAQueuedRetry(t *testing.T) {
+	t.Parallel()
+	statements := make([]string, 0, 3)
+	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+		statements = append(statements, statement)
+		return successfulResult(), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+	err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(context.Background(),
+		core.SourceReference{Adapter: "github", ID: "request-3"})
+	if err != nil || len(statements) != 3 || !strings.Contains(statements[0], "runner_started") ||
+		!strings.Contains(statements[1], "source_tombstones") || !strings.Contains(statements[2], "queued_jobs") {
+		t.Fatalf("delayed start statements=%#v error=%v", statements, err)
+	}
+}
+
+func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing.T) {
+	t.Parallel()
+	statements := make([]string, 0, 2)
+	transaction := Transaction{
+		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+			statements = append(statements, statement)
+			return successfulResult(), nil
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	retried, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		RetryUnstartedProcessing(context.Background(), testJobID)
+	if err != nil || !retried || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
+		!strings.Contains(statements[1], "runner_started = 0") {
+		t.Fatalf("retry statements=%#v retried=%t error=%v", statements, retried, err)
 	}
 }
 

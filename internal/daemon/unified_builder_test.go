@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,10 +16,8 @@ import (
 	"github.com/meza/RunnerFoundry/internal/state"
 )
 
-func daemonTestID(seed byte) core.JobID {
-	var identifier core.JobID
-	identifier[15] = seed
-	return identifier
+func daemonTestID(seed byte) core.MemberID {
+	return core.MemberID(fmt.Sprintf("runner-host-%d", seed))
 }
 
 func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
@@ -30,6 +29,7 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
 		store: store, manager: manager, member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
 		ticker: ticker, processGate: &localLeadershipGate{},
 	})
@@ -38,6 +38,9 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	}
 	if err = generation.Start(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
+	}
+	if err = generation.Activate(); err != nil {
+		t.Fatalf("activate generation: %v", err)
 	}
 	<-store.capacityPublished
 	if err = generation.Stop(context.Background()); err != nil {
@@ -75,6 +78,7 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 	return unifiedBuilderDependencies{
 		store: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
 		ticker: &manualCycleTicker{ticks: make(chan time.Time)}, processGate: &localLeadershipGate{},
 	}
@@ -93,16 +97,22 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	store := newBuilderStoreFake()
 	store.operationErr = wantErr
 	manager := newBuilderManager(t, store)
-	orchestrator := runtimeengine.NewOrchestrator(store, manager.Source(), builderProviderFake{}, daemonTestID(1))
+	provider := builderProviderFake{}
+	orchestrator := runtimeengine.NewOrchestrator(
+		store, manager.Source(), provider, provider, daemonTestID(1),
+	)
 	assertPoolAdapterFailures(t, orchestrator, wantErr)
 	store.operationErr = nil
 	assertPoolAdapterSuccess(t, orchestrator)
 	pool := orchestrationPool{orchestrator: orchestrator, runnerPool: "linux"}
-	if err := pool.Cleanup(context.Background()); err != nil {
+	if pool.RunnerPool() != "linux" {
+		t.Fatalf("finalizer Runner Pool = %q", pool.RunnerPool())
+	}
+	if remaining, err := pool.Terminate(context.Background()); err != nil || remaining != 0 {
 		t.Fatalf("clean up empty pool: %v", err)
 	}
 	store.operationErr = wantErr
-	if err := pool.Cleanup(context.Background()); !errors.Is(err, wantErr) {
+	if _, err := pool.Terminate(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("cleanup error = %v, want %v", err, wantErr)
 	}
 	closers := configuredClosers(unifiedBuilderDependencies{
@@ -198,11 +208,17 @@ func (*builderStoreFake) Enqueue(context.Context, core.JobRequest) (core.Job, bo
 func (store *builderStoreFake) TakeOldest(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 	return core.ProcessingJob{}, false, store.operationErr
 }
-func (*builderStoreFake) CancelQueued(context.Context, core.SourceReference) error { return nil }
+func (*builderStoreFake) TerminalizeSource(context.Context, core.SourceReference) error { return nil }
+func (*builderStoreFake) MarkRunnerStarted(context.Context, core.SourceReference) error { return nil }
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
-func (*builderStoreFake) RemoveProcessing(context.Context, core.JobID) error { return nil }
+func (*builderStoreFake) RetryUnstartedProcessing(context.Context, core.JobID) (bool, error) {
+	return false, nil
+}
+func (*builderStoreFake) RemoveTerminalProcessing(context.Context, core.JobID) (bool, error) {
+	return false, nil
+}
 
 func (store *builderStoreFake) PublishMemberState(
 	context.Context,
@@ -216,11 +232,10 @@ func (store *builderStoreFake) PublishMemberState(
 	store.capacityPublished <- struct{}{}
 	return nil
 }
-func (*builderStoreFake) ListExpiredMembers(context.Context, time.Time) ([]core.MemberID, error) {
-	return nil, nil
-}
 func (*builderStoreFake) CountLiveMembers(context.Context, time.Time) (int, error) { return 1, nil }
-func (*builderStoreFake) ExpireMember(context.Context, core.MemberID) error        { return nil }
+func (*builderStoreFake) WithdrawMemberCapacity(context.Context, core.MemberID) error {
+	return nil
+}
 func (*builderStoreFake) AvailableRunnerPoolCapacity(context.Context, core.RunnerPool, time.Time) (int, error) {
 	return 1, nil
 }

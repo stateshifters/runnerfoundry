@@ -31,20 +31,16 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
 	var jobID, runnerPool, memberID string
 	if err := row.Scan(&jobID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
-		&runnerPool, &memberID); err != nil {
+		&runnerPool, &memberID, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
 	}
 	parsedJobID, err := uuid.Parse(jobID)
 	if err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("parse processing job UUID: %w", err)
 	}
-	parsedMemberID, err := uuid.Parse(memberID)
-	if err != nil {
-		return core.ProcessingJob{}, fmt.Errorf("parse processing member UUID: %w", err)
-	}
 	processing.Job.ID = parsedJobID
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
-	processing.MemberID = parsedMemberID
+	processing.MemberID = core.MemberID(memberID)
 	return processing, nil
 }
 

@@ -22,7 +22,7 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
 	var runnerPool string
 	if err := row.Scan(&processing.Job.ID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
-		&runnerPool, &processing.MemberID); err != nil {
+		&runnerPool, &processing.MemberID, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
 	}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)

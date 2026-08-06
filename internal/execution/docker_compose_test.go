@@ -147,6 +147,7 @@ type recordingDockerTransport struct {
 	startErr        error
 	listOutput      string
 	listErr         error
+	listCalls       int
 	removedID       string
 	removeErr       error
 	validatedConfig providerdocker.ComposeConfig
@@ -163,6 +164,7 @@ func (transport *recordingDockerTransport) StartComposeRunner(
 }
 
 func (transport *recordingDockerTransport) ListComposeRunners(context.Context, string) (string, error) {
+	transport.listCalls++
 	return transport.listOutput, transport.listErr
 }
 

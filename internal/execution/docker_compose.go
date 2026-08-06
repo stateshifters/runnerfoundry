@@ -11,6 +11,10 @@ type DockerComposeProvider struct {
 	provider providerdocker.ComposeProvider
 }
 
+func (provider DockerComposeProvider) runnerInventoryIdentity() string {
+	return "docker-compose"
+}
+
 func NewDockerComposeProvider(
 	transport providerdocker.CommandRunner,
 	config providerdocker.ComposeConfig,

@@ -23,7 +23,7 @@ type RegistrationStore interface {
 }
 
 type MemberRegistry interface {
-	// PublishMemberState atomically renews the member lease and replaces its complete
+	// PublishMemberState atomically renews the member heartbeat and replaces its complete
 	// Runner Pool capacity snapshot. Omitted and non-positive capacities are withdrawn.
 	PublishMemberState(
 		ctx context.Context,
@@ -31,10 +31,8 @@ type MemberRegistry interface {
 		heartbeatAt time.Time,
 		capacities []core.RunnerPoolCapacity,
 	) error
-	ListLiveMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
-	ListExpiredMembers(ctx context.Context, cutoff time.Time) ([]core.MemberID, error)
 	CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error)
-	ExpireMember(ctx context.Context, memberID core.MemberID) error
+	WithdrawMemberCapacity(ctx context.Context, memberID core.MemberID) error
 }
 
 type RunnerPoolCapacityStore interface {

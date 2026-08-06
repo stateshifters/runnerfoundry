@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/meza/RunnerFoundry/internal/cluster"
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -58,7 +58,7 @@ var (
 	closeProductionPool        = (*pgxpool.Pool).Close
 	tryProductionLeader        = (*cluster.Store).TryLeader
 	buildProductionProviderSet = buildProductionProviders
-	productionMemberIdentifier = uuid.NewRandom
+	productionReadHostname     = os.Hostname
 )
 
 func buildProductionGeneration(
@@ -72,11 +72,13 @@ func buildProductionGeneration(
 	if err != nil {
 		return nil, err
 	}
-	providers, err := buildProductionProviderSet(ctx, configured)
+	providers, inventory, err := buildProductionProviderSet(ctx, configured)
 	if err != nil {
 		return nil, err
 	}
-	return buildTimedProductionGeneration(configured, state, processGate, report, manager, providers, state.member)
+	return buildTimedProductionGeneration(
+		configured, state, processGate, report, manager, providers, inventory, state.member,
+	)
 }
 
 func buildProductionGitHubManager(configured config.Config, store unifiedStore) (*githubsource.Manager, error) {
@@ -117,12 +119,13 @@ func buildTimedProductionGeneration(
 	report func(error),
 	manager *githubsource.Manager,
 	providers map[core.RunnerPool]execution.ExecutionProvider,
+	inventory execution.RunnerInventory,
 	member core.MemberID,
 ) (*unifiedGeneration, error) {
 	operatingSystemTicker := newProductionTicker(runtimeCycleInterval)
 	ticker := productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{
-		store: state.store, manager: manager, member: member, providers: providers,
+		store: state.store, manager: manager, member: member, providers: providers, inventory: inventory,
 		leadership: state.newLeadership(), currentTime: productionCurrentTime, memberTTL: runtimeMemberTTL,
 		ticker: ticker, report: report,
 		processGate: processGate,
@@ -155,9 +158,9 @@ func openProductionState(
 	ctx context.Context,
 	configured config.Config,
 ) (*productionState, error) {
-	member, err := productionMemberIdentifier()
+	member, err := productionMemberIdentity(productionReadHostname)
 	if err != nil {
-		return nil, fmt.Errorf("generate member identity: %w", err)
+		return nil, err
 	}
 	var state *productionState
 	if configured.State.Postgres == nil {
@@ -170,6 +173,21 @@ func openProductionState(
 	}
 	state.member = member
 	return state, nil
+}
+
+func productionMemberIdentity(readHostname func() (string, error)) (core.MemberID, error) {
+	if readHostname == nil {
+		return "", errors.New("member hostname reader is required")
+	}
+	hostname, err := readHostname()
+	if err != nil {
+		return "", fmt.Errorf("read member hostname: %w", err)
+	}
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return "", errors.New("member hostname is empty")
+	}
+	return core.MemberID(hostname), nil
 }
 
 func openProductionSQLiteState(ctx context.Context, path string) (*productionState, error) {
@@ -209,7 +227,7 @@ func openProductionPostgreSQLState(ctx context.Context, configured postgresconfi
 func buildProductionProviders(
 	ctx context.Context,
 	configured config.Config,
-) (map[core.RunnerPool]execution.ExecutionProvider, error) {
+) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
 		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
 		readTemplate: productionReadFile,
@@ -220,14 +238,17 @@ func buildConfiguredProviders(
 	ctx context.Context,
 	configured config.Config,
 	dependencies executionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, error) {
+) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 	providers := make(map[core.RunnerPool]execution.ExecutionProvider, len(configured.ScaleSets))
+	inventories := make([]execution.RunnerInventory, 0, len(configured.ScaleSets))
 	for _, scaleSet := range configured.ScaleSets {
 		provider, err := buildExecutionProvider(ctx, scaleSet, dependencies)
 		if err != nil {
-			return nil, err
+			return nil, execution.AggregateRunnerInventory{}, err
 		}
 		providers[core.RunnerPool(scaleSet.Name)] = provider
+		inventories = append(inventories, provider)
 	}
-	return providers, nil
+	inventory := execution.NewAggregateRunnerInventory(inventories...)
+	return providers, inventory, nil
 }

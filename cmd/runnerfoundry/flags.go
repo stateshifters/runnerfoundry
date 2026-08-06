@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+
+	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
 type migrationAction string
@@ -22,17 +24,34 @@ type migrationRequest struct {
 	target     int32
 }
 
-func parseConfigPath(args []string, output io.Writer) (string, error) {
+type daemonRequest struct {
+	configPath         string
+	activeRunnerPolicy daemon.ActiveRunnerPolicy
+}
+
+func parseDaemonRequest(args []string, output io.Writer) (daemonRequest, error) {
 	flags := flag.NewFlagSet("runnerfoundry", flag.ContinueOnError)
 	flags.SetOutput(output)
 	configPath := flags.String("config", "", "path to scaler YAML config")
+	activeRunnerPolicy := flags.String(
+		"active-runner-policy",
+		string(daemon.LeaveActiveRunners),
+		"action for active runners during shutdown or incompatible reload: leave or terminate",
+	)
 	if err := flags.Parse(args); err != nil {
-		return "", fmt.Errorf("parse flags: %w", err)
+		return daemonRequest{}, fmt.Errorf("parse flags: %w", err)
 	}
 	if *configPath == "" {
-		return "", errors.New("--config is required")
+		return daemonRequest{}, errors.New("--config is required")
 	}
-	return *configPath, nil
+	policy := daemon.ActiveRunnerPolicy(*activeRunnerPolicy)
+	if policy != daemon.LeaveActiveRunners && policy != daemon.TerminateActiveRunners {
+		return daemonRequest{}, errors.New("active runner policy must be leave or terminate")
+	}
+	return daemonRequest{
+		configPath:         *configPath,
+		activeRunnerPolicy: policy,
+	}, nil
 }
 
 func parseMigrationRequest(args []string, output io.Writer) (migrationRequest, error) {

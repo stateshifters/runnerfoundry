@@ -2,12 +2,23 @@ package execution
 
 import "context"
 
-// ExecutionProvider owns the lifecycle of ephemeral runner environments.
-type ExecutionProvider interface {
+// RunnerLauncher validates and starts ephemeral runner environments.
+type RunnerLauncher interface {
 	Validate(ctx context.Context) error
 	Start(ctx context.Context, request StartRequest) error
+}
+
+// RunnerInventory observes and destroys ephemeral runner environments.
+type RunnerInventory interface {
 	Inspect(ctx context.Context, runnerPool string) ([]RunnerInstance, error)
 	Destroy(ctx context.Context, instance RunnerInstance) error
+}
+
+// ExecutionProvider combines the launch and inventory boundaries implemented by
+// a configured provider.
+type ExecutionProvider interface {
+	RunnerLauncher
+	RunnerInventory
 }
 
 // Bootstrap is source-owned runner initialization data. Execution providers
@@ -38,4 +49,9 @@ type RunnerInstance struct {
 	ID         string
 	RunnerName string
 	State      RunnerState
+	origin     *runnerInventoryOrigin
+}
+
+type runnerInventoryOrigin struct {
+	inventory RunnerInventory
 }
