@@ -314,9 +314,10 @@ RunnerFoundry passes the JIT configuration in an SMBIOS type 11 value named `run
 The guest must:
 
 1. read the `runnerfoundry.jit` value without logging it;
-2. start an unregistered GitHub Actions runner once with that JIT configuration;
-3. remove transient runner and work data; and
-4. shut down after the attempt.
+2. expose that value only to the runner process as `ACTIONS_RUNNER_INPUT_JITCONFIG`, inherited through the child environment and absent from command-line arguments;
+3. start the unregistered GitHub Actions runner once;
+4. remove transient runner and work data; and
+5. shut down after the attempt.
 
 Optional examples are available for [Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows Server](examples/libvirt-windows-runner/README.md).
 

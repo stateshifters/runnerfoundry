@@ -4,29 +4,52 @@ set -euo pipefail
 readonly template='/opt/actions-runner-template'
 readonly runtime='/home/runner/actions-runner'
 
+cleanup_runtime() {
+  rm -rf -- "$runtime"
+}
+
+power_off() {
+  systemctl poweroff --no-block
+}
+
 finish() {
-  status=$?
+  local status="$1"
   trap - EXIT
   set +e
-  rm -rf -- "$runtime"
-  systemctl poweroff --no-block
-  exit "$status"
+  cleanup_runtime
+  power_off
+  return "$status"
 }
-trap finish EXIT
 
-jit="$({
+read_jit_configuration() {
   dmidecode --type 11 |
     sed -n 's/^[[:space:]]*String [0-9][0-9]*: runnerfoundry\.jit=//p' |
     head -n 1
-} || true)"
+}
 
-if [[ -z "$jit" || ! -x "$template/run.sh" ]]; then
-  exit 1
+run_runner() {
+  local jit="$1"
+  ACTIONS_RUNNER_INPUT_JITCONFIG="$jit" runuser --user runner -- "$runtime/run.sh"
+}
+
+main() {
+  local jit
+  trap 'status=$?; finish "$status"; exit "$status"' EXIT
+
+  jit="$({ read_jit_configuration; } || true)"
+
+  if [[ -z "$jit" || ! -x "$template/run.sh" ]]; then
+    return 1
+  fi
+
+  cleanup_runtime
+  install --directory --owner=runner --group=runner --mode=0755 "$runtime"
+  cp -a "$template/." "$runtime/"
+  chown -R runner:runner "$runtime"
+
+  run_runner "$jit"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
 fi
-
-rm -rf -- "$runtime"
-install --directory --owner=runner --group=runner --mode=0755 "$runtime"
-cp -a "$template/." "$runtime/"
-chown -R runner:runner "$runtime"
-
-runuser --user runner -- "$runtime/run.sh" --jitconfig "$jit"

@@ -3,6 +3,7 @@ build/
 dist/
 coverage
 coverage.out
+hs_err_pid*.log
 .tmp/
 examples/libvirt-ubuntu-runner/output/
 examples/libvirt-ubuntu-runner/packer-key*

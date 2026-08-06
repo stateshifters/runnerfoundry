@@ -16,6 +16,12 @@ packer build -var "ssh_private_key_file=$PWD/packer-key" .
 rm -f packer-key packer-key.pub
 ```
 
+The launcher has a hermetic test that does not read firmware, create files, start a runner, or power off the host:
+
+```sh
+bash runnerfoundry-jit-launcher.test.sh
+```
+
 Install the image and domain template at the paths used by `domain.xml`:
 
 ```sh
@@ -38,4 +44,4 @@ scale_sets:
 
 The example XML uses EFI firmware auto-selection, a transient qcow2 disk, and an active libvirt network named `default`. It does not prescribe a libvirt/QEMU version: the target host must support those XML features. Host DAC, ACL, SELinux, or AppArmor policy must allow the libvirt QEMU process to traverse the image directory and read the qcow2 file; readability by the `runnerfoundry` service account alone is not sufficient.
 
-The guest reads `runnerfoundry.jit=` from SMBIOS type 11, runs the unregistered runner once, removes its runtime directory, and powers off. The transient disk discards guest writes when the domain ends; the backing image remains operator-owned and must not be replaced while domains are using it. Add any tools required by your workflows to `provision.sh`.
+The guest reads `runnerfoundry.jit=` from SMBIOS type 11 without logging it. The launcher supplies the value only in the runner child's `ACTIONS_RUNNER_INPUT_JITCONFIG` environment variable, never in its command-line arguments. It runs the unregistered runner once, removes its runtime directory, and powers off. The transient disk discards guest writes when the domain ends; the backing image remains operator-owned and must not be replaced while domains are using it. Add any tools required by your workflows to `provision.sh`.

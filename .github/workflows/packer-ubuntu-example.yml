@@ -58,6 +58,9 @@ jobs:
       - name: Prepare build key
         run: ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/packer-key"
 
+      - name: Test JIT launcher
+        run: bash examples/libvirt-ubuntu-runner/runnerfoundry-jit-launcher.test.sh
+
       - name: Initialize Packer
         run: packer init examples/libvirt-ubuntu-runner
 
