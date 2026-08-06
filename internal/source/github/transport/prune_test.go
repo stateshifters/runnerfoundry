@@ -22,7 +22,10 @@ func TestPruneRunnerPoolsDeletesOnlyAbsentRunnerFoundryRegistrations(t *testing.
 		registry:      registry,
 	}
 
-	err := client.PruneRunnerPools(context.Background(), "default", []string{"configured"})
+	err := client.PruneRunnerPools(context.Background(), "default", []string{"configured"}, []OwnedRunnerPool{
+		{ID: 1, Name: "configured", RunnerGroupID: 17},
+		{ID: 2, Name: "stale", RunnerGroupID: 17},
+	})
 	if err != nil {
 		t.Fatalf("prune runner pools: %v", err)
 	}
@@ -63,7 +66,9 @@ func TestPruneRunnerPoolsReportsConfigurationAndRegistryFailures(t *testing.T) {
 		{registrations: &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}}, registry: &registryAPIFake{scaleSets: []upstream.RunnerScaleSet{owned}, deleteErr: expectedErr}},
 	}
 	for index, client := range tests {
-		if err := client.PruneRunnerPools(context.Background(), "default", nil); err == nil {
+		if err := client.PruneRunnerPools(context.Background(), "default", nil, []OwnedRunnerPool{
+			{ID: 2, Name: "stale", RunnerGroupID: 17},
+		}); err == nil {
 			t.Fatalf("case %d succeeded", index)
 		}
 	}

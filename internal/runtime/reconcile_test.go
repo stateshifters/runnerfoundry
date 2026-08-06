@@ -3,14 +3,159 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
 	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
+
+func TestReconcilePoolRecoversOnlyExpiredClaimsWithEndpointProof(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	endpointID := core.InventoryEndpointID("test:endpoint")
+	tests := []struct {
+		name        string
+		claimedAt   time.Time
+		endpointID  core.InventoryEndpointID
+		started     bool
+		wantRecover bool
+	}{
+		{name: "claim younger than lease is retained", claimedAt: now.Add(-5*time.Minute + time.Nanosecond), endpointID: endpointID},
+		{name: "claim at lease boundary is recovered", claimedAt: now.Add(-5 * time.Minute), endpointID: endpointID, wantRecover: true},
+		{name: "unknown endpoint is retained", claimedAt: now.Add(-6 * time.Minute), endpointID: "unknown"},
+		{name: "delayed start is never recovered", claimedAt: now.Add(-6 * time.Minute), endpointID: endpointID, started: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, recovered, err := recoveryDecision(now, test.claimedAt, test.endpointID, test.started)
+			if err != nil || recovered != test.wantRecover {
+				t.Fatalf("ReconcilePool() = (%#v, %v), recovered=%t", result, err, recovered)
+			}
+		})
+	}
+}
+
+func recoveryDecision(
+	now time.Time,
+	claimedAt time.Time,
+	endpointID core.InventoryEndpointID,
+	started bool,
+) (runtimeengine.PoolReconciliation, bool, error) {
+	recovered := false
+	processing := core.ProcessingJob{Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, ClaimedAt: claimedAt,
+		InventoryEndpointID: endpointID, RunnerStarted: started}
+	store := &jobStoreFake{
+		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+			return []core.ProcessingJob{processing}, nil
+		},
+		recover: func(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
+			recovered = true
+			return core.TransitionResult{Applied: true}, nil
+		},
+	}
+	provider := &providerFake{}
+	orchestrator := runtimeengine.NewOrchestrator(
+		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
+	)
+	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
+	if err != nil {
+		return result, recovered, fmt.Errorf("reconcile recovery decision: %w", err)
+	}
+	return result, recovered, nil
+}
+
+func TestReconcilePoolDestroysExpiredRunnerBeforeRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	events := make([]string, 0, 2)
+	orchestrator := newExpiredRecoveryOrchestrator(now, &events, nil, nil, nil)
+	if _, err := orchestrator.ReconcilePool(context.Background(), "linux"); err != nil {
+		t.Fatalf("ReconcilePool() error = %v", err)
+	}
+	if strings.Join(events, ",") != "destroy,recover" {
+		t.Fatalf("events = %v, want destroy then recover", events)
+	}
+}
+
+func TestReconcilePoolRetainsExpiredProcessingWhenRunnerCleanupFails(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	wantErr := errors.New("destroy failed")
+	recovered := false
+	orchestrator := newExpiredRecoveryOrchestrator(now, nil, wantErr, nil, &recovered)
+
+	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
+	assertReconciliationError(t, result, err, wantErr, 0, 0)
+	if result.RemainingProcessing != 1 || recovered {
+		t.Fatalf("ReconcilePool() = (%#v, %v), recovered=%t", result, err, recovered)
+	}
+}
+
+func TestReconcilePoolReportsExpiredProcessingRecoveryFailureAfterCleanup(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	jobID := uuid.New()
+	wantErr := errors.New("recovery failed")
+	processing := core.ProcessingJob{
+		Job: core.Job{ID: jobID, RunnerPool: "linux"}, ClaimedAt: now.Add(-5 * time.Minute),
+		InventoryEndpointID: "test:endpoint",
+	}
+	store := &jobStoreFake{
+		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+			return []core.ProcessingJob{processing}, nil
+		},
+		recover: func(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
+			return core.TransitionResult{}, wantErr
+		},
+	}
+	provider := &providerFake{
+		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+			return []execution.RunnerInstance{{
+				ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(), RunnerPool: "linux",
+			}}, nil
+		},
+	}
+	orchestrator := runtimeengine.NewOrchestrator(
+		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
+	)
+
+	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
+	assertReconciliationError(t, result, err, wantErr, 1, 0)
+	if result.RemainingProcessing != 1 {
+		t.Fatalf("remaining processing = %d, want 1", result.RemainingProcessing)
+	}
+}
+
+func TestReconcilePoolRetainsExpiredProcessingWhenRecoveryTransitionDoesNotApply(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	jobID := uuid.New()
+	processing := core.ProcessingJob{
+		Job:       core.Job{ID: jobID, RunnerPool: "linux", EnqueuedAt: now.Add(-time.Hour)},
+		ClaimedAt: now.Add(-5 * time.Minute), InventoryEndpointID: "test:endpoint",
+	}
+	store := &jobStoreFake{
+		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+			return []core.ProcessingJob{processing}, nil
+		},
+		recover: func(_ context.Context, recovered core.ProcessingJob) (core.TransitionResult, error) {
+			if recovered.Job.EnqueuedAt != now {
+				t.Fatalf("recovered enqueue time = %v, want %v", recovered.Job.EnqueuedAt, now)
+			}
+			return core.TransitionResult{Applied: false}, nil
+		},
+	}
+	provider := &providerFake{}
+	orchestrator := runtimeengine.NewOrchestrator(
+		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
+	)
+
+	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
+	assertReconciliation(t, result, err, 0, 0)
+	if result.RemainingProcessing != 1 {
+		t.Fatalf("remaining processing = %d, want 1", result.RemainingProcessing)
+	}
+}
 
 func TestReconciliationUsesMemberInventoryInsteadOfTheLaunchProvider(t *testing.T) {
 	jobID := uuid.New()

@@ -31,8 +31,7 @@ const availableCapacitySQL = `SELECT
 	), (
 		SELECT COUNT(*)
 		FROM public.runnerfoundry_processing_jobs processing
-		JOIN public.runnerfoundry_members members ON members.member_id = processing.member_id
-		WHERE processing.runner_pool = $1 AND members.heartbeat_at >= $2
+		WHERE processing.runner_pool = $1
 	)`
 
 func (store *Store) PublishMemberState(

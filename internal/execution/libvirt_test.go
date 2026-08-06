@@ -160,6 +160,44 @@ func TestLibvirtDestroyPreservesTransportFailure(t *testing.T) {
 	}
 }
 
+func TestLibvirtEndpointOperationsAreExplicit(t *testing.T) {
+	provider := NewLibvirtProvider(&recordingLibvirtTransport{}, libvirtTestConfig(), libvirtTemplate())
+	endpointID := InventoryEndpointID("libvirt:qemu:///system")
+	if provider.EndpointID() != endpointID || !provider.KnowsEndpoint(endpointID) || provider.KnowsEndpoint("unknown") {
+		t.Fatalf("endpoint identity = %q", provider.EndpointID())
+	}
+	if err := provider.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, err := provider.InspectEndpoint(context.Background(), endpointID); err != nil {
+		t.Fatalf("inspect endpoint: %v", err)
+	}
+	if _, err := provider.InspectEndpoint(context.Background(), "unknown"); err == nil {
+		t.Fatal("unknown endpoint accepted")
+	}
+}
+
+func TestLibvirtEndpointNormalizesConnectionURI(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+		want InventoryEndpointID
+	}{
+		{name: "scheme and host", uri: " QEMU+SSH://RUNNER.EXAMPLE/system ", want: "libvirt:qemu+ssh://runner.example/system"},
+		{name: "unparseable URI remains stable", uri: " qemu://host/%zz ", want: "libvirt:qemu://host/%zz"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configured := libvirtTestConfig()
+			configured.ConnectionURI = test.uri
+			provider := NewLibvirtProvider(&recordingLibvirtTransport{}, configured, []byte("<domain/>"))
+			if got := provider.EndpointID(); got != test.want {
+				t.Fatalf("endpoint ID = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 type recordingLibvirtTransport struct {
 	connectionURI       string
 	domainXML           string

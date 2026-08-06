@@ -18,6 +18,20 @@ const (
 	migrationVersionTable          = "public.runnerfoundry_schema_version"
 )
 
+const inspectSchemaCompatibilitySQL = `SELECT
+	to_regclass($1) IS NOT NULL,
+	to_regclass($2) IS NOT NULL OR EXISTS (
+		SELECT 1 FROM pg_catalog.pg_class objects
+		JOIN pg_catalog.pg_namespace namespaces ON namespaces.oid = objects.relnamespace
+		WHERE namespaces.nspname = 'public' AND objects.relname LIKE 'scaler\_%' ESCAPE '\')`
+
+var ErrIncompatibleSchema = errors.New("incompatible legacy RunnerFoundry schema")
+
+type IncompatibleSchemaError struct{}
+
+func (IncompatibleSchemaError) Error() string        { return ErrIncompatibleSchema.Error() }
+func (IncompatibleSchemaError) Is(target error) bool { return target == ErrIncompatibleSchema }
+
 //go:embed migrations/*.sql
 var embeddedMigrations embed.FS
 
@@ -45,6 +59,15 @@ func (store *Store) Migrate(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return safePostgreSQLError("read PostgreSQL migration version", err)
 	}
+	if current == 0 {
+		_, legacy, inspectErr := inspectSchemaCompatibility(ctx, connection)
+		if inspectErr != nil {
+			return safePostgreSQLError("inspect PostgreSQL schema compatibility", inspectErr)
+		}
+		if legacy {
+			return IncompatibleSchemaError{}
+		}
+	}
 	target := migrator.target
 	if current > target {
 		return errors.New("PostgreSQL schema is newer than this binary")
@@ -69,17 +92,29 @@ func (store *Store) MigrationStatus(ctx context.Context) (status MigrationStatus
 		return MigrationStatus{}, safePostgreSQLError("load PostgreSQL migrations", err)
 	}
 	status.Target = migrationTarget(catalog)
-	var versionTableExists bool
-	if err = connection.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, migrationVersionTable).Scan(&versionTableExists); err != nil {
+	versionTableExists, legacySchema, err := inspectSchemaCompatibility(ctx, connection)
+	if err != nil {
 		return MigrationStatus{}, safePostgreSQLError("inspect PostgreSQL migration metadata", err)
 	}
 	if !versionTableExists {
+		if legacySchema {
+			return MigrationStatus{}, IncompatibleSchemaError{}
+		}
 		return status, nil
 	}
 	if status.Current, err = store.inspectMigrationVersion(ctx, connection); err != nil {
 		return MigrationStatus{}, err
 	}
 	return status, nil
+}
+
+func inspectSchemaCompatibility(
+	ctx context.Context,
+	connection leaderConnection,
+) (versionTableExists bool, legacySchema bool, err error) {
+	err = connection.QueryRow(ctx, inspectSchemaCompatibilitySQL,
+		migrationVersionTable, "public.scaler_schema_version").Scan(&versionTableExists, &legacySchema)
+	return versionTableExists, legacySchema, err
 }
 
 func (store *Store) inspectMigrationVersion(ctx context.Context, connection leaderConnection) (int32, error) {
@@ -233,27 +268,18 @@ func closePostgreSQLConnection(ctx context.Context, connection postgreSQLCloser)
 }
 
 func safePostgreSQLError(operation string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s: %w", operation, context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", operation, context.DeadlineExceeded)
+	}
+	if errors.Is(err, ErrIncompatibleSchema) {
+		return err
+	}
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) && postgresError.Code != "" {
-		message := operation
-		if postgresError.Message != "" {
-			message += ": " + postgresError.Message
-		}
-		message += fmt.Sprintf(" (SQLSTATE %s)", postgresError.Code)
-		for _, diagnostic := range []struct {
-			label string
-			value string
-		}{
-			{label: "detail", value: postgresError.Detail},
-			{label: "hint", value: postgresError.Hint},
-			{label: "table", value: postgresError.TableName},
-			{label: "constraint", value: postgresError.ConstraintName},
-		} {
-			if diagnostic.value != "" {
-				message += "; " + diagnostic.label + ": " + diagnostic.value
-			}
-		}
-		return errors.New(message)
+		return fmt.Errorf("%s (SQLSTATE %s)", operation, postgresError.Code)
 	}
 	return errors.New(operation)
 }

@@ -3,7 +3,10 @@ package execution
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
+	"github.com/meza/RunnerFoundry/internal/core"
 	providerlibvirt "github.com/meza/RunnerFoundry/internal/provider/libvirt"
 )
 
@@ -11,8 +14,35 @@ type LibvirtProvider struct {
 	provider providerlibvirt.Provider
 }
 
-func (provider LibvirtProvider) runnerInventoryIdentity() string {
-	return "libvirt:" + provider.provider.Config.ConnectionURI
+func (provider LibvirtProvider) EndpointID() InventoryEndpointID {
+	return InventoryEndpointID("libvirt:" + normalizedLibvirtURI(provider.provider.Config.ConnectionURI))
+}
+
+func normalizedLibvirtURI(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String()
+}
+
+func (provider LibvirtProvider) KnowsEndpoint(endpointID InventoryEndpointID) bool {
+	return provider.EndpointID() == endpointID
+}
+
+func (provider LibvirtProvider) Refresh(ctx context.Context) error {
+	_, err := provider.Inspect(ctx)
+	return err
+}
+
+func (provider LibvirtProvider) InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error) {
+	if !provider.KnowsEndpoint(endpointID) {
+		return nil, fmt.Errorf("libvirt endpoint %q is not configured", endpointID)
+	}
+	return provider.Inspect(ctx)
 }
 
 func NewLibvirtProvider(
@@ -37,7 +67,7 @@ func (provider LibvirtProvider) Validate(ctx context.Context) error {
 
 func (provider LibvirtProvider) Start(ctx context.Context, request StartRequest) error {
 	err := provider.provider.Start(ctx, providerlibvirt.StartRequest{
-		ScaleSetName: request.RunnerPool,
+		ScaleSetName: string(request.RunnerPool),
 		RunnerName:   request.RunnerName,
 		JITConfig:    string(request.Bootstrap.content),
 	})
@@ -47,8 +77,8 @@ func (provider LibvirtProvider) Start(ctx context.Context, request StartRequest)
 	return nil
 }
 
-func (provider LibvirtProvider) Inspect(ctx context.Context, runnerPool string) ([]RunnerInstance, error) {
-	instances, err := provider.provider.List(ctx, runnerPool)
+func (provider LibvirtProvider) Inspect(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
+	instances, err := provider.provider.List(ctx, requestedPools...)
 	if err != nil {
 		return nil, fmt.Errorf("inspect libvirt runners: %w", err)
 	}
@@ -57,6 +87,7 @@ func (provider LibvirtProvider) Inspect(ctx context.Context, runnerPool string) 
 		translated = append(translated, RunnerInstance{
 			ID:         instance.ID,
 			RunnerName: instance.RunnerName,
+			RunnerPool: core.RunnerPool(instance.ScaleSetName),
 			State:      RunnerState(instance.State),
 		})
 	}

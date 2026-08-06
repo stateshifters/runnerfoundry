@@ -55,35 +55,53 @@ type Adapter struct {
 	LastMessageID int
 }
 
+// PollResult distinguishes receipt, durable handling, and acknowledgement.
+// A false Acknowledged value means the message remains eligible for redelivery.
+type PollResult struct {
+	Received     bool
+	Handled      bool
+	Acknowledged bool
+}
+
 // PollOnce receives and processes at most one GitHub message. It acknowledges
 // the message only after every translated event has been durably handled. The
 // returned boolean reports whether GitHub supplied a message, including when
 // durable handling or acknowledgement subsequently fails.
 func (adapter *Adapter) PollOnce(ctx context.Context, maxCapacity int) (bool, error) {
+	result, err := adapter.Poll(ctx, maxCapacity)
+	return result.Received, err
+}
+
+// Poll receives at most one message and advances each result flag only after
+// that protocol step succeeds. Calls on one Adapter must be serialized.
+func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, error) {
 	if adapter.Client == nil {
-		return false, errors.New("GitHub message client is required")
+		return PollResult{}, errors.New("GitHub message client is required")
 	}
 	if adapter.Handler == nil {
-		return false, errors.New("GitHub event handler is required")
+		return PollResult{}, errors.New("GitHub event handler is required")
 	}
 	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, maxCapacity)
 	if errors.Is(err, ErrNoMessage) {
-		return false, nil
+		return PollResult{}, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("receive GitHub scale-set message: %w", err)
+		return PollResult{}, fmt.Errorf("receive GitHub scale-set message: %w", err)
 	}
 	if message == nil {
-		return false, errors.New("GitHub message client returned nil without ErrNoMessage")
+		return PollResult{}, errors.New("GitHub message client returned nil without ErrNoMessage")
 	}
+	result := PollResult{Received: true}
 	if err := adapter.handleMessage(ctx, message); err != nil {
-		return true, err
+		return result, err
 	}
+	result.Handled = true
 	if err := adapter.Client.DeleteMessage(ctx, message.MessageID); err != nil {
-		return true, fmt.Errorf("acknowledge GitHub scale-set message %d: %w", message.MessageID, err)
+		return result, fmt.Errorf("acknowledge GitHub scale-set message %d: %w", message.MessageID, err)
 	}
 	adapter.LastMessageID = message.MessageID
-	return true, nil
+	result.Acknowledged = true
+	return result, nil
 }
 
 func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
@@ -108,21 +126,27 @@ func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.Run
 }
 
 func (adapter *Adapter) acquireAvailable(ctx context.Context, effects messageEffects) ([]identifiedRequest, error) {
-	if len(effects.AvailableIDs) == 0 {
+	if len(effects.Available) == 0 {
 		return nil, nil
 	}
-	acquiredIDs, err := adapter.Client.AcquireRequests(ctx, effects.AvailableIDs)
+	requestIDs := make([]int64, 0, len(effects.Available))
+	availableByID := make(map[int64]core.JobRequest, len(effects.Available))
+	for _, request := range effects.Available {
+		requestIDs = append(requestIDs, request.SourceID)
+		availableByID[request.SourceID] = request.JobRequest
+	}
+	acquiredIDs, err := adapter.Client.AcquireRequests(ctx, requestIDs)
 	if err != nil {
 		return nil, fmt.Errorf("acquire GitHub available requests: %w", err)
 	}
 	for _, requestID := range acquiredIDs {
-		if _, found := effects.Available[requestID]; !found {
+		if _, found := availableByID[requestID]; !found {
 			return nil, fmt.Errorf("GitHub acquired unknown request %d", requestID)
 		}
 	}
 	acquired := make([]identifiedRequest, 0, len(acquiredIDs))
 	for _, requestID := range acquiredIDs {
-		acquired = append(acquired, identifiedRequest{SourceID: requestID, JobRequest: effects.Available[requestID]})
+		acquired = append(acquired, identifiedRequest{SourceID: requestID, JobRequest: availableByID[requestID]})
 	}
 	return acquired, nil
 }
@@ -165,15 +189,14 @@ type identifiedObservation struct {
 }
 
 type messageEffects struct {
-	Available    map[int64]core.JobRequest
-	AvailableIDs []int64
-	Assigned     []identifiedRequest
-	Started      []identifiedObservation
-	Completed    []identifiedObservation
+	Available []identifiedRequest
+	Assigned  []identifiedRequest
+	Started   []identifiedObservation
+	Completed []identifiedObservation
 }
 
 func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage) (messageEffects, error) {
-	available, requestIDs, err := adapter.validateAvailable(message.JobAvailableMessages)
+	available, err := adapter.validateAvailable(message.JobAvailableMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
@@ -190,29 +213,30 @@ func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage)
 		return messageEffects{}, err
 	}
 	return messageEffects{
-		Available: available, AvailableIDs: requestIDs, Assigned: assigned, Started: started, Completed: completed,
+		Available: available, Assigned: assigned, Started: started, Completed: completed,
 	}, nil
 }
 
 func (adapter *Adapter) validateAvailable(
 	events []*upstream.JobAvailable,
-) (map[int64]core.JobRequest, []int64, error) {
-	available := make(map[int64]core.JobRequest, len(events))
-	requestIDs := make([]int64, 0, len(events))
+) ([]identifiedRequest, error) {
+	available := make([]identifiedRequest, 0, len(events))
+	seen := make(map[int64]struct{}, len(events))
 	for _, event := range events {
 		if event == nil {
-			return nil, nil, errors.New("GitHub JobAvailable message is nil")
+			return nil, errors.New("GitHub JobAvailable message is nil")
 		}
 		request, err := adapter.jobRequest(event.RunnerRequestID, event.QueueTime)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		if _, duplicate := available[event.RunnerRequestID]; !duplicate {
-			requestIDs = append(requestIDs, event.RunnerRequestID)
+		if _, duplicate := seen[event.RunnerRequestID]; duplicate {
+			continue
 		}
-		available[event.RunnerRequestID] = request
+		seen[event.RunnerRequestID] = struct{}{}
+		available = append(available, identifiedRequest{SourceID: event.RunnerRequestID, JobRequest: request})
 	}
-	return available, requestIDs, nil
+	return available, nil
 }
 
 func (adapter *Adapter) validateAssigned(events []*upstream.JobAssigned) ([]identifiedRequest, error) {

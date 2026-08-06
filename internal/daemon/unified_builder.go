@@ -18,7 +18,7 @@ type unifiedStore interface {
 	core.JobQueueStore
 	core.ProcessingJobStore
 	runtimeengine.MembershipStore
-	statecontract.RegistrationStore
+	githubsource.RegistrationRepository
 	statecontract.RunnerPoolCapacityStore
 }
 
@@ -75,6 +75,7 @@ func buildConfiguredEngine(
 	return NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
 		Membership: membership, Leadership: dependencies.leadership, Source: source, Pools: assembled.pools,
+		Inventory: dependencies.inventory,
 	})
 }
 

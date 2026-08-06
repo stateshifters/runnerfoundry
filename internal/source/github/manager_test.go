@@ -167,6 +167,17 @@ type registrationRepositoryFake struct {
 	deleteErr error
 }
 
+func (repository *registrationRepositoryFake) ReplaceRegistrations(_ context.Context, records []statecontract.Registration) error {
+	if repository.listErr != nil {
+		return repository.listErr
+	}
+	if repository.upsertErr != nil {
+		return repository.upsertErr
+	}
+	repository.records = append([]statecontract.Registration(nil), records...)
+	return repository.deleteErr
+}
+
 func (repository *registrationRepositoryFake) UpsertRegistration(
 	_ context.Context,
 	record statecontract.Registration,
@@ -282,7 +293,7 @@ func (client *managerClientFake) GenerateBootstrap(
 	return client.bootstrap, client.bootstrapErr
 }
 
-func (client *managerClientFake) PruneRunnerPools(context.Context, string, []string) error {
+func (client *managerClientFake) PruneRunnerPools(context.Context, string, []string, []transport.OwnedRunnerPool) error {
 	client.prunes++
 	return client.pruneErr
 }

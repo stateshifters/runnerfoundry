@@ -89,6 +89,24 @@ func TestInitializeAppliesFreshSchemaThroughInjectedDatabaseProtocol(t *testing.
 	}
 }
 
+func TestInitialSchemaRequestsRecoveryEvidenceFields(t *testing.T) {
+	var processingSchema string
+	for _, statement := range sqliteSchemaStatements {
+		if strings.Contains(statement, "CREATE TABLE IF NOT EXISTS runnerfoundry_processing_jobs") {
+			processingSchema = statement
+			break
+		}
+	}
+	for _, required := range []string{
+		"claimed_at INTEGER NOT NULL",
+		"inventory_endpoint_id TEXT NOT NULL CHECK(length(trim(inventory_endpoint_id)) > 0)",
+	} {
+		if !strings.Contains(processingSchema, required) {
+			t.Errorf("processing schema does not contain %q", required)
+		}
+	}
+}
+
 func TestInitializeAcceptsCurrentFreshSchemaVersion(t *testing.T) {
 	t.Parallel()
 	database, mock, err := sqlmock.New()

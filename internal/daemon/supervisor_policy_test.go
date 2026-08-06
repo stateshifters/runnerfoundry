@@ -22,7 +22,11 @@ func TestAffectedRunnerPoolsIncludesOnlyRemovedAndProviderTypeChanges(t *testing
 		{Name: "unchanged", Docker: docker}, {Name: "resized", MaxRunners: 9, Docker: docker},
 		{Name: "switched", Libvirt: libvirt}, {Name: "added", Docker: docker},
 	}}
-	if got, want := affectedRunnerPools(active, replacement), []core.RunnerPool{"removed", "switched"}; !reflect.DeepEqual(got, want) {
+	got, err := affectedRunnerPools(active, replacement)
+	if err != nil {
+		t.Fatalf("derive affected Runner Pools: %v", err)
+	}
+	if want := []core.RunnerPool{"removed", "switched"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("affected Runner Pools = %#v, want %#v", got, want)
 	}
 }
@@ -36,8 +40,8 @@ func TestTerminatePolicyActivatesReplacementAndRetainsIncompleteFinalizers(t *te
 	replacementFake := &fakeGeneration{}
 	replacement := managedWithPools(replacementFake, "unchanged")
 	removed.onTerminate = func() {
-		if replacementFake.activations != 0 {
-			t.Fatal("replacement activated before old-provider termination")
+		if replacementFake.activations != 1 {
+			t.Fatal("old-provider termination ran before replacement activation committed")
 		}
 	}
 	handoff := &generationHandoff{policy: TerminateActiveRunners, active: active}
@@ -85,8 +89,8 @@ func TestLeavePolicyStopsWithoutTerminatingPools(t *testing.T) {
 	oldGeneration := &fakeGeneration{finalizers: []runtimeFinalizer{finalizer}}
 	handoff := &generationHandoff{policy: LeaveActiveRunners, active: managedWithPools(oldGeneration, "removed")}
 	replacement := &fakeGeneration{onActivate: func() {
-		if oldGeneration.stops != 1 {
-			t.Fatal("replacement activated before old generation stopped")
+		if oldGeneration.deactivations != 1 || oldGeneration.stops != 0 {
+			t.Fatal("replacement activation did not occur between old deactivation and close")
 		}
 	}}
 	if err := replaceActiveGeneration(context.Background(), handoff, &managedGeneration{generation: replacement}); err != nil {
@@ -97,18 +101,20 @@ func TestLeavePolicyStopsWithoutTerminatingPools(t *testing.T) {
 	}
 }
 
-func TestReplacementActivationFailureIsReportedAfterOldStops(t *testing.T) {
+func TestReplacementActivationFailureRestoresOldGeneration(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("activate failed")
 	oldGeneration := &fakeGeneration{}
 	handoff := &generationHandoff{policy: LeaveActiveRunners, active: &managedGeneration{generation: oldGeneration}}
-	replacement := &managedGeneration{generation: &fakeGeneration{activateErr: wantErr}}
+	replacementFake := &fakeGeneration{activateErr: wantErr}
+	replacement := &managedGeneration{generation: replacementFake}
 	if err := replaceActiveGeneration(context.Background(), handoff, replacement); !errors.Is(err, wantErr) {
 		t.Fatalf("replacement activation error = %v", err)
 	}
-	if oldGeneration.stops != 1 || handoff.active != replacement {
-		t.Fatalf("old stops=%d active=%p replacement=%p", oldGeneration.stops, handoff.active, replacement)
+	if oldGeneration.stops != 0 || oldGeneration.deactivations != 1 || oldGeneration.activations != 1 ||
+		replacementFake.stops != 1 || handoff.active.generation != oldGeneration {
+		t.Fatalf("old=%+v replacement=%+v active=%p", oldGeneration, replacementFake, handoff.active)
 	}
 }
 

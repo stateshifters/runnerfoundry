@@ -142,6 +142,34 @@ func TestDockerComposeDestroyPreservesTransportFailure(t *testing.T) {
 	}
 }
 
+func TestDockerComposeEndpointOperationsAreExplicit(t *testing.T) {
+	provider := NewDockerComposeProvider(&recordingDockerTransport{}, providerdockerTestConfig(), "member-a")
+	endpointID := InventoryEndpointID("docker-compose:member-a?compose=compose.yaml&service=runner")
+	if provider.EndpointID() != endpointID || !provider.KnowsEndpoint(endpointID) ||
+		provider.KnowsEndpoint("docker-compose:member-b?compose=compose.yaml&service=runner") {
+		t.Fatalf("endpoint identity = %q", provider.EndpointID())
+	}
+	if err := provider.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, err := provider.InspectEndpoint(context.Background(), endpointID); err != nil {
+		t.Fatalf("inspect endpoint: %v", err)
+	}
+	if _, err := provider.InspectEndpoint(context.Background(), "docker-compose:member-b?compose=compose.yaml&service=runner"); err == nil {
+		t.Fatal("unknown endpoint accepted")
+	}
+}
+
+func TestDockerComposeEndpointDistinguishesMechanismsOnOneMember(t *testing.T) {
+	first := NewDockerComposeProvider(&recordingDockerTransport{}, providerdockerTestConfig(), " MEMBER-A ")
+	secondConfig := providerdockerTestConfig()
+	secondConfig.Service = "gpu-runner"
+	second := NewDockerComposeProvider(&recordingDockerTransport{}, secondConfig, "member-a")
+	if first.EndpointID() == second.EndpointID() {
+		t.Fatalf("distinct Docker mechanisms share endpoint %q", first.EndpointID())
+	}
+}
+
 type recordingDockerTransport struct {
 	startRequest    providerdocker.StartRequest
 	startErr        error

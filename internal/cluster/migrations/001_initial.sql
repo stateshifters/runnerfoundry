@@ -33,6 +33,8 @@ CREATE TABLE public.runnerfoundry_processing_jobs (
     runner_pool text NOT NULL CHECK (btrim(runner_pool) <> ''),
     member_id text NOT NULL
         REFERENCES public.runnerfoundry_members (member_id),
+    claimed_at timestamptz NOT NULL,
+    inventory_endpoint_id text NOT NULL CHECK (btrim(inventory_endpoint_id) <> ''),
     runner_started boolean NOT NULL DEFAULT false,
     UNIQUE (source_name, source_reference)
 );

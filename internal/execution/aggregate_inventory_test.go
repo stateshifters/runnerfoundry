@@ -151,6 +151,68 @@ func TestAggregateRunnerInventoryPreservesOriginDestroyFailure(t *testing.T) {
 	}
 }
 
+func TestAggregateRunnerInventoryRefreshesAndReusesCycleSnapshot(t *testing.T) {
+	backend := &runnerInventoryFake{identity: "docker:member", instances: []RunnerInstance{{
+		RunnerName: "runner-1", RunnerPool: "linux",
+	}}}
+	inventory := NewAggregateRunnerInventory(backend)
+	if err := inventory.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	first, err := inventory.Inspect(context.Background())
+	if err != nil || len(first) != 1 || first[0].EndpointID != "docker:member" || backend.inspections != 1 {
+		t.Fatalf("snapshot = (%#v, %v), inspections=%d", first, err, backend.inspections)
+	}
+	if _, err = inventory.Inspect(context.Background()); err != nil || backend.inspections != 1 {
+		t.Fatalf("cached inspection error=%v calls=%d", err, backend.inspections)
+	}
+	if inventory.EndpointID() != "aggregate" || !inventory.KnowsEndpoint("docker:member") ||
+		inventory.KnowsEndpoint("unknown") {
+		t.Fatal("aggregate endpoint identity is inconsistent")
+	}
+	instances, err := inventory.InspectEndpoint(context.Background(), "docker:member")
+	if err != nil || len(instances) != 1 || backend.inspections != 2 {
+		t.Fatalf("targeted inspection = (%#v, %v), calls=%d", instances, err, backend.inspections)
+	}
+	if _, err := inventory.InspectEndpoint(context.Background(), "unknown"); err == nil {
+		t.Fatal("unknown targeted endpoint was accepted")
+	}
+}
+
+func TestAggregateRunnerInventoryRefreshFailsClosed(t *testing.T) {
+	wantErr := errors.New("offline")
+	inventory := NewAggregateRunnerInventory(&runnerInventoryFake{identity: "docker:member", inspectErr: wantErr})
+	if err := inventory.Refresh(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+}
+
+func TestAggregateRunnerInventoryRefreshWithoutCacheReturnsInspectionFailure(t *testing.T) {
+	wantErr := errors.New("offline")
+	inventory := AggregateRunnerInventory{inventories: []RunnerInventory{
+		&runnerInventoryFake{identity: "docker:member", inspectErr: wantErr},
+	}}
+
+	if err := inventory.Refresh(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("Refresh() error = %v, want wrapped %v", err, wantErr)
+	}
+}
+
+func TestAggregateRunnerInventoryInspectEndpointReturnsBackendFailure(t *testing.T) {
+	wantErr := errors.New("offline")
+	inventory := NewAggregateRunnerInventory(
+		&runnerInventoryFake{identity: "docker:member", inspectErr: wantErr},
+	)
+
+	instances, err := inventory.InspectEndpoint(context.Background(), "docker:member")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("InspectEndpoint() error = %v, want wrapped %v", err, wantErr)
+	}
+	if instances != nil {
+		t.Fatalf("InspectEndpoint() instances = %#v, want nil", instances)
+	}
+}
+
 func providerdockerTestConfig() providerdocker.ComposeConfig {
 	return providerdocker.ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"}
 }
@@ -168,11 +230,24 @@ type runnerInventoryFake struct {
 	destroyErr  error
 }
 
-func (inventory *runnerInventoryFake) runnerInventoryIdentity() string {
-	return inventory.identity
+func (inventory *runnerInventoryFake) EndpointID() InventoryEndpointID {
+	return InventoryEndpointID(inventory.identity)
+}
+func (inventory *runnerInventoryFake) KnowsEndpoint(endpointID InventoryEndpointID) bool {
+	return inventory.EndpointID() == endpointID
+}
+func (inventory *runnerInventoryFake) Refresh(ctx context.Context) error {
+	_, err := inventory.Inspect(ctx)
+	return err
+}
+func (inventory *runnerInventoryFake) InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error) {
+	if !inventory.KnowsEndpoint(endpointID) {
+		return nil, errors.New("unknown endpoint")
+	}
+	return inventory.Inspect(ctx)
 }
 
-func (inventory *runnerInventoryFake) Inspect(context.Context, string) ([]RunnerInstance, error) {
+func (inventory *runnerInventoryFake) Inspect(context.Context, ...string) ([]RunnerInstance, error) {
 	inventory.inspections++
 	return append([]RunnerInstance(nil), inventory.instances...), inventory.inspectErr
 }

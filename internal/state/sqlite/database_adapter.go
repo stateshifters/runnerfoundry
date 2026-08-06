@@ -51,9 +51,9 @@ var sqliteSchemaStatements = []string{
 			AND substr(job_id, 19, 1) = '-' AND substr(job_id, 24, 1) = '-'
 			AND length(replace(job_id, '-', '')) = 32
 			AND replace(job_id, '-', '') NOT GLOB '*[^0-9a-f]*'),
-		source_name TEXT NOT NULL,
-		source_reference TEXT NOT NULL,
-		runner_pool TEXT NOT NULL,
+		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
+		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
+		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		enqueued_at INTEGER NOT NULL,
 		UNIQUE(source_name, source_reference)
 	)`,
@@ -61,10 +61,12 @@ var sqliteSchemaStatements = []string{
 		ON runnerfoundry_queued_jobs(runner_pool, enqueued_at)`,
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_processing_jobs (
 		job_id TEXT NOT NULL PRIMARY KEY,
-		source_name TEXT NOT NULL,
-		source_reference TEXT NOT NULL,
-		runner_pool TEXT NOT NULL,
+		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
+		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
+		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id),
+		claimed_at INTEGER NOT NULL,
+		inventory_endpoint_id TEXT NOT NULL CHECK(length(trim(inventory_endpoint_id)) > 0),
 		runner_started INTEGER NOT NULL DEFAULT 0 CHECK(runner_started IN (0, 1)),
 		UNIQUE(source_name, source_reference)
 	)`,
@@ -73,28 +75,28 @@ var sqliteSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_pool
 		ON runnerfoundry_processing_jobs(runner_pool)`,
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_source_tombstones (
-		source_name TEXT NOT NULL,
-		source_reference TEXT NOT NULL,
+		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
+		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
 		PRIMARY KEY(source_name, source_reference)
 	)`,
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_member_runner_pools (
 		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id) ON DELETE CASCADE,
-		runner_pool TEXT NOT NULL,
+		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		capacity INTEGER NOT NULL CHECK(capacity > 0),
 		PRIMARY KEY(member_id, runner_pool)
 	)`,
 	`CREATE TABLE IF NOT EXISTS runnerfoundry_github_registrations (
-		repository_url TEXT NOT NULL,
-		runner_pool TEXT NOT NULL,
-		installation_id INTEGER NOT NULL,
-		runner_group_id INTEGER NOT NULL,
-		scale_set_id INTEGER NOT NULL,
+		repository_url TEXT NOT NULL CHECK(length(trim(repository_url)) > 0),
+		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
+		installation_id INTEGER NOT NULL CHECK(installation_id > 0),
+		runner_group_id INTEGER NOT NULL CHECK(runner_group_id > 0),
+		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
 		PRIMARY KEY(repository_url, runner_pool)
 	)`,
 }
 
-const sqliteSchemaVersion = 103
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 103"
+const sqliteSchemaVersion = 104
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 104"
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)

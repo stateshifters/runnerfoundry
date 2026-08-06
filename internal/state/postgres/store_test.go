@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
@@ -215,14 +215,60 @@ func assignDestinations(destinations, values []any) error {
 		return fmt.Errorf("destination count %d does not match value count %d", len(destinations), len(values))
 	}
 	for index, value := range values {
-		destination := reflect.ValueOf(destinations[index])
-		source := reflect.ValueOf(value)
-		if destination.Kind() != reflect.Pointer || !source.Type().AssignableTo(destination.Elem().Type()) {
+		if !assignTestValue(destinations[index], value) {
 			return fmt.Errorf("cannot assign %T to %T", value, destinations[index])
 		}
-		destination.Elem().Set(source)
 	}
 	return nil
+}
+
+func assignTestValue(destination, value any) bool {
+	if assignScalarTestValue(destination, value) {
+		return true
+	}
+	switch target := destination.(type) {
+	case *time.Time:
+		assigned, ok := value.(time.Time)
+		*target = assigned
+		return ok
+	case *uuid.UUID:
+		assigned, ok := value.(uuid.UUID)
+		*target = assigned
+		return ok
+	case *core.MemberID:
+		assigned, ok := value.(core.MemberID)
+		*target = assigned
+		return ok
+	case *core.InventoryEndpointID:
+		assigned, ok := value.(core.InventoryEndpointID)
+		*target = assigned
+		return ok
+	default:
+		return false
+	}
+}
+
+func assignScalarTestValue(destination, value any) bool {
+	switch target := destination.(type) {
+	case *string:
+		assigned, ok := value.(string)
+		*target = assigned
+		return ok
+	case *int:
+		assigned, ok := value.(int)
+		*target = assigned
+		return ok
+	case *int64:
+		assigned, ok := value.(int64)
+		*target = assigned
+		return ok
+	case *bool:
+		assigned, ok := value.(bool)
+		*target = assigned
+		return ok
+	default:
+		return false
+	}
 }
 
 func fixedTime() time.Time {

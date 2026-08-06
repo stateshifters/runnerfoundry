@@ -7,7 +7,6 @@ import (
 
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
 type RunnerPoolConfig struct {
@@ -24,10 +23,6 @@ type RepositoryDiscoverer interface {
 	Discover(ctx context.Context) (transport.DiscoveryResult, error)
 }
 
-type RegistrationRepository interface {
-	statecontract.RegistrationStore
-}
-
 type ManagedSession interface {
 	MessageClient
 	Close(ctx context.Context) error
@@ -37,7 +32,7 @@ type ManagerClient struct {
 	EnsureRunnerPool  func(context.Context, string, string) (transport.Registration, error)
 	OpenSession       func(context.Context, transport.Registration, string) (ManagedSession, error)
 	GenerateBootstrap func(context.Context, transport.Registration, string) ([]byte, error)
-	PruneRunnerPools  func(context.Context, string, []string) error
+	PruneRunnerPools  func(context.Context, string, []string, []transport.OwnedRunnerPool) error
 }
 
 type managedBootstrapClient struct{ client ManagerClient }
@@ -67,7 +62,7 @@ func composeTransportManagerClient(
 	ensure func(context.Context, string, string) (transport.Registration, error),
 	open func(context.Context, transport.Registration, string) (*transport.Session, error),
 	generate func(context.Context, transport.Registration, string) ([]byte, error),
-	prune func(context.Context, string, []string) error,
+	prune func(context.Context, string, []string, []transport.OwnedRunnerPool) error,
 ) ManagerClient {
 	return ManagerClient{
 		EnsureRunnerPool:  wrapTransportEnsure(ensure),
@@ -114,10 +109,10 @@ func wrapTransportGenerate(
 }
 
 func wrapTransportPrune(
-	prune func(context.Context, string, []string) error,
-) func(context.Context, string, []string) error {
-	return func(ctx context.Context, group string, desired []string) error {
-		if err := prune(ctx, group, desired); err != nil {
+	prune func(context.Context, string, []string, []transport.OwnedRunnerPool) error,
+) func(context.Context, string, []string, []transport.OwnedRunnerPool) error {
+	return func(ctx context.Context, group string, desired []string, owned []transport.OwnedRunnerPool) error {
+		if err := prune(ctx, group, desired, owned); err != nil {
 			return fmt.Errorf("prune GitHub Runner Pools: %w", err)
 		}
 		return nil
@@ -167,6 +162,10 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 	if err := validateManagerConfig(config); err != nil {
 		return err
 	}
+	existing, err := manager.registrations.Registrations(ctx)
+	if err != nil {
+		return fmt.Errorf("load owned GitHub registrations: %w", err)
+	}
 	result, err := manager.discoverer.Discover(ctx)
 	if err != nil {
 		return fmt.Errorf("discover GitHub repositories: %w", err)
@@ -174,7 +173,7 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 	if failureErr := discoveryFailures(result.InstallationFailures); failureErr != nil {
 		return failureErr
 	}
-	records, err := manager.ensureRegistrations(ctx, result.Repositories, config)
+	records, err := manager.ensureRegistrations(ctx, result.Repositories, existing, config)
 	if err != nil {
 		return err
 	}
@@ -187,11 +186,12 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 func (manager *Manager) ensureRegistrations(
 	ctx context.Context,
 	repositories []transport.Repository,
+	existing []Registration,
 	config ManagerConfig,
-) ([]statecontract.Registration, error) {
-	records := make([]statecontract.Registration, 0, len(repositories)*len(config.RunnerPools))
+) ([]Registration, error) {
+	records := make([]Registration, 0, len(repositories)*len(config.RunnerPools))
 	for _, repository := range repositories {
-		repositoryRecords, err := manager.ensureRepository(ctx, repository, config)
+		repositoryRecords, err := manager.ensureRepository(ctx, repository, existing, config)
 		if err != nil {
 			return nil, err
 		}
@@ -203,55 +203,37 @@ func (manager *Manager) ensureRegistrations(
 func (manager *Manager) ensureRepository(
 	ctx context.Context,
 	repository transport.Repository,
+	existing []Registration,
 	config ManagerConfig,
-) ([]statecontract.Registration, error) {
+) ([]Registration, error) {
 	client, err := manager.factory(ctx, repository)
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub client for repository %q: %w", repository.URL, err)
 	}
-	records := make([]statecontract.Registration, 0, len(config.RunnerPools))
+	records := make([]Registration, 0, len(config.RunnerPools))
 	for _, runnerPool := range config.RunnerPools {
 		registration, ensureErr := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
 		if ensureErr != nil {
 			return nil, fmt.Errorf("ensure Runner Pool %q for repository %q: %w",
 				runnerPool.RunnerPool, repository.URL, ensureErr)
 		}
-		records = append(records, statecontract.Registration{
+		records = append(records, Registration{
 			RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
 			InstallationID: int64(repository.InstallationID), RunnerGroupID: int64(registration.RunnerGroupID),
 			ScaleSetID: int64(registration.ID),
 		})
 	}
 	if config.Prune {
-		if err := pruneRepository(ctx, client, config.RunnerPools); err != nil {
+		if err := pruneRepository(ctx, client, repository.URL, config.RunnerPools, existing); err != nil {
 			return nil, fmt.Errorf("prune repository %q: %w", repository.URL, err)
 		}
 	}
 	return records, nil
 }
 
-func (manager *Manager) replaceRegistrations(ctx context.Context, desired []statecontract.Registration) error {
-	existing, err := manager.registrations.Registrations(ctx)
-	if err != nil {
-		return fmt.Errorf("list persisted registrations: %w", err)
-	}
-	desiredKeys := make(map[routeKey]struct{}, len(desired))
-	for _, registration := range desired {
-		if err := manager.registrations.UpsertRegistration(ctx, registration); err != nil {
-			return fmt.Errorf("upsert registration for repository %q and Runner Pool %q: %w",
-				registration.RepositoryURL, registration.RunnerPool, err)
-		}
-		desiredKeys[routeKey{repository: registration.RepositoryURL, runnerPool: registration.RunnerPool}] = struct{}{}
-	}
-	for _, registration := range existing {
-		key := routeKey{repository: registration.RepositoryURL, runnerPool: registration.RunnerPool}
-		if _, retained := desiredKeys[key]; retained {
-			continue
-		}
-		if err := manager.registrations.DeleteRegistration(ctx, registration.RepositoryURL, registration.RunnerPool); err != nil {
-			return fmt.Errorf("delete registration for repository %q and Runner Pool %q: %w",
-				registration.RepositoryURL, registration.RunnerPool, err)
-		}
+func (manager *Manager) replaceRegistrations(ctx context.Context, desired []Registration) error {
+	if err := manager.registrations.ReplaceRegistrations(ctx, desired); err != nil {
+		return fmt.Errorf("replace GitHub registration snapshot: %w", err)
 	}
 	return nil
 }
@@ -278,13 +260,33 @@ func discoveryFailures(failures map[transport.InstallationID]error) error {
 	return joined
 }
 
-func pruneRepository(ctx context.Context, client ManagerClient, configs []RunnerPoolConfig) error {
+func pruneRepository(
+	ctx context.Context,
+	client ManagerClient,
+	repositoryURL string,
+	configs []RunnerPoolConfig,
+	existing []Registration,
+) error {
 	desiredByGroup := make(map[string][]string)
 	for _, config := range configs {
 		desiredByGroup[config.RunnerGroup] = append(desiredByGroup[config.RunnerGroup], string(config.RunnerPool))
 	}
+	ownedByGroup := make(map[int64][]transport.OwnedRunnerPool)
+	for _, registration := range existing {
+		if registration.RepositoryURL != repositoryURL {
+			continue
+		}
+		ownedByGroup[registration.RunnerGroupID] = append(ownedByGroup[registration.RunnerGroupID], transport.OwnedRunnerPool{
+			ID: int(registration.ScaleSetID), Name: string(registration.RunnerPool),
+			RunnerGroupID: int(registration.RunnerGroupID),
+		})
+	}
 	for runnerGroup, desired := range desiredByGroup {
-		if err := client.PruneRunnerPools(ctx, runnerGroup, desired); err != nil {
+		var owned []transport.OwnedRunnerPool
+		for _, registrations := range ownedByGroup {
+			owned = append(owned, registrations...)
+		}
+		if err := client.PruneRunnerPools(ctx, runnerGroup, desired, owned); err != nil {
 			return err
 		}
 	}
@@ -344,7 +346,7 @@ func (manager *Manager) OpenLeader(
 
 func (manager *Manager) openLeaderRecords(
 	ctx context.Context,
-	records []statecontract.Registration,
+	records []Registration,
 	owner string,
 	handler EventHandler,
 ) ([]ManagedSession, []*Adapter, error) {
@@ -363,7 +365,7 @@ func (manager *Manager) openLeaderRecords(
 
 func (manager *Manager) openLeaderRecord(
 	ctx context.Context,
-	record statecontract.Registration,
+	record Registration,
 	owner string,
 	handler EventHandler,
 ) (openedLeader, error) {
@@ -386,11 +388,11 @@ func (manager *Manager) openLeaderRecord(
 	}, nil
 }
 
-func repositoryFromRegistration(record statecontract.Registration) transport.Repository {
+func repositoryFromRegistration(record Registration) transport.Repository {
 	return transport.Repository{InstallationID: transport.InstallationID(record.InstallationID), URL: record.RepositoryURL}
 }
 
-func transportRegistration(record statecontract.Registration) transport.Registration {
+func transportRegistration(record Registration) transport.Registration {
 	return transport.Registration{
 		ID: int(record.ScaleSetID), Name: string(record.RunnerPool), RunnerGroupID: int(record.RunnerGroupID),
 	}

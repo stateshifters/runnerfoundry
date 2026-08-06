@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -73,7 +74,21 @@ func openProductionRuntime(ctx context.Context, configured config.Config) (*prod
 	}
 	runtime := &productionRuntime{logging: logging, state: state, processGate: &localLeadershipGate{}, firstBuild: true}
 	runtime.report = func(err error) {
-		logging.Logger().ErrorContext(ctx, "RunnerFoundry runtime error", "error", err)
+		if err == nil {
+			logging.Logger().InfoContext(ctx, "RunnerFoundry runtime operation recovered",
+				slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
+				slog.String("outcome", "recovered"))
+			return
+		}
+		category := "operation"
+		if errors.Is(err, context.Canceled) {
+			category = "canceled"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			category = "deadline"
+		}
+		logging.Logger().ErrorContext(ctx, "RunnerFoundry runtime operation failed",
+			slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
+			slog.String("outcome", "failed"), slog.String("error_category", category), slog.Any("error", err))
 	}
 	return runtime, nil
 }

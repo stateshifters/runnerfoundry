@@ -5,17 +5,13 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
-type Registration struct {
-	RepositoryURL  string
-	RunnerPool     core.RunnerPool
-	InstallationID int64
-	RunnerGroupID  int64
-	ScaleSetID     int64
-}
+type Registration = githubsource.Registration
 
 type RegistrationStore interface {
+	githubsource.RegistrationRepository
 	UpsertRegistration(ctx context.Context, registration Registration) error
 	Registration(ctx context.Context, repositoryURL string, runnerPool core.RunnerPool) (Registration, bool, error)
 	Registrations(ctx context.Context) ([]Registration, error)
@@ -37,6 +33,7 @@ type MemberRegistry interface {
 
 type RunnerPoolCapacityStore interface {
 	// AvailableRunnerPoolCapacity returns live member capacity minus queued jobs and
-	// processing jobs owned by live members, clamped to zero.
+	// every processing job, clamped to zero. Processing remains capacity-neutral
+	// while proof-based recovery moves it back to the queue.
 	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
 }

@@ -11,36 +11,38 @@ import (
 )
 
 type generation interface {
-	Start(ctx context.Context) error
-	Activate() error
-	Stop(ctx context.Context) error
+	Prepare(ctx context.Context) error
+	Activate(ctx context.Context) error
+	Deactivate(ctx context.Context) error
+	Close(ctx context.Context) error
 	Finalizers(runnerPools []core.RunnerPool) []runtimeFinalizer
 }
 
 type generationBuilder func(context.Context, config.Config) (generation, error)
 
-func affectedRunnerPools(active config.Config, replacement config.Config) []core.RunnerPool {
-	replacementProviders := make(map[core.RunnerPool]string, len(replacement.ScaleSets))
+func affectedRunnerPools(active config.Config, replacement config.Config) ([]core.RunnerPool, error) {
+	replacementProviders := make(map[core.RunnerPool]config.ProviderKind, len(replacement.ScaleSets))
 	for _, scaleSet := range replacement.ScaleSets {
-		replacementProviders[core.RunnerPool(scaleSet.Name)] = runnerPoolProviderType(scaleSet)
+		kind, err := scaleSet.ProviderKind()
+		if err != nil {
+			return nil, fmt.Errorf("derive replacement provider kind for Runner Pool %q: %w", scaleSet.Name, err)
+		}
+		replacementProviders[core.RunnerPool(scaleSet.Name)] = kind
 	}
 	affected := make([]core.RunnerPool, 0)
 	for _, scaleSet := range active.ScaleSets {
 		runnerPool := core.RunnerPool(scaleSet.Name)
 		replacementProvider, exists := replacementProviders[runnerPool]
-		if !exists || replacementProvider != runnerPoolProviderType(scaleSet) {
+		activeProvider, err := scaleSet.ProviderKind()
+		if err != nil {
+			return nil, fmt.Errorf("derive active provider kind for Runner Pool %q: %w", scaleSet.Name, err)
+		}
+		if !exists || replacementProvider != activeProvider {
 			affected = append(affected, runnerPool)
 		}
 	}
 	sort.Slice(affected, func(left int, right int) bool { return affected[left] < affected[right] })
-	return affected
-}
-
-func runnerPoolProviderType(scaleSet config.ScaleSetConfig) string {
-	if scaleSet.Docker != nil {
-		return "docker"
-	}
-	return "libvirt"
+	return affected, nil
 }
 
 func supervise(
@@ -90,8 +92,8 @@ func startInitialGeneration(
 	if err != nil {
 		return nil, err
 	}
-	if err = active.Activate(); err != nil {
-		return nil, errors.Join(fmt.Errorf("activate initial runtime: %w", err), active.Stop(context.WithoutCancel(ctx)))
+	if err = active.Activate(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("activate initial runtime: %w", err), active.Close(context.WithoutCancel(ctx)))
 	}
 	return active, nil
 }
@@ -110,8 +112,8 @@ func prepareGeneration(
 	if err != nil {
 		return nil, fmt.Errorf("build %s runtime: %w", phase, err)
 	}
-	if err = active.Start(ctx); err != nil {
-		return nil, errors.Join(fmt.Errorf("start %s runtime: %w", phase, err), active.Stop(context.WithoutCancel(ctx)))
+	if err = active.Prepare(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("prepare %s runtime: %w", phase, err), active.Close(context.WithoutCancel(ctx)))
 	}
 	return &managedGeneration{generation: active, configured: configured}, nil
 }
@@ -171,22 +173,49 @@ func replaceActiveGeneration(
 	handoff *generationHandoff,
 	replacement *managedGeneration,
 ) error {
-	if err := handoff.active.Stop(context.WithoutCancel(ctx)); err != nil {
-		return errors.Join(fmt.Errorf("stop replaced runtime: %w", err), replacement.Stop(context.WithoutCancel(ctx)))
-	}
 	previous := handoff.active
-	var terminateErr error
-	if handoff.policy == TerminateActiveRunners {
-		finalizers := append([]runtimeFinalizer(nil), handoff.retainedFinalizers...)
-		finalizers = append(finalizers, previous.Finalizers(affectedRunnerPools(previous.configured, replacement.configured))...)
-		handoff.retainedFinalizers, terminateErr = terminateFinalizers(context.WithoutCancel(ctx), finalizers)
+	if err := activateReplacement(ctx, previous, replacement); err != nil {
+		return err
 	}
 	handoff.active = replacement
-	activateErr := replacement.Activate()
-	if activateErr != nil {
-		activateErr = fmt.Errorf("activate replacement runtime: %w", activateErr)
+	terminateErr := terminateReplacedGeneration(ctx, handoff, previous, replacement)
+	return errors.Join(terminateErr, previous.Close(context.WithoutCancel(ctx)))
+}
+
+func activateReplacement(ctx context.Context, previous, replacement *managedGeneration) error {
+	if err := previous.Deactivate(context.WithoutCancel(ctx)); err != nil {
+		return errors.Join(fmt.Errorf("deactivate replaced runtime: %w", err), replacement.Close(context.WithoutCancel(ctx)))
 	}
-	return errors.Join(terminateErr, activateErr)
+	if err := replacement.Activate(ctx); err != nil {
+		return errors.Join(fmt.Errorf("activate replacement runtime: %w", err),
+			replacement.Close(context.WithoutCancel(ctx)), reactivatePrevious(ctx, previous))
+	}
+	return nil
+}
+
+func reactivatePrevious(ctx context.Context, previous *managedGeneration) error {
+	if err := previous.Activate(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("reactivate previous runtime: %w", err)
+	}
+	return nil
+}
+
+func terminateReplacedGeneration(
+	ctx context.Context,
+	handoff *generationHandoff,
+	previous, replacement *managedGeneration,
+) error {
+	if handoff.policy != TerminateActiveRunners {
+		return nil
+	}
+	affected, err := affectedRunnerPools(previous.configured, replacement.configured)
+	if err != nil {
+		return err
+	}
+	finalizers := append([]runtimeFinalizer(nil), handoff.retainedFinalizers...)
+	finalizers = append(finalizers, previous.Finalizers(affected)...)
+	handoff.retainedFinalizers, err = terminateFinalizers(context.WithoutCancel(ctx), finalizers)
+	return err
 }
 
 func finalizeSupervisor(
@@ -195,7 +224,7 @@ func finalizeSupervisor(
 	policy ActiveRunnerPolicy,
 	retainedFinalizers []runtimeFinalizer,
 ) error {
-	stopErr := active.Stop(ctx)
+	stopErr := active.Close(ctx)
 	if policy != TerminateActiveRunners {
 		return stopErr
 	}

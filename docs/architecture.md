@@ -36,15 +36,15 @@ A delayed `JobStarted` can race with a provisioning retry. If the matching reque
 
 The queue contains only jobs waiting to be picked up. FIFO ordering is local to each Runner Pool. A request for work selects the oldest queued job matching the requesting pool; jobs for other pools do not participate in that selection. Equal enqueue timestamps are equally eligible.
 
-Pickup atomically removes the selected job from the queue and creates a member-owned processing record. The record includes the stable member hostname and a durable `runner_started` boundary. It contains no workflow result or broader attempt-state machine.
+Pickup atomically removes the selected job from the queue and creates a processing record. The record includes the claiming member, claim time, exact inventory endpoint, and durable `runner_started` boundary. It contains no workflow result or broader attempt-state machine.
 
 The queue represents source demand only. RunnerFoundry does not manufacture jobs from capacity observations or create a second scheduling model.
 
 ## Execution boundary
 
-Execution providers supply ephemeral runner environments. Docker Compose and libvirt are the current providers. Launching uses the provider configured for the Runner Pool, while reconciliation uses one member-level aggregate of every provider inventory represented by the active configuration. The aggregate identifies runners by their deterministic `runnerfoundry-{job UUID}` name and carries cleanup routing only in the transient resource it returns; processing rows contain no provider identity.
+Execution providers supply ephemeral runner environments. Docker Compose and libvirt are the current providers. Launching uses the provider configured for the Runner Pool, while reconciliation uses one aggregate of every provider inventory represented by the active configuration. Docker endpoint identity includes the member hostname and normalized Compose mechanism; libvirt endpoint identity uses the normalized connection URI. Duplicate endpoints are queried once per maintenance cycle. Each observation includes its Runner Pool, and the cycle snapshot is partitioned for pool reconciliation and occupied-capacity calculation.
 
-Inventory is fail-closed: every represented backend must answer before RunnerFoundry treats a runner as absent. An error means the runner state is unknown and processing is retained. If an operator removes or changes an inventory endpoint, resources reachable only through the old endpoint are no longer RunnerFoundry's cleanup responsibility under `leave`; an unstarted job not visible in the active inventory can return to the queue.
+Inventory is fail-closed: every represented endpoint must answer before RunnerFoundry treats a runner as absent. An error means runner state is unknown and processing is retained. Failed provisioning performs a fresh inspection of the recorded endpoint before cleanup or absence confirmation. Removing an endpoint never turns invisibility into proof of absence; processing recorded against an unknown endpoint is retained for operator action.
 
 The provisioned runner communicates its normal workflow outcome directly to the Git source. Before runner acceptance, RunnerFoundry owns provisioning failures. After cleanup succeeds or resource absence is confirmed, it atomically moves the same unstarted job to the back of its Runner Pool queue and removes the processing record. A tombstone or concurrent runner-start observation prevents that retry. There is no retry count, delay, backoff, or timeout.
 
@@ -52,9 +52,9 @@ The provisioned runner communicates its normal workflow outcome directly to the 
 
 ## Member ownership boundary
 
-A member is identified by its trimmed operating-system hostname. Hostnames must be stable and unique within the cluster, and only one daemon may run for a hostname. Processing ownership is never reassigned to another hostname.
+A member is identified by its trimmed operating-system hostname. Hostnames must be stable and unique within the cluster, and only one daemon may run for a hostname. Ordinary processing remains member-local, but the leader may recover an unstarted claim after its fixed five-minute lease or clean terminal processing across members.
 
-Members heartbeat to advertise liveness. The 30-second cutoff is only a capacity liveness filter: a stale member contributes no capacity, but its member row, processing records, and provider resources are not expired or removed. When the daemon restarts on the same hostname, it republishes its heartbeat, loads its processing records, inventories deterministic Docker or libvirt resources, and resumes reconciliation.
+Members heartbeat to advertise liveness. The 30-second cutoff removes only advertised capacity. It does not authorize processing recovery. After five minutes, an unstarted, non-terminal claim is recoverable only when the leader can inspect its exact recorded endpoint and either destroy the deterministic runner or positively confirm absence. An unknown, unavailable, or incomplete endpoint retains processing. The guarded state transition loses to a concurrent `JobStarted` or terminal signal, and started jobs never return to the queue.
 
 ## Capacity boundary
 
@@ -62,9 +62,11 @@ Runner Pool registration and capacity publication are orthogonal to the job life
 
 The state store calculates one shared value for each Runner Pool:
 
-`available = max(0, live configured capacity - queued jobs - processing jobs owned by live members)`
+`available = max(0, live configured capacity - queued jobs - all processing jobs)`
 
 Moving a job from the queue into processing does not change availability. Cancelling queued work or removing completed processing releases capacity. Capacity queries observe current work but cannot create, claim, reorder, move, or remove it.
+
+GitHub discovery replaces its complete registration snapshot in one state transaction. Member routes are rebuilt only from a committed snapshot. Pruning considers only scale-set IDs previously persisted as RunnerFoundry-owned and rechecks ID, name, and runner group before deletion; labels and update settings are not ownership evidence.
 
 For GitHub, one leader owns repository discovery and message sessions. Each repository-scoped runner scale set representing a Runner Pool receives that pool's shared availability immediately before its message request. Repository requests run concurrently, while each session has at most one request in flight. After a message arrives, other requests for that pool are cancelled and restarted with fresh availability. Independent source requests can still observe the same pre-ingestion snapshot; RunnerFoundry does not add reservations or another scheduler to hide that external consistency limit.
 
@@ -74,11 +76,11 @@ The GitHub representation supports repositories installed under a personal accou
 
 The daemon-wide `--active-runner-policy=leave|terminate` option controls active resources during reload and graceful shutdown. It defaults to `leave` and is intentionally not part of YAML configuration, so a replacement configuration cannot choose how resources created by the previous generation are handled.
 
-Reload validates and prepares the replacement before stopping the active generation's claims and GitHub polls. A validation or preparation failure leaves the active generation running. Runner Pools whose provider type is unchanged preserve their processing. The policy applies only to pools removed from the replacement or changed to a different provider type.
+Reload validates and prepares the replacement without claiming work, then deactivates the old generation and activates the replacement. Activation acquires the local gate and completes one successful maintenance cycle before the replacement becomes active or `READY` is sent. If activation fails, the replacement and its prepared logging destination are closed or rolled back and the old generation is reactivated. The old generation is closed only after activation commits. Close timeouts leave unfinished resource cleanup retryable.
 
-With `leave`, the replacement is applied without explicitly destroying affected runners. Reconciliation then observes the provider-agnostic inventory defined by the replacement configuration. Visible running resources are retained. An unstarted job whose resource is confirmed absent returns to the queue, while started processing waits for GitHub's terminal message. Resources made invisible by an operator-removed endpoint are left for the operator to clean up.
+With `leave`, the replacement is applied without explicitly destroying affected runners. Reconciliation then observes the provider-agnostic inventory defined by the replacement configuration. Visible running resources are retained. An unstarted job whose recorded endpoint proves absence can return to the queue after the five-minute recovery lease, while started processing waits for GitHub's terminal message. Processing tied to an operator-removed endpoint is retained for operator action.
 
-With `terminate`, the old provider destroys affected resources. An unstarted job returns to the queue only after cleanup succeeds; a started job remains in processing until GitHub terminalizes it. Cleanup failure retains processing, but does not prevent the otherwise-valid replacement configuration from taking effect.
+With `terminate`, the old provider destroys affected resources after replacement activation commits. An unstarted job returns to the queue only after cleanup succeeds; a started job remains in processing until GitHub terminalizes it. Cleanup failure retains processing, but does not prevent the otherwise-valid replacement configuration from taking effect.
 
 On graceful shutdown, `leave` stops claims and polling, withdraws capacity, and preserves all runners and processing. `terminate` destroys owned resources, requeues successfully cleaned-up unstarted jobs, and leaves started jobs awaiting GitHub completion.
 
@@ -117,6 +119,8 @@ erDiagram
         text source_reference
         text runner_pool
         text member_id FK
+        timestamptz claimed_at
+        text inventory_endpoint_id
         boolean runner_started
     }
     RUNNERFOUNDRY_SOURCE_TOMBSTONES {

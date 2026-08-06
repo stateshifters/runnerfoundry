@@ -21,7 +21,7 @@ func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
-	if err := generation.Activate(); err != nil {
+	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	waitForCycle(t, cycles)
@@ -51,7 +51,7 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
-	if err := generation.Activate(); err != nil {
+	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	if pendingTicks := <-observedPendingTicks; pendingTicks != 1 {
@@ -85,7 +85,7 @@ func TestUnifiedGenerationReportsActivationBoundaryFailure(t *testing.T) {
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
-	if err := generation.Activate(); !errors.Is(err, wantErr) {
+	if err := generation.Activate(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("activation error = %v", err)
 	}
 	if err := generation.Stop(context.Background()); err != nil {
@@ -106,15 +106,17 @@ func TestUnifiedGenerationReportsCycleFailuresAndKeepsRunning(t *testing.T) {
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
-	if err := generation.Activate(); err != nil {
+	engine.cycleErr = nil
+	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
+	waitForCycle(t, cycles)
+	engine.cycleErr = cycleErr
+	ticker.ticks <- time.Time{}
 	waitForCycle(t, cycles)
 	if err := <-reports; !errors.Is(err, cycleErr) {
 		t.Fatalf("reported error = %v", err)
 	}
-	ticker.ticks <- time.Time{}
-	waitForCycle(t, cycles)
 	if err := generation.Stop(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestUnifiedGenerationClosesOwnedResourcesInReverseOrder(t *testing.T) {
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
-	if err := generation.Activate(); err != nil {
+	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	waitForCycle(t, cycles)
@@ -176,7 +178,7 @@ func TestGatedCycleEnginePreventsReloadGenerationOverlap(t *testing.T) {
 	assertNoTestError(t, active.Cycle(context.Background()), "cycle active generation")
 	assertTestError(t, replacement.Activate(), "activate overlapping replacement")
 	waitForCycle(t, activeCycles)
-	assertNoTestError(t, replacement.Cycle(context.Background()), "cycle overlapping replacement")
+	assertTestError(t, replacement.Cycle(context.Background()), "cycle overlapping replacement")
 	if len(replacementCycles) != 0 {
 		t.Fatal("replacement generation cycled before active generation closed")
 	}
@@ -212,15 +214,15 @@ func TestUnifiedGenerationRejectsInvalidLifecycleCalls(t *testing.T) {
 		&cycleEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil,
 		nil,
 	)
-	assertTestError(t, generation.Activate(), "activate before start")
+	assertTestError(t, generation.Activate(context.Background()), "activate before start")
 	assertNoTestError(t, generation.Start(context.Background()), "start generation")
-	assertNoTestError(t, generation.Activate(), "activate generation")
-	assertTestError(t, generation.Activate(), "activate twice")
+	assertNoTestError(t, generation.Activate(context.Background()), "activate generation")
+	assertTestError(t, generation.Activate(context.Background()), "activate twice")
 	waitForCycle(t, cycles)
 	assertTestError(t, generation.Start(context.Background()), "start twice")
 	assertNoTestError(t, generation.Stop(context.Background()), "stop generation")
 	assertTestError(t, generation.Start(context.Background()), "restart closed generation")
-	assertTestError(t, generation.Activate(), "activate closed generation")
+	assertTestError(t, generation.Activate(context.Background()), "activate closed generation")
 	assertNoTestError(t, generation.Stop(context.Background()), "stop generation twice")
 }
 
@@ -259,15 +261,19 @@ func TestUnifiedGenerationReportsCanceledWaitAndCloseFailures(t *testing.T) {
 	wantErr := errors.New("close failed")
 	block := make(chan struct{})
 	cycles := make(chan struct{}, 1)
-	engine := &cycleEngineFake{cycles: cycles, block: block, closeErr: wantErr}
-	generation := newUnifiedGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil,
+	engine := &cycleEngineFake{cycles: cycles, closeErr: wantErr}
+	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
+	generation := newUnifiedGeneration(engine, ticker, nil,
 		[]runtimeCloser{closerErrorFake{events: &[]string{}, err: wantErr}}, nil)
 	if err := generation.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := generation.Activate(); err != nil {
+	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	waitForCycle(t, cycles)
+	engine.block = block
+	ticker.ticks <- time.Time{}
 	waitForCycle(t, cycles)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -301,6 +307,9 @@ func (engine *activationObservationEngine) Cycle(context.Context) error {
 	return nil
 }
 
+func (*activationObservationEngine) Activate() error                  { return nil }
+func (*activationObservationEngine) Deactivate(context.Context) error { return nil }
+
 func (*activationObservationEngine) Close(context.Context) error { return nil }
 
 func (fake *cycleEngineFake) Cycle(context.Context) error {
@@ -310,6 +319,8 @@ func (fake *cycleEngineFake) Cycle(context.Context) error {
 	}
 	return fake.cycleErr
 }
+func (*cycleEngineFake) Activate() error                  { return nil }
+func (*cycleEngineFake) Deactivate(context.Context) error { return nil }
 func (fake *cycleEngineFake) Close(context.Context) error {
 	fake.closes++
 	if fake.closeEvents != nil {

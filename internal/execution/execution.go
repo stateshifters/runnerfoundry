@@ -1,17 +1,43 @@
 package execution
 
-import "context"
+import (
+	"context"
+
+	"github.com/meza/RunnerFoundry/internal/core"
+)
+
+// InventoryEndpointID identifies one concrete provider endpoint. It is stable
+// across configuration reloads so processing recovery can revisit the exact
+// endpoint that accepted a claim.
+type InventoryEndpointID = core.InventoryEndpointID
 
 // RunnerLauncher validates and starts ephemeral runner environments.
 type RunnerLauncher interface {
+	EndpointID() InventoryEndpointID
 	Validate(ctx context.Context) error
 	Start(ctx context.Context, request StartRequest) error
 }
 
 // RunnerInventory observes and destroys ephemeral runner environments.
-type RunnerInventory interface {
-	Inspect(ctx context.Context, runnerPool string) ([]RunnerInstance, error)
+// Refresh obtains one complete endpoint snapshot for a maintenance cycle;
+// Inspect partitions that snapshot without I/O. InspectEndpoint deliberately
+// obtains fresh endpoint-specific evidence for recovery. Implementations fail
+// closed when an endpoint is unavailable or returns an incomplete snapshot.
+type InventorySnapshot interface {
+	Refresh(ctx context.Context) error
+	Inspect(ctx context.Context, legacyRunnerPool ...string) ([]RunnerInstance, error)
+}
+
+type EndpointInventory interface {
+	EndpointID() InventoryEndpointID
+	InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error)
+	KnowsEndpoint(endpointID InventoryEndpointID) bool
 	Destroy(ctx context.Context, instance RunnerInstance) error
+}
+
+type RunnerInventory interface {
+	InventorySnapshot
+	EndpointInventory
 }
 
 // ExecutionProvider combines the launch and inventory boundaries implemented by
@@ -31,8 +57,11 @@ func NewBootstrap(content []byte) Bootstrap {
 	return Bootstrap{content: append([]byte(nil), content...)}
 }
 
+// StartRequest binds a runner to exactly one configured Runner Pool and
+// inventory endpoint. Bootstrap remains opaque to the execution provider.
 type StartRequest struct {
-	RunnerPool string
+	RunnerPool core.RunnerPool
+	EndpointID InventoryEndpointID
 	RunnerName string
 	Bootstrap  Bootstrap
 }
@@ -48,6 +77,8 @@ const (
 type RunnerInstance struct {
 	ID         string
 	RunnerName string
+	RunnerPool core.RunnerPool
+	EndpointID InventoryEndpointID
 	State      RunnerState
 	origin     *runnerInventoryOrigin
 }

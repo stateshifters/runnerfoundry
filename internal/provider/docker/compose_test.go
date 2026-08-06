@@ -86,6 +86,31 @@ func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
 	}
 }
 
+func TestListIgnoresContainersWithoutRunnerFoundryOwnership(t *testing.T) {
+	provider := ComposeProvider{
+		CommandRunner: &recordingCommandRunner{
+			output: `[
+{"ID":"unowned","Names":"unowned","State":"running","Labels":"com.example.kind=runner"},
+{"ID":"owned","Names":"owned","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=linux-1"}
+]`,
+		},
+	}
+
+	instances, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []RunnerInstance{{
+		ID:           "owned",
+		RunnerName:   "linux-1",
+		ScaleSetName: "linux",
+		State:        RunnerStateRunning,
+	}}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("List() instances = %#v, want %#v", instances, want)
+	}
+}
+
 func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
 	provider := ComposeProvider{
 		CommandRunner: &recordingCommandRunner{output: `{"ID":"1","Names":"runner-1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-1"}`},

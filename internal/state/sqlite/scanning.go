@@ -59,6 +59,42 @@ func scanProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) 
 	return jobs, nil
 }
 
+func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
+	var processing core.ProcessingJob
+	var jobID, runnerPool, memberID, endpointID string
+	var claimedAt int64
+	if err := row.Scan(&jobID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
+		&runnerPool, &memberID, &claimedAt, &endpointID, &processing.RunnerStarted,
+		&processing.SourceTerminal); err != nil {
+		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
+	}
+	parsedJobID, err := uuid.Parse(jobID)
+	if err != nil {
+		return core.ProcessingJob{}, fmt.Errorf("parse claimed processing job UUID: %w", err)
+	}
+	processing.Job.ID = parsedJobID
+	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
+	processing.MemberID = core.MemberID(memberID)
+	processing.ClaimedAt = time.Unix(0, claimedAt).UTC()
+	processing.InventoryEndpointID = core.InventoryEndpointID(endpointID)
+	return processing, nil
+}
+
+func scanClaimedProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) {
+	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
+	for rows.Next() {
+		job, err := scanClaimedProcessingJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed processing jobs: %w", err)
+	}
+	return jobs, nil
+}
+
 func rollback(ctx context.Context, transaction Transaction, open *bool, resultErr *error) {
 	if *open {
 		*resultErr = errors.Join(*resultErr, transaction.Rollback(context.WithoutCancel(ctx)))

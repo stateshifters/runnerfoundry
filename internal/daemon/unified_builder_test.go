@@ -39,7 +39,7 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	if err = generation.Start(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
-	if err = generation.Activate(); err != nil {
+	if err = generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	<-store.capacityPublished
@@ -182,7 +182,18 @@ type builderProviderFake struct{}
 
 func (builderProviderFake) Validate(context.Context) error                      { return nil }
 func (builderProviderFake) Start(context.Context, execution.StartRequest) error { return nil }
-func (builderProviderFake) Inspect(context.Context, string) ([]execution.RunnerInstance, error) {
+func (builderProviderFake) EndpointID() execution.InventoryEndpointID           { return "test:builder" }
+func (provider builderProviderFake) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	return provider.EndpointID() == endpointID
+}
+func (provider builderProviderFake) Refresh(ctx context.Context) error {
+	_, err := provider.Inspect(ctx)
+	return err
+}
+func (provider builderProviderFake) InspectEndpoint(ctx context.Context, _ execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
+	return provider.Inspect(ctx)
+}
+func (builderProviderFake) Inspect(context.Context, ...string) ([]execution.RunnerInstance, error) {
 	return nil, nil
 }
 func (builderProviderFake) Destroy(context.Context, execution.RunnerInstance) error { return nil }
@@ -205,19 +216,37 @@ func newBuilderStoreFake() *builderStoreFake {
 func (*builderStoreFake) Enqueue(context.Context, core.JobRequest) (core.Job, bool, error) {
 	return core.Job{}, false, nil
 }
+func (*builderStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+	return core.EnqueueResult{}, nil
+}
 func (store *builderStoreFake) TakeOldest(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 	return core.ProcessingJob{}, false, store.operationErr
+}
+func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.TakeResult, error) {
+	return core.TakeResult{}, store.operationErr
 }
 func (*builderStoreFake) TerminalizeSource(context.Context, core.SourceReference) error { return nil }
 func (*builderStoreFake) MarkRunnerStarted(context.Context, core.SourceReference) error { return nil }
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
+func (store *builderStoreFake) ProcessingByPool(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
+	return nil, store.operationErr
+}
 func (*builderStoreFake) RetryUnstartedProcessing(context.Context, core.JobID) (bool, error) {
 	return false, nil
 }
+func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.TransitionResult, error) {
+	return core.TransitionResult{}, nil
+}
+func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
+	return core.TransitionResult{}, nil
+}
 func (*builderStoreFake) RemoveTerminalProcessing(context.Context, core.JobID) (bool, error) {
 	return false, nil
+}
+func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TransitionResult, error) {
+	return core.TransitionResult{}, nil
 }
 
 func (store *builderStoreFake) PublishMemberState(
@@ -241,6 +270,10 @@ func (*builderStoreFake) AvailableRunnerPoolCapacity(context.Context, core.Runne
 }
 func (store *builderStoreFake) UpsertRegistration(_ context.Context, registration state.Registration) error {
 	store.registrations = append(store.registrations, registration)
+	return nil
+}
+func (store *builderStoreFake) ReplaceRegistrations(_ context.Context, registrations []state.Registration) error {
+	store.registrations = append([]state.Registration(nil), registrations...)
 	return nil
 }
 func (*builderStoreFake) Registration(context.Context, string, core.RunnerPool) (state.Registration, bool, error) {

@@ -8,12 +8,19 @@ import (
 	upstream "github.com/actions/scaleset"
 )
 
+type OwnedRunnerPool struct {
+	ID            int
+	Name          string
+	RunnerGroupID int
+}
+
 // PruneRunnerPools removes absent registrations only when their settings
 // match the fingerprint used by EnsureRunnerPool. It never changes job state.
 func (client *Client) PruneRunnerPools(
 	ctx context.Context,
 	runnerGroupName string,
 	desiredRunnerPools []string,
+	ownedRunnerPools []OwnedRunnerPool,
 ) error {
 	if client == nil || client.registrations == nil || client.registry == nil {
 		return errors.New("GitHub prune APIs are required")
@@ -27,7 +34,7 @@ func (client *Client) PruneRunnerPools(
 		return fmt.Errorf("list runner scale sets for prune: %w", err)
 	}
 	desired := desiredRunnerPoolNames(desiredRunnerPools)
-	return client.deleteAbsentOwnedRunnerPools(ctx, desired, runnerScaleSets)
+	return client.deleteAbsentOwnedRunnerPools(ctx, runnerGroupID, desired, ownedRunnerPools, runnerScaleSets)
 }
 
 func desiredRunnerPoolNames(names []string) map[string]struct{} {
@@ -40,11 +47,21 @@ func desiredRunnerPoolNames(names []string) map[string]struct{} {
 
 func (client *Client) deleteAbsentOwnedRunnerPools(
 	ctx context.Context,
+	runnerGroupID int,
 	desired map[string]struct{},
+	ownedRunnerPools []OwnedRunnerPool,
 	runnerScaleSets []upstream.RunnerScaleSet,
 ) error {
+	ownedByID := make(map[int]OwnedRunnerPool, len(ownedRunnerPools))
+	for _, owned := range ownedRunnerPools {
+		if owned.RunnerGroupID == runnerGroupID {
+			ownedByID[owned.ID] = owned
+		}
+	}
 	for _, runnerScaleSet := range runnerScaleSets {
-		if _, configured := desired[runnerScaleSet.Name]; configured || !ownedRunnerScaleSet(runnerScaleSet) {
+		owned, recorded := ownedByID[runnerScaleSet.ID]
+		_, configured := desired[runnerScaleSet.Name]
+		if configured || !recorded || owned.Name != runnerScaleSet.Name {
 			continue
 		}
 		if err := client.registry.DeleteRunnerScaleSet(ctx, runnerScaleSet.ID); err != nil {
@@ -52,12 +69,4 @@ func (client *Client) deleteAbsentOwnedRunnerPools(
 		}
 	}
 	return nil
-}
-
-func ownedRunnerScaleSet(runnerScaleSet upstream.RunnerScaleSet) bool {
-	if !runnerScaleSet.RunnerSetting.DisableUpdate || len(runnerScaleSet.Labels) != 1 {
-		return false
-	}
-	label := runnerScaleSet.Labels[0]
-	return label.Name == runnerScaleSet.Name && label.Type == "System"
 }

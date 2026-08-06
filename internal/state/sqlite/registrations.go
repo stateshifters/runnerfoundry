@@ -19,12 +19,40 @@ const registrationSQL = `SELECT repository_url, runner_pool, installation_id, ru
 const registrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
 const deleteRegistrationSQL = `DELETE FROM runnerfoundry_github_registrations WHERE repository_url = ? AND runner_pool = ?`
+const deleteAllRegistrationsSQL = `DELETE FROM runnerfoundry_github_registrations`
 
 var _ statecontract.RegistrationStore = (*Store)(nil)
 
 func (store *Store) UpsertRegistration(ctx context.Context, registration statecontract.Registration) error {
 	return store.executeTransaction(ctx, "upsert registration", upsertRegistrationSQL, registration.RepositoryURL,
 		string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID)
+}
+
+func (store *Store) ReplaceRegistrations(
+	ctx context.Context,
+	registrations []statecontract.Registration,
+) (resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin registration replacement: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	if _, err = transaction.Execute(ctx, deleteAllRegistrationsSQL); err != nil {
+		return fmt.Errorf("clear registration snapshot: %w", err)
+	}
+	for _, registration := range registrations {
+		if _, err = transaction.Execute(ctx, upsertRegistrationSQL, registration.RepositoryURL,
+			string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID,
+			registration.ScaleSetID); err != nil {
+			return fmt.Errorf("insert registration snapshot: %w", err)
+		}
+	}
+	if err = transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit registration replacement: %w", err)
+	}
+	open = false
+	return nil
 }
 
 func (store *Store) Registration(

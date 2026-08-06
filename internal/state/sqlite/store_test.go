@@ -124,11 +124,11 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 		},
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	retried, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstartedProcessing(context.Background(), testJobID)
-	if err != nil || !retried || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		RetryUnstarted(context.Background(), testJobID)
+	if err != nil || !result.Applied || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
 		!strings.Contains(statements[1], "runner_started = 0") {
-		t.Fatalf("retry statements=%#v retried=%t error=%v", statements, retried, err)
+		t.Fatalf("retry statements=%#v result=%#v error=%v", statements, result, err)
 	}
 }
 

@@ -192,16 +192,24 @@ func TestSupervisorReportsInitialStartFailure(t *testing.T) {
 }
 
 type fakeGeneration struct {
-	starts      int
-	activations int
-	stops       int
-	onStart     func()
-	onActivate  func()
-	startErr    error
-	activateErr error
-	stopErr     error
-	finalizers  []runtimeFinalizer
+	starts        int
+	activations   int
+	deactivations int
+	stops         int
+	onStart       func()
+	onActivate    func()
+	startErr      error
+	activateErr   error
+	stopErr       error
+	finalizers    []runtimeFinalizer
 }
+
+func (generation *fakeGeneration) Prepare(ctx context.Context) error { return generation.Start(ctx) }
+func (generation *fakeGeneration) Deactivate(context.Context) error {
+	generation.deactivations++
+	return nil
+}
+func (generation *fakeGeneration) Close(ctx context.Context) error { return generation.Stop(ctx) }
 
 func assertGenerationCalls(t *testing.T, candidate *fakeGeneration, starts int, activations int, stops int) {
 	t.Helper()
@@ -217,7 +225,7 @@ func assertNotifierCalls(t *testing.T, notifier *fakeSupervisorNotifier, ready i
 	}
 }
 
-func (generation *fakeGeneration) Activate() error {
+func (generation *fakeGeneration) Activate(context.Context) error {
 	generation.activations++
 	if generation.onActivate != nil {
 		generation.onActivate()

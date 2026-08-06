@@ -1,6 +1,6 @@
 package state
 
-// CalculateAvailableRunnerPoolCapacity subtracts waiting and live processing
+// CalculateAvailableRunnerPoolCapacity subtracts waiting and all processing
 // demand from the capacity published by live members.
 func CalculateAvailableRunnerPoolCapacity(liveCapacity, queuedJobs, processingJobs int) int {
 	available := liveCapacity - queuedJobs - processingJobs

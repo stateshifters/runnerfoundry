@@ -3,7 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
-	"reflect"
+	"fmt"
 )
 
 func transactionBeginning(transaction Transaction) func(context.Context) (Transaction, error) {
@@ -21,9 +21,34 @@ func assignDestinations(destinations, values []any) error {
 		return errors.New("destination count")
 	}
 	for index, destination := range destinations {
-		reflect.ValueOf(destination).Elem().Set(reflect.ValueOf(values[index]))
+		if !assignSQLiteTestValue(destination, values[index]) {
+			return fmt.Errorf("cannot assign %T to %T", values[index], destination)
+		}
 	}
 	return nil
+}
+
+func assignSQLiteTestValue(destination, value any) bool {
+	switch target := destination.(type) {
+	case *string:
+		assigned, ok := value.(string)
+		*target = assigned
+		return ok
+	case *int:
+		assigned, ok := value.(int)
+		*target = assigned
+		return ok
+	case *int64:
+		assigned, ok := value.(int64)
+		*target = assigned
+		return ok
+	case *bool:
+		assigned, ok := value.(bool)
+		*target = assigned
+		return ok
+	default:
+		return false
+	}
 }
 
 func failingListTransactions(protocolErr error) []Transaction {

@@ -98,7 +98,9 @@ func TestClientFromUpstreamUsesNativeScaleSetRegistry(t *testing.T) {
 		}},
 	}
 	client := clientFromUpstream("https://github.com/acme/widgets", api)
-	if err := client.PruneRunnerPools(context.Background(), "default", nil); err != nil {
+	if err := client.PruneRunnerPools(context.Background(), "default", nil, []OwnedRunnerPool{{
+		ID: 11, Name: "obsolete", RunnerGroupID: 7,
+	}}); err != nil {
 		t.Fatalf("prune through upstream registry: %v", err)
 	}
 	if len(api.deletedScaleSets) != 1 || api.deletedScaleSets[0] != 11 {

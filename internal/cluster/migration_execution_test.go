@@ -153,6 +153,21 @@ func TestMigrationStatusReportsEmptyZeroAndCurrentSchemas(t *testing.T) {
 	}
 }
 
+func TestMigrationStatusRejectsLegacySchema(t *testing.T) {
+	connection := &fakeDatabaseConnection{rowResults: []fakeRow{{scan: func(destinations ...any) {
+		*destination[bool](t, destinations[0]) = false
+		*destination[bool](t, destinations[1]) = true
+	}}}}
+	_, err := storeWithMigrationExecutor(connection, successfulMigrationExecutor(0), nil).
+		MigrationStatus(context.Background())
+	if !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("MigrationStatus() error = %v, want incompatible schema", err)
+	}
+	if len(connection.queries) != 1 || !strings.Contains(connection.queries[0].statement, "scaler\\_%") {
+		t.Fatalf("schema compatibility query = %#v", connection.queries)
+	}
+}
+
 func TestMigrationStatusReportsInspectionFailures(t *testing.T) {
 	failure := errors.New("failed")
 	tests := map[string]struct {

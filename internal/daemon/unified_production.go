@@ -228,10 +228,31 @@ func buildProductionProviders(
 	ctx context.Context,
 	configured config.Config,
 ) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+	hostname := ""
+	if configurationUsesDocker(configured) {
+		var err error
+		hostname, err = productionReadHostname()
+		if err != nil {
+			return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("read Docker inventory hostname: %w", err)
+		}
+		hostname = strings.TrimSpace(hostname)
+		if hostname == "" {
+			return nil, execution.AggregateRunnerInventory{}, errors.New("docker inventory hostname is empty")
+		}
+	}
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
 		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
-		readTemplate: productionReadFile,
+		readTemplate: productionReadFile, memberHostname: hostname,
 	})
+}
+
+func configurationUsesDocker(configured config.Config) bool {
+	for _, scaleSet := range configured.ScaleSets {
+		if kind, err := scaleSet.ProviderKind(); err == nil && kind == config.ProviderKindDocker {
+			return true
+		}
+	}
+	return false
 }
 
 func buildConfiguredProviders(

@@ -21,9 +21,10 @@ const (
 )
 
 type RunnerInstance struct {
-	ID         string
-	RunnerName string
-	State      RunnerState
+	ID           string
+	RunnerName   string
+	ScaleSetName string
+	State        RunnerState
 }
 
 type StartRequest struct {
@@ -75,9 +76,11 @@ func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config C
 }
 
 func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, scaleSetName string) (string, error) {
-	return runner.runDocker(ctx, dockerInvocation{arguments: []string{
-		"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName,
-	}})
+	arguments := []string{"ps", "--all", "--format", "json"}
+	if scaleSetName != "" {
+		arguments = append(arguments, "--filter", "label="+contract.OwnershipScaleSet+"="+scaleSetName)
+	}
+	return runner.runDocker(ctx, dockerInvocation{arguments: arguments})
 }
 
 func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
@@ -174,8 +177,8 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 	return nil
 }
 
-func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
-	output, err := provider.CommandRunner.ListComposeRunners(ctx, scaleSetName)
+func (provider ComposeProvider) List(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
+	output, err := provider.CommandRunner.ListComposeRunners(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list compose runners: %w", err)
 	}
@@ -186,13 +189,22 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 	instances := make([]RunnerInstance, 0, len(containers))
 	for _, container := range containers {
 		labels := parseLabels(container.Labels)
-		if labels[contract.OwnershipScaleSet] != scaleSetName {
+		scaleSetName := labels[contract.OwnershipScaleSet]
+		if scaleSetName == "" {
 			continue
 		}
+		if len(requestedPools) != 0 && scaleSetName != requestedPools[0] {
+			continue
+		}
+		reportedScaleSet := scaleSetName
+		if len(requestedPools) != 0 {
+			reportedScaleSet = ""
+		}
 		instances = append(instances, RunnerInstance{
-			ID:         container.ID,
-			RunnerName: labels[contract.OwnershipRunner],
-			State:      dockerState(container.State),
+			ID:           container.ID,
+			RunnerName:   labels[contract.OwnershipRunner],
+			ScaleSetName: reportedScaleSet,
+			State:        dockerState(container.State),
 		})
 	}
 	return instances, nil

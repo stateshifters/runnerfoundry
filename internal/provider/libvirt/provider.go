@@ -22,9 +22,10 @@ const (
 )
 
 type RunnerInstance struct {
-	ID         string
-	RunnerName string
-	State      RunnerState
+	ID           string
+	RunnerName   string
+	ScaleSetName string
+	State        RunnerState
 }
 
 type StartRequest struct {
@@ -147,7 +148,7 @@ func (provider Provider) Start(ctx context.Context, request StartRequest) error 
 	return nil
 }
 
-func (provider Provider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
+func (provider Provider) List(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
 	output, err := provider.CommandRunner.ListDomains(ctx, provider.Config.ConnectionURI)
 	if err != nil {
 		return nil, fmt.Errorf("list libvirt domains: %w", err)
@@ -158,23 +159,39 @@ func (provider Provider) List(ctx context.Context, scaleSetName string) ([]Runne
 		if domainName == "" {
 			continue
 		}
-		instance, owned, err := provider.instanceForDomain(ctx, domainName, scaleSetName)
+		instance, owned, err := provider.instanceForDomain(ctx, domainName, requestedPools...)
 		if err != nil {
 			return nil, err
 		}
-		if owned {
-			instances = append(instances, instance)
+		if !owned {
+			continue
 		}
+		instances = append(instances, listedInstance(instance, requestedPools))
 	}
 	return instances, nil
 }
 
-func (provider Provider) instanceForDomain(ctx context.Context, domainName string, scaleSetName string) (RunnerInstance, bool, error) {
+func listedInstance(instance RunnerInstance, requestedPools []string) RunnerInstance {
+	if len(requestedPools) != 0 {
+		instance.ScaleSetName = ""
+	}
+	return instance
+}
+
+func (provider Provider) instanceForDomain(
+	ctx context.Context,
+	domainName string,
+	requestedPools ...string,
+) (RunnerInstance, bool, error) {
 	domainXML, err := provider.CommandRunner.ReadDomainXML(ctx, provider.Config.ConnectionURI, domainName)
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
 	}
-	if metadataValue(domainXML, contract.OwnershipScaleSet) != scaleSetName {
+	scaleSetName := metadataValue(domainXML, contract.OwnershipScaleSet)
+	if scaleSetName == "" {
+		return RunnerInstance{}, false, nil
+	}
+	if len(requestedPools) != 0 && scaleSetName != requestedPools[0] {
 		return RunnerInstance{}, false, nil
 	}
 	domainState, err := provider.CommandRunner.ReadDomainState(ctx, provider.Config.ConnectionURI, domainName)
@@ -186,9 +203,10 @@ func (provider Provider) instanceForDomain(ctx context.Context, domainName strin
 		runnerName = domainName
 	}
 	return RunnerInstance{
-		ID:         domainName,
-		RunnerName: runnerName,
-		State:      libvirtState(domainState),
+		ID:           domainName,
+		RunnerName:   runnerName,
+		ScaleSetName: scaleSetName,
+		State:        libvirtState(domainState),
 	}, true, nil
 }
 

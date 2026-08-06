@@ -14,7 +14,7 @@ type QueueHandler struct{ store core.JobQueueStore }
 func NewQueueHandler(store core.JobQueueStore) *QueueHandler { return &QueueHandler{store: store} }
 
 func (handler *QueueHandler) Request(ctx context.Context, request core.JobRequest) error {
-	if _, _, err := handler.store.Enqueue(ctx, request); err != nil {
+	if _, err := handler.store.Queue(ctx, request); err != nil {
 		return fmt.Errorf("enqueue source request %q: %w", request.Source.ID, err)
 	}
 	return nil

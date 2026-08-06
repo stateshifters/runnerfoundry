@@ -11,6 +11,23 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
+type ProviderKind string
+
+const (
+	ProviderKindDocker  ProviderKind = "docker"
+	ProviderKindLibvirt ProviderKind = "libvirt"
+)
+
+func (scaleSet ScaleSetConfig) ProviderKind() (ProviderKind, error) {
+	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
+		return "", errors.New("exactly one of docker or libvirt is required")
+	}
+	if scaleSet.Docker != nil {
+		return ProviderKindDocker, nil
+	}
+	return ProviderKindLibvirt, nil
+}
+
 // Validate applies defaults and rejects unsafe startup state.
 func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.GitHub.validate(); err != nil {
@@ -146,10 +163,11 @@ func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
 }
 
 func (scaleSet *ScaleSetConfig) validateProvider() error {
-	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
-		return errors.New("exactly one of docker or libvirt is required")
+	kind, err := scaleSet.ProviderKind()
+	if err != nil {
+		return err
 	}
-	if scaleSet.Docker != nil {
+	if kind == ProviderKindDocker {
 		if scaleSet.Docker.ComposeFile == "" {
 			return errors.New("docker.compose_file is required")
 		}

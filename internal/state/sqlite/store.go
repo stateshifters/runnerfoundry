@@ -14,6 +14,11 @@ const processingJobColumns = `job_id, source_name, source_reference, runner_pool
 	runner_started, EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
+const claimedProcessingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
+	claimed_at, inventory_endpoint_id, runner_started,
+	EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 
 const insertQueuedJobSQL = `INSERT INTO runnerfoundry_queued_jobs
 	(job_id, source_name, source_reference, runner_pool, enqueued_at)
@@ -32,6 +37,9 @@ const oldestQueuedJobSQL = `SELECT ` + queuedJobColumns + ` FROM runnerfoundry_q
 	WHERE runner_pool = ? ORDER BY enqueued_at LIMIT 1`
 const insertProcessingJobSQL = `INSERT INTO runnerfoundry_processing_jobs
 	(job_id, source_name, source_reference, runner_pool, member_id) VALUES (?, ?, ?, ?, ?)`
+const insertClaimedProcessingJobSQL = `INSERT INTO runnerfoundry_processing_jobs
+	(job_id, source_name, source_reference, runner_pool, member_id, claimed_at, inventory_endpoint_id)
+	VALUES (?, ?, ?, ?, ?, ?, ?)`
 const insertTombstoneSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
 	VALUES (?, ?) ON CONFLICT(source_name, source_reference) DO NOTHING`
 const deleteQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs WHERE job_id = ?`
@@ -47,6 +55,23 @@ const tombstoneDelayedStartSQL = `INSERT INTO runnerfoundry_source_tombstones(so
 	ON CONFLICT(source_name, source_reference) DO NOTHING`
 const processingByMemberSQL = `SELECT ` + processingJobColumns + `
 	FROM runnerfoundry_processing_jobs WHERE member_id = ? AND runner_pool = ?`
+const processingByPoolSQL = `SELECT ` + claimedProcessingJobColumns + `
+	FROM runnerfoundry_processing_jobs WHERE runner_pool = ?`
+const recoverProcessingSQL = `INSERT INTO runnerfoundry_queued_jobs
+	(job_id, source_name, source_reference, runner_pool, enqueued_at)
+	SELECT job_id, source_name, source_reference, runner_pool, ?
+	FROM runnerfoundry_processing_jobs processing
+	WHERE processing.job_id = ? AND processing.claimed_at = ?
+	AND processing.inventory_endpoint_id = ? AND processing.runner_started = 0
+	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = processing.source_name
+		AND tombstones.source_reference = processing.source_reference)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const deleteRecoveredProcessingSQL = `DELETE FROM runnerfoundry_processing_jobs
+	WHERE job_id = ? AND claimed_at = ? AND inventory_endpoint_id = ? AND runner_started = 0
+	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference)`
 const retryProcessingSQL = `INSERT INTO runnerfoundry_queued_jobs
 	(job_id, source_name, source_reference, runner_pool, enqueued_at)
 	SELECT job_id, source_name, source_reference, runner_pool,
@@ -112,6 +137,11 @@ func (store *Store) Enqueue(ctx context.Context, request core.JobRequest) (_ cor
 	return job, rowsAffected == 1, nil
 }
 
+func (store *Store) Queue(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+	job, enqueued, err := store.Enqueue(ctx, request)
+	return core.EnqueueResult{Job: job, Enqueued: enqueued}, err
+}
+
 func (store *Store) TakeOldest(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
@@ -134,27 +164,26 @@ func (store *Store) TakeOldest(
 	return processingJob, found, nil
 }
 
-func moveOldestToProcessing(
+func (store *Store) ClaimOldest(
 	ctx context.Context,
-	transaction Transaction,
 	runnerPool core.RunnerPool,
-	memberID core.MemberID,
-) (core.ProcessingJob, bool, error) {
-	job, err := scanJob(transaction.QueryRow(ctx, oldestQueuedJobSQL, string(runnerPool)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return core.ProcessingJob{}, false, nil
-	}
+	claim core.ProcessingClaim,
+) (_ core.TakeResult, resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("select oldest queued job: %w", err)
+		return core.TakeResult{}, fmt.Errorf("begin claim oldest job: %w", err)
 	}
-	if _, err := transaction.Execute(ctx, insertProcessingJobSQL, job.ID.String(), job.Source.Adapter,
-		job.Source.ID, string(job.RunnerPool), string(memberID)); err != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("insert processing job: %w", err)
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	result, err := claimOldestInTransaction(ctx, transaction, runnerPool, claim)
+	if err != nil {
+		return core.TakeResult{}, err
 	}
-	if _, err := transaction.Execute(ctx, deleteQueuedJobSQL, job.ID.String()); err != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("remove job from queue: %w", err)
+	if err = transaction.Commit(ctx); err != nil {
+		return core.TakeResult{}, fmt.Errorf("commit job claim: %w", err)
 	}
-	return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
+	open = false
+	return result, nil
 }
 
 func (store *Store) TerminalizeSource(ctx context.Context, source core.SourceReference) (resultErr error) {
@@ -228,6 +257,63 @@ func (store *Store) ProcessingByMember(
 	return jobs, nil
 }
 
+func (store *Store) ProcessingByPool(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+) (_ []core.ProcessingJob, resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin pool processing lookup: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	rows, err := transaction.Query(ctx, processingByPoolSQL, string(runnerPool))
+	if err != nil {
+		return nil, fmt.Errorf("query pool processing: %w", err)
+	}
+	jobs, err := scanClaimedProcessingJobs(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err = transaction.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit pool processing lookup: %w", err)
+	}
+	open = false
+	return jobs, nil
+}
+
+func (store *Store) RecoverUnstartedProcessing(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (_ core.TransitionResult, resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return core.TransitionResult{}, fmt.Errorf("begin processing recovery: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	result, err := transaction.Execute(ctx, recoverProcessingSQL, processing.Job.EnqueuedAt.UnixNano(),
+		processing.Job.ID.String(), processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID))
+	if err != nil {
+		return core.TransitionResult{}, fmt.Errorf("requeue expired processing: %w", err)
+	}
+	recovered, err := result.RowsAffected()
+	if err != nil {
+		return core.TransitionResult{}, fmt.Errorf("read processing recovery count: %w", err)
+	}
+	if recovered == 1 {
+		if _, err = transaction.Execute(ctx, deleteRecoveredProcessingSQL, processing.Job.ID.String(),
+			processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID)); err != nil {
+			return core.TransitionResult{}, fmt.Errorf("remove recovered processing: %w", err)
+		}
+	}
+	if err = transaction.Commit(ctx); err != nil {
+		return core.TransitionResult{}, fmt.Errorf("commit processing recovery: %w", err)
+	}
+	open = false
+	return core.TransitionResult{Applied: recovered == 1}, nil
+}
+
 func (store *Store) RetryUnstartedProcessing(ctx context.Context, jobID core.JobID) (_ bool, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
@@ -266,4 +352,14 @@ func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobI
 
 func (store *Store) RemoveTerminalProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
 	return store.executeConditionalTransaction(ctx, "remove terminal processing job", deleteTerminalProcessingSQL, jobID.String())
+}
+
+func (store *Store) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
+	applied, err := store.RetryUnstartedProcessing(ctx, jobID)
+	return core.TransitionResult{Applied: applied}, err
+}
+
+func (store *Store) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
+	applied, err := store.RemoveTerminalProcessing(ctx, jobID)
+	return core.TransitionResult{Applied: applied}, err
 }

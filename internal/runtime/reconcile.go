@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
 )
+
+const unstartedProcessingLease = 5 * time.Minute
 
 type PoolReconciliation struct {
 	RemovedProcessing   int
@@ -25,11 +28,11 @@ const (
 )
 
 func (orchestrator *Orchestrator) OccupiedSlots(ctx context.Context, runnerPool core.RunnerPool) (int, error) {
-	processing, err := orchestrator.store.ProcessingByMember(ctx, orchestrator.member, runnerPool)
+	processing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
 	if err != nil {
 		return 0, fmt.Errorf("list processing work for Runner Pool %q: %w", runnerPool, err)
 	}
-	instances, err := orchestrator.inventory.Inspect(ctx, string(runnerPool))
+	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("inspect occupied runners for Runner Pool %q: %w", runnerPool, err)
 	}
@@ -37,7 +40,7 @@ func (orchestrator *Orchestrator) OccupiedSlots(ctx context.Context, runnerPool 
 	for _, job := range processing {
 		occupied[runnerName(job.Job.ID)] = struct{}{}
 	}
-	for _, instance := range instances {
+	for _, instance := range instancesForPool(instances, runnerPool) {
 		key := instance.RunnerName
 		if key == "" {
 			key = "provider:" + instance.ID
@@ -73,15 +76,15 @@ func (orchestrator *Orchestrator) loadAndReconcilePool(
 	runnerPool core.RunnerPool,
 	purpose reconciliationPurpose,
 ) (PoolReconciliation, error) {
-	processing, err := orchestrator.store.ProcessingByMember(ctx, orchestrator.member, runnerPool)
+	processing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("list processing work for Runner Pool %q: %w", runnerPool, err)
 	}
-	instances, err := orchestrator.inventory.Inspect(ctx, string(runnerPool))
+	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err)
 	}
-	return orchestrator.reconcileInventory(ctx, processing, instances, purpose)
+	return orchestrator.reconcileInventory(ctx, processing, instancesForPool(instances, runnerPool), purpose)
 }
 
 func (orchestrator *Orchestrator) reconcileInventory(
@@ -154,8 +157,14 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 	instance *execution.RunnerInstance,
 	purpose reconciliationPurpose,
 ) (removedRunners, removedProcessing int, resultErr error) {
+	if processing.InventoryEndpointID != "" && !orchestrator.inventory.KnowsEndpoint(processing.InventoryEndpointID) {
+		return 0, 0, nil
+	}
 	if processing.SourceTerminal {
 		return orchestrator.cleanupTerminalProcessing(ctx, processing, instance)
+	}
+	if processing.InventoryEndpointID != "" && !processing.RunnerStarted {
+		return orchestrator.recoverExpiredProcessing(ctx, processing, instance)
 	}
 	if instance == nil {
 		retriedProcessing, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
@@ -171,6 +180,31 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 	return 1, retriedProcessing, retryErr
 }
 
+func (orchestrator *Orchestrator) recoverExpiredProcessing(
+	ctx context.Context,
+	processing core.ProcessingJob,
+	instance *execution.RunnerInstance,
+) (removedRunners, removedProcessing int, resultErr error) {
+	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(unstartedProcessingLease)) {
+		return 0, 0, nil
+	}
+	if instance != nil {
+		if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
+			return 0, 0, fmt.Errorf("destroy expired unstarted runner %q: %w", instance.ID, err)
+		}
+		removedRunners = 1
+	}
+	processing.Job.EnqueuedAt = orchestrator.currentTime()
+	transition, err := orchestrator.store.RecoverUnstartedProcessing(ctx, processing)
+	if err != nil {
+		return removedRunners, 0, fmt.Errorf("recover expired processing job %s: %w", processing.Job.ID, err)
+	}
+	if transition.Applied {
+		removedProcessing = 1
+	}
+	return removedRunners, removedProcessing, nil
+}
+
 func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 	ctx context.Context,
 	processing core.ProcessingJob,
@@ -182,11 +216,11 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 		}
 		removedRunners = 1
 	}
-	removed, err := orchestrator.store.RemoveTerminalProcessing(ctx, processing.Job.ID)
+	transition, err := orchestrator.store.RemoveTerminal(ctx, processing.Job.ID)
 	if err != nil {
 		return removedRunners, 0, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
 	}
-	if removed {
+	if transition.Applied {
 		removedProcessing = 1
 	}
 	return removedRunners, removedProcessing, nil
@@ -196,11 +230,11 @@ func (orchestrator *Orchestrator) retryIfUnstarted(ctx context.Context, processi
 	if processing.RunnerStarted {
 		return 0, nil
 	}
-	retried, err := orchestrator.store.RetryUnstartedProcessing(ctx, processing.Job.ID)
+	transition, err := orchestrator.store.RetryUnstarted(ctx, processing.Job.ID)
 	if err != nil {
 		return 0, fmt.Errorf("retry unstarted processing job %s: %w", processing.Job.ID, err)
 	}
-	if retried {
+	if transition.Applied {
 		return 1, nil
 	}
 	return 0, nil
@@ -222,4 +256,14 @@ func isRunnerFoundryName(stableRunnerName string) bool {
 	}
 	jobID, err := uuid.Parse(identifier)
 	return err == nil && jobID != uuid.Nil
+}
+
+func instancesForPool(instances []execution.RunnerInstance, runnerPool core.RunnerPool) []execution.RunnerInstance {
+	selected := make([]execution.RunnerInstance, 0, len(instances))
+	for _, instance := range instances {
+		if instance.RunnerPool == "" || instance.RunnerPool == runnerPool {
+			selected = append(selected, instance)
+		}
+	}
+	return selected
 }

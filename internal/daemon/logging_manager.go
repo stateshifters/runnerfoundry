@@ -49,24 +49,63 @@ func (manager *loggingManager) Close() error {
 type preparedLogging struct {
 	manager   *loggingManager
 	target    loggingTarget
+	previous  *loggingTarget
 	mutex     sync.Mutex
 	completed bool
+	activated bool
 }
 
 func (prepared *preparedLogging) Activate() error {
 	prepared.mutex.Lock()
 	defer prepared.mutex.Unlock()
-	if prepared.completed {
+	if prepared.completed || prepared.activated {
 		return errors.New("prepared logging configuration is already completed")
 	}
+	previous := prepared.manager.handler.swap(prepared.target)
+	prepared.previous = &previous
+	prepared.activated = true
+	return nil
+}
+
+func (prepared *preparedLogging) Commit() error {
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if !prepared.activated || prepared.completed {
+		return errors.New("prepared logging configuration is not active")
+	}
 	prepared.completed = true
-	return prepared.manager.handler.replace(prepared.target)
+	if err := prepared.previous.destination.Close(); err != nil {
+		return fmt.Errorf("close replaced log destination: %w", err)
+	}
+	return nil
+}
+
+func (prepared *preparedLogging) Rollback() error {
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if !prepared.activated || prepared.completed {
+		return nil
+	}
+	candidate := prepared.manager.handler.swap(*prepared.previous)
+	prepared.completed = true
+	if err := candidate.destination.Close(); err != nil {
+		return fmt.Errorf("close replacement log destination: %w", err)
+	}
+	return nil
 }
 
 func (prepared *preparedLogging) Close() error {
 	prepared.mutex.Lock()
 	defer prepared.mutex.Unlock()
 	if prepared.completed {
+		return nil
+	}
+	if prepared.activated {
+		candidate := prepared.manager.handler.swap(*prepared.previous)
+		prepared.completed = true
+		if err := candidate.destination.Close(); err != nil {
+			return fmt.Errorf("close rolled-back log destination: %w", err)
+		}
 		return nil
 	}
 	prepared.completed = true
@@ -156,14 +195,19 @@ func (handler *reloadableLogHandler) decorated(active slog.Handler) slog.Handler
 }
 
 func (handler *reloadableLogHandler) replace(replacement loggingTarget) error {
-	handler.state.mutex.Lock()
-	previous := handler.state.target
-	handler.state.target = replacement
-	handler.state.mutex.Unlock()
+	previous := handler.swap(replacement)
 	if err := previous.destination.Close(); err != nil {
 		return fmt.Errorf("close replaced log destination: %w", err)
 	}
 	return nil
+}
+
+func (handler *reloadableLogHandler) swap(replacement loggingTarget) loggingTarget {
+	handler.state.mutex.Lock()
+	previous := handler.state.target
+	handler.state.target = replacement
+	handler.state.mutex.Unlock()
+	return previous
 }
 
 type noOpWriteCloser struct {

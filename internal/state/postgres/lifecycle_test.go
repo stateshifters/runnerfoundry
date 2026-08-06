@@ -41,11 +41,11 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 		rowFromValues(processingJobValues(job, testMemberIDA)),
 		rowFromValues(queuedJobValues(testJobID1, queued)),
 	}}
-	retried, err := NewStore(protocol.executor()).RetryUnstartedProcessing(context.Background(), testJobID1)
-	if err != nil || !retried || protocol.commitCalls != 1 || len(protocol.statements) != 4 ||
+	result, err := NewStore(protocol.executor()).RetryUnstarted(context.Background(), testJobID1)
+	if err != nil || !result.Applied || protocol.commitCalls != 1 || len(protocol.statements) != 4 ||
 		len(protocol.arguments[2]) != 1 || !strings.Contains(protocol.statements[2], "RETURNING") ||
 		strings.Contains(protocol.statements[2], "enqueued_at) VALUES") {
-		t.Fatalf("retry statements=%#v arguments=%#v commits=%d retried=%t error=%v",
-			protocol.statements, protocol.arguments, protocol.commitCalls, retried, err)
+		t.Fatalf("retry statements=%#v arguments=%#v commits=%d result=%#v error=%v",
+			protocol.statements, protocol.arguments, protocol.commitCalls, result, err)
 	}
 }

@@ -44,6 +44,33 @@ func scanProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) 
 	return jobs, nil
 }
 
+func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
+	var processing core.ProcessingJob
+	var runnerPool string
+	if err := row.Scan(&processing.Job.ID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
+		&runnerPool, &processing.MemberID, &processing.ClaimedAt, &processing.InventoryEndpointID,
+		&processing.RunnerStarted, &processing.SourceTerminal); err != nil {
+		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
+	}
+	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
+	return processing, nil
+}
+
+func scanClaimedProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) {
+	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
+	for rows.Next() {
+		job, err := scanClaimedProcessingJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed processing jobs: %w", err)
+	}
+	return jobs, nil
+}
+
 func rollback(ctx context.Context, transaction Transaction, open *bool, resultErr *error) {
 	if *open {
 		*resultErr = errors.Join(*resultErr, transaction.Rollback(context.WithoutCancel(ctx)))

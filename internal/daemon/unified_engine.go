@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/meza/RunnerFoundry/internal/execution"
 )
 
 type membershipRuntime interface {
@@ -46,6 +48,7 @@ type UnifiedEngineConfig struct {
 	Leadership  leadershipRuntime
 	Source      sourceRuntime
 	Pools       []RunnerPoolRuntime
+	Inventory   execution.RunnerInventory
 }
 
 // UnifiedEngine advances one source-neutral lifecycle for a member. Cycles are
@@ -57,8 +60,10 @@ type UnifiedEngine struct {
 	leadership    leadershipRuntime
 	source        sourceRuntime
 	pools         []RunnerPoolRuntime
+	inventory     execution.RunnerInventory
 	leaderOpen    bool
 	leaderClosing bool
+	cycleMutex    sync.Mutex
 }
 
 func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
@@ -69,12 +74,15 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 		leadership:  config.Leadership,
 		source:      config.Source,
 		pools:       append([]RunnerPoolRuntime(nil), config.Pools...),
+		inventory:   config.Inventory,
 	}
 }
 
 // Cycle performs one bounded maintenance pass. Independent work continues
 // after individual failures and all failures are returned together.
 func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
+	engine.cycleMutex.Lock()
+	defer engine.cycleMutex.Unlock()
 	now := engine.currentTime()
 	liveMemberCutoff := now.Add(-engine.memberTTL)
 	cycleErrors := make([]error, 0)
@@ -87,6 +95,12 @@ func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 	}
 
 	cycleErrors = append(cycleErrors, engine.runLeaderWork(ctx, liveMemberCutoff)...)
+	if engine.inventory != nil {
+		if err := engine.inventory.Refresh(ctx); err != nil {
+			cycleErrors = append(cycleErrors, fmt.Errorf("refresh runner inventory: %w", err))
+			return errors.Join(cycleErrors...)
+		}
+	}
 	for _, runnerPool := range engine.pools {
 		cycleErrors = append(cycleErrors, engine.runPoolWork(ctx, runnerPool)...)
 	}

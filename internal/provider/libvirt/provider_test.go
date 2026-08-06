@@ -125,6 +125,57 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	}
 }
 
+func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs: []string{
+			"unowned\nowned\n",
+			`<domain><metadata><example>unowned</example></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>owned</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+			"running\n",
+		},
+	}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []RunnerInstance{{
+		ID:           "owned",
+		RunnerName:   "owned",
+		ScaleSetName: "vm-set",
+		State:        RunnerStateRunning,
+	}}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("List() instances = %#v, want %#v", instances, want)
+	}
+}
+
+func TestListFiltersRequestedPoolBeforeReadingDomainState(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs: []string{
+			"other-runner\n",
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>other</runnerfoundry:scale-set><runnerfoundry:name>other-runner</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+		},
+	}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background(), "vm-set")
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("List() instances = %#v, want none", instances)
+	}
+	wantCommands := []Command{
+		{Args: []string{"-c", "qemu:///system", "list", "--all", "--name"}},
+		{Args: []string{"-c", "qemu:///system", "dumpxml", "other-runner"}},
+	}
+	if !reflect.DeepEqual(commandRunner.commands, wantCommands) {
+		t.Fatalf("commands = %#v, want %#v", commandRunner.commands, wantCommands)
+	}
+}
+
 func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}

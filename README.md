@@ -21,9 +21,9 @@ The normative behavior and terminology live in the [product contract](docs/PRD.m
 
 Runner registration and capacity publication are separate from this job flow. Before `JobStarted`, RunnerFoundry retries provisioning indefinitely from the queue tail after successful cleanup, without a retry count, delay, backoff, or timeout. After `JobStarted`, missing or failed runner resources never cause an internal retry. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
 
-Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts queued jobs and processing jobs owned by live members from the capacity contributed by live members. Moving a job from queued to processing does not change availability.
+Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts queued jobs and every processing job from the capacity contributed by live members. Moving a job from queued to processing does not change availability.
 
-`available = max(0, live configured capacity - queued jobs - processing jobs owned by live members)`
+`available = max(0, live configured capacity - queued jobs - all processing jobs)`
 
 GitHub does not expose a supported operation for reporting a provisioning failure for an individual job. RunnerFoundry therefore cleans up and retries the same job without inventing a GitHub result. If a future source supports such reporting, it remains inside that source adapter and does not create a persisted result lifecycle.
 
@@ -201,7 +201,7 @@ Configure exactly one state backend:
 
 One member using `state.postgres` is standalone. Multiple members sharing it form a cluster. Changing backends or PostgreSQL settings requires a restart.
 
-Each member uses its trimmed operating-system hostname as its stable identity. Hostnames must be unique within a cluster, and only one RunnerFoundry daemon may run for a hostname. A member that has not heartbeated for 30 seconds contributes no advertised capacity, but its processing and provider resources remain owned by that hostname. Restarting on the same hostname resumes their reconciliation.
+Each member uses its trimmed operating-system hostname as its stable identity. Hostnames must be unique within a cluster, and only one RunnerFoundry daemon may run for a hostname. A member that has not heartbeated for 30 seconds contributes no advertised capacity. That cutoff does not requeue its work. The leader can recover an unstarted claim only after five minutes and only with cleanup or positive absence proof from the claim's exact inventory endpoint. Started jobs never return to the queue.
 
 ### Active runner policy
 
@@ -335,11 +335,13 @@ sudo journalctl -u runnerfoundry -f
 sudo systemctl reload runnerfoundry
 ```
 
-Reload validates and prepares the replacement configuration before applying it. A failure leaves the current configuration running. State-backend changes require a restart.
+Reload validates and prepares the replacement configuration before applying it. The replacement acquires the local work gate and completes one successful maintenance cycle before it becomes active and the service reports `READY`. If activation fails, RunnerFoundry rolls back prepared logging and reactivates the previous generation. State-backend changes require a restart.
 
-Runner reconciliation is provider-agnostic. It searches every Docker mechanism and libvirt connection represented by the active configuration for the deterministic runner name. A complete inventory that does not find an unstarted runner allows that job to return to the queue; an inventory error retains processing because absence was not established. A runner found through any active inventory is retained regardless of which provider is configured to launch new work for its Runner Pool.
+Runner reconciliation is provider-agnostic. Docker inventory endpoint identity includes the member hostname and Compose mechanism; libvirt endpoint identity uses the normalized connection URI. Each endpoint returns all observable RunnerFoundry resources with their Runner Pool, is queried once per maintenance cycle, and is then partitioned by pool. Duplicate configured endpoints are queried once. Inventory errors retain processing because absence was not established. Failed provisioning triggers a fresh inspection of the exact endpoint recorded with the claim.
 
-For a removed Runner Pool or one changed between Docker and libvirt, `leave` applies the replacement without destroying its active runners. Removing or changing an inventory endpoint can make old resources invisible; cleaned-up or invisible unstarted work may then requeue into the active configuration, while started work always waits for `JobCompleted`. Resources left behind on an endpoint the operator removed are operator-owned cleanup. With `terminate`, RunnerFoundry uses the old provider before replacement to destroy affected resources, requeues cleaned-up unstarted jobs, and leaves started jobs awaiting `JobCompleted`. Cleanup failures retain processing without rejecting the otherwise-valid replacement.
+GitHub discovery replaces its complete persisted registration snapshot in one transaction. When `prune` is enabled, RunnerFoundry deletes only scale-set IDs from its previous committed snapshot after the current ID, name, and runner group still match. Similar labels or update settings do not establish ownership.
+
+For a removed Runner Pool or one changed between Docker and libvirt, `leave` applies the replacement without destroying its active runners. Processing recorded against a removed or unavailable endpoint is retained; invisibility is not absence proof. With `terminate`, RunnerFoundry uses the old provider after replacement activation commits to destroy affected resources, requeues cleaned-up unstarted jobs, and leaves started jobs awaiting `JobCompleted`. Cleanup failures retain processing without rejecting the otherwise-valid replacement.
 
 On graceful shutdown, `leave` withdraws capacity and preserves all active runners and processing. `terminate` destroys owned runners, requeues unstarted jobs only after successful cleanup, and preserves started processing until GitHub terminalizes it.
 
@@ -351,7 +353,7 @@ Review the release notes, stop the affected member or cluster, install the packa
 
 - **Configuration rejected:** Read the first validation error in the service log. Check unknown fields, App credentials, state-backend selection, positive capacity, and exactly one provider per Runner Pool.
 - **GitHub capacity missing:** Verify App permissions, installation scope, the configured GitHub runner group, and the private-key file.
-- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued and live-member processing jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
+- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued jobs or any processing jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
 - **Jobs remain queued:** Confirm that workflow `runs-on` matches `scale_sets[].name`, provider validation succeeds, and the Runner Pool has capacity.
 - **Docker unavailable:** Run `docker compose -f <file> config --services` as the service account.
 - **libvirt unavailable:** Run `virsh --connect <uri> list --all` as the service account and validate the domain XML and referenced storage.
