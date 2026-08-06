@@ -97,7 +97,7 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 	}
 	return &productionRuntime{
 		logging: logging, state: &productionState{store: newBuilderStoreFake(), member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
-		build: buildGeneration,
+		build: buildGeneration, reporter: &productionRuntimeReporter{},
 	}, &builds
 }
 

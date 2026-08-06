@@ -40,6 +40,7 @@ const (
 type ProcessResult struct {
 	Outcome      ProcessOutcome
 	RetryOutcome core.RetryOutcome
+	JobID        core.JobID
 }
 
 func NewOrchestrator(
@@ -80,7 +81,7 @@ func (orchestrator *Orchestrator) Process(ctx context.Context, runnerPool core.R
 	bootstrap, err := orchestrator.bootstrapper.GenerateBootstrap(ctx, processing.Job, runnerName)
 	if err != nil {
 		retryOutcome, retryErr := orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
-		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome}, errors.Join(
+		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome, JobID: processing.Job.ID}, errors.Join(
 			fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err),
 			retryErr,
 		)
@@ -90,9 +91,9 @@ func (orchestrator *Orchestrator) Process(ctx context.Context, runnerPool core.R
 	}); err != nil {
 		startErr := fmt.Errorf("start runner for job %s: %w", processing.Job.ID, err)
 		retryOutcome, cleanupErr := orchestrator.cleanupFailedStart(ctx, processing)
-		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome}, errors.Join(startErr, cleanupErr)
+		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome, JobID: processing.Job.ID}, errors.Join(startErr, cleanupErr)
 	}
-	return ProcessResult{Outcome: ProcessRunnerStarted}, nil
+	return ProcessResult{Outcome: ProcessRunnerStarted, JobID: processing.Job.ID}, nil
 }
 
 func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, processing core.ProcessingJob) (core.RetryOutcome, error) {

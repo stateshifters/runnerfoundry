@@ -25,10 +25,10 @@ func TestProductionRuntimeReportsRecoveryAndErrorCategories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open production runtime: %v", err)
 	}
-	runtime.report(nil)
 	runtime.report(context.Canceled)
 	runtime.report(context.DeadlineExceeded)
 	runtime.report(errors.New("operation failed"))
+	runtime.report(nil)
 
 	output := destination.String()
 	for _, expected := range []string{

@@ -81,8 +81,13 @@ func (source *githubSourceRuntime) launchIdlePolls(
 		capacity, err := source.capacities.AvailableRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
 		if err != nil {
 			capacity = 0
+			reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
+				runnerPool: adapter.RunnerPool, err: err, capacity: capacity})
 			capacityErrors = append(capacityErrors,
 				fmt.Errorf("read Runner Pool %q available capacity: %w", adapter.RunnerPool, err))
+		} else {
+			reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "published",
+				runnerPool: adapter.RunnerPool, capacity: capacity})
 		}
 		source.launchPoll(ctx, adapter, capacity)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"reflect"
 
 	"github.com/meza/RunnerFoundry/internal/config"
@@ -19,6 +18,7 @@ type Options struct {
 type serviceNotifier interface {
 	Ready(ctx context.Context) error
 	Reloading(ctx context.Context) error
+	Status(ctx context.Context, status operationalStatus) error
 }
 
 type daemonApplicationDependencies struct {
@@ -71,7 +71,11 @@ func runDaemon(ctx context.Context, options Options, dependencies daemonApplicat
 	build := func(buildContext context.Context, configured config.Config) (generation, error) {
 		return runtime.Build(buildContext, configured)
 	}
-	return dependencies.supervise(ctx, options.ReloadRequests, load, build, newSystemdNotifier(), runtime.report, policy)
+	notifier := newSystemdNotifier()
+	if runtime.reporter != nil {
+		runtime.reporter.notifier = notifier
+	}
+	return dependencies.supervise(ctx, options.ReloadRequests, load, build, notifier, runtime.report, policy)
 }
 
 type productionRuntime struct {
@@ -79,6 +83,7 @@ type productionRuntime struct {
 	state       *productionState
 	processGate *localLeadershipGate
 	report      func(error)
+	reporter    *productionRuntimeReporter
 	build       func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*maintenanceGeneration, error)
 	firstBuild  bool
 }
@@ -106,7 +111,8 @@ func openProductionRuntimeWithDependencies(
 			)
 		},
 	}
-	runtime.report = newProductionRuntimeReporter(ctx, logging, state)
+	runtime.reporter = newProductionRuntimeReporter(logging, state, dependencies.currentTime)
+	runtime.report = runtime.reporter.reportMaintenance
 	return runtime, nil
 }
 
@@ -119,30 +125,6 @@ func buildProductionRuntimeGeneration(
 	dependencies productionDependencies,
 ) (*maintenanceGeneration, error) {
 	return dependencies.buildGeneration(ctx, configured, state, processGate, report, dependencies)
-}
-
-func newProductionRuntimeReporter(
-	ctx context.Context,
-	logging *loggingManager,
-	state *productionState,
-) func(error) {
-	return func(err error) {
-		if err == nil {
-			logging.Logger().InfoContext(ctx, "RunnerFoundry runtime operation recovered",
-				slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
-				slog.String("outcome", "recovered"))
-			return
-		}
-		category := "operation"
-		if errors.Is(err, context.Canceled) {
-			category = "canceled"
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			category = "deadline"
-		}
-		logging.Logger().ErrorContext(ctx, "RunnerFoundry runtime operation failed",
-			slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
-			slog.String("outcome", "failed"), slog.String("error_category", category), slog.Any("error", err))
-	}
 }
 
 func (runtime *productionRuntime) Build(ctx context.Context, configured config.Config) (*runtimeGeneration, error) {

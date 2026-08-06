@@ -69,13 +69,14 @@ func buildConfiguredEngine(
 		dependencies.manager, dependencies.store, string(dependencies.member), runtimeengine.NewQueueHandler(dependencies.store),
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
+	source.report = dependencies.report
 	membership := runtimeengine.NewMembershipService(
 		dependencies.store, dependencies.member, assembled.localCapacity, dependencies.currentTime,
 	)
 	return NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
 		Membership: membership, Leadership: dependencies.leadership, Source: source, Pools: assembled.pools,
-		Inventory: dependencies.inventory,
+		Inventory: dependencies.inventory, Report: dependencies.report,
 	})
 }
 
@@ -136,7 +137,7 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	})
 	pool := orchestrationPool{
 		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, runnerPoolConfig.MaxRunners), orchestrator: orchestrator,
-		runnerPool: runnerPool,
+		runnerPool: runnerPool, report: dependencies.report,
 	}
 	assembled.pools = append(assembled.pools, RunnerPoolRuntime{
 		RunnerPool: runnerPool,
@@ -162,18 +163,37 @@ type orchestrationPool struct {
 	worker       *runtimeengine.PoolWorker
 	orchestrator *runtimeengine.Orchestrator
 	runnerPool   core.RunnerPool
+	report       func(error)
 }
 
 func (pool orchestrationPool) RequestWork(ctx context.Context, _ core.RunnerPool) error {
-	_, err := pool.worker.RequestWork(ctx)
+	result, err := pool.worker.RequestWork(ctx)
+	reportProcessOutcome(pool.report, pool.runnerPool, result, err)
 	if err != nil {
 		return fmt.Errorf("request pool work: %w", err)
 	}
 	return nil
 }
 
+func reportProcessOutcome(report func(error), runnerPool core.RunnerPool, result runtimeengine.ProcessResult, err error) {
+	if result.JobID != (core.JobID{}) {
+		reportOperational(report, operationalEvent{operation: "claim", outcome: "claimed",
+			runnerPool: runnerPool, jobID: result.JobID})
+	}
+	if result.Outcome == runtimeengine.ProcessRunnerStarted {
+		reportOperational(report, operationalEvent{operation: "runner_start", outcome: "started",
+			runnerPool: runnerPool, jobID: result.JobID})
+	}
+	if result.Outcome == runtimeengine.ProcessRetry {
+		event := operationalEvent{operation: "runner_retry", outcome: string(result.RetryOutcome),
+			runnerPool: runnerPool, jobID: result.JobID, err: err}
+		reportOperational(report, event)
+	}
+}
+
 func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	result, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	reportCleanup(pool.report, runnerPool, result)
 	if err != nil {
 		return fmt.Errorf("reconcile pool work: %w", err)
 	}
@@ -184,8 +204,16 @@ func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerP
 
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
 	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
+	reportCleanup(pool.report, pool.runnerPool, result)
 	if err != nil {
 		return result.RemainingProcessing, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
 	return result.RemainingProcessing, nil
+}
+
+func reportCleanup(report func(error), runnerPool core.RunnerPool, result runtimeengine.PoolReconciliation) {
+	if result.RemovedRunners != 0 || result.RemovedProcessing != 0 {
+		reportOperational(report, operationalEvent{operation: "cleanup", outcome: "removed",
+			runnerPool: runnerPool, count: result.RemovedRunners + result.RemovedProcessing})
+	}
 }

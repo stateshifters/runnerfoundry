@@ -133,9 +133,13 @@ func superviseReloads(
 		case <-ctx.Done():
 			return
 		case <-reloadRequests:
-			if err := reloadGeneration(ctx, load, build, notifier, handoff); err != nil {
-				report(err)
+			err := reloadGeneration(ctx, load, build, notifier, handoff)
+			if err != nil {
+				reportOperationalError(report, operationalEvent{operation: "reload", outcome: "rejected",
+					errorCategory: classifyOperationalError(operationalEvent{err: err})}, err)
+				continue
 			}
+			reportOperational(report, operationalEvent{operation: "reload", outcome: "applied"})
 		}
 	}
 }

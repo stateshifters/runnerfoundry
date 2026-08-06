@@ -49,21 +49,24 @@ type UnifiedEngineConfig struct {
 	Source      sourceRuntime
 	Pools       []RunnerPoolRuntime
 	Inventory   execution.RunnerInventory
+	Report      func(error)
 }
 
 // UnifiedEngine advances one source-neutral lifecycle for a member. Cycles are
 // sequential; callers own scheduling and must not call Cycle concurrently.
 type UnifiedEngine struct {
-	currentTime   func() time.Time
-	memberTTL     time.Duration
-	membership    membershipRuntime
-	leadership    leadershipRuntime
-	source        sourceRuntime
-	pools         []RunnerPoolRuntime
-	inventory     execution.RunnerInventory
-	leaderOpen    bool
-	leaderClosing bool
-	cycleMutex    sync.Mutex
+	currentTime    func() time.Time
+	memberTTL      time.Duration
+	membership     membershipRuntime
+	leadership     leadershipRuntime
+	source         sourceRuntime
+	pools          []RunnerPoolRuntime
+	inventory      execution.RunnerInventory
+	leaderOpen     bool
+	leaderClosing  bool
+	cycleMutex     sync.Mutex
+	report         func(error)
+	reportedLeader operationalLeadership
 }
 
 func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
@@ -75,6 +78,7 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 		source:      config.Source,
 		pools:       append([]RunnerPoolRuntime(nil), config.Pools...),
 		inventory:   config.Inventory,
+		report:      config.Report,
 	}
 }
 
@@ -114,8 +118,10 @@ func (engine *UnifiedEngine) runLeaderWork(ctx context.Context, liveMemberCutoff
 		return []error{fmt.Errorf("inspect source leadership: %w", err)}
 	}
 	if !leader {
+		engine.reportLeadership(leadershipStandby)
 		return engine.closeLostLeadership(ctx)
 	}
+	engine.reportLeadership(leadershipLeader)
 	if engine.leaderClosing {
 		if closeErrors := engine.closeSourceLeadership(ctx, "finish closing source leadership"); len(closeErrors) != 0 {
 			return closeErrors
@@ -125,6 +131,18 @@ func (engine *UnifiedEngine) runLeaderWork(ctx context.Context, liveMemberCutoff
 		return []error{err}
 	}
 	return engine.runOwnedLeaderWork(ctx, liveMemberCutoff)
+}
+
+func (engine *UnifiedEngine) reportLeadership(leadership operationalLeadership) {
+	if engine.reportedLeader == leadership {
+		return
+	}
+	engine.reportedLeader = leadership
+	outcome := "standby"
+	if leadership == leadershipLeader {
+		outcome = "acquired"
+	}
+	reportOperational(engine.report, operationalEvent{operation: "leadership", outcome: outcome, leadership: leadership})
 }
 
 func (engine *UnifiedEngine) closeLostLeadership(ctx context.Context) []error {

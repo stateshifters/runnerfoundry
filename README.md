@@ -330,6 +330,10 @@ sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
+`systemctl status` reports source-neutral runtime health as `operational` or `degraded`; cluster leadership is shown separately as `unknown`, `standby`, or `leader`. `READY=1` continues to mean that the active generation completed its first maintenance cycle. A rejected reload that restores or preserves the active generation does not make the service degraded.
+
+Text and JSON logs use the same structured operational fields. The `operation` field identifies maintenance, reload, leadership, capacity publication, claims, runner starts or retries, and successful cleanup. Events include only non-secret identifiers such as `member`, `runner_pool`, and `job_id`, plus an `outcome` and `error_category`; raw error details are not logged. Repeated failures are logged immediately, whenever their fingerprint changes, and every five minutes while unchanged. The recovery event includes the recurrence count and failure duration.
+
 ### Reload configuration
 
 ```sh
@@ -352,6 +356,7 @@ Review the release notes, stop the affected member or cluster, install the packa
 
 ### Troubleshooting
 
+- **Service is degraded:** Filter the service log by `outcome=failed`, then use `operation` and `error_category` to identify the failing boundary. An `outcome=recovered` event clears that operation's active failure; `systemctl status` returns to `operational` after every active operation has recovered.
 - **Configuration rejected:** Read the first validation error in the service log. Check unknown fields, App credentials, state-backend selection, positive capacity, and exactly one provider per Runner Pool.
 - **GitHub capacity missing:** Verify App permissions, installation scope, the configured GitHub runner group, and the private-key file.
 - **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued jobs or any processing jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.

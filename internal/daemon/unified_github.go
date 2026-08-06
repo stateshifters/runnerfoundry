@@ -33,6 +33,7 @@ type githubSourceRuntime struct {
 	adapters          []*githubsource.Adapter
 	polls             map[*githubsource.Adapter]*githubPollAttempt
 	leaderInstalled   bool
+	report            func(error)
 }
 
 func newGitHubSourceRuntime(

@@ -344,3 +344,5 @@ func (notifier *fakeSupervisorNotifier) Reloading(context.Context) error {
 	notifier.reloading++
 	return notifier.reloadingErr
 }
+
+func (*fakeSupervisorNotifier) Status(context.Context, operationalStatus) error { return nil }
