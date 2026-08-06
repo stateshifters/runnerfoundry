@@ -2,13 +2,12 @@ package sqlite
 
 import (
 	"context"
-	"path/filepath"
+	"database/sql"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/state/storetest"
 )
 
@@ -20,200 +19,181 @@ type sqliteConformance struct{}
 
 func (sqliteConformance) Exercise(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	if scenario == storetest.RetryClaimChanged {
-		return exerciseSQLiteClaimChanged(t)
-	}
-	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatalf("open SQLite store: %v", err)
-	}
-	t.Cleanup(func() {
-		if closeErr := store.Close(); closeErr != nil {
-			t.Errorf("close SQLite store: %v", closeErr)
-		}
-	})
-	return exerciseSQLiteScenario(t, store, scenario)
-}
-
-func exerciseSQLiteScenario(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
-	t.Helper()
 	name := string(scenario)
 	switch {
 	case strings.HasPrefix(name, "queue/"):
-		return exerciseSQLiteQueue(t, store, scenario)
+		return exerciseSQLiteQueueProtocol(t, scenario)
 	case scenario == storetest.DelayedStart:
-		return exerciseSQLiteDelayedStart(t, store)
+		return exerciseSQLiteDelayedStartProtocol(t)
 	case strings.HasPrefix(name, "claim/"):
-		return exerciseSQLiteClaim(t, store, scenario)
+		return exerciseSQLiteClaimProtocol(t, scenario)
 	case strings.HasPrefix(name, "retry/"):
-		return exerciseSQLiteRetry(t, store, scenario)
+		return exerciseSQLiteRetryProtocol(t, scenario)
 	case strings.HasPrefix(name, "recovery/"):
-		return exerciseSQLiteRecovery(t, store, scenario)
+		return exerciseSQLiteRecoveryProtocol(t, scenario)
 	case strings.HasPrefix(name, "removal/"):
-		return exerciseSQLiteRemoval(t, store, scenario)
-	case scenario == storetest.Capacity:
-		return exerciseSQLiteCapacity(t, store)
+		return exerciseSQLiteRemovalProtocol(t, scenario)
 	default:
-		return exerciseSQLiteRegistrations(t, store)
+		return exerciseSQLiteSnapshotProtocol(t, scenario)
 	}
 }
 
-func exerciseSQLiteQueue(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteQueueProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	request := requestFor(storetest.OldestJob())
-	if scenario == storetest.QueueDuplicate || scenario == storetest.QueueProcessing {
-		mustQueue(t, store, request)
+	job := storetest.OldestJob()
+	request := core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool, EnqueuedAt: job.EnqueuedAt}
+	affected := int64(0)
+	var queryRow func(context.Context, string, ...any) Row
+	switch string(scenario) {
+	case string(storetest.QueueNew):
+		affected = 1
+		queryRow = constantRow(rowFromValues(sqliteQueuedValues(job)))
+	case string(storetest.QueueDuplicate):
+		queryRow = constantRow(rowFromValues(sqliteQueuedValues(job)))
+	case string(storetest.QueueProcessing):
+		queryRow = queueClassificationRows(core.QueueProcessing)
+	default:
+		queryRow = queueClassificationRows(core.QueueSourceTerminal)
 	}
-	if scenario == storetest.QueueProcessing {
-		mustClaim(t, store)
-	}
-	if scenario == storetest.QueueTerminal {
-		if err := store.TerminalizeSource(context.Background(), request.Source); err != nil {
-			t.Fatalf("terminalize source: %v", err)
-		}
-	}
-	result, err := store.Queue(context.Background(), request)
+	transaction := Transaction{execute: outcomeExecute(affected), queryRow: queryRow,
+		commit: successfulCompletion, rollback: successfulCompletion}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Queue(context.Background(), request)
 	if err != nil {
 		t.Fatalf("queue: %v", err)
 	}
 	return storetest.Observation{QueueOutcome: result.Outcome}
 }
 
-func exerciseSQLiteClaim(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteClaimProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	if scenario == storetest.ClaimEmpty {
-		result, err := store.ClaimOldest(context.Background(), "linux", conformanceClaim())
-		if err != nil {
-			t.Fatalf("empty claim: %v", err)
-		}
-		return storetest.Observation{ClaimOutcome: result.Outcome}
+	job := storetest.OldestJob()
+	row := Row{scan: func(...any) error { return sql.ErrNoRows }}
+	if scenario != storetest.ClaimEmpty {
+		row = rowFromValues(sqliteQueuedValues(job))
 	}
-	newer := storetest.OldestJob()
-	newer.Source.ID = "newer"
-	newer.EnqueuedAt = newer.EnqueuedAt.Add(time.Minute)
-	mustQueue(t, store, requestFor(newer))
-	mustQueue(t, store, requestFor(storetest.OldestJob()))
-	processing := mustClaim(t, store)
-	processing.Job.ID = uuid.Nil
-	observation := storetest.Observation{ClaimOutcome: core.ClaimClaimed, Job: processing.Job}
+	transaction := Transaction{queryRow: constantRow(row), execute: outcomeExecute(1),
+		commit: successfulCompletion, rollback: successfulCompletion}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ClaimOldest(
+		context.Background(), "linux", sqliteConformanceClaim(),
+	)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	observation := storetest.Observation{ClaimOutcome: result.Outcome}
+	if result.Outcome == core.ClaimClaimed {
+		observation.Job = result.Processing.Job
+	}
 	if scenario == storetest.ClaimMetadata {
-		observation.Processing = processing
+		observation.Processing = result.Processing
 	}
 	return observation
 }
 
-func exerciseSQLiteDelayedStart(t *testing.T, store *Store) storetest.Observation {
+func exerciseSQLiteDelayedStartProtocol(t *testing.T) storetest.Observation {
 	t.Helper()
-	processing := queueAndClaim(t, store)
+	processing := storetest.ExpectedProcessing()
+	transaction := Transaction{execute: outcomeExecute(1),
+		query: func(context.Context, string, ...any) (Rows, error) {
+			return rowsFromValues([][]any{sqliteClaimedValues(processing, true, false)}), nil
+		}, commit: successfulCompletion, rollback: successfulCompletion}
+	store := NewStore(Executor{begin: transactionBeginning(transaction)})
 	if err := store.MarkRunnerStarted(context.Background(), processing.Job.Source); err != nil {
-		t.Fatalf("mark runner started: %v", err)
+		t.Fatalf("mark started: %v", err)
 	}
-	current, err := store.ProcessingByPool(context.Background(), "linux")
+	current, err := store.ProcessingByPool(context.Background(), processing.Job.RunnerPool)
 	if err != nil || len(current) != 1 {
 		t.Fatalf("processing after start = %#v, %v", current, err)
 	}
 	return storetest.Observation{Started: current[0].RunnerStarted}
 }
 
-func exerciseSQLiteRetry(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteRetryProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	if scenario == storetest.RetryMissing {
-		result, err := store.RetryUnstarted(context.Background(), uuid.New())
-		if err != nil {
-			t.Fatalf("retry missing: %v", err)
-		}
-		return storetest.Observation{RetryOutcome: result.Outcome}
+	job := storetest.OldestJob()
+	plain := rowFromValues(sqliteProcessingValues(job, false, false))
+	rows := map[storetest.Scenario][]Row{
+		storetest.RetryRequeue:      {plain},
+		storetest.RetryMissing:      {{scan: func(...any) error { return sql.ErrNoRows }}},
+		storetest.RetryStarted:      {rowFromValues(sqliteProcessingValues(job, true, false))},
+		storetest.RetryTerminal:     {rowFromValues(sqliteProcessingValues(job, false, true))},
+		storetest.RetryClaimChanged: {plain, plain},
+	}[scenario]
+	affected := int64(1)
+	if scenario == storetest.RetryClaimChanged {
+		affected = 0
 	}
-	processing := queueAndClaim(t, store)
-	if scenario == storetest.RetryStarted {
-		mustMarkStarted(t, store, processing.Job.Source)
-	}
-	if scenario == storetest.RetryTerminal {
-		mustTerminalize(t, store, processing.Job.Source)
-	}
-	result, err := store.RetryUnstarted(context.Background(), processing.Job.ID)
+	transaction := Transaction{queryRow: sqliteRowsInOrder(rows...), execute: outcomeExecute(affected),
+		commit: successfulCompletion, rollback: successfulCompletion}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		RetryUnstarted(context.Background(), job.ID)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	return storetest.Observation{RetryOutcome: result.Outcome}
 }
 
-func exerciseSQLiteClaimChanged(t *testing.T) storetest.Observation {
-	t.Helper()
-	transaction := Transaction{queryRow: constantRow(rowFromValues(processingOutcomeValues(false, false))),
-		execute: outcomeExecute(0), commit: successfulCompletion, rollback: successfulCompletion}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID)
-	if err != nil {
-		t.Fatalf("retry changed claim: %v", err)
-	}
-	return storetest.Observation{RetryOutcome: result.Outcome}
-}
-
-func exerciseSQLiteRecovery(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteRecoveryProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
 	processing := storetest.ExpectedProcessing()
-	if scenario != storetest.RecoveryMissing {
-		processing = queueAndClaim(t, store)
+	affected := int64(0)
+	classification := map[storetest.Scenario]Row{
+		storetest.RecoveryMissing:      {scan: func(...any) error { return sql.ErrNoRows }},
+		storetest.RecoveryStarted:      rowFromValues(sqliteClaimedValues(processing, true, false)),
+		storetest.RecoveryTerminal:     rowFromValues(sqliteClaimedValues(processing, false, true)),
+		storetest.RecoveryClaimChanged: rowFromValues(sqliteClaimedValues(processing, false, false)),
+	}[scenario]
+	if scenario == storetest.RecoveryRequeue {
+		affected = 1
 	}
-	if scenario == storetest.RecoveryMissing {
-		processing.Job.ID = uuid.New()
-	}
-	if scenario == storetest.RecoveryStarted {
-		mustMarkStarted(t, store, processing.Job.Source)
-	}
-	if scenario == storetest.RecoveryTerminal {
-		mustTerminalize(t, store, processing.Job.Source)
-	}
-	if scenario == storetest.RecoveryClaimChanged {
-		processing.ClaimedAt = processing.ClaimedAt.Add(time.Second)
-	}
-	result, err := store.RecoverUnstartedProcessing(context.Background(), processing)
+	transaction := Transaction{execute: outcomeExecute(affected), queryRow: constantRow(classification),
+		commit: successfulCompletion, rollback: successfulCompletion}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		RecoverUnstartedProcessing(context.Background(), processing)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
 	return storetest.Observation{RetryOutcome: result.Outcome}
 }
 
-func exerciseSQLiteRemoval(t *testing.T, store *Store, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteRemovalProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	jobID := uuid.New()
-	if scenario != storetest.RemovalMissing {
-		processing := queueAndClaim(t, store)
-		jobID = processing.Job.ID
-		if scenario == storetest.RemovalRemoved {
-			mustTerminalize(t, store, processing.Job.Source)
-		}
+	affected := int64(1)
+	classification := rowFromValues([]any{false})
+	if scenario != storetest.RemovalRemoved {
+		affected = 0
+		classification = rowFromValues([]any{scenario == storetest.RemovalNotTerminal})
 	}
-	result, err := store.RemoveTerminal(context.Background(), jobID)
+	transaction := Transaction{execute: outcomeExecute(affected), queryRow: constantRow(classification),
+		commit: successfulCompletion, rollback: successfulCompletion}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		RemoveTerminal(context.Background(), storetest.OldestJob().ID)
 	if err != nil {
-		t.Fatalf("remove terminal: %v", err)
+		t.Fatalf("remove: %v", err)
 	}
 	return storetest.Observation{RemovalOutcome: result.Outcome}
 }
 
-func exerciseSQLiteCapacity(t *testing.T, store *Store) storetest.Observation {
+func exerciseSQLiteSnapshotProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	if err := store.PublishMemberState(context.Background(), "member-a", storetest.FixedTime(),
-		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 5}}); err != nil {
-		t.Fatalf("publish capacity: %v", err)
+	if scenario == storetest.Capacity {
+		store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row { return rowFromValues([]any{5, 2, 1}) }})
+		capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", storetest.FixedTime())
+		if err != nil {
+			t.Fatalf("capacity: %v", err)
+		}
+		return storetest.Observation{Capacity: capacity}
 	}
-	for index := 0; index < 3; index++ {
-		job := storetest.OldestJob()
-		job.Source.ID = core.SourceIdentifier(string(rune('a' + index)))
-		mustQueue(t, store, requestFor(job))
-	}
-	mustClaim(t, store)
-	capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", storetest.FixedTime())
-	if err != nil {
-		t.Fatalf("capacity: %v", err)
-	}
-	return storetest.Observation{Capacity: capacity}
-}
-
-func exerciseSQLiteRegistrations(t *testing.T, store *Store) storetest.Observation {
-	t.Helper()
 	want := storetest.ExpectedRegistrations()
+	queryCalls := 0
+	transaction := Transaction{execute: outcomeExecute(1), query: func(context.Context, string, ...any) (Rows, error) {
+		queryCalls++
+		registrations := want.Active
+		if queryCalls == 2 {
+			registrations = want.Owned
+		}
+		return rowsFromValues(sqliteRegistrationValues(registrations)), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+	store := NewStore(Executor{begin: transactionBeginning(transaction)})
 	if err := store.ReplaceRegistrationSnapshot(context.Background(), want); err != nil {
 		t.Fatalf("replace registrations: %v", err)
 	}
@@ -224,50 +204,38 @@ func exerciseSQLiteRegistrations(t *testing.T, store *Store) storetest.Observati
 	return storetest.Observation{Registrations: got}
 }
 
-func queueAndClaim(t *testing.T, store *Store) core.ProcessingJob {
-	t.Helper()
-	mustQueue(t, store, requestFor(storetest.OldestJob()))
-	return mustClaim(t, store)
+func sqliteQueuedValues(job core.Job) []any {
+	return []any{job.ID.String(), string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), job.EnqueuedAt.UnixNano()}
 }
 
-func mustQueue(t *testing.T, store *Store, request core.JobRequest) {
-	t.Helper()
-	if _, err := store.Queue(context.Background(), request); err != nil {
-		t.Fatalf("queue fixture: %v", err)
-	}
+func sqliteProcessingValues(job core.Job, started, terminal bool) []any {
+	return []any{job.ID.String(), string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool),
+		"member-a", started, terminal}
 }
 
-func mustClaim(t *testing.T, store *Store) core.ProcessingJob {
-	t.Helper()
-	if err := store.PublishMemberState(context.Background(), "member-a", storetest.FixedTime(),
-		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 5}}); err != nil {
-		t.Fatalf("publish member fixture: %v", err)
-	}
-	result, err := store.ClaimOldest(context.Background(), "linux", conformanceClaim())
-	if err != nil || result.Outcome != core.ClaimClaimed {
-		t.Fatalf("claim fixture = %#v, %v", result, err)
-	}
-	return result.Processing
+func sqliteClaimedValues(processing core.ProcessingJob, started, terminal bool) []any {
+	return []any{processing.Job.ID.String(), string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
+		string(processing.Job.RunnerPool), string(processing.MemberID), processing.ClaimedAt.UnixNano(),
+		string(processing.InventoryEndpointID), started, terminal}
 }
 
-func conformanceClaim() core.ProcessingClaim {
+func sqliteConformanceClaim() core.ProcessingClaim {
 	return core.ProcessingClaim{MemberID: "member-a", ClaimedAt: storetest.FixedTime(), InventoryEndpointID: "docker:member-a"}
 }
 
-func requestFor(job core.Job) core.JobRequest {
-	return core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool, EnqueuedAt: job.EnqueuedAt}
-}
-
-func mustMarkStarted(t *testing.T, store *Store, source core.SourceReference) {
-	t.Helper()
-	if err := store.MarkRunnerStarted(context.Background(), source); err != nil {
-		t.Fatalf("mark started: %v", err)
+func sqliteRowsInOrder(rows ...Row) func(context.Context, string, ...any) Row {
+	return func(context.Context, string, ...any) Row {
+		row := rows[0]
+		rows = rows[1:]
+		return row
 	}
 }
 
-func mustTerminalize(t *testing.T, store *Store, source core.SourceReference) {
-	t.Helper()
-	if err := store.TerminalizeSource(context.Background(), source); err != nil {
-		t.Fatalf("terminalize: %v", err)
+func sqliteRegistrationValues(registrations []githubsource.Registration) [][]any {
+	values := make([][]any, 0, len(registrations))
+	for _, registration := range registrations {
+		values = append(values, []any{registration.RepositoryURL, string(registration.RunnerPool), int64(registration.InstallationID),
+			int64(registration.RunnerGroupID), int64(registration.ScaleSetID)})
 	}
+	return values
 }
