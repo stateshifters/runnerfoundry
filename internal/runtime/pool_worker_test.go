@@ -34,6 +34,27 @@ func TestPoolWorkerProcessesOnlyWhenLocalCapacityIsFree(t *testing.T) {
 	}
 }
 
+func TestPoolWorkerRequestsOneJobWhenSeveralLocalSlotsAreFree(t *testing.T) {
+	processCalls := 0
+	coordinator := &workCoordinatorFake{
+		occupied: func(context.Context, core.RunnerPool) (int, error) { return 1, nil },
+		process: func(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error) {
+			processCalls++
+			return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRunnerStarted}, nil
+		},
+	}
+	worker := runtimeengine.NewPoolWorker(coordinator, "linux", 5)
+
+	result, err := worker.RequestWork(context.Background())
+
+	if err != nil || result.Outcome != runtimeengine.ProcessRunnerStarted {
+		t.Fatalf("RequestWork() = (%#v, %v)", result, err)
+	}
+	if processCalls != 1 {
+		t.Fatalf("Process calls = %d, want exactly one", processCalls)
+	}
+}
+
 func TestPoolWorkerPreservesOutcomesWhileReportingFailures(t *testing.T) {
 	wantErr := errors.New("failed")
 	for name, test := range map[string]struct {
