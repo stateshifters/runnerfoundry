@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
@@ -82,17 +84,38 @@ func TestLoggingGenerationReportsRuntimeActivationFailure(t *testing.T) {
 	}
 }
 
-func TestLoggingGenerationReportsCommitAndDeactivationFailures(t *testing.T) {
+func TestLoggingGenerationKeepsReplacementActiveAfterCommittedLoggingCleanupFails(t *testing.T) {
 	t.Parallel()
-	wantErr := errors.New("lifecycle failed")
+	wantErr := errors.New("close failed")
+	initial := &memoryLogDestination{closeErr: wantErr}
+	replacement := &memoryLogDestination{}
+	manager := memoryLoggingManager(t, initial, replacement)
+	prepared, err := manager.Prepare(config.LogConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	events := make([]string, 0)
 	wrapper := &loggingGeneration{
 		generation: &orderedGenerationFake{events: &events},
-		prepared:   &preparedLogFake{events: &events, commitErr: wantErr},
+		prepared:   prepared,
 	}
-	if err := wrapper.Activate(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("commit error = %v, want %v", err, wantErr)
+	if err = wrapper.Activate(context.Background()); err != nil {
+		t.Fatalf("activation treated committed log cleanup as rollback-worthy: %v", err)
 	}
+	manager.Logger().Info("replacement active")
+	if want := []string{"activate-runtime"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	if !strings.Contains(replacement.String(), "replacement active") {
+		t.Fatalf("replacement log = %q", replacement.String())
+	}
+}
+
+func TestLoggingGenerationReportsDeactivationFailures(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("lifecycle failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{prepared: &preparedLogFake{events: &events}}
 	wrapper.generation = &orderedGenerationFake{events: &events, deactivateErr: wantErr}
 	if err := wrapper.Deactivate(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("deactivation error = %v, want %v", err, wantErr)
@@ -100,6 +123,20 @@ func TestLoggingGenerationReportsCommitAndDeactivationFailures(t *testing.T) {
 	wrapper.generation = &orderedGenerationFake{events: &events}
 	if err := wrapper.Deactivate(context.Background()); err != nil {
 		t.Fatalf("successful deactivation: %v", err)
+	}
+}
+
+func TestLoggingGenerationReportsCommitStateFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("commit state failed")
+	events := make([]string, 0)
+	wrapper := &loggingGeneration{
+		generation: &orderedGenerationFake{events: &events},
+		prepared:   &preparedLogFake{events: &events, commitErr: wantErr},
+	}
+	if err := wrapper.Activate(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("commit state error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -124,7 +161,7 @@ func TestLoggingGenerationReportsActivatedStopFailure(t *testing.T) {
 	events := make([]string, 0)
 	wrapper := &loggingGeneration{
 		generation: &orderedGenerationFake{events: &events, stopErr: wantErr},
-		prepared:   &preparedLogFake{events: &events}, activated: true,
+		prepared:   &preparedLogFake{events: &events},
 	}
 	if err := wrapper.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("activated stop error = %v", err)
@@ -139,7 +176,6 @@ func TestLoggingGenerationDelegatesFinalizers(t *testing.T) {
 	wrapper := &loggingGeneration{
 		generation: &orderedGenerationFake{events: &events, finalizers: []runtimeFinalizer{finalizer}},
 		prepared:   &preparedLogFake{events: &events},
-		activated:  true,
 	}
 	selected := wrapper.Finalizers([]core.RunnerPool{"linux"})
 	if len(selected) != 1 || selected[0] != finalizer {

@@ -47,12 +47,14 @@ func (manager *loggingManager) Close() error {
 }
 
 type preparedLogging struct {
-	manager   *loggingManager
-	target    loggingTarget
-	previous  *loggingTarget
-	mutex     sync.Mutex
-	completed bool
-	activated bool
+	manager        *loggingManager
+	target         loggingTarget
+	previous       *loggingTarget
+	cleanup        io.WriteCloser
+	cleanupFailure string
+	mutex          sync.Mutex
+	completed      bool
+	activated      bool
 }
 
 func (prepared *preparedLogging) Activate() error {
@@ -74,9 +76,9 @@ func (prepared *preparedLogging) Commit() error {
 		return errors.New("prepared logging configuration is not active")
 	}
 	prepared.completed = true
-	if err := prepared.previous.destination.Close(); err != nil {
-		return fmt.Errorf("close replaced log destination: %w", err)
-	}
+	prepared.cleanup = prepared.previous.destination
+	prepared.cleanupFailure = "close replaced log destination"
+	prepared.attemptCleanupWithoutFailingCommit()
 	return nil
 }
 
@@ -88,31 +90,43 @@ func (prepared *preparedLogging) Rollback() error {
 	}
 	candidate := prepared.manager.handler.swap(*prepared.previous)
 	prepared.completed = true
-	if err := candidate.destination.Close(); err != nil {
-		return fmt.Errorf("close replacement log destination: %w", err)
-	}
-	return nil
+	prepared.cleanup = candidate.destination
+	prepared.cleanupFailure = "close replacement log destination"
+	return prepared.attemptCleanup()
 }
 
 func (prepared *preparedLogging) Close() error {
 	prepared.mutex.Lock()
 	defer prepared.mutex.Unlock()
-	if prepared.completed {
-		return nil
-	}
-	if prepared.activated {
-		candidate := prepared.manager.handler.swap(*prepared.previous)
+	if !prepared.completed {
 		prepared.completed = true
-		if err := candidate.destination.Close(); err != nil {
-			return fmt.Errorf("close rolled-back log destination: %w", err)
+		if prepared.activated {
+			candidate := prepared.manager.handler.swap(*prepared.previous)
+			prepared.cleanup = candidate.destination
+			prepared.cleanupFailure = "close rolled-back log destination"
+		} else {
+			prepared.cleanup = prepared.target.destination
+			prepared.cleanupFailure = "close prepared log destination"
 		}
+	}
+	return prepared.attemptCleanup()
+}
+
+func (prepared *preparedLogging) attemptCleanup() error {
+	if prepared.cleanup == nil {
 		return nil
 	}
-	prepared.completed = true
-	if err := prepared.target.destination.Close(); err != nil {
-		return fmt.Errorf("close prepared log destination: %w", err)
+	if err := prepared.cleanup.Close(); err != nil {
+		return fmt.Errorf("%s: %w", prepared.cleanupFailure, err)
 	}
+	prepared.cleanup = nil
 	return nil
+}
+
+func (prepared *preparedLogging) attemptCleanupWithoutFailingCommit() {
+	if prepared.cleanup != nil && prepared.cleanup.Close() == nil {
+		prepared.cleanup = nil
+	}
 }
 
 type loggingTarget struct {

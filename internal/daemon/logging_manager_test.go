@@ -82,11 +82,11 @@ func TestLoggingManagerSurfacesFactoryAndDestinationFailures(t *testing.T) {
 	}
 }
 
-func TestPreparedLoggingClosesAbandonedTargetOnce(t *testing.T) {
+func TestPreparedLoggingRetriesAbandonedTargetCleanupUntilItSucceeds(t *testing.T) {
 	t.Parallel()
 
 	initial := &memoryLogDestination{}
-	candidate := &memoryLogDestination{closeErr: errors.New("close failed")}
+	candidate := &memoryLogDestination{closeErrors: []error{errors.New("close failed"), nil}}
 	manager := memoryLoggingManager(t, initial, candidate)
 	prepared, err := manager.Prepare(config.LogConfig{})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestPreparedLoggingClosesAbandonedTargetOnce(t *testing.T) {
 	if err = prepared.Close(); err == nil {
 		t.Fatal("candidate close failure was ignored")
 	}
-	if err = prepared.Close(); err != nil || candidate.closes != 1 {
+	if err = prepared.Close(); err != nil || candidate.closes != 2 {
 		t.Fatalf("second close = %v, calls=%d", err, candidate.closes)
 	}
 }
@@ -110,6 +110,31 @@ func TestPreparedLoggingClosesSuccessfulCandidate(t *testing.T) {
 	}
 	if err = prepared.Close(); err != nil || successful.closes != 1 {
 		t.Fatalf("successful candidate close = %v, calls=%d", err, successful.closes)
+	}
+}
+
+func TestCommittedLoggingRetriesFailedDestinationCleanupUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("close failed")
+	initial := &memoryLogDestination{closeErrors: []error{wantErr, nil}}
+	replacement := &memoryLogDestination{}
+	manager := memoryLoggingManager(t, initial, replacement)
+	prepared, err := manager.Prepare(config.LogConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = prepared.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if err = prepared.Commit(); err != nil {
+		t.Fatalf("commit replacement: %v", err)
+	}
+	if err = prepared.Close(); err != nil {
+		t.Fatalf("retry committed cleanup: %v", err)
+	}
+	if err = prepared.Close(); err != nil || initial.closes != 2 || replacement.closes != 0 {
+		t.Fatalf("idempotent close = %v, initial closes=%d replacement closes=%d", err, initial.closes, replacement.closes)
 	}
 }
 
@@ -154,12 +179,16 @@ func TestNoOpWriteCloserDelegatesWrites(t *testing.T) {
 
 type memoryLogDestination struct {
 	bytes.Buffer
-	closeErr error
-	closes   int
+	closeErr    error
+	closeErrors []error
+	closes      int
 }
 
 func (destination *memoryLogDestination) Close() error {
 	destination.closes++
+	if destination.closes <= len(destination.closeErrors) {
+		return destination.closeErrors[destination.closes-1]
+	}
 	return destination.closeErr
 }
 

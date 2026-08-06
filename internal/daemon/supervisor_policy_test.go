@@ -158,7 +158,7 @@ func TestFinalShutdownHonorsActiveRunnerPolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			finalizer := &supervisorFinalizerFake{runnerPool: "linux"}
 			active := managedWithPools(&fakeGeneration{finalizers: []runtimeFinalizer{finalizer}}, "linux")
-			if err := finalizeSupervisor(context.Background(), active, test.policy, nil); err != nil {
+			if err := finalizeSupervisor(context.Background(), active, test.policy, nil, nil); err != nil {
 				t.Fatalf("finalize supervisor: %v", err)
 			}
 			if finalizer.calls != test.wantCalls {

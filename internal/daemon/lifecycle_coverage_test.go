@@ -101,7 +101,7 @@ func TestPreparedLoggingRollbackRestoresPreviousDestination(t *testing.T) {
 	}
 }
 
-func TestPreparedLoggingReportsCommitAndRollbackDestinationFailures(t *testing.T) {
+func TestPreparedLoggingDefersCommittedCleanupFailureAndReportsRollbackFailure(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("destination close failed")
 	manager := memoryLoggingManager(t, &memoryLogDestination{closeErr: wantErr}, &memoryLogDestination{})
@@ -109,8 +109,11 @@ func TestPreparedLoggingReportsCommitAndRollbackDestinationFailures(t *testing.T
 	if err != nil || prepared.Activate() != nil {
 		t.Fatalf("prepare commit failure fixture: %v", err)
 	}
-	if err = prepared.Commit(); !errors.Is(err, wantErr) {
-		t.Fatalf("commit error = %v, want %v", err, wantErr)
+	if err = prepared.Commit(); err != nil {
+		t.Fatalf("commit logging change: %v", err)
+	}
+	if err = prepared.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("deferred cleanup error = %v, want %v", err, wantErr)
 	}
 
 	manager = memoryLoggingManager(t, &memoryLogDestination{}, &memoryLogDestination{closeErr: wantErr})

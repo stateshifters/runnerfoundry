@@ -135,6 +135,70 @@ func TestSupervisorReportsReplacementStopFailure(t *testing.T) {
 	}
 }
 
+func TestSupervisorRetriesMultipleRetiredGenerationsAfterLaterSuccessfulHandoff(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("close failed")
+	first := &fakeGeneration{stopErrors: []error{wantErr, wantErr, nil}}
+	second := &fakeGeneration{stopErrors: []error{wantErr, nil}}
+	handoff := &generationHandoff{policy: LeaveActiveRunners, active: &managedGeneration{generation: first}}
+	if err := replaceActiveGeneration(context.Background(), handoff, &managedGeneration{generation: second}); !errors.Is(err, wantErr) {
+		t.Fatalf("first handoff error = %v, want %v", err, wantErr)
+	}
+	if first.stops != 1 {
+		t.Fatalf("failed retirement calls=%d", first.stops)
+	}
+	third := &fakeGeneration{}
+	if err := replaceActiveGeneration(context.Background(), handoff, &managedGeneration{generation: third}); !errors.Is(err, wantErr) {
+		t.Fatalf("second handoff error = %v, want %v", err, wantErr)
+	}
+	if first.stops != 2 || second.stops != 1 {
+		t.Fatalf("retirement retries first=%d second=%d", first.stops, second.stops)
+	}
+	fourth := &fakeGeneration{}
+	if err := replaceActiveGeneration(context.Background(), handoff, &managedGeneration{generation: fourth}); err != nil {
+		t.Fatalf("later successful handoff: %v", err)
+	}
+	if first.stops != 3 || second.stops != 2 || third.stops != 1 {
+		t.Fatalf("successful retries first=%d second=%d third=%d", first.stops, second.stops, third.stops)
+	}
+}
+
+func TestSupervisorRetriesRetiredGenerationsDuringShutdown(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("close failed")
+	retired := &fakeGeneration{stopErrors: []error{wantErr, nil}}
+	active := &fakeGeneration{}
+	handoff := &generationHandoff{policy: LeaveActiveRunners, active: &managedGeneration{generation: retired}}
+	if err := replaceActiveGeneration(context.Background(), handoff, &managedGeneration{generation: active}); !errors.Is(err, wantErr) {
+		t.Fatalf("handoff error = %v, want %v", err, wantErr)
+	}
+	if err := finalizeSupervisor(context.Background(), handoff.active, handoff.policy, nil, handoff.retiredGenerations); err != nil {
+		t.Fatalf("shutdown retry: %v", err)
+	}
+	if retired.stops != 2 || active.stops != 1 {
+		t.Fatalf("shutdown closes retired=%d active=%d", retired.stops, active.stops)
+	}
+}
+
+func TestSupervisorShutdownContinuesAfterOneRetiredGenerationFails(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("close failed")
+	failing := &fakeGeneration{stopErr: wantErr}
+	successful := &fakeGeneration{}
+	active := &fakeGeneration{}
+	err := finalizeSupervisor(context.Background(), &managedGeneration{generation: active}, LeaveActiveRunners, nil,
+		[]*managedGeneration{{generation: failing}, {generation: successful}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("shutdown error = %v, want %v", err, wantErr)
+	}
+	if failing.stops != 1 || successful.stops != 1 || active.stops != 1 {
+		t.Fatalf("shutdown closes failing=%d successful=%d active=%d", failing.stops, successful.stops, active.stops)
+	}
+}
+
 func TestSupervisorReportsReloadingNotificationFailure(t *testing.T) {
 	t.Parallel()
 
@@ -201,6 +265,7 @@ type fakeGeneration struct {
 	startErr      error
 	activateErr   error
 	stopErr       error
+	stopErrors    []error
 	finalizers    []runtimeFinalizer
 }
 
@@ -243,6 +308,9 @@ func (generation *fakeGeneration) Start(context.Context) error {
 
 func (generation *fakeGeneration) Stop(context.Context) error {
 	generation.stops++
+	if generation.stops <= len(generation.stopErrors) {
+		return generation.stopErrors[generation.stops-1]
+	}
 	return generation.stopErr
 }
 

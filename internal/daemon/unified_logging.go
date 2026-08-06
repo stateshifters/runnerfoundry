@@ -18,7 +18,6 @@ type preparedLogChange interface {
 type loggingGeneration struct {
 	generation generation
 	prepared   preparedLogChange
-	activated  bool
 }
 
 func (wrapped *loggingGeneration) Prepare(ctx context.Context) error {
@@ -35,7 +34,6 @@ func (wrapped *loggingGeneration) Activate(ctx context.Context) error {
 	if err := wrapped.generation.Activate(ctx); err != nil {
 		return errors.Join(fmt.Errorf("activate logging runtime generation: %w", err), wrapped.prepared.Rollback())
 	}
-	wrapped.activated = true
 	if err := wrapped.prepared.Commit(); err != nil {
 		return fmt.Errorf("commit replacement logging: %w", err)
 	}

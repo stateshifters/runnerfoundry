@@ -61,7 +61,7 @@ func supervise(
 	handoff := &generationHandoff{policy: policy, active: active}
 	defer func() {
 		resultErr = errors.Join(resultErr, finalizeSupervisor(
-			context.WithoutCancel(ctx), handoff.active, policy, handoff.retainedFinalizers,
+			context.WithoutCancel(ctx), handoff.active, policy, handoff.retainedFinalizers, handoff.retiredGenerations,
 		))
 	}()
 	if err = notifier.Ready(ctx); err != nil {
@@ -81,6 +81,7 @@ type generationHandoff struct {
 	policy             ActiveRunnerPolicy
 	active             *managedGeneration
 	retainedFinalizers []runtimeFinalizer
+	retiredGenerations []*managedGeneration
 }
 
 func startInitialGeneration(
@@ -179,7 +180,22 @@ func replaceActiveGeneration(
 	}
 	handoff.active = replacement
 	terminateErr := terminateReplacedGeneration(ctx, handoff, previous, replacement)
-	return errors.Join(terminateErr, previous.Close(context.WithoutCancel(ctx)))
+	retirees := append(handoff.retiredGenerations, previous)
+	remainingRetirees, closeErr := closeRetiredGenerations(context.WithoutCancel(ctx), retirees)
+	handoff.retiredGenerations = remainingRetirees
+	return errors.Join(terminateErr, closeErr)
+}
+
+func closeRetiredGenerations(ctx context.Context, retirees []*managedGeneration) ([]*managedGeneration, error) {
+	remaining := make([]*managedGeneration, 0, len(retirees))
+	var resultErr error
+	for _, retiree := range retirees {
+		if err := retiree.Close(ctx); err != nil {
+			remaining = append(remaining, retiree)
+			resultErr = errors.Join(resultErr, fmt.Errorf("close retired runtime: %w", err))
+		}
+	}
+	return remaining, resultErr
 }
 
 func activateReplacement(ctx context.Context, previous, replacement *managedGeneration) error {
@@ -223,8 +239,9 @@ func finalizeSupervisor(
 	active *managedGeneration,
 	policy ActiveRunnerPolicy,
 	retainedFinalizers []runtimeFinalizer,
+	retiredGenerations []*managedGeneration,
 ) error {
-	stopErr := active.Close(ctx)
+	_, stopErr := closeRetiredGenerations(ctx, append(retiredGenerations, active))
 	if policy != TerminateActiveRunners {
 		return stopErr
 	}
