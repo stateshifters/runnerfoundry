@@ -16,14 +16,12 @@ import (
 )
 
 func TestProductionLogFactoryDelegatesRotatingWriterConstruction(t *testing.T) {
-	original := newRotatingLogFile
-	t.Cleanup(func() { newRotatingLogFile = original })
 	called := false
-	newRotatingLogFile = func(string, ...logrotate.Option) (*logrotate.Writer, error) {
+	openRotatingLogFile := func(string, ...logrotate.Option) (*logrotate.Writer, error) {
 		called = true
 		return &logrotate.Writer{}, nil
 	}
-	factory := newProductionLogDestinationFactory()
+	factory := newProductionLogDestinationFactoryWithRotator(openRotatingLogFile)
 	if _, err := factory.openRotatingFile(rotatingFileSettings{}, func(error) {}); err != nil || !called {
 		t.Fatalf("rotating writer = (called %t, error %v)", called, err)
 	}

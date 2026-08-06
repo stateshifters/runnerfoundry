@@ -25,28 +25,34 @@ const (
 var ErrNotLeader = errors.New("PostgreSQL leadership is held by another member")
 
 type Store struct {
-	settings          postgresconfig.Settings
-	directConnector   func(context.Context) (leaderConnection, error)
-	connectConfig     func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error)
-	parsePoolConfig   func(string) (*pgxpool.Config, error)
-	connectPool       func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error)
-	assumePoolRole    func(context.Context, roleConnection, string) error
-	migrationFactory  func(context.Context, leaderConnection) (*migrationExecutor, error)
-	newTernMigrator   func(context.Context, *pgx.Conn, string) (*migrate.Migrator, error)
-	connectionAdapter postgreSQLConnectionAdapter
-	migrationFiles    fs.FS
+	settings           postgresconfig.Settings
+	directConnector    func(context.Context) (leaderConnection, error)
+	connectConfig      func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error)
+	parsePoolConfig    func(string) (*pgxpool.Config, error)
+	connectPool        func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error)
+	assumePoolRole     func(context.Context, roleConnection, string) error
+	migrationFactory   func(context.Context, leaderConnection) (*migrationExecutor, error)
+	newTernMigrator    func(context.Context, *pgx.Conn, string) (*migrate.Migrator, error)
+	connectionAdapter  postgreSQLConnectionAdapter
+	migrationFiles     fs.FS
+	connectionResolver connectionSettingResolver
 }
 
 func NewStore(settings postgresconfig.Settings) *Store {
+	return newStoreWithResolver(settings, operatingSystemConnectionSettingResolver())
+}
+
+func newStoreWithResolver(settings postgresconfig.Settings, resolver connectionSettingResolver) *Store {
 	store := &Store{
-		settings:          settings,
-		connectConfig:     pgx.ConnectConfig,
-		parsePoolConfig:   pgxpool.ParseConfig,
-		connectPool:       pgxpool.NewWithConfig,
-		assumePoolRole:    assumePostgreSQLRole,
-		newTernMigrator:   migrate.NewMigrator,
-		connectionAdapter: operatingSystemPostgreSQLConnectionAdapter(),
-		migrationFiles:    embeddedMigrations,
+		settings:           settings,
+		connectConfig:      pgx.ConnectConfig,
+		parsePoolConfig:    pgxpool.ParseConfig,
+		connectPool:        pgxpool.NewWithConfig,
+		assumePoolRole:     assumePostgreSQLRole,
+		newTernMigrator:    migrate.NewMigrator,
+		connectionAdapter:  operatingSystemPostgreSQLConnectionAdapter(),
+		migrationFiles:     embeddedMigrations,
+		connectionResolver: resolver,
 	}
 	store.migrationFactory = store.newMigrationExecutor
 	store.directConnector = func(ctx context.Context) (leaderConnection, error) {
@@ -136,11 +142,11 @@ func operatingSystemPostgreSQLConnectionAdapter() postgreSQLConnectionAdapter {
 }
 
 func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, error) {
-	role, err := resolvedConnectionRole(store.settings, productionConnectionSettingResolver)
+	role, err := resolvedConnectionRole(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PostgreSQL role: %w", err)
 	}
-	config, err := directConnectionConfig(store.settings)
+	config, err := directConnectionConfigWithResolver(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve direct PostgreSQL connection: %w", err)
 	}

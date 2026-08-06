@@ -22,15 +22,13 @@ func TestOpenUsesInjectedDatabaseProtocol(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(
 		sqlmock.NewRows([]string{"user_version"}).AddRow(sqliteSchemaVersion))
 	mock.ExpectClose()
-	originalOpener := openSQLiteDatabase
-	openSQLiteDatabase = func(driverName, path string) (*sql.DB, error) {
+	opener := func(driverName, path string) (*sql.DB, error) {
 		if driverName != "sqlite" || path != "state.db" {
 			t.Fatalf("open arguments = %q, %q", driverName, path)
 		}
 		return database, nil
 	}
-	t.Cleanup(func() { openSQLiteDatabase = originalOpener })
-	store, err := Open(context.Background(), "state.db")
+	store, err := openWithDatabaseOpener(context.Background(), "state.db", opener)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -44,10 +42,8 @@ func TestOpenUsesInjectedDatabaseProtocol(t *testing.T) {
 
 func TestOpenReportsOpenAndInitializationFailures(t *testing.T) {
 	protocolErr := errors.New("protocol")
-	originalOpener := openSQLiteDatabase
-	t.Cleanup(func() { openSQLiteDatabase = originalOpener })
-	openSQLiteDatabase = func(string, string) (*sql.DB, error) { return nil, protocolErr }
-	if _, err := Open(context.Background(), "state.db"); err == nil {
+	openFailure := func(string, string) (*sql.DB, error) { return nil, protocolErr }
+	if _, err := openWithDatabaseOpener(context.Background(), "state.db", openFailure); err == nil {
 		t.Fatal("expected open error")
 	}
 	database, mock, err := sqlmock.New()
@@ -56,9 +52,17 @@ func TestOpenReportsOpenAndInitializationFailures(t *testing.T) {
 	}
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnError(protocolErr)
 	mock.ExpectClose().WillReturnError(protocolErr)
-	openSQLiteDatabase = func(string, string) (*sql.DB, error) { return database, nil }
-	if _, err := Open(context.Background(), "state.db"); err == nil {
+	initializationFailure := func(string, string) (*sql.DB, error) { return database, nil }
+	if _, err := openWithDatabaseOpener(context.Background(), "state.db", initializationFailure); err == nil {
 		t.Fatal("expected initialization error")
+	}
+}
+
+func TestOpenHonoursCancelledContextBeforeDatabaseAccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Open(ctx, "must-not-be-opened.db"); !errors.Is(err, context.Canceled) {
+		t.Fatal("expected canceled open error")
 	}
 }
 
@@ -72,7 +76,7 @@ func TestInitializeAppliesFreshSchemaThroughInjectedDatabaseProtocol(t *testing.
 	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(sqlmock.NewRows([]string{"user_version"}).AddRow(0))
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM sqlite_master").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectBegin()
-	for _, statement := range sqliteSchemaStatements {
+	for _, statement := range sqliteSchemaStatements() {
 		mock.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 	mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -91,7 +95,7 @@ func TestInitializeAppliesFreshSchemaThroughInjectedDatabaseProtocol(t *testing.
 
 func TestInitialSchemaRequestsRecoveryEvidenceFields(t *testing.T) {
 	var processingSchema string
-	for _, statement := range sqliteSchemaStatements {
+	for _, statement := range sqliteSchemaStatements() {
 		if strings.Contains(statement, "CREATE TABLE IF NOT EXISTS runnerfoundry_processing_jobs") {
 			processingSchema = statement
 			break
@@ -308,7 +312,7 @@ func schemaFailureProtocols(protocolErr error) []func(sqlmock.Sqlmock) {
 		func(mock sqlmock.Sqlmock) { mock.ExpectBegin().WillReturnError(protocolErr) },
 		func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements[0])).WillReturnError(protocolErr)
+			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements()[0])).WillReturnError(protocolErr)
 			mock.ExpectRollback()
 		},
 		func(mock sqlmock.Sqlmock) {
@@ -323,7 +327,7 @@ func schemaFailureProtocols(protocolErr error) []func(sqlmock.Sqlmock) {
 		},
 		func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
-			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements[0])).WillReturnError(protocolErr)
+			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements()[0])).WillReturnError(protocolErr)
 			mock.ExpectRollback().WillReturnError(protocolErr)
 		},
 	}
@@ -337,7 +341,7 @@ func expectUnversionedSchema(mock sqlmock.Sqlmock) {
 
 func expectSchemaStatements(mock sqlmock.Sqlmock) {
 	mock.ExpectBegin()
-	for _, statement := range sqliteSchemaStatements {
+	for _, statement := range sqliteSchemaStatements() {
 		mock.ExpectExec(regexp.QuoteMeta(statement)).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 }

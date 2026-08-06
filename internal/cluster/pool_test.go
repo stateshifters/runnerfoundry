@@ -31,22 +31,16 @@ func TestOpenPoolBuildsPrimaryRoleScopedPoolWithoutConnectingInTest(t *testing.T
 }
 
 func TestOpenPoolRejectsInvalidConfiguration(t *testing.T) {
-	originalResolver := productionConnectionSettingResolver
-	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
-	productionConnectionSettingResolver = testConnectionResolver(nil)
-	if _, err := NewStore(Settings{}).OpenPool(context.Background()); err == nil {
+	if _, err := newStoreWithResolver(Settings{}, testConnectionResolver(nil)).OpenPool(context.Background()); err == nil {
 		t.Fatal("missing role was accepted")
 	}
-	if _, err := NewStore(Settings{Role: "runnerfoundry", Port: "invalid"}).OpenPool(context.Background()); err == nil {
+	if _, err := newStoreWithResolver(Settings{Role: "runnerfoundry", Port: "invalid"}, testConnectionResolver(nil)).OpenPool(context.Background()); err == nil {
 		t.Fatal("invalid primary configuration was accepted")
 	}
 }
 
 func TestOpenPoolReportsParserFailure(t *testing.T) {
-	originalResolver := productionConnectionSettingResolver
-	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
-	productionConnectionSettingResolver = testConnectionResolver(nil)
-	store := NewStore(Settings{Role: "runnerfoundry", Host: "database"})
+	store := newStoreWithResolver(Settings{Role: "runnerfoundry", Host: "database"}, testConnectionResolver(nil))
 	store.parsePoolConfig = func(string) (*pgxpool.Config, error) {
 		return nil, errors.New("parse")
 	}
@@ -56,10 +50,7 @@ func TestOpenPoolReportsParserFailure(t *testing.T) {
 }
 
 func TestOpenPoolReturnsConfiguredPool(t *testing.T) {
-	originalResolver := productionConnectionSettingResolver
-	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
-	productionConnectionSettingResolver = testConnectionResolver(nil)
-	store := NewStore(Settings{Role: "runnerfoundry", Host: "database"})
+	store := newStoreWithResolver(Settings{Role: "runnerfoundry", Host: "database"}, testConnectionResolver(nil))
 	var configured *pgxpool.Config
 	wantPool := &pgxpool.Pool{}
 	store.connectPool = func(_ context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {

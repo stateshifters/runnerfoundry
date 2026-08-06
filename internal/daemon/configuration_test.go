@@ -8,19 +8,17 @@ import (
 
 func TestConfigurationLoadingUsesConfiguredReader(t *testing.T) {
 	contents := []byte("github:\n  discovery_interval: 1m\n  app:\n    app_id: 1\n    private_key_file: key.pem\nstate:\n  path: state.db\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yml\n      service: runner\n")
-	original := readConfigFile
-	t.Cleanup(func() { readConfigFile = original })
-	readConfigFile = func(path string) ([]byte, error) {
+	readConfigFile := func(path string) ([]byte, error) {
 		if path != "config.yml" {
 			t.Fatalf("path = %q", path)
 		}
 		return contents, nil
 	}
-	if configured, err := loadConfig("config.yml"); err != nil || len(configured.RunnerPools) != 1 {
+	if configured, err := loadConfigWithReader("config.yml", readConfigFile); err != nil || len(configured.RunnerPools) != 1 {
 		t.Fatalf("load config = %#v, %v", configured, err)
 	}
 	readConfigFile = func(string) ([]byte, error) { return nil, errors.New("unavailable") }
-	if _, err := loadConfig("config.yml"); err == nil {
+	if _, err := loadConfigWithReader("config.yml", readConfigFile); err == nil {
 		t.Fatal("file read failure was ignored")
 	}
 	if _, err := loadConfigBytes([]byte("unknown: true\n")); err == nil {

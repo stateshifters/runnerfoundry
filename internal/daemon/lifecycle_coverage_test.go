@@ -14,18 +14,14 @@ import (
 )
 
 func TestProductionRuntimeReportsRecoveryAndErrorCategories(t *testing.T) {
-	originalLogging, originalState := newDaemonLoggingManager, openDaemonState
-	t.Cleanup(func() { newDaemonLoggingManager, openDaemonState = originalLogging, originalState })
-
 	destination := &memoryLogDestination{}
-	newDaemonLoggingManager = func(config.LogConfig, logDestinationFactory) (*loggingManager, error) {
-		return newLoggingManager(config.LogConfig{}, singleLogDestinationFactory{destination: destination})
-	}
-	openDaemonState = func(context.Context, config.Config) (*productionState, error) {
+	dependencies := newProductionDependencies()
+	dependencies.logDestinationFactory = singleLogDestinationFactory{destination: destination}
+	dependencies.openState = func(context.Context, config.Config, productionDependencies) (*productionState, error) {
 		return &productionState{member: "member-1"}, nil
 	}
 
-	runtime, err := openProductionRuntime(context.Background(), config.Config{})
+	runtime, err := openProductionRuntimeWithDependencies(context.Background(), config.Config{}, dependencies)
 	if err != nil {
 		t.Fatalf("open production runtime: %v", err)
 	}
@@ -287,9 +283,6 @@ func TestLoggingGenerationDelegatesDeactivation(t *testing.T) {
 }
 
 func TestBuildProductionProvidersReportsDockerHostnameFailures(t *testing.T) {
-	originalReadHostname := productionReadHostname
-	t.Cleanup(func() { productionReadHostname = originalReadHostname })
-
 	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{{
 		Name: "linux",
 		Docker: &config.DockerConfig{
@@ -298,12 +291,13 @@ func TestBuildProductionProvidersReportsDockerHostnameFailures(t *testing.T) {
 		},
 	}}}
 	wantErr := errors.New("hostname unavailable")
-	productionReadHostname = func() (string, error) { return "", wantErr }
-	if _, _, err := buildProductionProviders(context.Background(), configured); !errors.Is(err, wantErr) {
+	dependencies := newProductionDependencies()
+	dependencies.readHostname = func() (string, error) { return "", wantErr }
+	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), configured, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("hostname read error = %v, want %v", err, wantErr)
 	}
-	productionReadHostname = func() (string, error) { return " \n", nil }
-	if _, _, err := buildProductionProviders(context.Background(), configured); err == nil {
+	dependencies.readHostname = func() (string, error) { return " \n", nil }
+	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), configured, dependencies); err == nil {
 		t.Fatal("empty Docker hostname was accepted")
 	}
 }

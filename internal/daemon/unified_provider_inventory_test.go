@@ -86,8 +86,10 @@ func TestProductionInventoryContainsOnlyActiveConfigurationEndpoints(t *testing.
 	}
 }
 
-func TestProductionProviderShellAcceptsEmptyConfiguration(t *testing.T) {
-	providers, inventory, err := buildProductionProviders(context.Background(), config.Config{})
+func TestProviderBuilderAcceptsEmptyConfiguration(t *testing.T) {
+	providers, inventory, err := buildProductionProvidersWithDependencies(
+		context.Background(), config.Config{}, productionDependencies{},
+	)
 	if err != nil || len(providers) != 0 {
 		t.Fatalf("empty production providers = (%d, %v)", len(providers), err)
 	}

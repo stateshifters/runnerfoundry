@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 )
 
-var readConfigFile = os.ReadFile
-
-func loadConfig(configPath string) (config.Config, error) {
-	configBytes, err := readConfigFile(configPath)
+func loadConfigWithReader(configPath string, readFile config.ReadFile) (config.Config, error) {
+	configBytes, err := readFile(configPath)
 	if err != nil {
 		return config.Config{}, err
 	}

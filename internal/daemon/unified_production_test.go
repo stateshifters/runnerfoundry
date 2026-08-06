@@ -52,30 +52,28 @@ func TestProductionAdaptersUseInjectedBoundaries(t *testing.T) {
 }
 
 func TestProductionStateUsesTrimmedHostnameIdentity(t *testing.T) {
-	restore := replaceProductionStateBoundaries()
-	t.Cleanup(restore)
+	dependencies := testProductionStateDependencies()
 	calls := 0
-	productionReadHostname = func() (string, error) {
+	dependencies.readHostname = func() (string, error) {
 		calls++
 		return "  runner-host-7\n", nil
 	}
 
-	state, err := openProductionState(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}})
+	state, err := openProductionStateWithDependencies(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}}, dependencies)
 	if err != nil || state.member != daemonTestID(7) || calls != 1 {
 		t.Fatalf("production member identity = (%s, %d, %v)", state.member, calls, err)
 	}
 }
 
 func TestProductionStateCompositionUsesSelectedBackend(t *testing.T) {
-	restore := replaceProductionStateBoundaries()
-	t.Cleanup(restore)
-	assertProductionSQLiteState(t)
-	assertProductionPostgreSQLState(t)
+	dependencies := testProductionStateDependencies()
+	assertProductionSQLiteState(t, dependencies)
+	assertProductionPostgreSQLState(t, dependencies)
 }
 
-func assertProductionSQLiteState(t *testing.T) {
+func assertProductionSQLiteState(t *testing.T, dependencies productionDependencies) {
 	t.Helper()
-	sqliteState, err := openProductionState(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}})
+	sqliteState, err := openProductionStateWithDependencies(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}}, dependencies)
 	if err != nil || sqliteState == nil || len(sqliteState.closers) != 1 {
 		t.Fatalf("SQLite state = (%v, %v)", sqliteState, err)
 	}
@@ -87,11 +85,14 @@ func assertProductionSQLiteState(t *testing.T) {
 	}
 }
 
-func assertProductionPostgreSQLState(t *testing.T) {
+func assertProductionPostgreSQLState(t *testing.T, dependencies productionDependencies) {
 	t.Helper()
 	settings := postgresconfig.Settings{Role: "runnerfoundry"}
-	postgresState, err := openProductionState(
-		context.Background(), config.Config{State: config.StateConfig{Postgres: &settings}},
+	dependencies.tryLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
+		return nil, cluster.ErrNotLeader
+	}
+	postgresState, err := openProductionStateWithDependencies(
+		context.Background(), config.Config{State: config.StateConfig{Postgres: &settings}}, dependencies,
 	)
 	if err != nil || postgresState == nil || len(postgresState.closers) != 1 {
 		t.Fatalf("PostgreSQL state = (%v, %v)", postgresState, err)
@@ -99,47 +100,42 @@ func assertProductionPostgreSQLState(t *testing.T) {
 	if err = postgresState.closers[0].Close(context.Background()); err != nil {
 		t.Fatalf("close PostgreSQL state: %v", err)
 	}
-	tryProductionLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
-		return nil, cluster.ErrNotLeader
-	}
 	if leader, leaderErr := postgresState.newLeadership().IsLeader(context.Background()); leaderErr != nil || leader {
 		t.Fatalf("PostgreSQL leadership = (%t, %v)", leader, leaderErr)
 	}
 }
 
 func TestProductionStateReportsBackendFailures(t *testing.T) {
-	restore := replaceProductionStateBoundaries()
-	t.Cleanup(restore)
+	dependencies := testProductionStateDependencies()
 	wantErr := errors.New("state failed")
-	openProductionSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return nil, wantErr }
-	if _, err := openProductionState(context.Background(), config.Config{}); !errors.Is(err, wantErr) {
+	dependencies.openSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return nil, wantErr }
+	if _, err := openProductionStateWithDependencies(context.Background(), config.Config{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("selected backend error = %v", err)
 	}
-	if _, err := openProductionSQLiteState(context.Background(), "state.db"); !errors.Is(err, wantErr) {
+	if _, err := openProductionSQLiteStateWithDependencies(context.Background(), "state.db", dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("SQLite error = %v", err)
 	}
 	settings := postgresconfig.Settings{Role: "runnerfoundry"}
-	migrateProductionCluster = func(*cluster.Store, context.Context) error { return wantErr }
-	if _, err := openProductionPostgreSQLState(context.Background(), settings); !errors.Is(err, wantErr) {
+	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return wantErr }
+	if _, err := openProductionPostgreSQLStateWithDependencies(context.Background(), settings, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("PostgreSQL migration error = %v", err)
 	}
-	migrateProductionCluster = func(*cluster.Store, context.Context) error { return nil }
-	openProductionClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return nil, wantErr }
-	if _, err := openProductionPostgreSQLState(context.Background(), settings); !errors.Is(err, wantErr) {
+	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return nil }
+	dependencies.openClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return nil, wantErr }
+	if _, err := openProductionPostgreSQLStateWithDependencies(context.Background(), settings, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("PostgreSQL pool error = %v", err)
 	}
 }
 
 func TestProductionStateReportsMemberIdentityFailure(t *testing.T) {
-	restore := replaceProductionStateBoundaries()
-	t.Cleanup(restore)
+	dependencies := testProductionStateDependencies()
 	wantErr := errors.New("identity unavailable")
-	productionReadHostname = func() (string, error) { return "", wantErr }
-	if _, err := openProductionState(context.Background(), config.Config{}); !errors.Is(err, wantErr) {
+	dependencies.readHostname = func() (string, error) { return "", wantErr }
+	if _, err := openProductionStateWithDependencies(context.Background(), config.Config{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("member identity error = %v", err)
 	}
-	productionReadHostname = func() (string, error) { return " \n", nil }
-	if _, err := openProductionState(context.Background(), config.Config{}); err == nil {
+	dependencies.readHostname = func() (string, error) { return " \n", nil }
+	if _, err := openProductionStateWithDependencies(context.Background(), config.Config{}, dependencies); err == nil {
 		t.Fatal("empty member hostname was accepted")
 	}
 }
@@ -152,47 +148,34 @@ func TestProductionMemberIdentityRequiresHostnameReader(t *testing.T) {
 	}
 }
 
-func replaceProductionStateBoundaries() func() {
-	originalSQLite, originalSQLiteClose := openProductionSQLite, closeProductionSQLite
-	originalCluster, originalMigrate := newProductionClusterStore, migrateProductionCluster
-	originalPool, originalConnection, originalStore := openProductionClusterPool, newProductionPGConnection, newProductionPGStore
-	originalPoolClose, originalLeader := closeProductionPool, tryProductionLeader
-	originalReadHostname := productionReadHostname
-	productionReadHostname = func() (string, error) { return string(daemonTestID(1)), nil }
-	openProductionSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return &sqlitestate.Store{}, nil }
-	closeProductionSQLite = func(*sqlitestate.Store) error { return nil }
-	newProductionClusterStore = func(settings postgresconfig.Settings) *cluster.Store { return cluster.NewStore(settings) }
-	migrateProductionCluster = func(*cluster.Store, context.Context) error { return nil }
-	openProductionClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
-	newProductionPGConnection = func(*pgxpool.Pool) postgresstate.Connection { return postgresstate.Connection{} }
-	newProductionPGStore = func(postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
-	closeProductionPool = func(*pgxpool.Pool) {}
-	tryProductionLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
+func testProductionStateDependencies() productionDependencies {
+	dependencies := newProductionDependencies()
+	dependencies.readHostname = func() (string, error) { return string(daemonTestID(1)), nil }
+	dependencies.openSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return &sqlitestate.Store{}, nil }
+	dependencies.closeSQLite = func(*sqlitestate.Store) error { return nil }
+	dependencies.newClusterStore = func(settings postgresconfig.Settings) *cluster.Store { return cluster.NewStore(settings) }
+	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return nil }
+	dependencies.openClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
+	dependencies.newPGConnection = func(*pgxpool.Pool) postgresstate.Connection { return postgresstate.Connection{} }
+	dependencies.newPGStore = func(postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
+	dependencies.closePool = func(*pgxpool.Pool) {}
+	dependencies.tryLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
 		return &cluster.LeaderLease{}, nil
 	}
-	return func() {
-		openProductionSQLite, closeProductionSQLite = originalSQLite, originalSQLiteClose
-		newProductionClusterStore, migrateProductionCluster = originalCluster, originalMigrate
-		openProductionClusterPool, newProductionPGConnection, newProductionPGStore = originalPool, originalConnection, originalStore
-		closeProductionPool, tryProductionLeader = originalPoolClose, originalLeader
-		productionReadHostname = originalReadHostname
-	}
+	return dependencies
 }
 
 func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
-	originalDiscoverer, originalClient, originalManager := newProductionDiscoverer, newProductionClient, newProductionManager
-	t.Cleanup(func() {
-		newProductionDiscoverer, newProductionClient, newProductionManager = originalDiscoverer, originalClient, originalManager
-	})
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+	dependencies := newProductionDependencies()
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
-	newProductionClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
+	dependencies.newClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
 		return &transport.Client{}, nil
 	}
 	store := newBuilderStoreFake()
 	manager := newBuilderManager(t, store)
-	newProductionManager = func(
+	dependencies.newManager = func(
 		_ githubsource.RepositoryDiscoverer,
 		factory githubsource.ManagerClientFactoryFunc,
 		_ githubsource.RegistrationRepository,
@@ -204,17 +187,13 @@ func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
 	}
 	configured := builderConfig()
 	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
-	built, err := buildProductionGitHubManager(configured, store)
+	built, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies)
 	if err != nil || built != manager {
 		t.Fatalf("GitHub manager = (%p, %v)", built, err)
 	}
 }
 
 func TestProductionGitHubManagerReportsBoundaryFailures(t *testing.T) {
-	originalDiscoverer, originalClient, originalManager := newProductionDiscoverer, newProductionClient, newProductionManager
-	t.Cleanup(func() {
-		newProductionDiscoverer, newProductionClient, newProductionManager = originalDiscoverer, originalClient, originalManager
-	})
 	wantErr := errors.New("GitHub failed")
 	store := newBuilderStoreFake()
 	configured := builderConfig()
@@ -224,10 +203,9 @@ func TestProductionGitHubManagerReportsBoundaryFailures(t *testing.T) {
 	assertProductionManagerFailure(t, configured, store, wantErr)
 	configured.GitHub.App.PrivateKey = ""
 	configured.GitHub.App.PrivateKeyFile = "key.pem"
-	originalRead := productionReadFile
-	productionReadFile = func(string) ([]byte, error) { return nil, wantErr }
-	t.Cleanup(func() { productionReadFile = originalRead })
-	if _, err := buildProductionGitHubManager(configured, store); !errors.Is(err, wantErr) {
+	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return nil, wantErr }
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("credentials error = %v", err)
 	}
 }
@@ -239,20 +217,22 @@ func assertProductionDiscovererFailure(
 	wantErr error,
 ) {
 	t.Helper()
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+	dependencies := newProductionDependencies()
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, wantErr
 	}
-	if _, err := buildProductionGitHubManager(configured, store); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("discoverer error = %v", err)
 	}
 }
 
 func assertProductionClientFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
 	t.Helper()
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+	dependencies := newProductionDependencies()
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
-	newProductionManager = func(
+	dependencies.newManager = func(
 		_ githubsource.RepositoryDiscoverer,
 		factory githubsource.ManagerClientFactoryFunc,
 		_ githubsource.RegistrationRepository,
@@ -260,102 +240,104 @@ func assertProductionClientFailure(t *testing.T, configured config.Config, store
 		_, err := factory(context.Background(), transport.Repository{})
 		return nil, err
 	}
-	newProductionClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
+	dependencies.newClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
 		return nil, wantErr
 	}
-	if _, err := buildProductionGitHubManager(configured, store); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("client error = %v", err)
 	}
 }
 
 func assertProductionManagerFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
 	t.Helper()
-	newProductionManager = func(
+	dependencies := newProductionDependencies()
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+		return transport.Discoverer{}, nil
+	}
+	dependencies.newManager = func(
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
 	) (*githubsource.Manager, error) {
 		return nil, wantErr
 	}
-	if _, err := buildProductionGitHubManager(configured, store); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("manager error = %v", err)
 	}
 }
 
 func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
-	originalTicker, originalClock := newProductionTicker, productionCurrentTime
-	t.Cleanup(func() { newProductionTicker, productionCurrentTime = originalTicker, originalClock })
-	newProductionTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
-	productionCurrentTime = builderTime
+	dependencies := newProductionDependencies()
+	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
+	dependencies.currentTime = builderTime
 	store := newBuilderStoreFake()
 	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildTimedProductionGeneration(
-		builderConfig(), state, &localLeadershipGate{}, func(error) {}, newBuilderManager(t, store),
-		map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
-		builderProviderFake{}, daemonTestID(1),
+		builderConfig(), state, &localLeadershipGate{}, nil,
+		productionGenerationComponents{
+			manager:   newBuilderManager(t, store),
+			providers: map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+			inventory: builderProviderFake{}, member: daemonTestID(1),
+		}, dependencies,
 	)
 	if err != nil || generation == nil {
 		t.Fatalf("timed generation = (%v, %v)", generation, err)
 	}
+	generation.reportCycle(errors.New("ignored report"))
 }
 
 func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) {
-	originalTicker := newProductionTicker
-	t.Cleanup(func() { newProductionTicker = originalTicker })
-	newProductionTicker = func(time.Duration) *time.Ticker { return &time.Ticker{} }
+	dependencies := newProductionDependencies()
+	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{} }
 	store := newBuilderStoreFake()
 	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	if _, err := buildTimedProductionGeneration(
-		config.Config{}, state, &localLeadershipGate{}, nil, newBuilderManager(t, store), nil, nil, daemonTestID(1),
+		config.Config{}, state, &localLeadershipGate{}, nil,
+		productionGenerationComponents{manager: newBuilderManager(t, store), member: daemonTestID(1)}, dependencies,
 	); err == nil {
 		t.Fatal("invalid timed generation was accepted")
 	}
 }
 
 func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
-	originalProviders := buildProductionProviderSet
-	originalTicker, originalClock := newProductionTicker, productionCurrentTime
-	originalDiscoverer, originalManager := newProductionDiscoverer, newProductionManager
-	t.Cleanup(func() {
-		buildProductionProviderSet = originalProviders
-		newProductionTicker, productionCurrentTime = originalTicker, originalClock
-		newProductionDiscoverer, newProductionManager = originalDiscoverer, originalManager
-	})
 	store := newBuilderStoreFake()
 	manager := newBuilderManager(t, store)
-	configureProductionGenerationBoundaries(manager)
+	dependencies := productionGenerationDependencies(manager)
 	configured := builderConfig()
 	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
 	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
-	generation, err := buildProductionGeneration(
-		context.Background(), configured, state, &localLeadershipGate{}, func(error) {},
+	generation, err := buildProductionGenerationWithDependencies(
+		context.Background(), configured, state, &localLeadershipGate{}, func(error) {}, dependencies,
 	)
 	if err != nil || generation == nil {
 		t.Fatalf("production generation = (%v, %v)", generation, err)
 	}
 }
 
-func configureProductionGenerationBoundaries(manager *githubsource.Manager) {
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+func productionGenerationDependencies(manager *githubsource.Manager) productionDependencies {
+	dependencies := newProductionDependencies()
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
-	newProductionManager = func(
+	dependencies.newManager = func(
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
 	) (*githubsource.Manager, error) {
 		return manager, nil
 	}
-	buildProductionProviderSet = func(
+	dependencies.buildProviderSet = func(
 		context.Context,
 		config.Config,
+		productionDependencies,
 	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 		provider := builderProviderFake{}
 		inventory := execution.NewAggregateRunnerInventory(provider)
 		return map[core.RunnerPool]execution.ExecutionProvider{"linux": provider}, inventory, nil
 	}
-	newProductionTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
-	productionCurrentTime = builderTime
+	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
+	dependencies.currentTime = builderTime
+	return dependencies
 }
 
 func TestBuildProductionGenerationReportsCompositionFailures(t *testing.T) {
@@ -365,111 +347,104 @@ func TestBuildProductionGenerationReportsCompositionFailures(t *testing.T) {
 }
 
 type productionGenerationFailureFixture struct {
-	configured config.Config
-	state      *productionState
-	manager    *githubsource.Manager
-	wantErr    error
+	configured   config.Config
+	state        *productionState
+	manager      *githubsource.Manager
+	wantErr      error
+	dependencies productionDependencies
 }
 
 func newProductionGenerationFailureFixture(t *testing.T) productionGenerationFailureFixture {
 	t.Helper()
-	originalProviders := buildProductionProviderSet
-	originalDiscoverer, originalManager := newProductionDiscoverer, newProductionManager
-	t.Cleanup(func() {
-		buildProductionProviderSet = originalProviders
-		newProductionDiscoverer, newProductionManager = originalDiscoverer, originalManager
-	})
 	configured := builderConfig()
 	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
 	store := newBuilderStoreFake()
 	return productionGenerationFailureFixture{
 		configured: configured, state: &productionState{store: store, member: daemonTestID(1)}, manager: newBuilderManager(t, store),
-		wantErr: errors.New("composition failed"),
+		wantErr: errors.New("composition failed"), dependencies: newProductionDependencies(),
 	}
 }
 
 func (fixture productionGenerationFailureFixture) assertManagerFailure(t *testing.T) {
 	t.Helper()
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+	dependencies := fixture.dependencies
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, fixture.wantErr
 	}
-	if _, err := fixture.build(); !errors.Is(err, fixture.wantErr) {
+	if _, err := fixture.build(dependencies); !errors.Is(err, fixture.wantErr) {
 		t.Fatalf("manager composition error = %v", err)
 	}
 }
 
-func (fixture productionGenerationFailureFixture) useManager() {
-	newProductionDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+func (fixture productionGenerationFailureFixture) managerDependencies() productionDependencies {
+	dependencies := fixture.dependencies
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
-	newProductionManager = func(
+	dependencies.newManager = func(
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
 	) (*githubsource.Manager, error) {
 		return fixture.manager, nil
 	}
+	return dependencies
 }
 
 func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testing.T) {
 	t.Helper()
-	fixture.useManager()
-	buildProductionProviderSet = func(
+	dependencies := fixture.managerDependencies()
+	dependencies.buildProviderSet = func(
 		context.Context,
 		config.Config,
+		productionDependencies,
 	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 		return nil, execution.AggregateRunnerInventory{}, fixture.wantErr
 	}
-	if _, err := fixture.build(); !errors.Is(err, fixture.wantErr) {
+	if _, err := fixture.build(dependencies); !errors.Is(err, fixture.wantErr) {
 		t.Fatalf("provider composition error = %v", err)
 	}
 }
 
-func (fixture productionGenerationFailureFixture) build() (*maintenanceGeneration, error) {
-	return buildProductionGeneration(
-		context.Background(), fixture.configured, fixture.state, &localLeadershipGate{}, nil,
+func (fixture productionGenerationFailureFixture) build(dependencies productionDependencies) (*maintenanceGeneration, error) {
+	return buildProductionGenerationWithDependencies(
+		context.Background(), fixture.configured, fixture.state, &localLeadershipGate{}, nil, dependencies,
 	)
 }
 
 func TestOpenProductionRuntimeUsesLoggingAndStateBoundaries(t *testing.T) {
-	originalLogging, originalState := newDaemonLoggingManager, openDaemonState
-	t.Cleanup(func() { newDaemonLoggingManager, openDaemonState = originalLogging, originalState })
-	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
-	if err != nil {
-		t.Fatalf("create memory logger: %v", err)
-	}
-	newDaemonLoggingManager = func(config.LogConfig, logDestinationFactory) (*loggingManager, error) {
-		return logging, nil
-	}
-	openDaemonState = func(context.Context, config.Config) (*productionState, error) {
+	dependencies := newProductionDependencies()
+	dependencies.logDestinationFactory = memoryLogFactory{}
+	dependencies.openState = func(context.Context, config.Config, productionDependencies) (*productionState, error) {
 		return &productionState{}, nil
 	}
-	runtime, err := openProductionRuntime(context.Background(), config.Config{})
+	dependencies.buildGeneration = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error) {
+		return newMaintenanceGeneration(
+			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+		), nil
+	}
+	runtime, err := openProductionRuntimeWithDependencies(context.Background(), config.Config{}, dependencies)
 	if err != nil || runtime == nil || runtime.report == nil {
 		t.Fatalf("production runtime = (%v, %v)", runtime, err)
 	}
 	runtime.report(errors.New("reported"))
+	if _, err = runtime.Build(context.Background(), config.Config{}); err != nil {
+		t.Fatalf("build production runtime: %v", err)
+	}
 }
 
 func TestOpenProductionRuntimeReportsBoundaryFailures(t *testing.T) {
-	originalLogging, originalState := newDaemonLoggingManager, openDaemonState
-	t.Cleanup(func() { newDaemonLoggingManager, openDaemonState = originalLogging, originalState })
 	wantErr := errors.New("runtime setup failed")
-	newDaemonLoggingManager = func(config.LogConfig, logDestinationFactory) (*loggingManager, error) {
-		return nil, wantErr
-	}
-	if _, err := openProductionRuntime(context.Background(), config.Config{}); !errors.Is(err, wantErr) {
+	dependencies := newProductionDependencies()
+	dependencies.logDestinationFactory = failingLogFactory{err: wantErr}
+	if _, err := openProductionRuntimeWithDependencies(context.Background(), config.Config{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("logging setup error = %v", err)
 	}
-	logging, err := newLoggingManager(config.LogConfig{}, memoryLogFactory{})
-	if err != nil {
-		t.Fatalf("create memory logger: %v", err)
+	dependencies.logDestinationFactory = memoryLogFactory{}
+	dependencies.openState = func(context.Context, config.Config, productionDependencies) (*productionState, error) {
+		return nil, wantErr
 	}
-	newDaemonLoggingManager = func(config.LogConfig, logDestinationFactory) (*loggingManager, error) {
-		return logging, nil
-	}
-	openDaemonState = func(context.Context, config.Config) (*productionState, error) { return nil, wantErr }
-	if _, err = openProductionRuntime(context.Background(), config.Config{}); !errors.Is(err, wantErr) {
+	if _, err := openProductionRuntimeWithDependencies(context.Background(), config.Config{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("state setup error = %v", err)
 	}
 }
@@ -477,7 +452,7 @@ func TestOpenProductionRuntimeReportsBoundaryFailures(t *testing.T) {
 func TestProductionRuntimeBuildReportsFailures(t *testing.T) {
 	runtime, _ := newTestProductionRuntime(t)
 	wantErr := errors.New("generation failed")
-	buildDaemonGeneration = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*maintenanceGeneration, error) {
+	runtime.build = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*maintenanceGeneration, error) {
 		return nil, wantErr
 	}
 	if _, err := runtime.Build(context.Background(), config.Config{}); !errors.Is(err, wantErr) {

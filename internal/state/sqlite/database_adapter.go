@@ -9,8 +9,6 @@ import (
 	_ "modernc.org/sqlite" // Register the production SQLite database/sql driver.
 )
 
-var openSQLiteDatabase = sql.Open
-
 func NewDatabaseStore(database *sql.DB) *Store {
 	database.SetMaxOpenConns(1)
 	store := NewStore(Executor{
@@ -30,7 +28,18 @@ func NewDatabaseStore(database *sql.DB) *Store {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	database, err := openSQLiteDatabase("sqlite", path)
+	return openWithDatabaseOpener(ctx, path, sql.Open)
+}
+
+func openWithDatabaseOpener(
+	ctx context.Context,
+	path string,
+	opener func(driverName string, dataSourceName string) (*sql.DB, error),
+) (*Store, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("open SQLite job state: %w", err)
+	}
+	database, err := opener("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite job state: %w", err)
 	}
@@ -40,12 +49,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return NewDatabaseStore(database), nil
 }
 
-var sqliteSchemaStatements = []string{
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_members (
+func sqliteSchemaStatements() []string {
+	return append(sqliteJobSchemaStatements(), sqliteCapacitySchemaStatements()...)
+}
+
+func sqliteJobSchemaStatements() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_members (
 		member_id TEXT NOT NULL PRIMARY KEY CHECK(length(trim(member_id)) > 0),
 		heartbeat_at INTEGER NOT NULL
 	)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_queued_jobs (
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_queued_jobs (
 		job_id TEXT NOT NULL PRIMARY KEY CHECK(length(job_id) = 36
 			AND substr(job_id, 9, 1) = '-' AND substr(job_id, 14, 1) = '-'
 			AND substr(job_id, 19, 1) = '-' AND substr(job_id, 24, 1) = '-'
@@ -57,9 +71,9 @@ var sqliteSchemaStatements = []string{
 		enqueued_at INTEGER NOT NULL,
 		UNIQUE(source_name, source_reference)
 	)`,
-	`CREATE INDEX IF NOT EXISTS runnerfoundry_queued_jobs_fifo
+		`CREATE INDEX IF NOT EXISTS runnerfoundry_queued_jobs_fifo
 		ON runnerfoundry_queued_jobs(runner_pool, enqueued_at)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_processing_jobs (
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_processing_jobs (
 		job_id TEXT NOT NULL PRIMARY KEY,
 		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
 		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
@@ -70,22 +84,27 @@ var sqliteSchemaStatements = []string{
 		runner_started INTEGER NOT NULL DEFAULT 0 CHECK(runner_started IN (0, 1)),
 		UNIQUE(source_name, source_reference)
 	)`,
-	`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_member_pool
+		`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_member_pool
 		ON runnerfoundry_processing_jobs(member_id, runner_pool)`,
-	`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_pool
+		`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_pool
 		ON runnerfoundry_processing_jobs(runner_pool)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_source_tombstones (
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_source_tombstones (
 		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
 		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
 		PRIMARY KEY(source_name, source_reference)
 	)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_member_runner_pools (
+	}
+}
+
+func sqliteCapacitySchemaStatements() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_member_runner_pools (
 		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id) ON DELETE CASCADE,
 		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		capacity INTEGER NOT NULL CHECK(capacity > 0),
 		PRIMARY KEY(member_id, runner_pool)
 	)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_github_registrations (
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_github_registrations (
 		repository_url TEXT NOT NULL CHECK(length(trim(repository_url)) > 0),
 		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		installation_id INTEGER NOT NULL CHECK(installation_id > 0),
@@ -93,7 +112,7 @@ var sqliteSchemaStatements = []string{
 		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
 		PRIMARY KEY(repository_url, runner_pool)
 	)`,
-	`CREATE TABLE IF NOT EXISTS runnerfoundry_github_scale_set_ownership (
+		`CREATE TABLE IF NOT EXISTS runnerfoundry_github_scale_set_ownership (
 		repository_url TEXT NOT NULL CHECK(length(trim(repository_url)) > 0),
 		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		installation_id INTEGER NOT NULL CHECK(installation_id > 0),
@@ -101,6 +120,7 @@ var sqliteSchemaStatements = []string{
 		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
 		PRIMARY KEY(repository_url, scale_set_id)
 	)`,
+	}
 }
 
 const sqliteSchemaVersion = 105
@@ -150,7 +170,7 @@ func createSQLiteSchema(ctx context.Context, database *sql.DB) (resultErr error)
 			resultErr = errors.Join(resultErr, transaction.Rollback())
 		}
 	}()
-	for _, statement := range sqliteSchemaStatements {
+	for _, statement := range sqliteSchemaStatements() {
 		if _, err := transaction.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("initialize SQLite job schema: %w", err)
 		}

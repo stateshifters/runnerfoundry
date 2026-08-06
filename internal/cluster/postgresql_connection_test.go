@@ -102,10 +102,7 @@ type directConnectionExpectation struct {
 
 func assertDirectConnection(t *testing.T, expectation directConnectionExpectation) {
 	t.Helper()
-	originalResolver := productionConnectionSettingResolver
-	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
-	productionConnectionSettingResolver = testConnectionResolver(nil)
-	store := NewStore(expectation.settings)
+	store := newStoreWithResolver(expectation.settings, testConnectionResolver(nil))
 	connected := false
 	executed := false
 	store.connectConfig = func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error) {
@@ -132,10 +129,7 @@ func TestNewStoreConnectorUsesDirectConnectionBoundary(t *testing.T) {
 		t.Fatal("default direct connector accepted missing role")
 	}
 
-	originalResolver := productionConnectionSettingResolver
-	t.Cleanup(func() { productionConnectionSettingResolver = originalResolver })
-	productionConnectionSettingResolver = testConnectionResolver(nil)
-	store = NewStore(Settings{Role: "runnerfoundry", Host: "database"})
+	store = newStoreWithResolver(Settings{Role: "runnerfoundry", Host: "database"}, testConnectionResolver(nil))
 	postgresConnection := &pgx.Conn{}
 	store.connectConfig = func(context.Context, *pgx.ConnConfig) (*pgx.Conn, error) {
 		return postgresConnection, nil

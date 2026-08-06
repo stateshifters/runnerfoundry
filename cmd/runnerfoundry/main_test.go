@@ -82,19 +82,17 @@ func TestRunMainReturnsSuccess(t *testing.T) {
 	}
 }
 
-func TestMainExitsWithCommandResult(t *testing.T) {
-	originalProcess := productionProcess
-	t.Cleanup(func() {
-		productionProcess = originalProcess
-	})
+func TestRunProcessExitsWithCommandResult(t *testing.T) {
 	exitCode := -1
-	productionProcess = processRuntime{
-		args: []string{"--unsupported"}, stdout: io.Discard, stderr: io.Discard,
-		lifecycle: testProcessLifecycle(), exit: func(code int) { exitCode = code },
-	}
-	main()
+	runtime := newProductionProcess()
+	runtime.args = []string{"--unsupported"}
+	runtime.stdout = io.Discard
+	runtime.stderr = io.Discard
+	runtime.lifecycle = testProcessLifecycle()
+	runtime.exit = func(code int) { exitCode = code }
+	runProcess(runtime)
 	if exitCode != 1 {
-		t.Fatalf("main exit code = %d, want 1", exitCode)
+		t.Fatalf("process exit code = %d, want 1", exitCode)
 	}
 }
 

@@ -29,7 +29,7 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 	runtime, _ := newTestProductionRuntime(t)
 	runtime.state.member = daemonTestID(7)
 	members := make([]core.MemberID, 0, 2)
-	buildDaemonGeneration = func(
+	runtime.build = func(
 		_ context.Context,
 		_ config.Config,
 		state *productionState,
@@ -77,10 +77,8 @@ func TestProductionRuntimeCloseWithdrawsMember(t *testing.T) {
 
 func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 	t.Helper()
-	originalBuild := buildDaemonGeneration
-	t.Cleanup(func() { buildDaemonGeneration = originalBuild })
 	builds := 0
-	buildDaemonGeneration = func(
+	buildGeneration := func(
 		context.Context,
 		config.Config,
 		*productionState,
@@ -99,6 +97,7 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 	}
 	return &productionRuntime{
 		logging: logging, state: &productionState{store: newBuilderStoreFake(), member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
+		build: buildGeneration,
 	}, &builds
 }
 
@@ -115,21 +114,22 @@ func (store *shutdownStoreFake) WithdrawMemberCapacity(_ context.Context, member
 
 func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {
 	runtime, _ := newTestProductionRuntime(t)
-	loads := installRunBoundaries(t, runtime)
-	if err := Run(context.Background(), Options{ConfigPath: "config.yml"}); err != nil || *loads != 2 {
+	dependencies, loads := testRunBoundaries(t, runtime)
+	application := NewApplication()
+	application.dependencies = dependencies
+	if err := application.Run(context.Background(), Options{ConfigPath: "config.yml"}); err != nil || *loads != 2 {
 		t.Fatalf("Run = %v, loads %d", err, *loads)
 	}
 }
 
 func TestRunRejectsInvalidActiveRunnerPolicyBeforeLoadingConfiguration(t *testing.T) {
-	restoreRunGlobals(t)
 	loaded := false
-	loadDaemonConfig = func(string) (config.Config, error) {
+	dependencies := daemonApplicationDependencies{loadConfig: func(string, config.ReadFile) (config.Config, error) {
 		loaded = true
 		return config.Config{}, nil
-	}
+	}}
 
-	if err := Run(context.Background(), Options{ActiveRunnerPolicy: "destroy"}); err == nil {
+	if err := runDaemon(context.Background(), Options{ActiveRunnerPolicy: "destroy"}, dependencies); err == nil {
 		t.Fatal("Run accepted an invalid active runner policy")
 	}
 	if loaded {
@@ -137,56 +137,53 @@ func TestRunRejectsInvalidActiveRunnerPolicyBeforeLoadingConfiguration(t *testin
 	}
 }
 
-func TestRunReportsApplicationBoundaryFailures(t *testing.T) {
+func TestRunReportsConfigLoadFailure(t *testing.T) {
 	wantErr := errors.New("application failed")
-	t.Run("load", func(t *testing.T) {
-		restoreRunGlobals(t)
-		loadDaemonConfig = func(string) (config.Config, error) { return config.Config{}, wantErr }
-		if err := Run(context.Background(), Options{}); !errors.Is(err, wantErr) {
-			t.Fatalf("load error = %v", err)
-		}
-	})
-	t.Run("open", func(t *testing.T) {
-		restoreRunGlobals(t)
-		loadDaemonConfig = func(string) (config.Config, error) { return config.Config{}, nil }
-		openDaemonProduction = func(context.Context, config.Config) (*productionRuntime, error) { return nil, wantErr }
-		if err := Run(context.Background(), Options{}); !errors.Is(err, wantErr) {
-			t.Fatalf("open error = %v", err)
-		}
-	})
-	t.Run("supervise", func(t *testing.T) {
-		runtime, _ := newTestProductionRuntime(t)
-		installRunBoundaries(t, runtime)
-		superviseDaemonRuntime = func(
-			context.Context, <-chan struct{}, func() (config.Config, error), generationBuilder, serviceNotifier, func(error),
-			ActiveRunnerPolicy,
-		) error {
-			return wantErr
-		}
-		if err := Run(context.Background(), Options{}); !errors.Is(err, wantErr) {
-			t.Fatalf("supervise error = %v", err)
-		}
-	})
+	dependencies := daemonApplicationDependencies{loadConfig: func(string, config.ReadFile) (config.Config, error) {
+		return config.Config{}, wantErr
+	}}
+	if err := runDaemon(context.Background(), Options{}, dependencies); !errors.Is(err, wantErr) {
+		t.Fatalf("load error = %v", err)
+	}
 }
 
-func restoreRunGlobals(t *testing.T) {
-	t.Helper()
-	originalLoad, originalOpen, originalSupervise := loadDaemonConfig, openDaemonProduction, superviseDaemonRuntime
-	t.Cleanup(func() {
-		loadDaemonConfig, openDaemonProduction, superviseDaemonRuntime = originalLoad, originalOpen, originalSupervise
-	})
+func TestRunReportsRuntimeOpenFailure(t *testing.T) {
+	wantErr := errors.New("application failed")
+	dependencies := daemonApplicationDependencies{
+		loadConfig: func(string, config.ReadFile) (config.Config, error) { return config.Config{}, nil },
+		openRuntime: func(context.Context, config.Config, productionDependencies) (*productionRuntime, error) {
+			return nil, wantErr
+		},
+	}
+	if err := runDaemon(context.Background(), Options{}, dependencies); !errors.Is(err, wantErr) {
+		t.Fatalf("open error = %v", err)
+	}
 }
 
-func installRunBoundaries(t *testing.T, runtime *productionRuntime) *int {
+func TestRunReportsSupervisorFailure(t *testing.T) {
+	wantErr := errors.New("application failed")
+	runtime, _ := newTestProductionRuntime(t)
+	dependencies, _ := testRunBoundaries(t, runtime)
+	dependencies.supervise = func(
+		context.Context, <-chan struct{}, func() (config.Config, error), generationBuilder, serviceNotifier, func(error),
+		ActiveRunnerPolicy,
+	) error {
+		return wantErr
+	}
+	if err := runDaemon(context.Background(), Options{}, dependencies); !errors.Is(err, wantErr) {
+		t.Fatalf("supervise error = %v", err)
+	}
+}
+
+func testRunBoundaries(t *testing.T, runtime *productionRuntime) (daemonApplicationDependencies, *int) {
 	t.Helper()
-	originalLoad, originalOpen, originalSupervise := loadDaemonConfig, openDaemonProduction, superviseDaemonRuntime
-	t.Cleanup(func() {
-		loadDaemonConfig, openDaemonProduction, superviseDaemonRuntime = originalLoad, originalOpen, originalSupervise
-	})
 	loads := 0
-	loadDaemonConfig = func(string) (config.Config, error) { loads++; return config.Config{}, nil }
-	openDaemonProduction = func(context.Context, config.Config) (*productionRuntime, error) { return runtime, nil }
-	superviseDaemonRuntime = func(
+	dependencies := daemonApplicationDependencies{}
+	dependencies.loadConfig = func(string, config.ReadFile) (config.Config, error) { loads++; return config.Config{}, nil }
+	dependencies.openRuntime = func(context.Context, config.Config, productionDependencies) (*productionRuntime, error) {
+		return runtime, nil
+	}
+	dependencies.supervise = func(
 		ctx context.Context,
 		_ <-chan struct{},
 		load func() (config.Config, error),
@@ -208,5 +205,5 @@ func installRunBoundaries(t *testing.T, runtime *productionRuntime) *int {
 		_, buildErr := build(ctx, configured)
 		return buildErr
 	}
-	return &loads
+	return dependencies, &loads
 }

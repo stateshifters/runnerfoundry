@@ -14,17 +14,25 @@ const (
 )
 
 type DomainTemplate struct {
-	XML string
+	xml     string
+	marshal func(*upstream.Domain) (string, error)
+}
+
+func NewDomainTemplate(domainXML string) DomainTemplate {
+	return domainTemplateWithMarshaler(domainXML, func(domain *upstream.Domain) (string, error) { return domain.Marshal() })
+}
+
+func domainTemplateWithMarshaler(
+	domainXML string,
+	marshal func(*upstream.Domain) (string, error),
+) DomainTemplate {
+	return DomainTemplate{xml: domainXML, marshal: marshal}
 }
 
 type RenderRequest struct {
 	RunnerPoolName string
 	RunnerName     string
 	JITConfig      string
-}
-
-var marshalDomainXML = func(domain *upstream.Domain) (string, error) {
-	return domain.Marshal()
 }
 
 var xmlTextEscaper = strings.NewReplacer(
@@ -37,7 +45,7 @@ var xmlTextEscaper = strings.NewReplacer(
 
 func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	var domain upstream.Domain
-	if err := domain.Unmarshal(template.XML); err != nil {
+	if err := domain.Unmarshal(template.xml); err != nil {
 		return "", fmt.Errorf("parse domain xml: %w", err)
 	}
 	domain.Name = request.RunnerName
@@ -46,7 +54,7 @@ func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	domain.Metadata = &upstream.DomainMetadata{
 		XML: scalerMetadata(request),
 	}
-	renderedXML, err := marshalDomainXML(&domain)
+	renderedXML, err := template.marshal(&domain)
 	if err != nil {
 		return "", fmt.Errorf("marshal domain xml: %w", err)
 	}

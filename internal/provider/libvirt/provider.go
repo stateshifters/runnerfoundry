@@ -238,7 +238,7 @@ func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read libvirt XML template: %w", err)
 	}
-	renderedXML, err := libvirtxml.DomainTemplate{XML: string(templateBytes)}.Render(libvirtxml.RenderRequest{
+	renderedXML, err := libvirtxml.NewDomainTemplate(string(templateBytes)).Render(libvirtxml.RenderRequest{
 		RunnerPoolName: request.RunnerPoolName,
 		RunnerName:     request.RunnerName,
 		JITConfig:      request.JITConfig,

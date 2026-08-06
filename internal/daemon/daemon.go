@@ -21,36 +21,57 @@ type serviceNotifier interface {
 	Reloading(ctx context.Context) error
 }
 
-var (
-	loadDaemonConfig        = loadConfig
-	openDaemonProduction    = openProductionRuntime
-	superviseDaemonRuntime  = supervise
-	newDaemonLoggingManager = newLoggingManager
-	openDaemonState         = openProductionState
-	buildDaemonGeneration   = buildProductionGeneration
-)
+type daemonApplicationDependencies struct {
+	production  productionDependencies
+	loadConfig  func(string, config.ReadFile) (config.Config, error)
+	openRuntime func(context.Context, config.Config, productionDependencies) (*productionRuntime, error)
+	supervise   func(context.Context, <-chan struct{}, func() (config.Config, error), generationBuilder, serviceNotifier, func(error), ActiveRunnerPolicy) error
+}
 
-func Run(ctx context.Context, options Options) (resultErr error) {
+func productionDaemonApplicationDependencies() daemonApplicationDependencies {
+	production := newProductionDependencies()
+	return daemonApplicationDependencies{
+		production: production, loadConfig: loadConfigWithReader,
+		openRuntime: openProductionRuntimeWithDependencies, supervise: supervise,
+	}
+}
+
+// Application owns the immutable operating-system and service dependencies used by a daemon process.
+type Application struct {
+	dependencies daemonApplicationDependencies
+}
+
+// NewApplication creates a production daemon application without opening runtime resources.
+func NewApplication() Application {
+	return Application{dependencies: productionDaemonApplicationDependencies()}
+}
+
+// Run validates options, opens one runtime, and supervises it until the context ends.
+func (application Application) Run(ctx context.Context, options Options) error {
+	return runDaemon(ctx, options, application.dependencies)
+}
+
+func runDaemon(ctx context.Context, options Options, dependencies daemonApplicationDependencies) (resultErr error) {
 	policy, err := resolveActiveRunnerPolicy(options.ActiveRunnerPolicy)
 	if err != nil {
 		return err
 	}
-	initial, err := loadDaemonConfig(options.ConfigPath)
+	initial, err := dependencies.loadConfig(options.ConfigPath, dependencies.production.readFile)
 	if err != nil {
 		return err
 	}
-	runtime, err := openDaemonProduction(ctx, initial)
+	runtime, err := dependencies.openRuntime(ctx, initial, dependencies.production)
 	if err != nil {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, runtime.Close(context.WithoutCancel(ctx))) }()
 	load := newGenerationConfigLoader(initial, func() (config.Config, error) {
-		return loadDaemonConfig(options.ConfigPath)
+		return dependencies.loadConfig(options.ConfigPath, dependencies.production.readFile)
 	})
 	build := func(buildContext context.Context, configured config.Config) (generation, error) {
 		return runtime.Build(buildContext, configured)
 	}
-	return superviseDaemonRuntime(ctx, options.ReloadRequests, load, build, newSystemdNotifier(), runtime.report, policy)
+	return dependencies.supervise(ctx, options.ReloadRequests, load, build, newSystemdNotifier(), runtime.report, policy)
 }
 
 type productionRuntime struct {
@@ -58,22 +79,54 @@ type productionRuntime struct {
 	state       *productionState
 	processGate *localLeadershipGate
 	report      func(error)
+	build       func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*maintenanceGeneration, error)
 	firstBuild  bool
 }
 
 type runtimeGeneration struct{ generation }
 
-func openProductionRuntime(ctx context.Context, configured config.Config) (*productionRuntime, error) {
-	logging, err := newDaemonLoggingManager(configured.Log, newProductionLogDestinationFactory())
+func openProductionRuntimeWithDependencies(
+	ctx context.Context,
+	configured config.Config,
+	dependencies productionDependencies,
+) (*productionRuntime, error) {
+	logging, err := newLoggingManager(configured.Log, dependencies.logDestinationFactory)
 	if err != nil {
 		return nil, fmt.Errorf("configure logging: %w", err)
 	}
-	state, err := openDaemonState(ctx, configured)
+	state, err := dependencies.openState(ctx, configured, dependencies)
 	if err != nil {
 		return nil, errors.Join(err, logging.Close())
 	}
-	runtime := &productionRuntime{logging: logging, state: state, processGate: &localLeadershipGate{}, firstBuild: true}
-	runtime.report = func(err error) {
+	runtime := &productionRuntime{
+		logging: logging, state: state, processGate: &localLeadershipGate{}, firstBuild: true,
+		build: func(buildContext context.Context, buildConfig config.Config, buildState *productionState, processGate *localLeadershipGate, report func(error)) (*maintenanceGeneration, error) {
+			return buildProductionRuntimeGeneration(
+				buildContext, buildConfig, buildState, processGate, report, dependencies,
+			)
+		},
+	}
+	runtime.report = newProductionRuntimeReporter(ctx, logging, state)
+	return runtime, nil
+}
+
+func buildProductionRuntimeGeneration(
+	ctx context.Context,
+	configured config.Config,
+	state *productionState,
+	processGate *localLeadershipGate,
+	report func(error),
+	dependencies productionDependencies,
+) (*maintenanceGeneration, error) {
+	return dependencies.buildGeneration(ctx, configured, state, processGate, report, dependencies)
+}
+
+func newProductionRuntimeReporter(
+	ctx context.Context,
+	logging *loggingManager,
+	state *productionState,
+) func(error) {
+	return func(err error) {
 		if err == nil {
 			logging.Logger().InfoContext(ctx, "RunnerFoundry runtime operation recovered",
 				slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
@@ -90,13 +143,12 @@ func openProductionRuntime(ctx context.Context, configured config.Config) (*prod
 			slog.String("operation", "maintenance_cycle"), slog.String("member", string(state.member)),
 			slog.String("outcome", "failed"), slog.String("error_category", category), slog.Any("error", err))
 	}
-	return runtime, nil
 }
 
 func (runtime *productionRuntime) Build(ctx context.Context, configured config.Config) (*runtimeGeneration, error) {
 	if runtime.firstBuild {
 		runtime.firstBuild = false
-		built, err := buildDaemonGeneration(ctx, configured, runtime.state, runtime.processGate, runtime.report)
+		built, err := runtime.build(ctx, configured, runtime.state, runtime.processGate, runtime.report)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +158,7 @@ func (runtime *productionRuntime) Build(ctx context.Context, configured config.C
 	if err != nil {
 		return nil, fmt.Errorf("prepare replacement logging: %w", err)
 	}
-	replacement, err := buildDaemonGeneration(ctx, configured, runtime.state, runtime.processGate, runtime.report)
+	replacement, err := runtime.build(ctx, configured, runtime.state, runtime.processGate, runtime.report)
 	if err != nil {
 		return nil, errors.Join(err, prepared.Close())
 	}

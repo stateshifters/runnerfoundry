@@ -17,11 +17,11 @@ type roleConnection interface {
 // OpenPool opens the primary PostgreSQL endpoint for concurrent runtime state
 // access. Every connection assumes the configured stable role before use.
 func (store *Store) OpenPool(ctx context.Context) (*pgxpool.Pool, error) {
-	role, err := resolvedConnectionRole(store.settings, productionConnectionSettingResolver)
+	role, err := resolvedConnectionRole(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PostgreSQL role: %w", err)
 	}
-	connectionConfig, err := primaryConnectionConfig(store.settings)
+	connectionConfig, err := primaryConnectionConfigWithResolver(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
 	}
