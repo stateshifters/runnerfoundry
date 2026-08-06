@@ -30,7 +30,7 @@ func newExpiredRecoveryOrchestrator(
 		return core.TransitionResult{Applied: recoverErr == nil}, recoverErr
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-		return []execution.RunnerInstance{{ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(),
+		return []execution.RunnerInstance{{ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()),
 			RunnerPool: "linux", EndpointID: "test:endpoint"}}, nil
 	}, destroy: func(context.Context, execution.RunnerInstance) error {
 		appendRecoveryEvent(events, "destroy")

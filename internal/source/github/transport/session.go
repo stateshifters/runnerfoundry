@@ -31,7 +31,7 @@ func (client *Client) OpenSession(
 	if client == nil || client.openSession == nil {
 		return nil, errors.New("GitHub session APIs are required")
 	}
-	messageAPI, err := client.openSession(ctx, registration.ID, owner)
+	messageAPI, err := client.openSession(ctx, int(registration.ID), owner)
 	if err != nil {
 		return nil, fmt.Errorf("open message session for runner scale set %d: %w", registration.ID, err)
 	}
@@ -154,7 +154,7 @@ func (client *Client) GenerateBootstrap(
 	}
 	jitConfig, err := client.jit.GenerateJitRunnerConfig(ctx, &upstream.RunnerScaleSetJitRunnerSetting{
 		Name: runnerName,
-	}, registration.ID)
+	}, int(registration.ID))
 	if err != nil {
 		return nil, fmt.Errorf("generate JIT bootstrap for runner %q: %w", runnerName, err)
 	}

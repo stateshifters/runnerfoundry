@@ -97,9 +97,7 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	store.operationErr = wantErr
 	manager := newBuilderManager(t, store)
 	provider := builderProviderFake{}
-	orchestrator := runtimeengine.NewOrchestrator(
-		store, manager.Source(), provider, provider, daemonTestID(1),
-	)
+	orchestrator := newBuilderOrchestrator(store, manager, provider)
 	assertPoolAdapterFailures(t, orchestrator, wantErr)
 	store.operationErr = nil
 	assertPoolAdapterSuccess(t, orchestrator)
@@ -121,6 +119,16 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	if len(closers) != 2 {
 		t.Fatalf("closers = %d, want 2", len(closers))
 	}
+}
+
+func newBuilderOrchestrator(
+	store *builderStoreFake,
+	manager *githubsource.Manager,
+	provider builderProviderFake,
+) *runtimeengine.Orchestrator {
+	return runtimeengine.NewOrchestrator(
+		store, manager.Source(), provider, provider, daemonTestID(1), builderTime,
+	)
 }
 
 func assertPoolAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestrator) {
@@ -212,14 +220,8 @@ func newBuilderStoreFake() *builderStoreFake {
 	}
 }
 
-func (*builderStoreFake) Enqueue(context.Context, core.JobRequest) (core.Job, bool, error) {
-	return core.Job{}, false, nil
-}
 func (*builderStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, nil
-}
-func (store *builderStoreFake) TakeOldest(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
-	return core.ProcessingJob{}, false, store.operationErr
 }
 func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.TakeResult, error) {
 	return core.TakeResult{}, store.operationErr
@@ -232,17 +234,11 @@ func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID
 func (store *builderStoreFake) ProcessingByPool(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
-func (*builderStoreFake) RetryUnstartedProcessing(context.Context, core.JobID) (bool, error) {
-	return false, nil
-}
 func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.TransitionResult, error) {
 	return core.TransitionResult{}, nil
 }
 func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.TransitionResult, error) {
 	return core.TransitionResult{}, nil
-}
-func (*builderStoreFake) RemoveTerminalProcessing(context.Context, core.JobID) (bool, error) {
-	return false, nil
 }
 func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TransitionResult, error) {
 	return core.TransitionResult{}, nil

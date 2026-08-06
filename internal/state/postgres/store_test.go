@@ -18,9 +18,9 @@ func TestEnqueueCreatesQueuedJob(t *testing.T) {
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"},
 		RunnerPool: "linux", EnqueuedAt: fixedTime()}
 	protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
-	job, created, err := NewStore(protocol.executor()).Enqueue(context.Background(), request)
-	if err != nil || !created || job.ID != testJobID1 || protocol.commitCalls != 1 {
-		t.Fatalf("enqueue = %#v, %t, commits=%d, error=%v", job, created, protocol.commitCalls, err)
+	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
+	if err != nil || !result.Enqueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
+		t.Fatalf("queue = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 	if len(protocol.statements) != 2 || !strings.Contains(protocol.statements[0], "pg_advisory_xact_lock") ||
 		!strings.Contains(protocol.statements[1], "runnerfoundry_queued_jobs") || len(protocol.arguments[1]) != 4 {
@@ -36,9 +36,9 @@ func TestEnqueueReturnsExistingQueuedJob(t *testing.T) {
 		{scan: func(...any) error { return sql.ErrNoRows }},
 		rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
-	job, created, err := NewStore(protocol.executor()).Enqueue(context.Background(), request)
-	if err != nil || created || job.ID != testJobID1 || protocol.commitCalls != 1 {
-		t.Fatalf("redelivery = %#v, %t, commits=%d, error=%v", job, created, protocol.commitCalls, err)
+	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
+	if err != nil || result.Enqueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
+		t.Fatalf("redelivery = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 }
 
@@ -49,9 +49,9 @@ func TestEnqueueIgnoresProcessingOrTombstonedSource(t *testing.T) {
 		{scan: func(...any) error { return sql.ErrNoRows }},
 		{scan: func(...any) error { return sql.ErrNoRows }},
 	}}
-	job, created, err := NewStore(protocol.executor()).Enqueue(context.Background(), request)
-	if err != nil || created || job != (core.Job{}) || protocol.commitCalls != 1 {
-		t.Fatalf("ignored enqueue = %#v, %t, commits=%d, error=%v", job, created, protocol.commitCalls, err)
+	result, err := NewStore(protocol.executor()).Queue(context.Background(), request)
+	if err != nil || result.Enqueued || result.Job != (core.Job{}) || protocol.commitCalls != 1 {
+		t.Fatalf("ignored queue = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 }
 
@@ -63,10 +63,10 @@ func TestTakeOldestMovesQueueEntryAtomically(t *testing.T) {
 		rowFromValues(queuedJobValues(testJobID1, request)),
 		rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
-	processing, taken, err := NewStore(protocol.executor()).TakeOldest(context.Background(), "linux", testMemberIDA)
-	if err != nil || !taken || processing.Job.ID != testJobID1 || processing.MemberID != testMemberIDA ||
+	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
+	if err != nil || !result.Taken || result.Processing.Job.ID != testJobID1 || result.Processing.MemberID != testMemberIDA ||
 		protocol.commitCalls != 1 {
-		t.Fatalf("take = %#v, %t, commits=%d, error=%v", processing, taken, protocol.commitCalls, err)
+		t.Fatalf("claim = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
 	if len(protocol.statements) != 5 || !strings.Contains(protocol.statements[1], "ORDER BY enqueued_at LIMIT 1") ||
 		strings.Contains(protocol.statements[1], "ORDER BY enqueued_at,") ||
@@ -81,11 +81,11 @@ func TestTakeOldestMovesQueueEntryAtomically(t *testing.T) {
 func TestTakeOldestLeavesEmptyQueueUnchanged(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{rows: []Row{{scan: func(...any) error { return sql.ErrNoRows }}}}
-	processing, taken, err := NewStore(protocol.executor()).TakeOldest(context.Background(), "linux", testMemberIDA)
-	if err != nil || taken || processing != (core.ProcessingJob{}) || len(protocol.statements) != 2 ||
+	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
+	if err != nil || result.Taken || result.Processing != (core.ProcessingJob{}) || len(protocol.statements) != 2 ||
 		protocol.commitCalls != 1 {
 		t.Fatalf("empty take = %#v, %t, statements=%d, commits=%d, error=%v",
-			processing, taken, len(protocol.statements), protocol.commitCalls, err)
+			result.Processing, result.Taken, len(protocol.statements), protocol.commitCalls, err)
 	}
 }
 
@@ -106,8 +106,8 @@ func TestProcessingByMemberReturnsCurrentOwnership(t *testing.T) {
 func TestRemoveTerminalProcessingDeletesOnlyTerminalJob(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{}
-	removed, err := NewStore(protocol.executor()).RemoveTerminalProcessing(context.Background(), testJobID1)
-	if err != nil || !removed || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
+	result, err := NewStore(protocol.executor()).RemoveTerminal(context.Background(), testJobID1)
+	if err != nil || !result.Applied || protocol.commitCalls != 1 || len(protocol.statements) != 1 ||
 		len(protocol.arguments[0]) != 1 || protocol.arguments[0][0] != testJobID1 {
 		t.Fatalf("remove statements=%#v arguments=%#v commits=%d error=%v",
 			protocol.statements, protocol.arguments, protocol.commitCalls, err)
@@ -118,10 +118,19 @@ func TestStoreOperationsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	operations := []func(*Store) error{
-		func(store *Store) error { _, _, err := store.Enqueue(context.Background(), request); return err },
+	for index, operation := range protocolFailureOperations(request) {
+		store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }})
+		if err := operation(store); err == nil {
+			t.Fatalf("operation %d: expected begin error", index)
+		}
+	}
+}
+
+func protocolFailureOperations(request core.JobRequest) []func(*Store) error {
+	return []func(*Store) error{
+		func(store *Store) error { _, err := store.Queue(context.Background(), request); return err },
 		func(store *Store) error {
-			_, _, err := store.TakeOldest(context.Background(), "linux", testMemberIDA)
+			_, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
 			return err
 		},
 		func(store *Store) error { return store.TerminalizeSource(context.Background(), request.Source) },
@@ -131,19 +140,13 @@ func TestStoreOperationsReportProtocolFailures(t *testing.T) {
 			return err
 		},
 		func(store *Store) error {
-			_, err := store.RetryUnstartedProcessing(context.Background(), testJobID1)
+			_, err := store.RetryUnstarted(context.Background(), testJobID1)
 			return err
 		},
 		func(store *Store) error {
-			_, err := store.RemoveTerminalProcessing(context.Background(), testJobID1)
+			_, err := store.RemoveTerminal(context.Background(), testJobID1)
 			return err
 		},
-	}
-	for index, operation := range operations {
-		store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }})
-		if err := operation(store); err == nil {
-			t.Fatalf("operation %d: expected begin error", index)
-		}
 	}
 }
 
@@ -192,11 +195,11 @@ func (protocol *recordedTransaction) record(statement string, arguments []any) {
 }
 
 func queuedJobValues(identifier core.JobID, request core.JobRequest) []any {
-	return []any{identifier, request.Source.Adapter, request.Source.ID, string(request.RunnerPool), request.EnqueuedAt}
+	return []any{identifier, string(request.Source.Adapter), string(request.Source.ID), string(request.RunnerPool), request.EnqueuedAt}
 }
 
 func processingJobValues(job core.Job, memberID core.MemberID) []any {
-	return []any{job.ID, job.Source.Adapter, job.Source.ID, string(job.RunnerPool), memberID, false, false}
+	return []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), memberID, false, false}
 }
 
 func rowFromValues(values []any) Row {

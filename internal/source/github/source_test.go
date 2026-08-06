@@ -171,13 +171,13 @@ type bootstrapClientFake struct {
 	err          error
 	calls        int
 	registration transport.Registration
-	runnerName   string
+	runnerName   core.RunnerName
 }
 
 func (client *bootstrapClientFake) GenerateBootstrap(
 	_ context.Context,
 	registration transport.Registration,
-	runnerName string,
+	runnerName core.RunnerName,
 ) ([]byte, error) {
 	client.calls++
 	client.registration = registration

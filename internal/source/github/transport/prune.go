@@ -9,9 +9,9 @@ import (
 )
 
 type OwnedRunnerPool struct {
-	ID            int
+	ID            ScaleSetID
 	Name          string
-	RunnerGroupID int
+	RunnerGroupID RunnerGroupID
 }
 
 type PruneResult struct {
@@ -30,14 +30,14 @@ const (
 // match the fingerprint used by EnsureRunnerPool. It never changes job state.
 func (client *Client) PruneRunnerPools(
 	ctx context.Context,
-	runnerGroupID int,
+	runnerGroupID RunnerGroupID,
 	currentRunnerPools []OwnedRunnerPool,
 	ownedRunnerPools []OwnedRunnerPool,
 ) (PruneResult, error) {
 	if client == nil || client.registry == nil {
 		return PruneResult{}, errors.New("GitHub prune registry API is required")
 	}
-	runnerScaleSets, err := client.registry.ListRunnerScaleSets(ctx, runnerGroupID)
+	runnerScaleSets, err := client.registry.ListRunnerScaleSets(ctx, int(runnerGroupID))
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("list runner scale sets for runner group %d: %w", runnerGroupID, err)
 	}
@@ -46,7 +46,7 @@ func (client *Client) PruneRunnerPools(
 
 func (client *Client) deleteAbsentOwnedRunnerPools(
 	ctx context.Context,
-	runnerGroupID int,
+	runnerGroupID RunnerGroupID,
 	currentRunnerPools []OwnedRunnerPool,
 	ownedRunnerPools []OwnedRunnerPool,
 	runnerScaleSets []upstream.RunnerScaleSet,
@@ -55,9 +55,9 @@ func (client *Client) deleteAbsentOwnedRunnerPools(
 	for _, registration := range currentRunnerPools {
 		current[registration] = struct{}{}
 	}
-	upstreamByID := make(map[int]upstream.RunnerScaleSet, len(runnerScaleSets))
+	upstreamByID := make(map[ScaleSetID]upstream.RunnerScaleSet, len(runnerScaleSets))
 	for _, runnerScaleSet := range runnerScaleSets {
-		upstreamByID[runnerScaleSet.ID] = runnerScaleSet
+		upstreamByID[ScaleSetID(runnerScaleSet.ID)] = runnerScaleSet
 	}
 	result := PruneResult{Removed: make([]OwnedRunnerPool, 0, len(ownedRunnerPools))}
 	for _, owned := range ownedRunnerPools {
@@ -76,10 +76,10 @@ func (client *Client) deleteAbsentOwnedRunnerPools(
 }
 
 func classifyOwnedRunnerPool(
-	runnerGroupID int,
+	runnerGroupID RunnerGroupID,
 	owned OwnedRunnerPool,
 	current map[OwnedRunnerPool]struct{},
-	upstreamByID map[int]upstream.RunnerScaleSet,
+	upstreamByID map[ScaleSetID]upstream.RunnerScaleSet,
 ) pruneAction {
 	if owned.RunnerGroupID != runnerGroupID {
 		return retainOwnership
@@ -91,14 +91,14 @@ func classifyOwnedRunnerPool(
 	if !exists {
 		return removeOwnership
 	}
-	if runnerScaleSet.Name != owned.Name || runnerScaleSet.RunnerGroupID != owned.RunnerGroupID {
+	if runnerScaleSet.Name != owned.Name || RunnerGroupID(runnerScaleSet.RunnerGroupID) != owned.RunnerGroupID {
 		return retainOwnership
 	}
 	return deleteAndRemoveOwnership
 }
 
 func (client *Client) deleteOwnedRunnerPool(ctx context.Context, owned OwnedRunnerPool) error {
-	if err := client.registry.DeleteRunnerScaleSet(ctx, owned.ID); err != nil && !errors.Is(err, upstream.NotFoundError) {
+	if err := client.registry.DeleteRunnerScaleSet(ctx, int(owned.ID)); err != nil && !errors.Is(err, upstream.NotFoundError) {
 		return fmt.Errorf("delete runner scale set %q: %w", owned.Name, err)
 	}
 	return nil

@@ -141,7 +141,7 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 
 func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
-	values := []any{job.ID, job.Source.Adapter, job.Source.ID, "linux", testMemberIDA,
+	values := []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), "linux", testMemberIDA,
 		fixedTime(), core.InventoryEndpointID("docker:member-a"), false, false}
 	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{values})}
 	processing, err := NewStore(protocol.executor()).ProcessingByPool(context.Background(), "linux")

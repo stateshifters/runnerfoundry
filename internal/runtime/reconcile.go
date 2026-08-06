@@ -36,14 +36,14 @@ func (orchestrator *Orchestrator) OccupiedSlots(ctx context.Context, runnerPool 
 	if err != nil {
 		return 0, fmt.Errorf("inspect occupied runners for Runner Pool %q: %w", runnerPool, err)
 	}
-	occupied := make(map[string]struct{}, len(processing)+len(instances))
+	occupied := make(map[core.RunnerName]struct{}, len(processing)+len(instances))
 	for _, job := range processing {
 		occupied[runnerName(job.Job.ID)] = struct{}{}
 	}
 	for _, instance := range instancesForPool(instances, runnerPool) {
 		key := instance.RunnerName
 		if key == "" {
-			key = "provider:" + instance.ID
+			key = core.RunnerName("provider:" + instance.ID)
 		}
 		occupied[key] = struct{}{}
 	}
@@ -93,7 +93,7 @@ func (orchestrator *Orchestrator) reconcileInventory(
 	instances []execution.RunnerInstance,
 	purpose reconciliationPurpose,
 ) (PoolReconciliation, error) {
-	instancesByName := make(map[string]execution.RunnerInstance, len(instances))
+	instancesByName := make(map[core.RunnerName]execution.RunnerInstance, len(instances))
 	for _, instance := range instances {
 		instancesByName[instance.RunnerName] = instance
 	}
@@ -106,7 +106,7 @@ func (orchestrator *Orchestrator) reconcileInventory(
 func (orchestrator *Orchestrator) reconcileOwnedProcessing(
 	ctx context.Context,
 	processing []core.ProcessingJob,
-	instancesByName map[string]execution.RunnerInstance,
+	instancesByName map[core.RunnerName]execution.RunnerInstance,
 	purpose reconciliationPurpose,
 ) (PoolReconciliation, error) {
 	result := PoolReconciliation{RemainingProcessing: len(processing)}
@@ -132,7 +132,7 @@ func (orchestrator *Orchestrator) cleanupOrphanedRunners(
 	instances []execution.RunnerInstance,
 	processing []core.ProcessingJob,
 ) (int, error) {
-	processingByName := make(map[string]struct{}, len(processing))
+	processingByName := make(map[core.RunnerName]struct{}, len(processing))
 	for _, job := range processing {
 		processingByName[runnerName(job.Job.ID)] = struct{}{}
 	}
@@ -247,10 +247,12 @@ func appendFailure(failures []error, err error) []error {
 	return append(failures, err)
 }
 
-func runnerName(jobID core.JobID) string { return "runnerfoundry-" + jobID.String() }
+func runnerName(jobID core.JobID) core.RunnerName {
+	return core.RunnerName("runnerfoundry-" + jobID.String())
+}
 
-func isRunnerFoundryName(stableRunnerName string) bool {
-	identifier, found := strings.CutPrefix(stableRunnerName, "runnerfoundry-")
+func isRunnerFoundryName(stableRunnerName core.RunnerName) bool {
+	identifier, found := strings.CutPrefix(string(stableRunnerName), "runnerfoundry-")
 	if !found {
 		return false
 	}

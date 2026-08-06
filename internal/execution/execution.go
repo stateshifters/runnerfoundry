@@ -11,6 +11,8 @@ import (
 // endpoint that accepted a claim.
 type InventoryEndpointID = core.InventoryEndpointID
 
+type HostIdentity string
+
 // RunnerLauncher validates and starts ephemeral runner environments.
 type RunnerLauncher interface {
 	EndpointID() InventoryEndpointID
@@ -62,7 +64,7 @@ func NewBootstrap(content []byte) Bootstrap {
 type StartRequest struct {
 	RunnerPool core.RunnerPool
 	EndpointID InventoryEndpointID
-	RunnerName string
+	RunnerName core.RunnerName
 	Bootstrap  Bootstrap
 }
 
@@ -76,7 +78,7 @@ const (
 
 type RunnerInstance struct {
 	ID         string
-	RunnerName string
+	RunnerName core.RunnerName
 	RunnerPool core.RunnerPool
 	EndpointID InventoryEndpointID
 	State      RunnerState

@@ -38,7 +38,7 @@ func TestSourceIdentityEncodingDoesNotCollideAcrossRepositoryAndPoolBoundaries(t
 		{Repository: "owner/other", RunnerPool: core.RunnerPool("linux|x64"), RequestID: 7},
 		{Repository: "owner/repo", RunnerPool: core.RunnerPool("linux|x64"), RequestID: 8},
 	}
-	encoded := make(map[string]githubsource.SourceIdentity, len(identities))
+	encoded := make(map[core.SourceIdentifier]githubsource.SourceIdentity, len(identities))
 	for _, identity := range identities {
 		sourceID, err := githubsource.EncodeSourceID(identity)
 		if err != nil {
@@ -74,7 +74,7 @@ func TestSourceIdentityRejectsInvalidValues(t *testing.T) {
 		base64.RawURLEncoding.EncodeToString([]byte("repository=repo&runner_pool=linux&request_id=1&extra=value")),
 	}
 	for _, encoded := range invalidEncoded {
-		if _, err := githubsource.DecodeSourceID(encoded); err == nil {
+		if _, err := githubsource.DecodeSourceID(core.SourceIdentifier(encoded)); err == nil {
 			t.Fatalf("DecodeSourceID(%q) error = nil, want validation failure", encoded)
 		}
 	}

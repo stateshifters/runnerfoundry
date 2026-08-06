@@ -12,9 +12,9 @@ import (
 
 func scanJob(row scanner) (core.Job, error) {
 	var job core.Job
-	var jobID, runnerPool string
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool string
 	var enqueuedAt int64
-	if err := row.Scan(&jobID, &job.Source.Adapter, &job.Source.ID, &runnerPool, &enqueuedAt); err != nil {
+	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier, &runnerPool, &enqueuedAt); err != nil {
 		return core.Job{}, fmt.Errorf("scan queued job: %w", err)
 	}
 	parsedJobID, err := uuid.Parse(jobID)
@@ -22,6 +22,7 @@ func scanJob(row scanner) (core.Job, error) {
 		return core.Job{}, fmt.Errorf("parse job UUID: %w", err)
 	}
 	job.ID = parsedJobID
+	job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
 	job.RunnerPool = core.RunnerPool(runnerPool)
 	job.EnqueuedAt = time.Unix(0, enqueuedAt).UTC()
 	return job, nil
@@ -29,8 +30,8 @@ func scanJob(row scanner) (core.Job, error) {
 
 func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, runnerPool, memberID string
-	if err := row.Scan(&jobID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID string
+	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
 		&runnerPool, &memberID, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
 	}
@@ -39,6 +40,7 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 		return core.ProcessingJob{}, fmt.Errorf("parse processing job UUID: %w", err)
 	}
 	processing.Job.ID = parsedJobID
+	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.MemberID = core.MemberID(memberID)
 	return processing, nil
@@ -61,9 +63,9 @@ func scanProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) 
 
 func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, runnerPool, memberID, endpointID string
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, endpointID string
 	var claimedAt int64
-	if err := row.Scan(&jobID, &processing.Job.Source.Adapter, &processing.Job.Source.ID,
+	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
 		&runnerPool, &memberID, &claimedAt, &endpointID, &processing.RunnerStarted,
 		&processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
@@ -73,6 +75,7 @@ func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 		return core.ProcessingJob{}, fmt.Errorf("parse claimed processing job UUID: %w", err)
 	}
 	processing.Job.ID = parsedJobID
+	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.MemberID = core.MemberID(memberID)
 	processing.ClaimedAt = time.Unix(0, claimedAt).UTC()

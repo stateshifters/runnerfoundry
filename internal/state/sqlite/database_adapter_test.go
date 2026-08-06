@@ -168,8 +168,8 @@ func TestDatabaseAdapterDelegatesEnqueueTransaction(t *testing.T) {
 	store := NewDatabaseStore(database)
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-3"},
 		RunnerPool: "linux", EnqueuedAt: now}
-	if _, created, err := store.Enqueue(context.Background(), request); err != nil || !created {
-		t.Fatalf("enqueue through adapter = %t, %v", created, err)
+	if result, err := store.Queue(context.Background(), request); err != nil || !result.Enqueued {
+		t.Fatalf("queue through adapter = %#v, %v", result, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close adapter: %v", err)

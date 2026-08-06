@@ -32,7 +32,7 @@ type ManagerClient struct {
 	EnsureRunnerPool  func(context.Context, string, string) (transport.Registration, error)
 	OpenSession       func(context.Context, transport.Registration, string) (ManagedSession, error)
 	GenerateBootstrap func(context.Context, transport.Registration, string) ([]byte, error)
-	PruneRunnerPools  func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
+	PruneRunnerPools  func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
 type managedBootstrapClient struct{ client ManagerClient }
@@ -40,9 +40,9 @@ type managedBootstrapClient struct{ client ManagerClient }
 func (client managedBootstrapClient) GenerateBootstrap(
 	ctx context.Context,
 	registration transport.Registration,
-	runnerName string,
+	runnerName core.RunnerName,
 ) ([]byte, error) {
-	return client.client.GenerateBootstrap(ctx, registration, runnerName)
+	return client.client.GenerateBootstrap(ctx, registration, string(runnerName))
 }
 
 type ManagerClientFactoryFunc func(context.Context, transport.Repository) (ManagerClient, error)
@@ -62,7 +62,7 @@ func composeTransportManagerClient(
 	ensure func(context.Context, string, string) (transport.Registration, error),
 	open func(context.Context, transport.Registration, string) (*transport.Session, error),
 	generate func(context.Context, transport.Registration, string) ([]byte, error),
-	prune func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
+	prune func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
 ) ManagerClient {
 	return ManagerClient{
 		EnsureRunnerPool:  wrapTransportEnsure(ensure),
@@ -109,9 +109,9 @@ func wrapTransportGenerate(
 }
 
 func wrapTransportPrune(
-	prune func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
-) func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
-	return func(ctx context.Context, groupID int, current, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	prune func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
+) func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	return func(ctx context.Context, groupID transport.RunnerGroupID, current, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 		result, err := prune(ctx, groupID, current, owned)
 		if err != nil {
 			return result, fmt.Errorf("prune GitHub Runner Pools: %w", err)
@@ -227,8 +227,8 @@ func (manager *Manager) ensureRepository(
 		}
 		records = append(records, Registration{
 			RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
-			InstallationID: int64(repository.InstallationID), RunnerGroupID: int64(registration.RunnerGroupID),
-			ScaleSetID: int64(registration.ID),
+			InstallationID: repository.InstallationID, RunnerGroupID: registration.RunnerGroupID,
+			ScaleSetID: registration.ID,
 		})
 	}
 	return records, nil
@@ -358,12 +358,12 @@ func (manager *Manager) openLeaderRecord(
 }
 
 func repositoryFromRegistration(record Registration) transport.Repository {
-	return transport.Repository{InstallationID: transport.InstallationID(record.InstallationID), URL: record.RepositoryURL}
+	return transport.Repository{InstallationID: record.InstallationID, URL: record.RepositoryURL}
 }
 
 func transportRegistration(record Registration) transport.Registration {
 	return transport.Registration{
-		ID: int(record.ScaleSetID), Name: string(record.RunnerPool), RunnerGroupID: int(record.RunnerGroupID),
+		ID: record.ScaleSetID, Name: string(record.RunnerPool), RunnerGroupID: record.RunnerGroupID,
 	}
 }
 

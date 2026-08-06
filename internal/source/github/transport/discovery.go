@@ -15,6 +15,10 @@ const discoveryPageSize = 100
 
 type InstallationID int64
 
+type RunnerGroupID int64
+
+type ScaleSetID int64
+
 type Credentials struct {
 	AppID      int64
 	PrivateKey string

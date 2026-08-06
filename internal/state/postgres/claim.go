@@ -34,29 +34,6 @@ func claimOldestInTransaction(
 		ClaimedAt: claim.ClaimedAt, InventoryEndpointID: claim.InventoryEndpointID}, Taken: true}, nil
 }
 
-func takeOldestInTransaction(
-	ctx context.Context,
-	transaction Transaction,
-	runnerPool core.RunnerPool,
-	memberID core.MemberID,
-) (core.ProcessingJob, bool, error) {
-	if _, lockErr := transaction.Execute(ctx, serializeRunnerPoolClaimSQL, string(runnerPool)); lockErr != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("serialize Runner Pool pickup: %w", lockErr)
-	}
-	candidate, found, err := selectOldestQueuedJob(ctx, transaction, runnerPool)
-	if err != nil || !found {
-		return core.ProcessingJob{}, false, err
-	}
-	job, taken, err := takeQueuedJob(ctx, transaction, candidate)
-	if err != nil || !taken {
-		return core.ProcessingJob{}, false, err
-	}
-	if err := createProcessingOwnership(ctx, transaction, job, memberID); err != nil {
-		return core.ProcessingJob{}, false, err
-	}
-	return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
-}
-
 func selectOldestQueuedJob(
 	ctx context.Context,
 	transaction Transaction,
@@ -85,17 +62,4 @@ func takeQueuedJob(ctx context.Context, transaction Transaction, candidate core.
 		return core.Job{}, false, fmt.Errorf("remove picked-up queued job: %w", err)
 	}
 	return job, true, nil
-}
-
-func createProcessingOwnership(
-	ctx context.Context,
-	transaction Transaction,
-	job core.Job,
-	memberID core.MemberID,
-) error {
-	if _, err := transaction.Execute(ctx, insertProcessingJobSQL, job.ID, job.Source.Adapter,
-		job.Source.ID, string(job.RunnerPool), memberID); err != nil {
-		return fmt.Errorf("insert processing job: %w", err)
-	}
-	return nil
 }

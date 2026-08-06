@@ -8,6 +8,7 @@ import (
 
 	"github.com/meza/RunnerFoundry/internal/core"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	githubtransport "github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
 const upsertRegistrationSQL = `INSERT INTO runnerfoundry_github_registrations
@@ -155,11 +156,15 @@ func (store *Store) DeleteRegistration(ctx context.Context, repositoryURL string
 func scanRegistration(row scanner) (githubsource.Registration, error) {
 	var registration githubsource.Registration
 	var runnerPool string
-	if err := row.Scan(&registration.RepositoryURL, &runnerPool, &registration.InstallationID,
-		&registration.RunnerGroupID, &registration.ScaleSetID); err != nil {
+	var installationID, runnerGroupID, scaleSetID int64
+	if err := row.Scan(&registration.RepositoryURL, &runnerPool, &installationID,
+		&runnerGroupID, &scaleSetID); err != nil {
 		return githubsource.Registration{}, fmt.Errorf("scan registration: %w", err)
 	}
 	registration.RunnerPool = core.RunnerPool(runnerPool)
+	registration.InstallationID = githubtransport.InstallationID(installationID)
+	registration.RunnerGroupID = githubtransport.RunnerGroupID(runnerGroupID)
+	registration.ScaleSetID = githubtransport.ScaleSetID(scaleSetID)
 	return registration, nil
 }
 

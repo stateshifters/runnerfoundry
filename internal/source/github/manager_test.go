@@ -114,7 +114,7 @@ func newPartialPruneRetryFixture(t *testing.T) partialPruneRetryFixture {
 	factory := newManagerFactoryFake(discoverer.repositories)
 	wantErr := errors.New("partial delete failed")
 	attempt := 0
-	factory.clients[first.RepositoryURL].pruneFunc = func(_ int, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	factory.clients[first.RepositoryURL].pruneFunc = func(_ transport.RunnerGroupID, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 		attempt++
 		if attempt == 1 {
 			return transport.PruneResult{Removed: owned[:1]}, wantErr
@@ -257,7 +257,7 @@ func openLeaderManagerFixture(t *testing.T) leaderManagerFixture {
 
 func managerTransportRepository(record githubsource.Registration) transport.Repository {
 	return transport.Repository{
-		InstallationID: transport.InstallationID(record.InstallationID), URL: record.RepositoryURL,
+		InstallationID: record.InstallationID, URL: record.RepositoryURL,
 	}
 }
 
@@ -278,7 +278,7 @@ func newManagerFixture(
 func managerRecord(repositoryURL string, registrationID int) githubsource.Registration {
 	return githubsource.Registration{
 		RepositoryURL: repositoryURL, InstallationID: 1, RunnerPool: core.RunnerPool("linux"),
-		RunnerGroupID: 1, ScaleSetID: int64(registrationID),
+		RunnerGroupID: 1, ScaleSetID: transport.ScaleSetID(registrationID),
 	}
 }
 
@@ -421,7 +421,7 @@ type managerClientFake struct {
 	openErr       error
 	bootstrapErr  error
 	runnerGroupID int
-	pruneFunc     func(int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
+	pruneFunc     func(transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
 func (client *managerClientFake) EnsureRunnerPool(
@@ -434,7 +434,8 @@ func (client *managerClientFake) EnsureRunnerPool(
 	if runnerGroupID == 0 {
 		runnerGroupID = 1
 	}
-	return transport.Registration{ID: client.nextID, Name: runnerPoolName, RunnerGroupID: runnerGroupID}, client.ensureErr
+	return transport.Registration{ID: transport.ScaleSetID(client.nextID), Name: runnerPoolName,
+		RunnerGroupID: transport.RunnerGroupID(runnerGroupID)}, client.ensureErr
 }
 
 func (client *managerClientFake) GenerateBootstrap(
@@ -447,7 +448,7 @@ func (client *managerClientFake) GenerateBootstrap(
 
 func (client *managerClientFake) PruneRunnerPools(
 	_ context.Context,
-	runnerGroupID int,
+	runnerGroupID transport.RunnerGroupID,
 	current []transport.OwnedRunnerPool,
 	owned []transport.OwnedRunnerPool,
 ) (transport.PruneResult, error) {

@@ -49,7 +49,7 @@ func configuredProvider(
 			dockerprovider.ComposeConfig{
 				ComposeFile: configured.Docker.ComposeFile,
 				Service:     configured.Docker.Service,
-			}, dependencies.memberHostname,
+			}, execution.HostIdentity(dependencies.memberHostname),
 		)
 		return configuredExecutionProvider{ExecutionProvider: provider}, nil
 	}

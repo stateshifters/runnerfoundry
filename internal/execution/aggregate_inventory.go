@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/meza/RunnerFoundry/internal/core"
 )
 
 // AggregateRunnerInventory provides one fail-closed view of all active runner
@@ -66,7 +68,7 @@ func (inventory AggregateRunnerInventory) Refresh(ctx context.Context) error {
 
 func (inventory AggregateRunnerInventory) inspectBackends(ctx context.Context) ([]RunnerInstance, error) {
 	instances := make([]RunnerInstance, 0)
-	seenRunnerNames := make(map[string]struct{})
+	seenRunnerNames := make(map[core.RunnerName]struct{})
 	var inspectionErrors []error
 	for _, backend := range inventory.inventories {
 		backendInstances, err := backend.Inspect(ctx)

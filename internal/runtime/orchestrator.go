@@ -11,7 +11,7 @@ import (
 )
 
 type BootstrapGenerator interface {
-	GenerateBootstrap(ctx context.Context, job core.Job, runnerName string) (execution.Bootstrap, error)
+	GenerateBootstrap(ctx context.Context, job core.Job, runnerName core.RunnerName) (execution.Bootstrap, error)
 }
 
 // Orchestrator owns member-local processing from queue pickup through provider
@@ -45,12 +45,8 @@ func NewOrchestrator(
 	launcher execution.RunnerLauncher,
 	inventory execution.RunnerInventory,
 	member core.MemberID,
-	clocks ...func() time.Time,
+	currentTime func() time.Time,
 ) *Orchestrator {
-	currentTime := time.Now
-	if len(clocks) != 0 && clocks[0] != nil {
-		currentTime = clocks[0]
-	}
 	return &Orchestrator{
 		store: store, bootstrapper: bootstrapper, launcher: launcher, inventory: inventory, member: member,
 		currentTime: currentTime,

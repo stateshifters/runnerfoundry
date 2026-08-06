@@ -12,9 +12,9 @@ import (
 )
 
 type Registration struct {
-	ID            int
+	ID            ScaleSetID
 	Name          string
-	RunnerGroupID int
+	RunnerGroupID RunnerGroupID
 }
 
 type registrationAPI interface {
@@ -120,7 +120,7 @@ func (client *Client) EnsureRunnerPool(
 	if err != nil {
 		return Registration{}, err
 	}
-	runnerScaleSet, err := client.registrations.GetRunnerScaleSet(ctx, runnerGroupID, runnerPoolName)
+	runnerScaleSet, err := client.registrations.GetRunnerScaleSet(ctx, int(runnerGroupID), runnerPoolName)
 	if err != nil {
 		return Registration{}, fmt.Errorf("get runner scale set %q: %w", runnerPoolName, err)
 	}
@@ -134,11 +134,11 @@ func (client *Client) EnsureRunnerPool(
 		return Registration{}, fmt.Errorf("ensure runner scale set %q returned no registration", runnerPoolName)
 	}
 	return Registration{
-		ID: runnerScaleSet.ID, Name: runnerScaleSet.Name, RunnerGroupID: runnerScaleSet.RunnerGroupID,
+		ID: ScaleSetID(runnerScaleSet.ID), Name: runnerScaleSet.Name, RunnerGroupID: RunnerGroupID(runnerScaleSet.RunnerGroupID),
 	}, nil
 }
 
-func (client *Client) runnerGroupID(ctx context.Context, runnerGroupName string) (int, error) {
+func (client *Client) runnerGroupID(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
 	runnerGroup, err := client.registrations.GetRunnerGroupByName(ctx, runnerGroupName)
 	if err != nil {
 		return 0, fmt.Errorf("get runner group %q: %w", runnerGroupName, err)
@@ -146,17 +146,17 @@ func (client *Client) runnerGroupID(ctx context.Context, runnerGroupName string)
 	if runnerGroup == nil {
 		return 0, fmt.Errorf("runner group %q was not found", runnerGroupName)
 	}
-	return runnerGroup.ID, nil
+	return RunnerGroupID(runnerGroup.ID), nil
 }
 
 func (client *Client) createRunnerScaleSet(
 	ctx context.Context,
 	runnerPoolName string,
-	runnerGroupID int,
+	runnerGroupID RunnerGroupID,
 ) (*upstream.RunnerScaleSet, error) {
 	runnerScaleSet, err := client.registrations.CreateRunnerScaleSet(ctx, &upstream.RunnerScaleSet{
 		Name:          runnerPoolName,
-		RunnerGroupID: runnerGroupID,
+		RunnerGroupID: int(runnerGroupID),
 		Labels:        []upstream.Label{{Name: runnerPoolName, Type: "System"}},
 		RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
 	})

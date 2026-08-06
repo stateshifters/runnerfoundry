@@ -22,7 +22,7 @@ func TestEnqueueReportsTransactionalFailures(t *testing.T) {
 	}
 	for index, transaction := range tests {
 		store := NewStore(Executor{begin: transactionBeginning(transaction)})
-		if _, _, err := store.Enqueue(context.Background(), request); err == nil {
+		if _, err := store.Queue(context.Background(), request); err == nil {
 			t.Fatalf("case %d: expected enqueue error", index)
 		}
 	}
@@ -44,7 +44,7 @@ func TestTakeOldestReportsTransactionalFailures(t *testing.T) {
 	}
 	for index, transaction := range tests {
 		store := NewStore(Executor{begin: transactionBeginning(transaction)})
-		if _, _, err := store.TakeOldest(context.Background(), "linux", testMemberIDA); err == nil {
+		if _, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA}); err == nil {
 			t.Fatalf("case %d: expected pickup error", index)
 		}
 	}
@@ -57,17 +57,17 @@ func TestTakeOldestHandlesCandidateCancelledWhileWaitingForSourceLock(t *testing
 		rowFromValues(queuedJobValues(testJobID1, request)),
 		{scan: func(...any) error { return sql.ErrNoRows }},
 	}, nil)
-	processing, taken, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		TakeOldest(context.Background(), "linux", testMemberIDA)
-	if err != nil || taken || processing != (core.ProcessingJob{}) {
-		t.Fatalf("vanished pickup = %#v, %t, %v", processing, taken, err)
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
+	if err != nil || result.Taken || result.Processing != (core.ProcessingJob{}) {
+		t.Fatalf("vanished claim = %#v, %v", result, err)
 	}
 	commitFailure := transactionWithRows([]Row{
 		rowFromValues(queuedJobValues(testJobID1, request)),
 		{scan: func(...any) error { return sql.ErrNoRows }},
 	}, errors.New("commit"))
-	if _, _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).
-		TakeOldest(context.Background(), "linux", testMemberIDA); err == nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).
+		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA}); err == nil {
 		t.Fatal("expected vanished pickup commit error")
 	}
 }

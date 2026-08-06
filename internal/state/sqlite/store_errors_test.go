@@ -21,11 +21,11 @@ func TestEnqueueProtocolFailures(t *testing.T) {
 		{execute: successfulExecute, queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion},
 		{execute: successfulExecute, queryRow: constantRow(rowFromValues(queuedJobValues())), commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	}
-	if _, _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).Enqueue(context.Background(), request); err == nil {
+	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).Queue(context.Background(), request); err == nil {
 		t.Fatal("expected begin failure")
 	}
 	for index, transaction := range transactions {
-		if _, _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Enqueue(context.Background(), request); err == nil {
+		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Queue(context.Background(), request); err == nil {
 			t.Fatalf("case %d: expected enqueue failure", index)
 		}
 	}
@@ -38,30 +38,30 @@ func TestEnqueueIgnoresAnExistingTombstone(t *testing.T) {
 		return Result{rowsAffected: func() (int64, error) { return 0, nil }}, nil
 	}, queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}), commit: successfulCompletion,
 		rollback: successfulCompletion}
-	job, created, err := NewStore(Executor{begin: transactionBeginning(tombstoned)}).Enqueue(context.Background(), request)
-	if err != nil || created || job != (core.Job{}) {
-		t.Fatalf("tombstoned enqueue=%#v %t %v", job, created, err)
+	result, err := NewStore(Executor{begin: transactionBeginning(tombstoned)}).Queue(context.Background(), request)
+	if err != nil || result.Enqueued || result.Job != (core.Job{}) {
+		t.Fatalf("tombstoned queue=%#v %v", result, err)
 	}
 }
 
 func TestTakeOldestProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	if _, _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
 		t.Fatal("expected take begin failure")
 	}
 	selectionFailure := Transaction{queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion}
-	if _, _, err := NewStore(Executor{begin: transactionBeginning(selectionFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(selectionFailure)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
 		t.Fatal("expected selection failure")
 	}
 	emptyCommitFailure := Transaction{queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}),
 		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
-	if _, _, err := NewStore(Executor{begin: transactionBeginning(emptyCommitFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(emptyCommitFailure)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
 		t.Fatal("expected empty commit failure")
 	}
 	commitFailure := Transaction{queryRow: constantRow(rowFromValues(queuedJobValues())), execute: successfulExecute,
 		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
-	if _, _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).TakeOldest(context.Background(), "linux", testMemberID); err == nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
 		t.Fatal("expected move commit failure")
 	}
 }

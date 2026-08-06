@@ -18,19 +18,19 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 	store := &jobStoreFake{take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 		return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
 	}}
-	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName string) (execution.Bootstrap, error) {
-		if actual.ID != jobID || runnerName != "runnerfoundry-"+jobID.String() {
+	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName core.RunnerName) (execution.Bootstrap, error) {
+		if actual.ID != jobID || runnerName != core.RunnerName("runnerfoundry-"+jobID.String()) {
 			t.Fatalf("bootstrap job = %#v, runner = %q", actual, runnerName)
 		}
 		return execution.NewBootstrap([]byte("opaque")), nil
 	}}
 	provider := &providerFake{start: func(_ context.Context, request execution.StartRequest) error {
-		if request.RunnerPool != "linux" || request.RunnerName != "runnerfoundry-"+jobID.String() {
+		if request.RunnerPool != "linux" || request.RunnerName != core.RunnerName("runnerfoundry-"+jobID.String()) {
 			t.Fatalf("start request = %#v", request)
 		}
 		return nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID)
+	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID, testCurrentTime)
 
 	processed, err := orchestrator.ProcessOne(context.Background(), "linux")
 	if err != nil {
@@ -60,15 +60,9 @@ func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool
 	return core.TakeResult{Processing: job, Taken: taken}, err
 }
 
-func (store *jobStoreFake) Enqueue(ctx context.Context, request core.JobRequest) (core.Job, bool, error) {
-	return store.enqueue(ctx, request)
-}
 func (store *jobStoreFake) Queue(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
-	job, enqueued, err := store.Enqueue(ctx, request)
+	job, enqueued, err := store.enqueue(ctx, request)
 	return core.EnqueueResult{Job: job, Enqueued: enqueued}, err
-}
-func (store *jobStoreFake) TakeOldest(ctx context.Context, pool core.RunnerPool, member core.MemberID) (core.ProcessingJob, bool, error) {
-	return store.take(ctx, pool, member)
 }
 func (store *jobStoreFake) TerminalizeSource(ctx context.Context, source core.SourceReference) error {
 	return store.terminalize(ctx, source)
@@ -85,14 +79,11 @@ func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.M
 func (store *jobStoreFake) ProcessingByPool(ctx context.Context, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	return store.ProcessingByMember(ctx, "", pool)
 }
-func (store *jobStoreFake) RetryUnstartedProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
-	if store.retry == nil {
-		return true, nil
-	}
-	return store.retry(ctx, jobID)
-}
 func (store *jobStoreFake) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
-	applied, err := store.RetryUnstartedProcessing(ctx, jobID)
+	if store.retry == nil {
+		return core.TransitionResult{Applied: true}, nil
+	}
+	applied, err := store.retry(ctx, jobID)
 	return core.TransitionResult{Applied: applied}, err
 }
 func (store *jobStoreFake) RecoverUnstartedProcessing(ctx context.Context, job core.ProcessingJob) (core.TransitionResult, error) {
@@ -101,22 +92,19 @@ func (store *jobStoreFake) RecoverUnstartedProcessing(ctx context.Context, job c
 	}
 	return core.TransitionResult{Applied: true}, nil
 }
-func (store *jobStoreFake) RemoveTerminalProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
+func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
 	if store.removeTerminal != nil {
-		return store.removeTerminal(ctx, jobID)
+		applied, err := store.removeTerminal(ctx, jobID)
+		return core.TransitionResult{Applied: applied}, err
 	}
 	if store.remove == nil {
-		return true, nil
+		return core.TransitionResult{Applied: true}, nil
 	}
-	return true, store.remove(ctx, jobID)
-}
-func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
-	applied, err := store.RemoveTerminalProcessing(ctx, jobID)
-	return core.TransitionResult{Applied: applied}, err
+	return core.TransitionResult{Applied: true}, store.remove(ctx, jobID)
 }
 
 type bootstrapGeneratorFake struct {
-	generate func(context.Context, core.Job, string) (execution.Bootstrap, error)
+	generate func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error)
 }
 
 type launcherFake struct{}
@@ -127,9 +115,11 @@ func (launcherFake) Start(context.Context, execution.StartRequest) error {
 	return nil
 }
 
-func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name string) (execution.Bootstrap, error) {
+func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name core.RunnerName) (execution.Bootstrap, error) {
 	return generator.generate(ctx, job, name)
 }
+
+func testCurrentTime() time.Time { return time.Unix(1, 0).UTC() }
 
 type providerFake struct {
 	start   func(context.Context, execution.StartRequest) error

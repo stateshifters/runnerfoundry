@@ -18,8 +18,8 @@ func pruneRepository(ctx context.Context, client ManagerClient, active, owned []
 	return retainOwnedRegistrations(owned, removed), nil
 }
 
-func groupOwnedRunnerPools(registrations []Registration) map[int64][]transport.OwnedRunnerPool {
-	grouped := make(map[int64][]transport.OwnedRunnerPool)
+func groupOwnedRunnerPools(registrations []Registration) map[transport.RunnerGroupID][]transport.OwnedRunnerPool {
+	grouped := make(map[transport.RunnerGroupID][]transport.OwnedRunnerPool)
 	for _, registration := range registrations {
 		grouped[registration.RunnerGroupID] = append(grouped[registration.RunnerGroupID], ownedRunnerPool(registration))
 	}
@@ -29,12 +29,12 @@ func groupOwnedRunnerPools(registrations []Registration) map[int64][]transport.O
 func pruneRunnerPoolGroups(
 	ctx context.Context,
 	client ManagerClient,
-	currentByGroup map[int64][]transport.OwnedRunnerPool,
-	ownedByGroup map[int64][]transport.OwnedRunnerPool,
+	currentByGroup map[transport.RunnerGroupID][]transport.OwnedRunnerPool,
+	ownedByGroup map[transport.RunnerGroupID][]transport.OwnedRunnerPool,
 ) (map[transport.OwnedRunnerPool]struct{}, error) {
 	removed := make(map[transport.OwnedRunnerPool]struct{})
 	for _, runnerGroupID := range registrationGroupIDs(currentByGroup, ownedByGroup) {
-		result, err := client.PruneRunnerPools(ctx, int(runnerGroupID), currentByGroup[runnerGroupID], ownedByGroup[runnerGroupID])
+		result, err := client.PruneRunnerPools(ctx, runnerGroupID, currentByGroup[runnerGroupID], ownedByGroup[runnerGroupID])
 		if err != nil {
 			return nil, err
 		}
@@ -56,18 +56,18 @@ func retainOwnedRegistrations(owned []Registration, removed map[transport.OwnedR
 }
 
 func ownedRunnerPool(registration Registration) transport.OwnedRunnerPool {
-	return transport.OwnedRunnerPool{ID: int(registration.ScaleSetID), Name: string(registration.RunnerPool), RunnerGroupID: int(registration.RunnerGroupID)}
+	return transport.OwnedRunnerPool{ID: registration.ScaleSetID, Name: string(registration.RunnerPool), RunnerGroupID: registration.RunnerGroupID}
 }
 
-func registrationGroupIDs(current, owned map[int64][]transport.OwnedRunnerPool) []int64 {
-	groups := make(map[int64]struct{}, len(current)+len(owned))
+func registrationGroupIDs(current, owned map[transport.RunnerGroupID][]transport.OwnedRunnerPool) []transport.RunnerGroupID {
+	groups := make(map[transport.RunnerGroupID]struct{}, len(current)+len(owned))
 	for groupID := range current {
 		groups[groupID] = struct{}{}
 	}
 	for groupID := range owned {
 		groups[groupID] = struct{}{}
 	}
-	groupIDs := make([]int64, 0, len(groups))
+	groupIDs := make([]transport.RunnerGroupID, 0, len(groups))
 	for groupID := range groups {
 		groupIDs = append(groupIDs, groupID)
 	}
@@ -95,7 +95,7 @@ func mergeOwnedRegistrations(previous, active []Registration) []Registration {
 
 type registrationIdentity struct {
 	repositoryURL string
-	scaleSetID    int64
+	scaleSetID    transport.ScaleSetID
 }
 
 func (manager *Manager) pruneRegistrations(

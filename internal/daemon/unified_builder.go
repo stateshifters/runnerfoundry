@@ -126,6 +126,7 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	}
 	orchestrator := runtimeengine.NewOrchestrator(
 		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
+		dependencies.currentTime,
 	)
 	assembled.localCapacity = append(assembled.localCapacity, core.RunnerPoolCapacity{
 		RunnerPool: runnerPool, Capacity: runnerPoolConfig.MaxRunners,

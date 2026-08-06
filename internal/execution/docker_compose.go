@@ -13,13 +13,13 @@ import (
 
 type DockerComposeProvider struct {
 	provider providerdocker.ComposeProvider
-	hostname string
+	hostname HostIdentity
 }
 
 func (provider DockerComposeProvider) EndpointID() InventoryEndpointID {
 	config := provider.provider.Config
 	return InventoryEndpointID(fmt.Sprintf("docker-compose:%s?compose=%s&service=%s",
-		url.QueryEscape(strings.ToLower(strings.TrimSpace(provider.hostname))),
+		url.QueryEscape(strings.ToLower(strings.TrimSpace(string(provider.hostname)))),
 		url.QueryEscape(filepath.Clean(strings.TrimSpace(config.ComposeFile))),
 		url.QueryEscape(strings.TrimSpace(config.Service))))
 }
@@ -43,16 +43,12 @@ func (provider DockerComposeProvider) InspectEndpoint(ctx context.Context, endpo
 func NewDockerComposeProvider(
 	transport providerdocker.CommandRunner,
 	config providerdocker.ComposeConfig,
-	hostname ...string,
+	hostname HostIdentity,
 ) DockerComposeProvider {
-	memberHostname := "local"
-	if len(hostname) != 0 && hostname[0] != "" {
-		memberHostname = hostname[0]
-	}
 	return DockerComposeProvider{provider: providerdocker.ComposeProvider{
 		CommandRunner: transport,
 		Config:        config,
-	}, hostname: memberHostname}
+	}, hostname: hostname}
 }
 
 func (provider DockerComposeProvider) Validate(ctx context.Context) error {
@@ -65,7 +61,7 @@ func (provider DockerComposeProvider) Validate(ctx context.Context) error {
 func (provider DockerComposeProvider) Start(ctx context.Context, request StartRequest) error {
 	err := provider.provider.Start(ctx, providerdocker.StartRequest{
 		RunnerPoolName: string(request.RunnerPool),
-		RunnerName:     request.RunnerName,
+		RunnerName:     string(request.RunnerName),
 		JITConfig:      string(request.Bootstrap.content),
 	})
 	if err != nil {
@@ -83,7 +79,7 @@ func (provider DockerComposeProvider) Inspect(ctx context.Context) ([]RunnerInst
 	for _, instance := range instances {
 		translated = append(translated, RunnerInstance{
 			ID:         instance.ID,
-			RunnerName: instance.RunnerName,
+			RunnerName: core.RunnerName(instance.RunnerName),
 			RunnerPool: core.RunnerPool(instance.RunnerPoolName),
 			State:      RunnerState(instance.State),
 		})
@@ -94,7 +90,7 @@ func (provider DockerComposeProvider) Inspect(ctx context.Context) ([]RunnerInst
 func (provider DockerComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
 	err := provider.provider.Destroy(ctx, providerdocker.RunnerInstance{
 		ID:         instance.ID,
-		RunnerName: instance.RunnerName,
+		RunnerName: string(instance.RunnerName),
 		State:      providerdocker.RunnerState(instance.State),
 	})
 	if err != nil {

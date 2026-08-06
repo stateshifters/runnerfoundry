@@ -16,7 +16,7 @@ func TestManagerPrunesStoredGroupWithoutCurrentConfiguration(t *testing.T) {
 	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{Owned: []githubsource.Registration{record}}}
 	discoverer := &managerDiscovererFake{repositories: []transport.Repository{{InstallationID: 1, URL: record.RepositoryURL}}}
 	factory := newManagerFactoryFake(discoverer.repositories)
-	factory.clients[record.RepositoryURL].pruneFunc = func(groupID int, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	factory.clients[record.RepositoryURL].pruneFunc = func(groupID transport.RunnerGroupID, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 		if groupID != 71 {
 			t.Fatalf("pruned runner group %d, want stored group 71", groupID)
 		}
@@ -42,7 +42,7 @@ func TestManagerReplacesChangedOwnershipAndPrunesOldFingerprint(t *testing.T) {
 	client := factory.clients[old.RepositoryURL]
 	client.nextID = 12
 	client.runnerGroupID = 23
-	client.pruneFunc = func(groupID int, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	client.pruneFunc = func(groupID transport.RunnerGroupID, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 		if groupID == 17 {
 			return transport.PruneResult{Removed: owned}, nil
 		}

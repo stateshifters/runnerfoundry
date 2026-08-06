@@ -22,7 +22,7 @@ type SourceIdentity struct {
 // EncodeSourceID returns an opaque, deterministic core source ID. The encoded
 // query encoding is base64url without padding, so arbitrary repository and pool
 // names cannot create delimiter collisions. Invalid identities are rejected.
-func EncodeSourceID(identity SourceIdentity) (string, error) {
+func EncodeSourceID(identity SourceIdentity) (core.SourceIdentifier, error) {
 	if err := validateSourceIdentity(identity); err != nil {
 		return "", err
 	}
@@ -31,14 +31,14 @@ func EncodeSourceID(identity SourceIdentity) (string, error) {
 		"runner_pool": []string{string(identity.RunnerPool)},
 		"request_id":  []string{strconv.FormatInt(identity.RequestID, 10)},
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(values.Encode())), nil
+	return core.SourceIdentifier(base64.RawURLEncoding.EncodeToString([]byte(values.Encode()))), nil
 }
 
 // DecodeSourceID decodes and validates an opaque GitHub source ID. Callers
 // must continue to verify that the decoded pool matches the core job before
 // selecting a repository and scale-set session.
-func DecodeSourceID(sourceID string) (SourceIdentity, error) {
-	encodedValues, err := base64.RawURLEncoding.DecodeString(sourceID)
+func DecodeSourceID(sourceID core.SourceIdentifier) (SourceIdentity, error) {
+	encodedValues, err := base64.RawURLEncoding.DecodeString(string(sourceID))
 	if err != nil {
 		return SourceIdentity{}, fmt.Errorf("decode GitHub source ID: %w", err)
 	}

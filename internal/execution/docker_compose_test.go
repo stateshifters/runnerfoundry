@@ -13,7 +13,7 @@ func TestDockerComposeStartTranslatesSourceNeutralRequest(t *testing.T) {
 	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{
 		ComposeFile: "compose.yaml",
 		Service:     "runner",
-	})
+	}, "local")
 
 	err := provider.Start(context.Background(), StartRequest{
 		RunnerPool: "linux",
@@ -38,7 +38,7 @@ func TestDockerComposeInspectReturnsOwnedRunnerState(t *testing.T) {
 {"ID":"container-1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=linux-1"},
 {"ID":"container-2","State":"dead","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=linux-2"}
 ]`}
-	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{})
+	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{}, "local")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -60,7 +60,7 @@ func TestDockerComposeInspectReturnsOwnedRunnerState(t *testing.T) {
 
 func TestDockerComposeDestroyTranslatesRunnerIdentityAndState(t *testing.T) {
 	transport := &recordingDockerTransport{}
-	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{})
+	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{}, "local")
 
 	err := provider.Destroy(context.Background(), RunnerInstance{
 		ID:         "container-1",
@@ -80,7 +80,7 @@ func TestDockerComposeValidateChecksConfiguredService(t *testing.T) {
 	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{
 		ComposeFile: "compose.yaml",
 		Service:     "runner",
-	})
+	}, "local")
 
 	if err := provider.Validate(context.Background()); err != nil {
 		t.Fatalf("validate Docker Compose provider: %v", err)
@@ -95,6 +95,7 @@ func TestDockerComposeValidatePreservesTransportFailure(t *testing.T) {
 	provider := NewDockerComposeProvider(
 		&recordingDockerTransport{validateErr: expectedErr},
 		providerdocker.ComposeConfig{},
+		"local",
 	)
 
 	err := provider.Validate(context.Background())
@@ -108,6 +109,7 @@ func TestDockerComposeInspectPreservesTransportFailure(t *testing.T) {
 	provider := NewDockerComposeProvider(
 		&recordingDockerTransport{listErr: expectedErr},
 		providerdocker.ComposeConfig{},
+		"local",
 	)
 
 	_, err := provider.Inspect(context.Background())
@@ -121,6 +123,7 @@ func TestDockerComposeStartPreservesTransportFailure(t *testing.T) {
 	provider := NewDockerComposeProvider(
 		&recordingDockerTransport{startErr: expectedErr},
 		providerdocker.ComposeConfig{},
+		"local",
 	)
 
 	err := provider.Start(context.Background(), StartRequest{})
@@ -134,6 +137,7 @@ func TestDockerComposeDestroyPreservesTransportFailure(t *testing.T) {
 	provider := NewDockerComposeProvider(
 		&recordingDockerTransport{removeErr: expectedErr},
 		providerdocker.ComposeConfig{},
+		"local",
 	)
 
 	err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning})

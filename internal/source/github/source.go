@@ -17,7 +17,7 @@ type BootstrapClient interface {
 	GenerateBootstrap(
 		ctx context.Context,
 		registration transport.Registration,
-		runnerName string,
+		runnerName core.RunnerName,
 	) ([]byte, error)
 }
 
@@ -99,7 +99,7 @@ func buildRouteSnapshot(routes []MemberRoute) (map[routeKey]memberRoute, error) 
 func (source *Source) GenerateBootstrap(
 	ctx context.Context,
 	job core.Job,
-	runnerName string,
+	runnerName core.RunnerName,
 ) (execution.Bootstrap, error) {
 	_, key, err := sourceIdentityForJob(job)
 	if err != nil {

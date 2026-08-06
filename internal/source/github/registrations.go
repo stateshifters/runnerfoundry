@@ -4,15 +4,16 @@ import (
 	"context"
 
 	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
 // Registration is the durable GitHub routing record owned by this source.
 type Registration struct {
 	RepositoryURL  string
 	RunnerPool     core.RunnerPool
-	InstallationID int64
-	RunnerGroupID  int64
-	ScaleSetID     int64
+	InstallationID transport.InstallationID
+	RunnerGroupID  transport.RunnerGroupID
+	ScaleSetID     transport.ScaleSetID
 }
 
 // RegistrationSnapshot atomically separates current routes from the durable

@@ -103,8 +103,8 @@ func TestAggregateRunnerInventoryDeduplicatesConcreteMechanismsAndEndpoints(t *t
 	firstLibvirtTransport := &recordingLibvirtTransport{}
 	secondLibvirtTransport := &recordingLibvirtTransport{}
 	inventory := NewAggregateRunnerInventory(
-		NewDockerComposeProvider(firstDockerTransport, providerdockerTestConfig()),
-		NewDockerComposeProvider(secondDockerTransport, providerdockerTestConfig()),
+		NewDockerComposeProvider(firstDockerTransport, providerdockerTestConfig(), "local"),
+		NewDockerComposeProvider(secondDockerTransport, providerdockerTestConfig(), "local"),
 		NewLibvirtProvider(firstLibvirtTransport, libvirtTestConfig(), libvirtTemplate()),
 		NewLibvirtProvider(secondLibvirtTransport, libvirtTestConfig(), libvirtTemplate()),
 	)

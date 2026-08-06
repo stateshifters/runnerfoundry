@@ -43,8 +43,6 @@ const selectOldestQueuedJobSQL = `SELECT ` + queuedJobColumns + `
 	ORDER BY enqueued_at LIMIT 1`
 const takeQueuedJobSQL = `DELETE FROM public.runnerfoundry_queued_jobs WHERE job_id = $1
 	RETURNING ` + queuedJobColumns
-const insertProcessingJobSQL = `INSERT INTO public.runnerfoundry_processing_jobs
-	(job_id, source_name, source_reference, runner_pool, member_id) VALUES($1, $2, $3, $4, $5)`
 const insertClaimedProcessingJobSQL = `INSERT INTO public.runnerfoundry_processing_jobs
 	(job_id, source_name, source_reference, runner_pool, member_id, claimed_at, inventory_endpoint_id)
 	VALUES($1, $2, $3, $4, $5, $6, $7)`
@@ -107,30 +105,25 @@ var _ core.ProcessingJobStore = (*Store)(nil)
 
 func NewStore(executor Executor) *Store { return &Store{executor: executor} }
 
-func (store *Store) Enqueue(ctx context.Context, request core.JobRequest) (_ core.Job, _ bool, resultErr error) {
+func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.EnqueueResult, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return core.Job{}, false, fmt.Errorf("begin enqueue job: %w", err)
+		return core.EnqueueResult{}, fmt.Errorf("begin enqueue job: %w", err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
 	if _, lockErr := transaction.Execute(ctx, serializeSourceSQL, request.Source.Adapter, request.Source.ID); lockErr != nil {
-		return core.Job{}, false, fmt.Errorf("serialize source enqueue: %w", lockErr)
+		return core.EnqueueResult{}, fmt.Errorf("serialize source enqueue: %w", lockErr)
 	}
 	job, created, err := enqueueInTransaction(ctx, transaction, request)
 	if err != nil {
-		return core.Job{}, false, err
+		return core.EnqueueResult{}, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return core.Job{}, false, fmt.Errorf("commit enqueue job: %w", err)
+		return core.EnqueueResult{}, fmt.Errorf("commit enqueue job: %w", err)
 	}
 	open = false
-	return job, created, nil
-}
-
-func (store *Store) Queue(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
-	job, enqueued, err := store.Enqueue(ctx, request)
-	return core.EnqueueResult{Job: job, Enqueued: enqueued}, err
+	return core.EnqueueResult{Job: job, Enqueued: created}, nil
 }
 
 func enqueueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.Job, bool, error) {
@@ -151,28 +144,6 @@ func enqueueInTransaction(ctx context.Context, transaction Transaction, request 
 		return core.Job{}, false, fmt.Errorf("load existing queued job: %w", err)
 	}
 	return job, false, nil
-}
-
-func (store *Store) TakeOldest(
-	ctx context.Context,
-	runnerPool core.RunnerPool,
-	memberID core.MemberID,
-) (_ core.ProcessingJob, _ bool, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("begin take job: %w", err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	processing, taken, err := takeOldestInTransaction(ctx, transaction, runnerPool, memberID)
-	if err != nil {
-		return core.ProcessingJob{}, false, err
-	}
-	if commitErr := transaction.Commit(ctx); commitErr != nil {
-		return core.ProcessingJob{}, false, fmt.Errorf("commit job pickup: %w", commitErr)
-	}
-	open = false
-	return processing, taken, nil
 }
 
 func (store *Store) ClaimOldest(
@@ -322,22 +293,22 @@ func (store *Store) RecoverUnstartedProcessing(
 	return core.TransitionResult{Applied: applied}, nil
 }
 
-func (store *Store) RetryUnstartedProcessing(ctx context.Context, jobID core.JobID) (_ bool, resultErr error) {
+func (store *Store) RetryUnstarted(ctx context.Context, jobID core.JobID) (_ core.TransitionResult, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin retry processing job: %w", err)
+		return core.TransitionResult{}, fmt.Errorf("begin retry processing job: %w", err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
 	retried, err := retryUnstartedProcessing(ctx, transaction, jobID)
 	if err != nil {
-		return false, err
+		return core.TransitionResult{}, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit processing retry: %w", err)
+		return core.TransitionResult{}, fmt.Errorf("commit processing retry: %w", err)
 	}
 	open = false
-	return retried, nil
+	return core.TransitionResult{Applied: retried}, nil
 }
 
 func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobID core.JobID) (bool, error) {
@@ -391,16 +362,7 @@ func enqueueProcessingRetry(ctx context.Context, transaction Transaction, jobID 
 	return true, nil
 }
 
-func (store *Store) RemoveTerminalProcessing(ctx context.Context, jobID core.JobID) (bool, error) {
-	return store.executeConditionalTransaction(ctx, "remove terminal processing job", deleteTerminalProcessingSQL, jobID)
-}
-
-func (store *Store) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
-	applied, err := store.RetryUnstartedProcessing(ctx, jobID)
-	return core.TransitionResult{Applied: applied}, err
-}
-
 func (store *Store) RemoveTerminal(ctx context.Context, jobID core.JobID) (core.TransitionResult, error) {
-	applied, err := store.RemoveTerminalProcessing(ctx, jobID)
+	applied, err := store.executeConditionalTransaction(ctx, "remove terminal processing job", deleteTerminalProcessingSQL, jobID)
 	return core.TransitionResult{Applied: applied}, err
 }

@@ -13,11 +13,17 @@ type MemberID string
 
 type RunnerPool string
 
+type RunnerName string
+
+type SourceAdapter string
+
+type SourceIdentifier string
+
 type InventoryEndpointID string
 
 type SourceReference struct {
-	Adapter string
-	ID      string
+	Adapter SourceAdapter
+	ID      SourceIdentifier
 }
 
 type JobRequest struct {

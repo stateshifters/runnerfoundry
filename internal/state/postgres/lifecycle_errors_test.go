@@ -16,7 +16,7 @@ func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
 		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), source) })
 }
 
-func TestRetryUnstartedProcessingHandlesRejectedTransitions(t *testing.T) {
+func TestRetryUnstartedHandlesRejectedTransitions(t *testing.T) {
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
 	processing := rowFromValues(processingJobValues(job, testMemberIDA))
@@ -25,15 +25,15 @@ func TestRetryUnstartedProcessingHandlesRejectedTransitions(t *testing.T) {
 		"missing":  transactionWithRows([]Row{noRow}, nil),
 		"terminal": transactionWithRows([]Row{processing, noRow}, nil),
 	} {
-		retried, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RetryUnstartedProcessing(context.Background(), testJobID1)
-		if err != nil || retried {
-			t.Fatalf("%s retry=%t error=%v", name, retried, err)
+		result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+			RetryUnstarted(context.Background(), testJobID1)
+		if err != nil || result.Applied {
+			t.Fatalf("%s retry=%#v error=%v", name, result, err)
 		}
 	}
 }
 
-func TestRetryUnstartedProcessingReportsCandidateFailures(t *testing.T) {
+func TestRetryUnstartedReportsCandidateFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
@@ -45,13 +45,13 @@ func TestRetryUnstartedProcessingReportsCandidateFailures(t *testing.T) {
 	}
 	for index, transaction := range transactions {
 		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RetryUnstartedProcessing(context.Background(), testJobID1); err == nil {
+			RetryUnstarted(context.Background(), testJobID1); err == nil {
 			t.Fatalf("case %d: expected retry candidate failure", index)
 		}
 	}
 }
 
-func TestRetryUnstartedProcessingReportsRemovalFailure(t *testing.T) {
+func TestRetryUnstartedReportsRemovalFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
@@ -59,12 +59,12 @@ func TestRetryUnstartedProcessingReportsRemovalFailure(t *testing.T) {
 	queued := rowFromValues(queuedJobValues(testJobID1, core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool}))
 	transaction := transactionFailingAtExecuteWithRows(2, protocolErr, processing, queued)
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstartedProcessing(context.Background(), testJobID1); err == nil {
+		RetryUnstarted(context.Background(), testJobID1); err == nil {
 		t.Fatal("expected retry ownership removal failure")
 	}
 }
 
-func TestRetryUnstartedProcessingReportsCommitFailures(t *testing.T) {
+func TestRetryUnstartedReportsCommitFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
@@ -78,25 +78,25 @@ func TestRetryUnstartedProcessingReportsCommitFailures(t *testing.T) {
 	}
 	for index, transaction := range transactions {
 		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RetryUnstartedProcessing(context.Background(), testJobID1); err == nil {
+			RetryUnstarted(context.Background(), testJobID1); err == nil {
 			t.Fatalf("case %d: expected retry commit failure", index)
 		}
 	}
 }
 
-func TestRemoveTerminalProcessingReportsRowsAffectedFailure(t *testing.T) {
+func TestRemoveTerminalReportsRowsAffectedFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	transaction := Transaction{execute: func(context.Context, string, ...any) (Result, error) {
 		return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
 	}, rollback: successfulCompletion}
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RemoveTerminalProcessing(context.Background(), testJobID1); err == nil {
+		RemoveTerminal(context.Background(), testJobID1); err == nil {
 		t.Fatal("expected affected-row failure")
 	}
 }
 
-func TestRemoveTerminalProcessingReportsMutationFailures(t *testing.T) {
+func TestRemoveTerminalReportsMutationFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	for index, transaction := range []Transaction{
@@ -104,7 +104,7 @@ func TestRemoveTerminalProcessingReportsMutationFailures(t *testing.T) {
 		{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	} {
 		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RemoveTerminalProcessing(context.Background(), testJobID1); err == nil {
+			RemoveTerminal(context.Background(), testJobID1); err == nil {
 			t.Fatalf("case %d: expected terminal removal failure", index)
 		}
 	}

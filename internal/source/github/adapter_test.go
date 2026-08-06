@@ -99,11 +99,11 @@ func batchEffectEvents(t *testing.T) []string {
 	t.Helper()
 	return []string{
 		"acquire:41,42",
-		"request:" + sourceReference(t, 42).ID,
-		"request:" + sourceReference(t, 43).ID,
-		"started:" + sourceReference(t, 44).ID,
-		"completed:" + sourceReference(t, 44).ID,
-		"completed:" + sourceReference(t, 45).ID,
+		"request:" + string(sourceReference(t, 42).ID),
+		"request:" + string(sourceReference(t, 43).ID),
+		"started:" + string(sourceReference(t, 44).ID),
+		"completed:" + string(sourceReference(t, 44).ID),
+		"completed:" + string(sourceReference(t, 45).ID),
 		"ack:17",
 	}
 }
@@ -296,10 +296,10 @@ func TestPollOnceRedeliversDurableEffectsWhenAcknowledgementFails(t *testing.T) 
 func acknowledgementRedeliveryEvents(t *testing.T) []string {
 	t.Helper()
 	return []string{
-		"started:" + sourceReference(t, 71).ID,
-		"completed:" + sourceReference(t, 72).ID,
-		"started:" + sourceReference(t, 71).ID,
-		"completed:" + sourceReference(t, 72).ID,
+		"started:" + string(sourceReference(t, 71).ID),
+		"completed:" + string(sourceReference(t, 72).ID),
+		"started:" + string(sourceReference(t, 71).ID),
+		"completed:" + string(sourceReference(t, 72).ID),
 		"ack:30",
 	}
 }
@@ -346,7 +346,7 @@ type recordingEventHandler struct {
 func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) error {
 	handler.requests = append(handler.requests, request)
 	if handler.events != nil {
-		*handler.events = append(*handler.events, "request:"+request.Source.ID)
+		*handler.events = append(*handler.events, "request:"+string(request.Source.ID))
 	}
 	return handler.requestErr
 }
@@ -354,7 +354,7 @@ func (handler *recordingEventHandler) Request(_ context.Context, request core.Jo
 func (handler *recordingEventHandler) RunnerStarted(_ context.Context, source core.SourceReference) error {
 	handler.started = append(handler.started, source)
 	if handler.events != nil {
-		*handler.events = append(*handler.events, "started:"+source.ID)
+		*handler.events = append(*handler.events, "started:"+string(source.ID))
 	}
 	return handler.startedErr
 }
@@ -362,7 +362,7 @@ func (handler *recordingEventHandler) RunnerStarted(_ context.Context, source co
 func (handler *recordingEventHandler) Terminalize(_ context.Context, source core.SourceReference) error {
 	handler.completed = append(handler.completed, source)
 	if handler.events != nil {
-		*handler.events = append(*handler.events, "completed:"+source.ID)
+		*handler.events = append(*handler.events, "completed:"+string(source.ID))
 	}
 	return handler.completedErr
 }

@@ -70,7 +70,7 @@ func TestValidateAvailableAcceptsNoEvents(t *testing.T) {
 }
 
 type pruneCall struct {
-	runnerGroup int
+	runnerGroup transport.RunnerGroupID
 	current     []transport.OwnedRunnerPool
 	owned       []transport.OwnedRunnerPool
 }
@@ -81,7 +81,7 @@ func TestPruneRepositoryGroupsDesiredPoolsAndFiltersOwnership(t *testing.T) {
 	var calls []pruneCall
 	client := ManagerClient{PruneRunnerPools: func(
 		_ context.Context,
-		runnerGroup int,
+		runnerGroup transport.RunnerGroupID,
 		current []transport.OwnedRunnerPool,
 		owned []transport.OwnedRunnerPool,
 	) (transport.PruneResult, error) {
@@ -109,10 +109,10 @@ func assertPruneCalls(t *testing.T, calls []pruneCall) {
 	if len(calls) != 2 {
 		t.Fatalf("prune calls = %#v, want two runner groups", calls)
 	}
-	currentByGroup := make(map[int][]transport.OwnedRunnerPool, len(calls))
+	currentByGroup := make(map[transport.RunnerGroupID][]transport.OwnedRunnerPool, len(calls))
 	for _, call := range calls {
 		currentByGroup[call.runnerGroup] = call.current
-		wantOwned := map[int]transport.OwnedRunnerPool{}
+		wantOwned := map[transport.ScaleSetID]transport.OwnedRunnerPool{}
 		if call.runnerGroup == 7 {
 			wantOwned[71] = transport.OwnedRunnerPool{ID: 71, Name: "old", RunnerGroupID: 7}
 		} else {
@@ -122,7 +122,7 @@ func assertPruneCalls(t *testing.T, calls []pruneCall) {
 			t.Fatalf("owned pools for group %d = %#v, want %#v", call.runnerGroup, call.owned, wantOwned)
 		}
 	}
-	wantCurrent := map[int][]transport.OwnedRunnerPool{
+	wantCurrent := map[transport.RunnerGroupID][]transport.OwnedRunnerPool{
 		7: {{ID: 70, Name: "linux", RunnerGroupID: 7}},
 		8: {{ID: 80, Name: "gpu", RunnerGroupID: 8}},
 	}
@@ -131,8 +131,8 @@ func assertPruneCalls(t *testing.T, calls []pruneCall) {
 	}
 }
 
-func ownedByID(owned []transport.OwnedRunnerPool) map[int]transport.OwnedRunnerPool {
-	indexed := make(map[int]transport.OwnedRunnerPool, len(owned))
+func ownedByID(owned []transport.OwnedRunnerPool) map[transport.ScaleSetID]transport.OwnedRunnerPool {
+	indexed := make(map[transport.ScaleSetID]transport.OwnedRunnerPool, len(owned))
 	for _, runnerPool := range owned {
 		indexed[runnerPool.ID] = runnerPool
 	}
@@ -149,7 +149,7 @@ func TestPruneRepositoryHandlesEmptyConfigurationAndFailure(t *testing.T) {
 	wantErr := errors.New("prune failed")
 	client := ManagerClient{PruneRunnerPools: func(
 		context.Context,
-		int,
+		transport.RunnerGroupID,
 		[]transport.OwnedRunnerPool,
 		[]transport.OwnedRunnerPool,
 	) (transport.PruneResult, error) {

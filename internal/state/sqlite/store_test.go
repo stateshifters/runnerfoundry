@@ -27,10 +27,10 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 	}
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
 
-	processing, found, err := store.TakeOldest(context.Background(), "linux", testMemberID)
+	result, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
 
-	if err != nil || !found || processing.Job.ID != testJobID || processing.MemberID != testMemberID {
-		t.Fatalf("take oldest = %#v, %t, %v", processing, found, err)
+	if err != nil || !result.Taken || result.Processing.Job.ID != testJobID || result.Processing.MemberID != testMemberID {
+		t.Fatalf("claim oldest = %#v, %v", result, err)
 	}
 	if commits != 1 || len(statements) != 3 {
 		t.Fatalf("transaction effects = %#v, commits=%d", statements, commits)
@@ -58,8 +58,8 @@ func TestTakeOldestRollsBackEveryPartialMove(t *testing.T) {
 			commit:   successfulCompletion,
 			rollback: func(context.Context) error { rollbacks++; return nil },
 		}
-		_, _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			TakeOldest(context.Background(), "linux", testMemberID)
+		_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+			ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
 		if err == nil || rollbacks != 1 {
 			t.Fatalf("failure %d: err=%v rollbacks=%d", failureCall, err, rollbacks)
 		}
@@ -74,10 +74,10 @@ func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 		},
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	_, found, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		TakeOldest(context.Background(), "linux", testMemberID)
-	if err != nil || found {
-		t.Fatalf("empty queue = %t, %v", found, err)
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
+	if err != nil || result.Taken {
+		t.Fatalf("empty queue = %#v, %v", result, err)
 	}
 }
 
