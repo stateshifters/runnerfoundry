@@ -28,6 +28,33 @@ func TestExecuteCommandRunsDaemonWithConfigAndReloadRequests(t *testing.T) {
 	}
 }
 
+func TestExecuteCommandPrintsVersionWithoutRunningServices(t *testing.T) {
+	var stdout bytes.Buffer
+	runDaemon := func(context.Context, daemon.Options) error {
+		t.Fatal("daemon must not run for a version request")
+		return nil
+	}
+	runMigration := func(context.Context, migrationRequest) (migrationStatus, error) {
+		t.Fatal("migration service must not run for a version request")
+		return migrationStatus{}, nil
+	}
+	if err := executeCommand(t.Context(), []string{"--version"}, nil,
+		&stdout, io.Discard, runDaemon, runMigration); err != nil {
+		t.Fatalf("print version: %v", err)
+	}
+	if stdout.String() != "runnerfoundry dev\n" {
+		t.Fatalf("version snapshot mismatch: %q", stdout.String())
+	}
+}
+
+func TestExecuteCommandReportsVersionOutputFailure(t *testing.T) {
+	err := executeCommand(t.Context(), []string{"--version"}, nil,
+		failingWriter{}, io.Discard, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "write RunnerFoundry version") {
+		t.Fatalf("version output error = %v", err)
+	}
+}
+
 func TestExecuteCommandPropagatesExplicitActiveRunnerPolicies(t *testing.T) {
 	for _, policy := range []daemon.ActiveRunnerPolicy{daemon.LeaveActiveRunners, daemon.TerminateActiveRunners} {
 		t.Run(string(policy), func(t *testing.T) {

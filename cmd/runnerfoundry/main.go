@@ -67,6 +67,12 @@ func runMain(
 	runMigration migrationCommand,
 	lifecycle processLifecycle,
 ) int {
+	if isVersionRequest(args) {
+		if err := writeVersion(stdout); err != nil {
+			return 1
+		}
+		return 0
+	}
 	ctx, stop := lifecycle.notifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	reloadRequests, stopReloadRequests := reloadSignalRequests(lifecycle.notifySignals, lifecycle.stopSignals)

@@ -82,6 +82,38 @@ func TestRunMainReturnsSuccess(t *testing.T) {
 	}
 }
 
+func TestRunMainPrintsVersionBeforeInitializingProcessLifecycle(t *testing.T) {
+	var stdout bytes.Buffer
+	lifecycle := processLifecycle{
+		notifyContext: func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
+			t.Fatal("process lifecycle must not initialize for a version request")
+			return nil, nil
+		},
+		notifySignals: func(chan<- os.Signal, ...os.Signal) {
+			t.Fatal("reload signals must not initialize for a version request")
+		},
+		stopSignals: func(chan<- os.Signal) {},
+	}
+	if exitCode := runMain([]string{"--version"}, &stdout, io.Discard, nil, nil, lifecycle); exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+	if stdout.String() != "runnerfoundry dev\n" {
+		t.Fatalf("version snapshot mismatch: %q", stdout.String())
+	}
+}
+
+func TestRunMainReturnsFailureWhenVersionCannotBeWritten(t *testing.T) {
+	lifecycle := processLifecycle{
+		notifyContext: func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
+			t.Fatal("process lifecycle must not initialize for a version request")
+			return nil, nil
+		},
+	}
+	if exitCode := runMain([]string{"--version"}, failingWriter{}, io.Discard, nil, nil, lifecycle); exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
 func TestRunProcessExitsWithCommandResult(t *testing.T) {
 	exitCode := -1
 	runtime := newProductionProcess()

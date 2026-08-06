@@ -9,6 +9,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/hashicorp/go-retryablehttp"
+	"github.com/meza/RunnerFoundry/internal/buildinfo"
 )
 
 type Registration struct {
@@ -81,7 +82,7 @@ func NewClient(repository Repository, credentials Credentials, baseTransport htt
 			InstallationID: int64(repository.InstallationID),
 			PrivateKey:     credentials.PrivateKey,
 		},
-		SystemInfo: upstream.SystemInfo{System: "runnerfoundry", Version: "v1"},
+		SystemInfo: upstream.SystemInfo{System: "runnerfoundry", Version: buildinfo.Version()},
 	}, upstream.WithRetryableHTTPClint(retryClient))
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub Actions scale-set client: %w", err)
