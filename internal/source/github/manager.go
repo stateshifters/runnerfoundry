@@ -129,7 +129,6 @@ type Manager struct {
 	source        *Source
 	leaders       []ManagedSession
 	retiring      []ManagedSession
-	members       []MemberRoute
 }
 
 type openedLeader struct {
@@ -315,7 +314,6 @@ func (manager *Manager) RefreshMembers(ctx context.Context) error {
 	if err := manager.source.ReplaceRoutes(routes); err != nil {
 		return fmt.Errorf("replace GitHub member routes: %w", err)
 	}
-	manager.members = routes
 	return nil
 }
 
