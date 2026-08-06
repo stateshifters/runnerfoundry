@@ -13,11 +13,14 @@ const (
 	JITOEMStringPrefix = contract.JITOEMStringPrefix
 )
 
+// DomainTemplate is immutable source XML used to render one transient runner
+// domain per request.
 type DomainTemplate struct {
 	xml     string
 	marshal func(*upstream.Domain) (string, error)
 }
 
+// NewDomainTemplate retains domainXML for later parsing by Render.
 func NewDomainTemplate(domainXML string) DomainTemplate {
 	return domainTemplateWithMarshaler(domainXML, func(domain *upstream.Domain) (string, error) { return domain.Marshal() })
 }
@@ -29,6 +32,8 @@ func domainTemplateWithMarshaler(
 	return DomainTemplate{xml: domainXML, marshal: marshal}
 }
 
+// RenderRequest supplies source-neutral ownership metadata and opaque bootstrap
+// data for one domain.
 type RenderRequest struct {
 	RunnerPoolName string
 	RunnerName     string
@@ -43,6 +48,8 @@ var xmlTextEscaper = strings.NewReplacer(
 	`'`, "&#39;",
 )
 
+// Render parses a fresh copy of the template, replaces RunnerFoundry-owned
+// metadata and JIT OEM data, and leaves the original template unchanged.
 func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	var domain upstream.Domain
 	if err := domain.Unmarshal(template.xml); err != nil {

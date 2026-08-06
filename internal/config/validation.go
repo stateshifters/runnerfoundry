@@ -11,6 +11,8 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
+// ProviderKind identifies the single execution backend configured for a
+// Runner Pool.
 type ProviderKind string
 
 const (
@@ -18,6 +20,8 @@ const (
 	ProviderKindLibvirt ProviderKind = "libvirt"
 )
 
+// ProviderKind returns the configured backend or an error unless exactly one
+// of Docker and Libvirt is present.
 func (runnerPool RunnerPoolConfig) ProviderKind() (ProviderKind, error) {
 	if (runnerPool.Docker == nil) == (runnerPool.Libvirt == nil) {
 		return "", errors.New("exactly one of docker or libvirt is required")
@@ -28,7 +32,10 @@ func (runnerPool RunnerPoolConfig) ProviderKind() (ProviderKind, error) {
 	return ProviderKindLibvirt, nil
 }
 
-// Validate applies defaults and rejects unsafe startup state.
+// Validate mutates Config only to apply documented defaults, then rejects
+// unsupported authentication, invalid backend combinations, unsafe log paths,
+// and incomplete Runner Pools. It validates credential paths but does not read
+// credential contents; AppCredentials owns that boundary.
 func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.GitHub.validate(); err != nil {
 		return err
@@ -185,7 +192,8 @@ func (runnerPool *RunnerPoolConfig) validateProvider() error {
 	return nil
 }
 
-// DiscoveryDuration returns the validated repository discovery interval.
+// DiscoveryDuration parses the configured discovery interval. Callers normally
+// invoke it only after Validate; malformed unvalidated values return an error.
 func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
 	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
 	if err != nil {

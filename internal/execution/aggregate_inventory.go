@@ -24,7 +24,8 @@ type inventorySnapshotCache struct {
 }
 
 // NewAggregateRunnerInventory combines active inventories and removes duplicate
-// observations of the same underlying endpoint.
+// endpoint identities while preserving first occurrence order. The aggregate
+// is safe for concurrent Inspect and Refresh calls.
 func NewAggregateRunnerInventory(inventories ...RunnerInventory) AggregateRunnerInventory {
 	uniqueInventories := make([]RunnerInventory, 0, len(inventories))
 	seenIdentities := make(map[string]struct{}, len(inventories))
@@ -39,8 +40,10 @@ func NewAggregateRunnerInventory(inventories ...RunnerInventory) AggregateRunner
 	return AggregateRunnerInventory{inventories: uniqueInventories, cache: &inventorySnapshotCache{}}
 }
 
-// Inspect queries every active inventory. Any backend error or duplicate runner
-// name makes the complete observation unknown, so no partial result is returned.
+// Inspect returns a defensive copy of the latest successful Refresh snapshot.
+// Before the first successful Refresh it queries every active inventory to
+// obtain an initial view. Any backend error or duplicate runner name makes the
+// complete observation unknown, so no partial result is returned.
 func (inventory AggregateRunnerInventory) Inspect(ctx context.Context) ([]RunnerInstance, error) {
 	if inventory.cache != nil {
 		inventory.cache.mutex.RLock()
@@ -54,6 +57,8 @@ func (inventory AggregateRunnerInventory) Inspect(ctx context.Context) ([]Runner
 	return inventory.inspectBackends(ctx)
 }
 
+// Refresh replaces the cycle snapshot atomically after every backend succeeds.
+// A failed refresh clears readiness so later Inspect calls retry observation.
 func (inventory AggregateRunnerInventory) Refresh(ctx context.Context) error {
 	instances, err := inventory.inspectBackends(ctx)
 	if inventory.cache == nil {
@@ -96,8 +101,10 @@ func (inventory AggregateRunnerInventory) inspectBackends(ctx context.Context) (
 	return instances, nil
 }
 
+// EndpointID returns the synthetic identity of the aggregate boundary.
 func (inventory AggregateRunnerInventory) EndpointID() InventoryEndpointID { return "aggregate" }
 
+// KnowsEndpoint reports whether an active child inventory owns endpointID.
 func (inventory AggregateRunnerInventory) KnowsEndpoint(endpointID InventoryEndpointID) bool {
 	for _, backend := range inventory.inventories {
 		if backend.EndpointID() == endpointID {
@@ -107,6 +114,8 @@ func (inventory AggregateRunnerInventory) KnowsEndpoint(endpointID InventoryEndp
 	return false
 }
 
+// InspectEndpoint obtains fresh evidence from the matching child inventory and
+// returns an error when the endpoint is no longer configured.
 func (inventory AggregateRunnerInventory) InspectEndpoint(
 	ctx context.Context,
 	endpointID InventoryEndpointID,

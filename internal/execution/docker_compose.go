@@ -11,6 +11,8 @@ import (
 	providerdocker "github.com/meza/RunnerFoundry/internal/provider/docker"
 )
 
+// DockerComposeProvider adapts one validated Compose service to the
+// source-neutral execution contracts.
 type DockerComposeProvider struct {
 	provider providerdocker.ComposeProvider
 	hostname HostIdentity
@@ -40,6 +42,8 @@ func (provider DockerComposeProvider) InspectEndpoint(ctx context.Context, endpo
 	return provider.Inspect(ctx)
 }
 
+// NewDockerComposeProvider binds an explicit command transport, Compose
+// configuration, and stable host identity. It performs no validation or I/O.
 func NewDockerComposeProvider(
 	transport providerdocker.CommandRunner,
 	config providerdocker.ComposeConfig,

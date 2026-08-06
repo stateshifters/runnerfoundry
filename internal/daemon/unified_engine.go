@@ -52,8 +52,8 @@ type UnifiedEngineConfig struct {
 	Report      func(error)
 }
 
-// UnifiedEngine advances one source-neutral lifecycle for a member. Cycles are
-// sequential; callers own scheduling and must not call Cycle concurrently.
+// UnifiedEngine advances one source-neutral lifecycle for a member. Callers own
+// scheduling; concurrent Cycle calls are accepted and serialized.
 type UnifiedEngine struct {
 	currentTime    func() time.Time
 	memberTTL      time.Duration
@@ -82,8 +82,8 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 	}
 }
 
-// Cycle performs one bounded maintenance pass. Independent work continues
-// after individual failures and all failures are returned together.
+// Cycle performs one serialized, bounded maintenance pass. Independent work
+// continues after individual failures and all failures are returned together.
 func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 	engine.cycleMutex.Lock()
 	defer engine.cycleMutex.Unlock()

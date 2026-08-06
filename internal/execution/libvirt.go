@@ -10,6 +10,8 @@ import (
 	providerlibvirt "github.com/meza/RunnerFoundry/internal/provider/libvirt"
 )
 
+// LibvirtProvider adapts one libvirt connection to the source-neutral execution
+// contracts.
 type LibvirtProvider struct {
 	provider providerlibvirt.Provider
 }
@@ -45,6 +47,8 @@ func (provider LibvirtProvider) InspectEndpoint(ctx context.Context, endpointID 
 	return provider.Inspect(ctx)
 }
 
+// NewLibvirtProvider takes ownership of an in-memory copy of domainTemplate and
+// performs no validation or provider I/O.
 func NewLibvirtProvider(
 	transport providerlibvirt.CommandRunner,
 	config providerlibvirt.Config,

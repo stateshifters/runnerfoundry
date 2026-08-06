@@ -11,6 +11,8 @@ import (
 // endpoint that accepted a claim.
 type InventoryEndpointID = core.InventoryEndpointID
 
+// HostIdentity is the stable member-local host name used when deriving provider
+// endpoint identities across reloads.
 type HostIdentity string
 
 // RunnerLauncher validates and starts ephemeral runner environments.
@@ -20,16 +22,17 @@ type RunnerLauncher interface {
 	Start(ctx context.Context, request StartRequest) error
 }
 
-// RunnerInventory observes and destroys ephemeral runner environments.
-// Refresh obtains one complete endpoint snapshot for a maintenance cycle;
-// Inspect partitions that snapshot without I/O. InspectEndpoint deliberately
-// obtains fresh endpoint-specific evidence for recovery. Implementations fail
-// closed when an endpoint is unavailable or returns an incomplete snapshot.
+// InventorySnapshot owns the cycle-wide inventory view. Refresh establishes a
+// complete view for the current maintenance cycle. Inspect returns that view,
+// but may obtain an initial view before the first successful Refresh.
+// Implementations fail closed rather than return partial observations.
 type InventorySnapshot interface {
 	Refresh(ctx context.Context) error
 	Inspect(ctx context.Context) ([]RunnerInstance, error)
 }
 
+// EndpointInventory provides fresh endpoint-specific recovery evidence and
+// destroys only instances that belong to a known endpoint.
 type EndpointInventory interface {
 	EndpointID() InventoryEndpointID
 	InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error)
@@ -37,6 +40,8 @@ type EndpointInventory interface {
 	Destroy(ctx context.Context, instance RunnerInstance) error
 }
 
+// RunnerInventory combines cycle snapshots with endpoint-specific recovery and
+// destruction.
 type RunnerInventory interface {
 	InventorySnapshot
 	EndpointInventory
@@ -55,6 +60,7 @@ type Bootstrap struct {
 	content []byte
 }
 
+// NewBootstrap takes a defensive copy of source-owned bootstrap data.
 func NewBootstrap(content []byte) Bootstrap {
 	return Bootstrap{content: append([]byte(nil), content...)}
 }
@@ -68,6 +74,7 @@ type StartRequest struct {
 	Bootstrap  Bootstrap
 }
 
+// RunnerState is the provider-neutral lifecycle observation used by recovery.
 type RunnerState string
 
 const (
@@ -76,6 +83,8 @@ const (
 	RunnerStateUnknown   RunnerState = "unknown"
 )
 
+// RunnerInstance is one provider observation. Aggregate inventories attach a
+// transient origin so Destroy can route it back to the observing endpoint.
 type RunnerInstance struct {
 	ID         string
 	RunnerName core.RunnerName

@@ -1,3 +1,6 @@
+// Package contract defines provider-neutral ownership, bootstrap, and lifecycle
+// values shared by execution backends. New resources use Runner Pool markers;
+// legacy scale-set markers remain read-only compatibility inputs.
 package contract
 
 const (
