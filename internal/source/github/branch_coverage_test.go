@@ -70,8 +70,8 @@ func TestValidateAvailableAcceptsNoEvents(t *testing.T) {
 }
 
 type pruneCall struct {
-	runnerGroup string
-	desired     []string
+	runnerGroup int
+	current     []transport.OwnedRunnerPool
 	owned       []transport.OwnedRunnerPool
 }
 
@@ -81,25 +81,23 @@ func TestPruneRepositoryGroupsDesiredPoolsAndFiltersOwnership(t *testing.T) {
 	var calls []pruneCall
 	client := ManagerClient{PruneRunnerPools: func(
 		_ context.Context,
-		runnerGroup string,
-		desired []string,
+		runnerGroup int,
+		current []transport.OwnedRunnerPool,
 		owned []transport.OwnedRunnerPool,
-	) error {
-		calls = append(calls, pruneCall{runnerGroup: runnerGroup, desired: desired, owned: owned})
-		return nil
+	) (transport.PruneResult, error) {
+		calls = append(calls, pruneCall{runnerGroup: runnerGroup, current: current, owned: owned})
+		return transport.PruneResult{}, nil
 	}}
-	configs := []RunnerPoolConfig{
-		{RunnerPool: core.RunnerPool("linux"), RunnerGroup: "default"},
-		{RunnerPool: core.RunnerPool("windows"), RunnerGroup: "default"},
-		{RunnerPool: core.RunnerPool("gpu"), RunnerGroup: "accelerated"},
+	active := []Registration{
+		{RepositoryURL: "octo/repo", RunnerPool: core.RunnerPool("linux"), RunnerGroupID: 7, ScaleSetID: 70},
+		{RepositoryURL: "octo/repo", RunnerPool: core.RunnerPool("gpu"), RunnerGroupID: 8, ScaleSetID: 80},
 	}
-	existing := []Registration{
+	owned := []Registration{
 		{RepositoryURL: "octo/repo", RunnerPool: core.RunnerPool("old"), RunnerGroupID: 7, ScaleSetID: 71},
 		{RepositoryURL: "octo/repo", RunnerPool: core.RunnerPool("older"), RunnerGroupID: 8, ScaleSetID: 81},
-		{RepositoryURL: "octo/other", RunnerPool: core.RunnerPool("foreign"), RunnerGroupID: 9, ScaleSetID: 91},
 	}
 
-	err := pruneRepository(context.Background(), client, "octo/repo", configs, existing)
+	_, err := pruneRepository(context.Background(), client, active, owned)
 	if err != nil {
 		t.Fatalf("prune repository: %v", err)
 	}
@@ -111,20 +109,25 @@ func assertPruneCalls(t *testing.T, calls []pruneCall) {
 	if len(calls) != 2 {
 		t.Fatalf("prune calls = %#v, want two runner groups", calls)
 	}
-	desiredByGroup := make(map[string][]string, len(calls))
+	currentByGroup := make(map[int][]transport.OwnedRunnerPool, len(calls))
 	for _, call := range calls {
-		desiredByGroup[call.runnerGroup] = call.desired
-		wantOwned := map[int]transport.OwnedRunnerPool{
-			71: {ID: 71, Name: "old", RunnerGroupID: 7},
-			81: {ID: 81, Name: "older", RunnerGroupID: 8},
+		currentByGroup[call.runnerGroup] = call.current
+		wantOwned := map[int]transport.OwnedRunnerPool{}
+		if call.runnerGroup == 7 {
+			wantOwned[71] = transport.OwnedRunnerPool{ID: 71, Name: "old", RunnerGroupID: 7}
+		} else {
+			wantOwned[81] = transport.OwnedRunnerPool{ID: 81, Name: "older", RunnerGroupID: 8}
 		}
 		if !reflect.DeepEqual(ownedByID(call.owned), wantOwned) {
-			t.Fatalf("owned pools for group %q = %#v, want %#v", call.runnerGroup, call.owned, wantOwned)
+			t.Fatalf("owned pools for group %d = %#v, want %#v", call.runnerGroup, call.owned, wantOwned)
 		}
 	}
-	wantDesired := map[string][]string{"default": {"linux", "windows"}, "accelerated": {"gpu"}}
-	if !reflect.DeepEqual(desiredByGroup, wantDesired) {
-		t.Fatalf("desired pools = %#v, want %#v", desiredByGroup, wantDesired)
+	wantCurrent := map[int][]transport.OwnedRunnerPool{
+		7: {{ID: 70, Name: "linux", RunnerGroupID: 7}},
+		8: {{ID: 80, Name: "gpu", RunnerGroupID: 8}},
+	}
+	if !reflect.DeepEqual(currentByGroup, wantCurrent) {
+		t.Fatalf("current pools = %#v, want %#v", currentByGroup, wantCurrent)
 	}
 }
 
@@ -139,21 +142,21 @@ func ownedByID(owned []transport.OwnedRunnerPool) map[int]transport.OwnedRunnerP
 func TestPruneRepositoryHandlesEmptyConfigurationAndFailure(t *testing.T) {
 	t.Parallel()
 
-	if err := pruneRepository(context.Background(), ManagerClient{}, "octo/repo", nil, nil); err != nil {
+	if _, err := pruneRepository(context.Background(), ManagerClient{}, nil, nil); err != nil {
 		t.Fatalf("prune empty configuration: %v", err)
 	}
 
 	wantErr := errors.New("prune failed")
 	client := ManagerClient{PruneRunnerPools: func(
 		context.Context,
-		string,
-		[]string,
+		int,
 		[]transport.OwnedRunnerPool,
-	) error {
-		return wantErr
+		[]transport.OwnedRunnerPool,
+	) (transport.PruneResult, error) {
+		return transport.PruneResult{}, wantErr
 	}}
-	configs := []RunnerPoolConfig{{RunnerPool: core.RunnerPool("linux"), RunnerGroup: "default"}}
-	if err := pruneRepository(context.Background(), client, "octo/repo", configs, nil); !errors.Is(err, wantErr) {
+	active := []Registration{{RunnerPool: core.RunnerPool("linux"), RunnerGroupID: 7, ScaleSetID: 70}}
+	if _, err := pruneRepository(context.Background(), client, active, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("prune error = %v, want %v", err, wantErr)
 	}
 }

@@ -3,6 +3,7 @@ package github_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
@@ -36,6 +37,137 @@ func TestManagerReconcilesRegistrationsAndPrunes(t *testing.T) {
 			t.Fatalf("client state: ensured=%#v prunes=%d", client.ensured, client.prunes)
 		}
 	}
+}
+
+func TestManagerRetainsOwnershipWhenConfigurationIsRemovedWithoutPrune(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 17)
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{
+		Active: []githubsource.Registration{record},
+		Owned:  []githubsource.Registration{record},
+	}}
+	discoverer := &managerDiscovererFake{repositories: []transport.Repository{{
+		InstallationID: 1, URL: record.RepositoryURL,
+	}}}
+	factory := newManagerFactoryFake(discoverer.repositories)
+	manager := newManagerFixture(t, discoverer, factory.Client, repository)
+
+	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{}); err != nil {
+		t.Fatalf("reconcile removed configuration: %v", err)
+	}
+	if len(repository.snapshot.Active) != 0 {
+		t.Fatalf("active registrations = %#v, want none", repository.snapshot.Active)
+	}
+	if len(repository.snapshot.Owned) != 1 || repository.snapshot.Owned[0] != record {
+		t.Fatalf("owned registrations = %#v, want retained %#v", repository.snapshot.Owned, record)
+	}
+}
+
+func TestManagerRetainsUndiscoveredRepositoryOwnership(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/missing", 17)
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{
+		Active: []githubsource.Registration{record}, Owned: []githubsource.Registration{record},
+	}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
+		t.Fatalf("reconcile undiscovered repository: %v", err)
+	}
+	if len(repository.snapshot.Active) != 0 || len(repository.snapshot.Owned) != 1 || repository.snapshot.Owned[0] != record {
+		t.Fatalf("snapshot = %#v, want inactive retained ownership", repository.snapshot)
+	}
+}
+
+func TestManagerPreservesSnapshotAfterPartialPruneFailureAndRetries(t *testing.T) {
+	t.Parallel()
+
+	fixture := newPartialPruneRetryFixture(t)
+	err := fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true})
+	assertPartialPruneFailure(t, fixture, err)
+	if err = fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
+		t.Fatalf("retry prune: %v", err)
+	}
+	if fixture.repository.replaceCalls != 1 || len(fixture.repository.snapshot.Owned) != 0 {
+		t.Fatalf("retry snapshot = %#v replace calls=%d", fixture.repository.snapshot, fixture.repository.replaceCalls)
+	}
+}
+
+type partialPruneRetryFixture struct {
+	manager    *githubsource.Manager
+	repository *snapshotRepositoryFake
+	previous   githubsource.RegistrationSnapshot
+	wantErr    error
+}
+
+func newPartialPruneRetryFixture(t *testing.T) partialPruneRetryFixture {
+	t.Helper()
+	first := managerRecord("https://github.com/octo/repo", 11)
+	first.RunnerGroupID = 17
+	second := first
+	second.RunnerPool = "windows"
+	second.ScaleSetID = 12
+	previous := githubsource.RegistrationSnapshot{Active: []githubsource.Registration{first}, Owned: []githubsource.Registration{first, second}}
+	repository := &snapshotRepositoryFake{snapshot: previous}
+	discoverer := &managerDiscovererFake{repositories: []transport.Repository{{InstallationID: 1, URL: first.RepositoryURL}}}
+	factory := newManagerFactoryFake(discoverer.repositories)
+	wantErr := errors.New("partial delete failed")
+	attempt := 0
+	factory.clients[first.RepositoryURL].pruneFunc = func(_ int, _ []transport.OwnedRunnerPool, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+		attempt++
+		if attempt == 1 {
+			return transport.PruneResult{Removed: owned[:1]}, wantErr
+		}
+		return transport.PruneResult{Removed: owned}, nil
+	}
+	manager := newManagerFixture(t, discoverer, factory.Client, repository)
+	return partialPruneRetryFixture{manager: manager, repository: repository, previous: previous, wantErr: wantErr}
+}
+
+func assertPartialPruneFailure(t *testing.T, fixture partialPruneRetryFixture, err error) {
+	t.Helper()
+	if !errors.Is(err, fixture.wantErr) {
+		t.Fatalf("first reconcile error = %v, want %v", err, fixture.wantErr)
+	}
+	if fixture.repository.replaceCalls != 0 || !reflect.DeepEqual(fixture.repository.snapshot, fixture.previous) {
+		t.Fatalf("snapshot changed after partial failure: %#v", fixture.repository.snapshot)
+	}
+}
+
+func TestManagerReportsPruneClientCreationFailure(t *testing.T) {
+	t.Parallel()
+
+	repositoryURL := "https://github.com/octo/repo"
+	discoverer := &managerDiscovererFake{repositories: []transport.Repository{{InstallationID: 1, URL: repositoryURL}}}
+	wantErr := errors.New("client failed")
+	manager := newManagerFixture(t, discoverer, func(context.Context, transport.Repository) (githubsource.ManagerClient, error) {
+		return githubsource.ManagerClient{}, wantErr
+	}, &snapshotRepositoryFake{})
+	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); !errors.Is(err, wantErr) {
+		t.Fatalf("reconcile error = %v, want %v", err, wantErr)
+	}
+}
+
+type snapshotRepositoryFake struct {
+	snapshot     githubsource.RegistrationSnapshot
+	replaceCalls int
+}
+
+func (repository *snapshotRepositoryFake) RegistrationSnapshot(context.Context) (
+	githubsource.RegistrationSnapshot,
+	error,
+) {
+	return repository.snapshot, nil
+}
+
+func (repository *snapshotRepositoryFake) ReplaceRegistrationSnapshot(
+	_ context.Context,
+	snapshot githubsource.RegistrationSnapshot,
+) error {
+	repository.replaceCalls++
+	repository.snapshot = snapshot
+	return nil
 }
 
 func TestManagerRefreshesMemberRoutes(t *testing.T) {
@@ -177,6 +309,21 @@ func (repository *registrationRepositoryFake) ReplaceRegistrations(_ context.Con
 	return repository.deleteErr
 }
 
+func (repository *registrationRepositoryFake) ReplaceRegistrationSnapshot(
+	ctx context.Context,
+	snapshot githubsource.RegistrationSnapshot,
+) error {
+	return repository.ReplaceRegistrations(ctx, snapshot.Active)
+}
+
+func (repository *registrationRepositoryFake) RegistrationSnapshot(context.Context) (
+	githubsource.RegistrationSnapshot,
+	error,
+) {
+	records := append([]githubsource.Registration(nil), repository.records...)
+	return githubsource.RegistrationSnapshot{Active: records, Owned: append([]githubsource.Registration(nil), records...)}, repository.listErr
+}
+
 func (repository *registrationRepositoryFake) UpsertRegistration(
 	_ context.Context,
 	record githubsource.Registration,
@@ -264,15 +411,17 @@ func (factory *managerFactoryFake) Client(
 }
 
 type managerClientFake struct {
-	nextID       int
-	ensured      []string
-	prunes       int
-	bootstrap    []byte
-	session      *managerSessionFake
-	ensureErr    error
-	pruneErr     error
-	openErr      error
-	bootstrapErr error
+	nextID        int
+	ensured       []string
+	prunes        int
+	bootstrap     []byte
+	session       *managerSessionFake
+	ensureErr     error
+	pruneErr      error
+	openErr       error
+	bootstrapErr  error
+	runnerGroupID int
+	pruneFunc     func(int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
 func (client *managerClientFake) EnsureRunnerPool(
@@ -281,7 +430,11 @@ func (client *managerClientFake) EnsureRunnerPool(
 	_ string,
 ) (transport.Registration, error) {
 	client.ensured = append(client.ensured, runnerPoolName)
-	return transport.Registration{ID: client.nextID, Name: runnerPoolName}, client.ensureErr
+	runnerGroupID := client.runnerGroupID
+	if runnerGroupID == 0 {
+		runnerGroupID = 1
+	}
+	return transport.Registration{ID: client.nextID, Name: runnerPoolName, RunnerGroupID: runnerGroupID}, client.ensureErr
 }
 
 func (client *managerClientFake) GenerateBootstrap(
@@ -292,9 +445,17 @@ func (client *managerClientFake) GenerateBootstrap(
 	return client.bootstrap, client.bootstrapErr
 }
 
-func (client *managerClientFake) PruneRunnerPools(context.Context, string, []string, []transport.OwnedRunnerPool) error {
+func (client *managerClientFake) PruneRunnerPools(
+	_ context.Context,
+	runnerGroupID int,
+	current []transport.OwnedRunnerPool,
+	owned []transport.OwnedRunnerPool,
+) (transport.PruneResult, error) {
 	client.prunes++
-	return client.pruneErr
+	if client.pruneFunc != nil {
+		return client.pruneFunc(runnerGroupID, current, owned)
+	}
+	return transport.PruneResult{}, client.pruneErr
 }
 
 type managerSessionFake struct {

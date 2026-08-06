@@ -135,7 +135,7 @@ func TestInitializeRejectsLegacySchemaVersion(t *testing.T) {
 		t.Fatalf("create database protocol fake: %v", err)
 	}
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(sqlmock.NewRows([]string{"user_version"}).AddRow(8))
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(sqlmock.NewRows([]string{"user_version"}).AddRow(104))
 	mock.ExpectClose()
 	err = initialize(context.Background(), database)
 	if err == nil || !strings.Contains(err.Error(), "requires database recreation") {

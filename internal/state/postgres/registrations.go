@@ -20,6 +20,13 @@ const registrationsSQL = `SELECT repository_url, runner_pool, installation_id, r
 	FROM public.runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
 const deleteRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations WHERE repository_url = $1 AND runner_pool = $2`
 const deleteAllRegistrationsSQL = `DELETE FROM public.runnerfoundry_github_registrations`
+const upsertOwnedRegistrationSQL = `INSERT INTO public.runnerfoundry_github_scale_set_ownership
+	(repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5)
+	ON CONFLICT(repository_url, scale_set_id) DO UPDATE SET runner_pool = excluded.runner_pool,
+		installation_id = excluded.installation_id, runner_group_id = excluded.runner_group_id`
+const ownedRegistrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
+	FROM public.runnerfoundry_github_scale_set_ownership ORDER BY repository_url, scale_set_id`
+const deleteAllOwnedRegistrationsSQL = `DELETE FROM public.runnerfoundry_github_scale_set_ownership`
 
 var _ githubsource.RegistrationRepository = (*Store)(nil)
 
@@ -28,31 +35,80 @@ func (store *Store) UpsertRegistration(ctx context.Context, registration githubs
 		string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID)
 }
 
-func (store *Store) ReplaceRegistrations(
+func (store *Store) ReplaceRegistrationSnapshot(
 	ctx context.Context,
-	registrations []githubsource.Registration,
+	snapshot githubsource.RegistrationSnapshot,
 ) (resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin registration replacement: %w", err)
+		return fmt.Errorf("begin registration snapshot replacement: %w", err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
 	if _, err = transaction.Execute(ctx, deleteAllRegistrationsSQL); err != nil {
-		return fmt.Errorf("clear registration snapshot: %w", err)
+		return fmt.Errorf("clear active registration snapshot: %w", err)
 	}
-	for _, registration := range registrations {
-		if _, err = transaction.Execute(ctx, upsertRegistrationSQL, registration.RepositoryURL,
-			string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID,
-			registration.ScaleSetID); err != nil {
-			return fmt.Errorf("insert registration snapshot: %w", err)
-		}
+	if _, err = transaction.Execute(ctx, deleteAllOwnedRegistrationsSQL); err != nil {
+		return fmt.Errorf("clear owned registration snapshot: %w", err)
+	}
+	if err = insertRegistrationSnapshot(ctx, transaction, upsertRegistrationSQL, snapshot.Active); err != nil {
+		return fmt.Errorf("insert active registration snapshot: %w", err)
+	}
+	if err = insertRegistrationSnapshot(ctx, transaction, upsertOwnedRegistrationSQL, snapshot.Owned); err != nil {
+		return fmt.Errorf("insert owned registration snapshot: %w", err)
 	}
 	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit registration replacement: %w", err)
+		return fmt.Errorf("commit registration snapshot replacement: %w", err)
 	}
 	open = false
 	return nil
+}
+
+func insertRegistrationSnapshot(
+	ctx context.Context,
+	transaction Transaction,
+	statement string,
+	registrations []githubsource.Registration,
+) error {
+	for _, registration := range registrations {
+		if _, err := transaction.Execute(ctx, statement, registration.RepositoryURL, string(registration.RunnerPool),
+			registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *Store) RegistrationSnapshot(
+	ctx context.Context,
+) (_ githubsource.RegistrationSnapshot, resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return githubsource.RegistrationSnapshot{}, fmt.Errorf("begin registration snapshot lookup: %w", err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	active, err := queryRegistrations(ctx, transaction, registrationsSQL)
+	if err != nil {
+		return githubsource.RegistrationSnapshot{}, fmt.Errorf("query active registrations: %w", err)
+	}
+	owned, err := queryRegistrations(ctx, transaction, ownedRegistrationsSQL)
+	if err != nil {
+		return githubsource.RegistrationSnapshot{}, fmt.Errorf("query owned registrations: %w", err)
+	}
+	if err = transaction.Commit(ctx); err != nil {
+		return githubsource.RegistrationSnapshot{}, fmt.Errorf("commit registration snapshot lookup: %w", err)
+	}
+	open = false
+	return githubsource.RegistrationSnapshot{Active: active, Owned: owned}, nil
+}
+
+func queryRegistrations(ctx context.Context, transaction Transaction, statement string) ([]githubsource.Registration, error) {
+	rows, err := transaction.Query(ctx, statement)
+	if err != nil {
+		return nil, err
+	}
+	return scanRegistrations(rows)
 }
 
 func (store *Store) Registration(

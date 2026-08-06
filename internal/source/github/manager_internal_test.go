@@ -18,7 +18,9 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 		func(context.Context, string, string) (transport.Registration, error) { return registration, nil },
 		func(context.Context, transport.Registration, string) (*transport.Session, error) { return session, nil },
 		func(context.Context, transport.Registration, string) ([]byte, error) { return []byte("opaque"), nil },
-		func(context.Context, string, []string, []transport.OwnedRunnerPool) error { return nil },
+		func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+			return transport.PruneResult{}, nil
+		},
 	)
 	assertTransportClientSuccess(t, success, registration, session)
 
@@ -28,7 +30,9 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 		},
 		func(context.Context, transport.Registration, string) (*transport.Session, error) { return nil, wantErr },
 		func(context.Context, transport.Registration, string) ([]byte, error) { return nil, wantErr },
-		func(context.Context, string, []string, []transport.OwnedRunnerPool) error { return wantErr },
+		func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+			return transport.PruneResult{}, wantErr
+		},
 	)
 	assertTransportClientFailure(t, failure, registration, wantErr)
 	_ = NewTransportManagerClient((*transport.Client)(nil))
@@ -50,7 +54,7 @@ func assertTransportClientSuccess(
 	if got, err := client.GenerateBootstrap(context.Background(), registration, "runner"); err != nil || string(got) != "opaque" {
 		t.Fatalf("generate = (%q, %v)", got, err)
 	}
-	if err := client.PruneRunnerPools(context.Background(), "default", []string{"linux"}, nil); err != nil {
+	if _, err := client.PruneRunnerPools(context.Background(), 1, nil, nil); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 }
@@ -71,7 +75,7 @@ func assertTransportClientFailure(
 	if _, err := client.GenerateBootstrap(context.Background(), registration, "runner"); !errors.Is(err, wantErr) {
 		t.Fatalf("generate error = %v", err)
 	}
-	if err := client.PruneRunnerPools(context.Background(), "default", nil, nil); !errors.Is(err, wantErr) {
+	if _, err := client.PruneRunnerPools(context.Background(), 1, nil, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("prune error = %v", err)
 	}
 }

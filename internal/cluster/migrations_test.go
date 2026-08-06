@@ -20,6 +20,19 @@ func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
 	}
 }
 
+func TestEmbeddedMigrationCatalogIncludesReversibleOwnershipMigration(t *testing.T) {
+	catalog, err := NewStore(postgresconfig.Settings{Role: "runnerfoundry"}).migrationCatalog()
+	if err != nil {
+		t.Fatalf("load embedded migrations: %v", err)
+	}
+	if target := migrationTarget(catalog); target != 2 {
+		t.Fatalf("embedded migration target = %d, want 2", target)
+	}
+	if len(catalog.Migrations) != 2 || strings.TrimSpace(catalog.Migrations[1].DownSQL) == "" {
+		t.Fatalf("embedded migration catalog = %#v, want two reversible migrations", catalog.Migrations)
+	}
+}
+
 func TestInitialMigrationRequiresRecoveryEvidence(t *testing.T) {
 	migration, err := fs.ReadFile(embeddedMigrations, "migrations/001_initial.sql")
 	if err != nil {

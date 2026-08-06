@@ -275,11 +275,25 @@ func (store *builderStoreFake) ReplaceRegistrations(_ context.Context, registrat
 	store.registrations = append([]githubsource.Registration(nil), registrations...)
 	return nil
 }
+func (store *builderStoreFake) ReplaceRegistrationSnapshot(
+	_ context.Context,
+	snapshot githubsource.RegistrationSnapshot,
+) error {
+	store.registrations = append([]githubsource.Registration(nil), snapshot.Active...)
+	return nil
+}
 func (*builderStoreFake) Registration(context.Context, string, core.RunnerPool) (githubsource.Registration, bool, error) {
 	return githubsource.Registration{}, false, nil
 }
 func (store *builderStoreFake) Registrations(context.Context) ([]githubsource.Registration, error) {
 	return append([]githubsource.Registration(nil), store.registrations...), nil
+}
+func (store *builderStoreFake) RegistrationSnapshot(context.Context) (githubsource.RegistrationSnapshot, error) {
+	registrations := append([]githubsource.Registration(nil), store.registrations...)
+	return githubsource.RegistrationSnapshot{
+		Active: registrations,
+		Owned:  append([]githubsource.Registration(nil), registrations...),
+	}, nil
 }
 func (*builderStoreFake) DeleteRegistration(context.Context, string, core.RunnerPool) error {
 	return nil

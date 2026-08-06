@@ -93,10 +93,18 @@ var sqliteSchemaStatements = []string{
 		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
 		PRIMARY KEY(repository_url, runner_pool)
 	)`,
+	`CREATE TABLE IF NOT EXISTS runnerfoundry_github_scale_set_ownership (
+		repository_url TEXT NOT NULL CHECK(length(trim(repository_url)) > 0),
+		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
+		installation_id INTEGER NOT NULL CHECK(installation_id > 0),
+		runner_group_id INTEGER NOT NULL CHECK(runner_group_id > 0),
+		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
+		PRIMARY KEY(repository_url, scale_set_id)
+	)`,
 }
 
-const sqliteSchemaVersion = 104
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 104"
+const sqliteSchemaVersion = 105
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 105"
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)

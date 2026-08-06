@@ -26,7 +26,7 @@ A source adapter owns everything specific to a Git hosting or CI system:
 
 The adapter translates those details into the core terms defined by the product contract. Core ingestion, queueing, execution, and persistence contracts use `Job` and `Runner Pool`; they do not expose source-specific types.
 
-Source-specific registration persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding registration types or methods to the source-neutral state contract.
+Source-specific registration and ownership persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding source-specific types or methods to the source-neutral state contract. Active registrations publish current routes; durable ownership records exist only to verify safe source cleanup and do not create jobs or capacity.
 
 GitHub Actions is the only supported source. Its adapter maps GitHub runner scale sets and job requests to Runner Pools and internal jobs. GitHub does not expose a supported operation for reporting a provisioning failure for an individual job, so RunnerFoundry cleans up and retries the same job without manufacturing a result. If a source later provides that operation, reporting remains specific to its adapter and must not introduce a persisted result lifecycle into the core.
 
@@ -68,7 +68,7 @@ The state store calculates one shared value for each Runner Pool:
 
 Moving a job from the queue into processing does not change availability. Cancelling queued work or removing completed processing releases capacity. Capacity queries observe current work but cannot create, claim, reorder, move, or remove it.
 
-GitHub discovery replaces its complete registration snapshot in one state transaction. Member routes are rebuilt only from a committed snapshot. Pruning considers only scale-set IDs previously persisted as RunnerFoundry-owned and rechecks ID, name, and runner group before deletion; labels and update settings are not ownership evidence.
+GitHub discovery replaces active registrations and durable scale-set ownership in one state transaction. Member routes and leader message sessions use only the committed active registrations. Ownership survives configuration removal and temporary discovery absence, while pruning considers only stored ownership for repositories that are currently discovered. Before deletion, pruning rechecks the numeric runner-group ID, scale-set ID, and name; mismatched fingerprints remain owned for later verification, and labels or update settings are not ownership evidence.
 
 For GitHub, one leader owns repository discovery and message sessions. Each repository-scoped runner scale set representing a Runner Pool receives that pool's shared availability immediately before its message request. Repository requests run concurrently, while each session has at most one request in flight. After a message arrives, other requests for that pool are cancelled and restarted with fresh availability. Independent source requests can still observe the same pre-ingestion snapshot; RunnerFoundry does not add reservations or another scheduler to hide that external consistency limit.
 

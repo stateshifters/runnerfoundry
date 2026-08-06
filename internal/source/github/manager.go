@@ -32,7 +32,7 @@ type ManagerClient struct {
 	EnsureRunnerPool  func(context.Context, string, string) (transport.Registration, error)
 	OpenSession       func(context.Context, transport.Registration, string) (ManagedSession, error)
 	GenerateBootstrap func(context.Context, transport.Registration, string) ([]byte, error)
-	PruneRunnerPools  func(context.Context, string, []string, []transport.OwnedRunnerPool) error
+	PruneRunnerPools  func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
 type managedBootstrapClient struct{ client ManagerClient }
@@ -62,7 +62,7 @@ func composeTransportManagerClient(
 	ensure func(context.Context, string, string) (transport.Registration, error),
 	open func(context.Context, transport.Registration, string) (*transport.Session, error),
 	generate func(context.Context, transport.Registration, string) ([]byte, error),
-	prune func(context.Context, string, []string, []transport.OwnedRunnerPool) error,
+	prune func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
 ) ManagerClient {
 	return ManagerClient{
 		EnsureRunnerPool:  wrapTransportEnsure(ensure),
@@ -109,13 +109,14 @@ func wrapTransportGenerate(
 }
 
 func wrapTransportPrune(
-	prune func(context.Context, string, []string, []transport.OwnedRunnerPool) error,
-) func(context.Context, string, []string, []transport.OwnedRunnerPool) error {
-	return func(ctx context.Context, group string, desired []string, owned []transport.OwnedRunnerPool) error {
-		if err := prune(ctx, group, desired, owned); err != nil {
-			return fmt.Errorf("prune GitHub Runner Pools: %w", err)
+	prune func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
+) func(context.Context, int, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+	return func(ctx context.Context, groupID int, current, owned []transport.OwnedRunnerPool) (transport.PruneResult, error) {
+		result, err := prune(ctx, groupID, current, owned)
+		if err != nil {
+			return result, fmt.Errorf("prune GitHub Runner Pools: %w", err)
 		}
-		return nil
+		return result, nil
 	}
 }
 
@@ -161,7 +162,7 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 	if err := validateManagerConfig(config); err != nil {
 		return err
 	}
-	existing, err := manager.registrations.Registrations(ctx)
+	previous, err := manager.registrations.RegistrationSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("load owned GitHub registrations: %w", err)
 	}
@@ -172,11 +173,18 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 	if failureErr := discoveryFailures(result.InstallationFailures); failureErr != nil {
 		return failureErr
 	}
-	records, err := manager.ensureRegistrations(ctx, result.Repositories, existing, config)
+	active, err := manager.ensureRegistrations(ctx, result.Repositories, config)
 	if err != nil {
 		return err
 	}
-	if err := manager.replaceRegistrations(ctx, records); err != nil {
+	owned := mergeOwnedRegistrations(previous.Owned, active)
+	if config.Prune {
+		owned, err = manager.pruneRegistrations(ctx, result.Repositories, active, owned)
+		if err != nil {
+			return err
+		}
+	}
+	if err := manager.replaceRegistrations(ctx, RegistrationSnapshot{Active: active, Owned: owned}); err != nil {
 		return fmt.Errorf("persist GitHub registrations: %w", err)
 	}
 	return nil
@@ -185,12 +193,11 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 func (manager *Manager) ensureRegistrations(
 	ctx context.Context,
 	repositories []transport.Repository,
-	existing []Registration,
 	config ManagerConfig,
 ) ([]Registration, error) {
 	records := make([]Registration, 0, len(repositories)*len(config.RunnerPools))
 	for _, repository := range repositories {
-		repositoryRecords, err := manager.ensureRepository(ctx, repository, existing, config)
+		repositoryRecords, err := manager.ensureRepository(ctx, repository, config)
 		if err != nil {
 			return nil, err
 		}
@@ -202,9 +209,11 @@ func (manager *Manager) ensureRegistrations(
 func (manager *Manager) ensureRepository(
 	ctx context.Context,
 	repository transport.Repository,
-	existing []Registration,
 	config ManagerConfig,
 ) ([]Registration, error) {
+	if len(config.RunnerPools) == 0 {
+		return nil, nil
+	}
 	client, err := manager.factory(ctx, repository)
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub client for repository %q: %w", repository.URL, err)
@@ -222,16 +231,11 @@ func (manager *Manager) ensureRepository(
 			ScaleSetID: int64(registration.ID),
 		})
 	}
-	if config.Prune {
-		if err := pruneRepository(ctx, client, repository.URL, config.RunnerPools, existing); err != nil {
-			return nil, fmt.Errorf("prune repository %q: %w", repository.URL, err)
-		}
-	}
 	return records, nil
 }
 
-func (manager *Manager) replaceRegistrations(ctx context.Context, desired []Registration) error {
-	if err := manager.registrations.ReplaceRegistrations(ctx, desired); err != nil {
+func (manager *Manager) replaceRegistrations(ctx context.Context, snapshot RegistrationSnapshot) error {
+	if err := manager.registrations.ReplaceRegistrationSnapshot(ctx, snapshot); err != nil {
 		return fmt.Errorf("replace GitHub registration snapshot: %w", err)
 	}
 	return nil
@@ -259,48 +263,15 @@ func discoveryFailures(failures map[transport.InstallationID]error) error {
 	return joined
 }
 
-func pruneRepository(
-	ctx context.Context,
-	client ManagerClient,
-	repositoryURL string,
-	configs []RunnerPoolConfig,
-	existing []Registration,
-) error {
-	desiredByGroup := make(map[string][]string)
-	for _, config := range configs {
-		desiredByGroup[config.RunnerGroup] = append(desiredByGroup[config.RunnerGroup], string(config.RunnerPool))
-	}
-	ownedByGroup := make(map[int64][]transport.OwnedRunnerPool)
-	for _, registration := range existing {
-		if registration.RepositoryURL != repositoryURL {
-			continue
-		}
-		ownedByGroup[registration.RunnerGroupID] = append(ownedByGroup[registration.RunnerGroupID], transport.OwnedRunnerPool{
-			ID: int(registration.ScaleSetID), Name: string(registration.RunnerPool),
-			RunnerGroupID: int(registration.RunnerGroupID),
-		})
-	}
-	for runnerGroup, desired := range desiredByGroup {
-		var owned []transport.OwnedRunnerPool
-		for _, registrations := range ownedByGroup {
-			owned = append(owned, registrations...)
-		}
-		if err := client.PruneRunnerPools(ctx, runnerGroup, desired, owned); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // RefreshMembers replaces bootstrap routes from the persisted registration
 // snapshot. No leader message session is needed on ordinary members.
 func (manager *Manager) RefreshMembers(ctx context.Context) error {
-	records, err := manager.registrations.Registrations(ctx)
+	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("list GitHub registrations: %w", err)
 	}
-	routes := make([]MemberRoute, 0, len(records))
-	for _, record := range records {
+	routes := make([]MemberRoute, 0, len(snapshot.Active))
+	for _, record := range snapshot.Active {
 		repository := repositoryFromRegistration(record)
 		client, clientErr := manager.factory(ctx, repository)
 		if clientErr != nil {
@@ -329,11 +300,11 @@ func (manager *Manager) OpenLeader(
 		return nil, errors.New("GitHub leader owner and event handler are required")
 	}
 	cleanupErr := manager.retryRetiring(ctx)
-	records, err := manager.registrations.Registrations(ctx)
+	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
 	if err != nil {
 		return nil, errors.Join(cleanupErr, fmt.Errorf("list GitHub registrations: %w", err))
 	}
-	sessions, adapters, err := manager.openLeaderRecords(ctx, records, owner, handler)
+	sessions, adapters, err := manager.openLeaderRecords(ctx, snapshot.Active, owner, handler)
 	if err != nil {
 		return nil, errors.Join(cleanupErr, err)
 	}

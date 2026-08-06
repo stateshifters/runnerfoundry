@@ -94,11 +94,11 @@ func TestClientFromUpstreamUsesNativeScaleSetRegistry(t *testing.T) {
 		actionsAPIFake: actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 7}},
 		registryScaleSets: []upstream.RunnerScaleSet{{
 			ID: 11, Name: "obsolete", Labels: []upstream.Label{{Name: "obsolete", Type: "System"}},
-			RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+			RunnerGroupID: 7, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
 		}},
 	}
 	client := clientFromUpstream("https://github.com/acme/widgets", api)
-	if err := client.PruneRunnerPools(context.Background(), "default", nil, []OwnedRunnerPool{{
+	if _, err := client.PruneRunnerPools(context.Background(), 7, nil, []OwnedRunnerPool{{
 		ID: 11, Name: "obsolete", RunnerGroupID: 7,
 	}}); err != nil {
 		t.Fatalf("prune through upstream registry: %v", err)
