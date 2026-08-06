@@ -74,11 +74,8 @@ func (provider DockerComposeProvider) Start(ctx context.Context, request StartRe
 	return nil
 }
 
-func (provider DockerComposeProvider) Inspect(
-	ctx context.Context,
-	requestedPools ...string,
-) ([]RunnerInstance, error) {
-	instances, err := provider.provider.List(ctx, requestedPools...)
+func (provider DockerComposeProvider) Inspect(ctx context.Context) ([]RunnerInstance, error) {
+	instances, err := provider.provider.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Docker Compose runners: %w", err)
 	}

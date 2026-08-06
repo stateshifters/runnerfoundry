@@ -106,11 +106,7 @@ type maintenanceGeneration struct {
 	failures      map[string]string
 }
 
-// Keep the internal construction name stable while callers migrate away from
-// the old transitional terminology.
-type unifiedGeneration = maintenanceGeneration
-
-func newUnifiedGeneration(
+func newMaintenanceGeneration(
 	engine cycleEngine,
 	ticker cycleTicker,
 	report func(error),
@@ -153,11 +149,6 @@ func (generation *maintenanceGeneration) Prepare(ctx context.Context) error {
 	}
 	generation.prepared = true
 	return nil
-}
-
-// Start is retained as a compatibility spelling for tests and internal callers.
-func (generation *maintenanceGeneration) Start(ctx context.Context) error {
-	return generation.Prepare(ctx)
 }
 
 func (generation *maintenanceGeneration) Activate(ctx context.Context) error {
@@ -328,8 +319,4 @@ func (generation *maintenanceGeneration) closeResources(ctx context.Context) err
 		}
 	}
 	return errors.Join(closeErrors...)
-}
-
-func (generation *maintenanceGeneration) Stop(ctx context.Context) error {
-	return generation.Close(ctx)
 }

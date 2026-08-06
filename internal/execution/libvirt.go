@@ -77,8 +77,8 @@ func (provider LibvirtProvider) Start(ctx context.Context, request StartRequest)
 	return nil
 }
 
-func (provider LibvirtProvider) Inspect(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
-	instances, err := provider.provider.List(ctx, requestedPools...)
+func (provider LibvirtProvider) Inspect(ctx context.Context) ([]RunnerInstance, error) {
+	instances, err := provider.provider.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("inspect libvirt runners: %w", err)
 	}

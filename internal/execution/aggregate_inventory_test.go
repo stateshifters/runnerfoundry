@@ -20,7 +20,7 @@ func TestAggregateRunnerInventoryMergesActiveBackendsAndRoutesDestruction(t *tes
 	}
 	inventory := NewAggregateRunnerInventory(dockerInventory, libvirtInventory)
 
-	instances, err := inventory.Inspect(context.Background(), "linux")
+	instances, err := inventory.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -47,7 +47,7 @@ func TestAggregateRunnerInventoryFailsClosedAfterInspectingEveryBackend(t *testi
 	}
 	inventory := NewAggregateRunnerInventory(failingInventory, availableInventory)
 
-	instances, err := inventory.Inspect(context.Background(), "linux")
+	instances, err := inventory.Inspect(context.Background())
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("Inspect() error = %v, want wrapped %v", err, expectedErr)
 	}
@@ -65,7 +65,7 @@ func TestAggregateRunnerInventoryRejectsDuplicateRunnerNames(t *testing.T) {
 		&runnerInventoryFake{identity: "libvirt:qemu:///system", instances: []RunnerInstance{{RunnerName: "runner-1"}}},
 	)
 
-	instances, err := inventory.Inspect(context.Background(), "linux")
+	instances, err := inventory.Inspect(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `runner name "runner-1"`) {
 		t.Fatalf("Inspect() error = %v, want duplicate runner name", err)
 	}
@@ -86,7 +86,7 @@ func TestAggregateRunnerInventoryDeduplicatesEquivalentBackends(t *testing.T) {
 		secondLibvirtInventory,
 	)
 
-	if _, err := inventory.Inspect(context.Background(), "linux"); err != nil {
+	if _, err := inventory.Inspect(context.Background()); err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
 	if firstDockerInventory.inspections != 1 || secondDockerInventory.inspections != 0 {
@@ -109,7 +109,7 @@ func TestAggregateRunnerInventoryDeduplicatesConcreteMechanismsAndEndpoints(t *t
 		NewLibvirtProvider(secondLibvirtTransport, libvirtTestConfig(), libvirtTemplate()),
 	)
 
-	if _, err := inventory.Inspect(context.Background(), "linux"); err != nil {
+	if _, err := inventory.Inspect(context.Background()); err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
 	if firstDockerTransport.listCalls != 1 || secondDockerTransport.listCalls != 0 {
@@ -137,7 +137,7 @@ func TestAggregateRunnerInventoryPreservesOriginDestroyFailure(t *testing.T) {
 		destroyErr: expectedErr,
 	}
 	inventory := NewAggregateRunnerInventory(backend)
-	instances, err := inventory.Inspect(context.Background(), "linux")
+	instances, err := inventory.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -247,7 +247,7 @@ func (inventory *runnerInventoryFake) InspectEndpoint(ctx context.Context, endpo
 	return inventory.Inspect(ctx)
 }
 
-func (inventory *runnerInventoryFake) Inspect(context.Context, ...string) ([]RunnerInstance, error) {
+func (inventory *runnerInventoryFake) Inspect(context.Context) ([]RunnerInstance, error) {
 	inventory.inspections++
 	return append([]RunnerInstance(nil), inventory.instances...), inventory.inspectErr
 }

@@ -71,7 +71,7 @@ func TestProcessOneRetainsProcessingWhenPartialStartCannotBeInspected(t *testing
 	startErr := errors.New("start failed")
 	provider := &providerFake{
 		start: func(context.Context, execution.StartRequest) error { return startErr },
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return nil, errors.New("inspect failed")
 		},
 	}
@@ -83,7 +83,7 @@ func TestProcessOneRetainsProcessingWhenPartialStartCannotBeDestroyed(t *testing
 	startErr := errors.New("start failed")
 	provider := &providerFake{
 		start: func(context.Context, execution.StartRequest) error { return startErr },
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "partial", RunnerName: "runnerfoundry-" + jobID.String()}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return errors.New("destroy failed") },
@@ -126,7 +126,7 @@ func assertFailedStartRemovedForJob(t *testing.T, jobID core.JobID, instances []
 	removed := false
 	provider := &providerFake{
 		start:   func(context.Context, execution.StartRequest) error { return errors.New("start failed") },
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) { return instances, nil },
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) { return instances, nil },
 	}
 	store := processingStore(jobID, func(context.Context, core.JobID) (bool, error) {
 		removed = true
@@ -145,7 +145,7 @@ func TestProcessOneReportsRemovalFailureAfterDestroyingPartialStart(t *testing.T
 	removeErr := errors.New("remove failed")
 	provider := &providerFake{
 		start: func(context.Context, execution.StartRequest) error { return startErr },
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "partial", RunnerName: "runnerfoundry-" + jobID.String()}}, nil
 		},
 	}
@@ -162,7 +162,7 @@ func TestProcessOneIgnoresUnrelatedPartialRunners(t *testing.T) {
 	removed := false
 	provider := &providerFake{
 		start: func(context.Context, execution.StartRequest) error { return errors.New("start failed") },
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "other", RunnerName: "runnerfoundry-" + uuid.NewString()}}, nil
 		},
 	}

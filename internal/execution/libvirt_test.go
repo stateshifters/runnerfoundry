@@ -53,13 +53,13 @@ func TestLibvirtInspectReturnsOwnedRunnerState(t *testing.T) {
 	}
 	provider := NewLibvirtProvider(transport, libvirtTestConfig(), []byte(`<domain><name>template</name></domain>`))
 
-	instances, err := provider.Inspect(context.Background(), "linux-vm")
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("inspect libvirt runners: %v", err)
 	}
 	expected := []RunnerInstance{
-		{ID: "linux-vm-1", RunnerName: "linux-vm-1", State: RunnerStateRunning},
-		{ID: "linux-vm-2", RunnerName: "linux-vm-2", State: RunnerStateCompleted},
+		{ID: "linux-vm-1", RunnerName: "linux-vm-1", RunnerPool: "linux-vm", State: RunnerStateRunning},
+		{ID: "linux-vm-2", RunnerName: "linux-vm-2", RunnerPool: "linux-vm", State: RunnerStateCompleted},
 	}
 	if len(instances) != len(expected) {
 		t.Fatalf("instances = %#v, want %#v", instances, expected)
@@ -126,7 +126,7 @@ func TestLibvirtInspectPreservesTransportFailure(t *testing.T) {
 		[]byte(`<domain><name>template</name></domain>`),
 	)
 
-	_, err := provider.Inspect(context.Background(), "linux-vm")
+	_, err := provider.Inspect(context.Background())
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("inspect error = %v, want wrapped %v", err, expectedErr)
 	}

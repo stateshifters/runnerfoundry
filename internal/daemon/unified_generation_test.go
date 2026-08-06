@@ -16,9 +16,9 @@ func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 	cycles := make(chan struct{}, 2)
 	engine := &cycleEngineFake{cycles: cycles}
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	generation := newUnifiedGeneration(engine, ticker, nil, nil, nil)
+	generation := newMaintenanceGeneration(engine, ticker, nil, nil, nil)
 
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
 	if err := generation.Activate(context.Background()); err != nil {
@@ -27,7 +27,7 @@ func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 	waitForCycle(t, cycles)
 	ticker.ticks <- time.Time{}
 	waitForCycle(t, cycles)
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
 	if !ticker.stopped || engine.closes != 1 {
@@ -41,14 +41,14 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
 	ticker.ticks <- time.Time{}
 	observedPendingTicks := make(chan int, 2)
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&activationObservationEngine{ticker: ticker, observedPendingTicks: observedPendingTicks},
 		ticker,
 		nil,
 		nil,
 		nil,
 	)
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
 	if err := generation.Activate(context.Background()); err != nil {
@@ -57,7 +57,7 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 	if pendingTicks := <-observedPendingTicks; pendingTicks != 1 {
 		t.Fatalf("pending ticks at activation cycle = %d, want pre-activation tick untouched", pendingTicks)
 	}
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
 }
@@ -65,13 +65,13 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 func TestUnifiedGenerationCanStopWhileWaitingForActivation(t *testing.T) {
 	t.Parallel()
 
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop inactive generation: %v", err)
 	}
 }
@@ -81,14 +81,14 @@ func TestUnifiedGenerationReportsActivationBoundaryFailure(t *testing.T) {
 
 	wantErr := errors.New("activation failed")
 	engine := newGatedCycleEngine(&cycleEngineFake{}, leadershipFake{activateErr: wantErr, events: &[]string{}})
-	generation := newUnifiedGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
-	if err := generation.Start(context.Background()); err != nil {
+	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
 	if err := generation.Activate(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("activation error = %v", err)
 	}
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop inactive generation: %v", err)
 	}
 }
@@ -101,9 +101,9 @@ func TestUnifiedGenerationReportsCycleFailuresAndKeepsRunning(t *testing.T) {
 	reports := make(chan error, 2)
 	engine := &cycleEngineFake{cycles: cycles, cycleErr: cycleErr}
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	generation := newUnifiedGeneration(engine, ticker, func(err error) { reports <- err }, nil, nil)
+	generation := newMaintenanceGeneration(engine, ticker, func(err error) { reports <- err }, nil, nil)
 
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
 	engine.cycleErr = nil
@@ -117,7 +117,7 @@ func TestUnifiedGenerationReportsCycleFailuresAndKeepsRunning(t *testing.T) {
 	if err := <-reports; !errors.Is(err, cycleErr) {
 		t.Fatalf("reported error = %v", err)
 	}
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
 }
@@ -128,18 +128,18 @@ func TestUnifiedGenerationClosesOwnedResourcesInReverseOrder(t *testing.T) {
 	cycles := make(chan struct{}, 1)
 	events := make([]string, 0)
 	engine := &cycleEngineFake{cycles: cycles, closeEvents: &events}
-	generation := newUnifiedGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, []runtimeCloser{
+	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, []runtimeCloser{
 		closerFake{name: "state", events: &events}, closerFake{name: "provider", events: &events},
 	}, nil)
 
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
 	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	waitForCycle(t, cycles)
-	if err := generation.Stop(context.Background()); err != nil {
+	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
 	if want := []string{"engine", "provider", "state"}; !reflect.DeepEqual(events, want) {
@@ -152,7 +152,7 @@ func TestUnifiedGenerationSelectsFinalizersByRunnerPool(t *testing.T) {
 
 	linux := &finalizerFake{runnerPool: "linux"}
 	windows := &finalizerFake{runnerPool: "windows"}
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&cycleEngineFake{},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		nil,
@@ -210,31 +210,31 @@ func TestUnifiedGenerationRejectsInvalidLifecycleCalls(t *testing.T) {
 	t.Parallel()
 
 	cycles := make(chan struct{}, 1)
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&cycleEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil,
 		nil,
 	)
 	assertTestError(t, generation.Activate(context.Background()), "activate before start")
-	assertNoTestError(t, generation.Start(context.Background()), "start generation")
+	assertNoTestError(t, generation.Prepare(context.Background()), "prepare generation")
 	assertNoTestError(t, generation.Activate(context.Background()), "activate generation")
 	assertTestError(t, generation.Activate(context.Background()), "activate twice")
 	waitForCycle(t, cycles)
-	assertTestError(t, generation.Start(context.Background()), "start twice")
-	assertNoTestError(t, generation.Stop(context.Background()), "stop generation")
-	assertTestError(t, generation.Start(context.Background()), "restart closed generation")
+	assertTestError(t, generation.Prepare(context.Background()), "prepare twice")
+	assertNoTestError(t, generation.Close(context.Background()), "close generation")
+	assertTestError(t, generation.Prepare(context.Background()), "prepare closed generation")
 	assertTestError(t, generation.Activate(context.Background()), "activate closed generation")
-	assertNoTestError(t, generation.Stop(context.Background()), "stop generation twice")
+	assertNoTestError(t, generation.Close(context.Background()), "close generation twice")
 }
 
 func TestUnifiedGenerationStopsBeforeStartAndGatedLeadershipErrors(t *testing.T) {
 	t.Parallel()
 
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
-	generation := newUnifiedGeneration(&cycleEngineFake{cycles: make(chan struct{})}, ticker, nil, nil, nil)
-	if err := generation.Stop(context.Background()); err != nil || !ticker.stopped {
+	generation := newMaintenanceGeneration(&cycleEngineFake{cycles: make(chan struct{})}, ticker, nil, nil, nil)
+	if err := generation.Close(context.Background()); err != nil || !ticker.stopped {
 		t.Fatalf("stop before start = %v, ticker stopped=%t", err, ticker.stopped)
 	}
-	if err := generation.Start(context.Background()); err == nil {
+	if err := generation.Prepare(context.Background()); err == nil {
 		t.Fatal("generation started after close-before-start")
 	}
 	wantErr := errors.New("leadership failed")
@@ -263,9 +263,9 @@ func TestUnifiedGenerationReportsCanceledWaitAndCloseFailures(t *testing.T) {
 	cycles := make(chan struct{}, 1)
 	engine := &cycleEngineFake{cycles: cycles, closeErr: wantErr}
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
-	generation := newUnifiedGeneration(engine, ticker, nil,
+	generation := newMaintenanceGeneration(engine, ticker, nil,
 		[]runtimeCloser{closerErrorFake{events: &[]string{}, err: wantErr}}, nil)
-	if err := generation.Start(context.Background()); err != nil {
+	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := generation.Activate(context.Background()); err != nil {
@@ -277,13 +277,13 @@ func TestUnifiedGenerationReportsCanceledWaitAndCloseFailures(t *testing.T) {
 	waitForCycle(t, cycles)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := generation.Stop(canceled); !errors.Is(err, context.Canceled) {
+	if err := generation.Close(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait error = %v", err)
 	}
 	close(block)
-	generation = newUnifiedGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil,
+	generation = newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil,
 		[]runtimeCloser{closerErrorFake{events: &[]string{}, err: wantErr}}, nil)
-	if err := generation.Stop(context.Background()); !errors.Is(err, wantErr) {
+	if err := generation.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("close error = %v", err)
 	}
 }

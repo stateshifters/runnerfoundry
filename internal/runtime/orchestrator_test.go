@@ -133,7 +133,7 @@ func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, 
 
 type providerFake struct {
 	start   func(context.Context, execution.StartRequest) error
-	inspect func(context.Context, string) ([]execution.RunnerInstance, error)
+	inspect func(context.Context) ([]execution.RunnerInstance, error)
 	destroy func(context.Context, execution.RunnerInstance) error
 }
 
@@ -155,15 +155,11 @@ func (provider *providerFake) Refresh(ctx context.Context) error {
 func (provider *providerFake) InspectEndpoint(ctx context.Context, _ execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
 	return provider.Inspect(ctx)
 }
-func (provider *providerFake) Inspect(ctx context.Context, pools ...string) ([]execution.RunnerInstance, error) {
-	pool := ""
-	if len(pools) != 0 {
-		pool = pools[0]
-	}
+func (provider *providerFake) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
 	if provider.inspect == nil {
 		return nil, nil
 	}
-	return provider.inspect(ctx, pool)
+	return provider.inspect(ctx)
 }
 func (provider *providerFake) Destroy(ctx context.Context, instance execution.RunnerInstance) error {
 	if provider.destroy == nil {

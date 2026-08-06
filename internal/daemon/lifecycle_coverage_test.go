@@ -213,7 +213,7 @@ func TestMaintenanceGenerationReportsActivationCycleAndDeactivationFailures(t *t
 	cycleErr := errors.New("first cycle failed")
 	deactivateErr := errors.New("deactivate failed")
 	engine := &lifecycleCycleEngineFake{cycleErr: cycleErr, deactivateErr: deactivateErr}
-	generation := newUnifiedGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
+	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestMaintenanceGenerationDeduplicatesFailuresAndReportsRecovery(t *testing.
 
 	wantErr := errors.New("cycle failed")
 	reports := make([]error, 0)
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&lifecycleCycleEngineFake{},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		func(err error) { reports = append(reports, err) },
@@ -255,7 +255,7 @@ func TestMaintenanceGenerationRetriesOnlyFailedClosers(t *testing.T) {
 
 	failing := &failOnceRuntimeCloser{err: errors.New("close failed")}
 	successful := &failOnceRuntimeCloser{}
-	generation := newUnifiedGeneration(
+	generation := newMaintenanceGeneration(
 		&lifecycleCycleEngineFake{},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		nil,
@@ -343,7 +343,7 @@ type runnerInventoryRefreshFake struct {
 
 func (*runnerInventoryRefreshFake) EndpointID() execution.InventoryEndpointID { return "inventory" }
 func (fake *runnerInventoryRefreshFake) Refresh(context.Context) error        { return fake.err }
-func (*runnerInventoryRefreshFake) Inspect(context.Context, ...string) ([]execution.RunnerInstance, error) {
+func (*runnerInventoryRefreshFake) Inspect(context.Context) ([]execution.RunnerInstance, error) {
 	return nil, nil
 }
 func (*runnerInventoryRefreshFake) InspectEndpoint(context.Context, execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {

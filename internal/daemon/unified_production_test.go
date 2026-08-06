@@ -426,7 +426,7 @@ func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testi
 	}
 }
 
-func (fixture productionGenerationFailureFixture) build() (*unifiedGeneration, error) {
+func (fixture productionGenerationFailureFixture) build() (*maintenanceGeneration, error) {
 	return buildProductionGeneration(
 		context.Background(), fixture.configured, fixture.state, &localLeadershipGate{}, nil,
 	)
@@ -478,7 +478,7 @@ func TestOpenProductionRuntimeReportsBoundaryFailures(t *testing.T) {
 func TestProductionRuntimeBuildReportsFailures(t *testing.T) {
 	runtime, _ := newTestProductionRuntime(t)
 	wantErr := errors.New("generation failed")
-	buildDaemonGeneration = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*unifiedGeneration, error) {
+	buildDaemonGeneration = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error)) (*maintenanceGeneration, error) {
 		return nil, wantErr
 	}
 	if _, err := runtime.Build(context.Background(), config.Config{}); !errors.Is(err, wantErr) {

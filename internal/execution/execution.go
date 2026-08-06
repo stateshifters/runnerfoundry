@@ -25,7 +25,7 @@ type RunnerLauncher interface {
 // closed when an endpoint is unavailable or returns an incomplete snapshot.
 type InventorySnapshot interface {
 	Refresh(ctx context.Context) error
-	Inspect(ctx context.Context, legacyRunnerPool ...string) ([]RunnerInstance, error)
+	Inspect(ctx context.Context) ([]RunnerInstance, error)
 }
 
 type EndpointInventory interface {

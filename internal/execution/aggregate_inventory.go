@@ -39,10 +39,7 @@ func NewAggregateRunnerInventory(inventories ...RunnerInventory) AggregateRunner
 
 // Inspect queries every active inventory. Any backend error or duplicate runner
 // name makes the complete observation unknown, so no partial result is returned.
-func (inventory AggregateRunnerInventory) Inspect(
-	ctx context.Context,
-	_ ...string,
-) ([]RunnerInstance, error) {
+func (inventory AggregateRunnerInventory) Inspect(ctx context.Context) ([]RunnerInstance, error) {
 	if inventory.cache != nil {
 		inventory.cache.mutex.RLock()
 		if inventory.cache.ready {

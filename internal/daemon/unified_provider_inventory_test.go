@@ -32,7 +32,7 @@ func TestProductionInventoryCombinesActiveProviderBackends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build mixed providers: %v", err)
 	}
-	instances, inspectErr := inventory.Inspect(context.Background(), "libvirt")
+	instances, inspectErr := inventory.Inspect(context.Background())
 	if inspectErr != nil || len(instances) != 1 || instances[0].ID != "old-docker" {
 		t.Fatalf("provider-agnostic inventory = (%#v, %v)", instances, inspectErr)
 	}
@@ -80,7 +80,7 @@ func TestProductionInventoryContainsOnlyActiveConfigurationEndpoints(t *testing.
 	if err != nil {
 		t.Fatalf("build current inventory: %v", err)
 	}
-	instances, err := inventory.Inspect(context.Background(), "linux")
+	instances, err := inventory.Inspect(context.Background())
 	if err != nil || len(instances) != 0 {
 		t.Fatalf("current inventory = (%#v, %v), want no retired Docker resources", instances, err)
 	}
@@ -91,7 +91,7 @@ func TestProductionProviderShellAcceptsEmptyConfiguration(t *testing.T) {
 	if err != nil || len(providers) != 0 {
 		t.Fatalf("empty production providers = (%d, %v)", len(providers), err)
 	}
-	instances, inspectErr := inventory.Inspect(context.Background(), "unused")
+	instances, inspectErr := inventory.Inspect(context.Background())
 	if inspectErr != nil || len(instances) != 0 {
 		t.Fatalf("empty production inventory = (%#v, %v)", instances, inspectErr)
 	}

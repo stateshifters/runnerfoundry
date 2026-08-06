@@ -40,7 +40,7 @@ type unifiedBuilderDependencies struct {
 func buildUnifiedGeneration(
 	configured config.Config,
 	dependencies unifiedBuilderDependencies,
-) (*unifiedGeneration, error) {
+) (*maintenanceGeneration, error) {
 	if err := validateUnifiedDependencies(dependencies); err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func buildUnifiedGeneration(
 	}
 	engine := buildConfiguredEngine(assembled, dependencies, discoveryInterval)
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
-	return newUnifiedGeneration(
+	return newMaintenanceGeneration(
 		processEngine, dependencies.ticker, dependencies.report, configuredClosers(dependencies),
 		assembled.finalizers,
 	), nil

@@ -67,7 +67,7 @@ func buildProductionGeneration(
 	state *productionState,
 	processGate *localLeadershipGate,
 	report func(error),
-) (*unifiedGeneration, error) {
+) (*maintenanceGeneration, error) {
 	manager, err := buildProductionGitHubManager(configured, state.store)
 	if err != nil {
 		return nil, err
@@ -121,7 +121,7 @@ func buildTimedProductionGeneration(
 	providers map[core.RunnerPool]execution.ExecutionProvider,
 	inventory execution.RunnerInventory,
 	member core.MemberID,
-) (*unifiedGeneration, error) {
+) (*maintenanceGeneration, error) {
 	operatingSystemTicker := newProductionTicker(runtimeCycleInterval)
 	ticker := productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{

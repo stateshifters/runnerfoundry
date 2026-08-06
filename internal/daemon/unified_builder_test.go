@@ -36,14 +36,14 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build generation: %v", err)
 	}
-	if err = generation.Start(context.Background()); err != nil {
+	if err = generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
 	}
 	if err = generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
 	<-store.capacityPublished
-	if err = generation.Stop(context.Background()); err != nil {
+	if err = generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
 	if store.capacities != 1 {
@@ -193,7 +193,7 @@ func (provider builderProviderFake) Refresh(ctx context.Context) error {
 func (provider builderProviderFake) InspectEndpoint(ctx context.Context, _ execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
 	return provider.Inspect(ctx)
 }
-func (builderProviderFake) Inspect(context.Context, ...string) ([]execution.RunnerInstance, error) {
+func (builderProviderFake) Inspect(context.Context) ([]execution.RunnerInstance, error) {
 	return nil, nil
 }
 func (builderProviderFake) Destroy(context.Context, execution.RunnerInstance) error { return nil }

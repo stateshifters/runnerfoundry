@@ -40,13 +40,13 @@ func TestDockerComposeInspectReturnsOwnedRunnerState(t *testing.T) {
 ]`}
 	provider := NewDockerComposeProvider(transport, providerdocker.ComposeConfig{})
 
-	instances, err := provider.Inspect(context.Background(), "linux")
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("inspect Docker Compose runners: %v", err)
 	}
 	expected := []RunnerInstance{
-		{ID: "container-1", RunnerName: "linux-1", State: RunnerStateRunning},
-		{ID: "container-2", RunnerName: "linux-2", State: RunnerStateCompleted},
+		{ID: "container-1", RunnerName: "linux-1", RunnerPool: "linux", State: RunnerStateRunning},
+		{ID: "container-2", RunnerName: "linux-2", RunnerPool: "linux", State: RunnerStateCompleted},
 	}
 	if len(instances) != len(expected) {
 		t.Fatalf("instances = %#v, want %#v", instances, expected)
@@ -110,7 +110,7 @@ func TestDockerComposeInspectPreservesTransportFailure(t *testing.T) {
 		providerdocker.ComposeConfig{},
 	)
 
-	_, err := provider.Inspect(context.Background(), "linux")
+	_, err := provider.Inspect(context.Background())
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("inspect error = %v, want wrapped %v", err, expectedErr)
 	}

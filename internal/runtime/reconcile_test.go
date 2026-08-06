@@ -110,7 +110,7 @@ func TestReconcilePoolReportsExpiredProcessingRecoveryFailureAfterCleanup(t *tes
 		},
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
 				ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(), RunnerPool: "linux",
 			}}, nil
@@ -169,7 +169,7 @@ func TestReconciliationUsesMemberInventoryInsteadOfTheLaunchProvider(t *testing.
 			return true, nil
 		},
 	}
-	inventory := &providerFake{inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+	inventory := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{
 			ID: "existing", RunnerName: "runnerfoundry-" + jobID.String(), State: execution.RunnerStateRunning,
 		}}, nil
@@ -195,7 +195,7 @@ func TestTerminatePoolDestroysRunningOwnedResourcesAndRetainsStartedProcessing(t
 		},
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
 				ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(), State: execution.RunnerStateRunning,
 			}}, nil
@@ -225,7 +225,7 @@ func TestTerminatePoolRetainsProcessingWhenDestroyFails(t *testing.T) {
 		remove: func(context.Context, core.JobID) error { removed = true; return nil },
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "runner", RunnerName: "runnerfoundry-" + jobID.String()}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return wantErr },
@@ -253,7 +253,7 @@ func TestTerminatePoolReportsInventoryFailures(t *testing.T) {
 			store: &jobStoreFake{list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 				return nil, nil
 			}},
-			provider: &providerFake{inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+			provider: &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 				return nil, wantErr
 			}},
 		},
@@ -275,7 +275,7 @@ func TestTerminatePoolCleansOrphansAndIgnoresInvalidNames(t *testing.T) {
 	destroyed := make(map[string]bool)
 	store := &jobStoreFake{list: emptyProcessing}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
 				{ID: "orphan", RunnerName: "runnerfoundry-" + orphanID.String()},
 				{ID: "external", RunnerName: "external"},
@@ -330,7 +330,7 @@ func TestTerminatePoolContinuesAfterOwnedRemovalFailure(t *testing.T) {
 			return nil
 		},
 	}
-	provider := &providerFake{inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{ID: "resource", RunnerName: "runnerfoundry-" + resourceID.String()}}, nil
 	}}
 	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member")
@@ -345,7 +345,7 @@ func TestOccupiedSlotsCountsProcessingAndProviderInventoryOnce(t *testing.T) {
 	store := &jobStoreFake{list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 		return []core.ProcessingJob{{Job: core.Job{ID: jobID}}}, nil
 	}}
-	provider := &providerFake{inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{
 			{ID: "same", RunnerName: "runnerfoundry-" + jobID.String()},
 			{ID: "unnamed"},
@@ -369,7 +369,7 @@ func TestOccupiedSlotsAndReconcileReportInventoryFailures(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			provider := &providerFake{inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+			provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 				return nil, wantErr
 			}}
 			orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member")
@@ -469,7 +469,7 @@ func lifecycleProvider(jobID core.JobID, test lifecycleReconciliationCase, effec
 		})
 	}
 	return &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) { return instances, nil },
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) { return instances, nil },
 		destroy: func(context.Context, execution.RunnerInstance) error { effects.destroyed = true; return nil },
 	}
 }
@@ -512,7 +512,7 @@ func newTerminatePoolFixture() terminatePoolFixture {
 		},
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
 				{ID: "unstarted", RunnerName: "runnerfoundry-" + fixture.unstartedID.String(), State: execution.RunnerStateRunning},
 				{ID: "started", RunnerName: "runnerfoundry-" + fixture.startedID.String(), State: execution.RunnerStateRunning},
@@ -563,7 +563,7 @@ func TestReconcilePoolReportsOrphanCleanupFailure(t *testing.T) {
 	orphanID := uuid.New()
 	store := &jobStoreFake{list: emptyProcessing}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "orphan", RunnerName: "runnerfoundry-" + orphanID.String()}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return wantErr },
@@ -588,7 +588,7 @@ func TestReconcilePoolRetainsTerminalProcessingWhenRunnerCleanupFails(t *testing
 		remove: func(context.Context, core.JobID) error { removed = true; return nil },
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
 				ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(), State: execution.RunnerStateRunning,
 			}}, nil
@@ -631,7 +631,7 @@ func newOwnedReconciliationFixture(state execution.RunnerState) ownedReconciliat
 		},
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
 				ID: "runner", RunnerName: "runnerfoundry-" + jobID.String(), State: state,
 			}}, nil
@@ -661,7 +661,7 @@ func TestReconcilePoolCleansMissingAndOrphanedWork(t *testing.T) {
 		retry: func(context.Context, core.JobID) (bool, error) { removed = true; return true, nil },
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
 				{ID: "orphan", RunnerName: "runnerfoundry-" + orphanID.String()},
 				{ID: "external", RunnerName: "external"},
@@ -694,7 +694,7 @@ func TestReconcilePoolRetainsProcessingAcrossCleanupFailures(t *testing.T) {
 		},
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
 				ID: "destroy", RunnerName: "runnerfoundry-" + destroyID.String(), State: execution.RunnerStateUnknown,
 			}}, nil
@@ -718,7 +718,7 @@ func TestReconcilePoolReportsRemovalFailureAfterDestroy(t *testing.T) {
 		remove: func(context.Context, core.JobID) error { return wantErr },
 	}
 	provider := &providerFake{
-		inspect: func(context.Context, string) ([]execution.RunnerInstance, error) {
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{ID: "finished", RunnerName: "runnerfoundry-" + jobID.String(), State: execution.RunnerStateCompleted}}, nil
 		},
 	}
