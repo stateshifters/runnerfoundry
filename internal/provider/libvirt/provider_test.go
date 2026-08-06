@@ -279,7 +279,7 @@ func TestStartRequiresTemplateReader(t *testing.T) {
 	}
 }
 
-func TestNewProviderProvidesProductionTemplateReader(t *testing.T) {
+func TestNewProviderRetainsConfigurationAndInitializesTemplateReader(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"})
 	if provider.CommandRunner != commandRunner || provider.readTemplate == nil || provider.Config.DomainXMLTemplate != "domain.xml" {

@@ -12,10 +12,33 @@ import (
 )
 
 func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
+	evidence := newProcessOneEvidence(t)
+	processed, err := evidence.orchestrator.ProcessOne(context.Background(), "linux")
+	if err != nil {
+		t.Fatalf("ProcessOne() error = %v", err)
+	}
+	if !processed {
+		t.Fatal("ProcessOne() processed = false")
+	}
+	if evidence.claimCalls != 1 || evidence.startCalls != 1 {
+		t.Fatalf("claim calls = %d, start calls = %d; want exactly one each", evidence.claimCalls, evidence.startCalls)
+	}
+}
+
+type processOneEvidence struct {
+	orchestrator *runtimeengine.Orchestrator
+	claimCalls   int
+	startCalls   int
+}
+
+func newProcessOneEvidence(t *testing.T) *processOneEvidence {
+	t.Helper()
 	jobID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	memberID := core.MemberID("member-2")
 	job := core.Job{ID: jobID, RunnerPool: "linux", EnqueuedAt: time.Unix(1, 0)}
+	evidence := &processOneEvidence{}
 	store := &jobStoreFake{take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
+		evidence.claimCalls++
 		return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
 	}}
 	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName core.RunnerName) (execution.Bootstrap, error) {
@@ -25,20 +48,14 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 		return execution.NewBootstrap([]byte("opaque")), nil
 	}}
 	provider := &providerFake{start: func(_ context.Context, request execution.StartRequest) error {
+		evidence.startCalls++
 		if request.RunnerPool != "linux" || request.RunnerName != core.RunnerName("runnerfoundry-"+jobID.String()) {
 			t.Fatalf("start request = %#v", request)
 		}
 		return nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID, testCurrentTime)
-
-	processed, err := orchestrator.ProcessOne(context.Background(), "linux")
-	if err != nil {
-		t.Fatalf("ProcessOne() error = %v", err)
-	}
-	if !processed {
-		t.Fatal("ProcessOne() processed = false")
-	}
+	evidence.orchestrator = runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID, testCurrentTime)
+	return evidence
 }
 
 type jobStoreFake struct {

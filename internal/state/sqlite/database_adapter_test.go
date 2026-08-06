@@ -203,133 +203,164 @@ func TestDatabaseAdapterDelegatesProcessingRowsAndScalarQueries(t *testing.T) {
 func TestDatabaseAdapterReportsTransactionProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	cases := []func(sqlmock.Sqlmock){
-		func(mock sqlmock.Sqlmock) { mock.ExpectBegin().WillReturnError(protocolErr) },
-		func(mock sqlmock.Sqlmock) {
+	cases := []namedSQLMockSetup{
+		{name: "begin", configure: func(mock sqlmock.Sqlmock) { mock.ExpectBegin().WillReturnError(protocolErr) }},
+		{name: "execute", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(heartbeatMemberSQL)).WillReturnError(protocolErr)
 			mock.ExpectRollback()
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "commit", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(heartbeatMemberSQL)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(regexp.QuoteMeta(removeMemberCapacitiesSQL)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectCommit().WillReturnError(protocolErr)
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "rollback", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(heartbeatMemberSQL)).WillReturnError(protocolErr)
 			mock.ExpectRollback().WillReturnError(protocolErr)
-		},
+		}},
 	}
-	for index, configure := range cases {
-		database, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("case %d: create fake: %v", index, err)
-		}
-		configure(mock)
-		if err := NewDatabaseStore(database).PublishMemberState(context.Background(), testMemberID, fixedTime(), nil); err == nil {
-			t.Fatalf("case %d: expected adapter error", index)
-		}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertDatabaseAdapterFailure(t, testCase.configure)
+		})
 	}
 }
 
 func TestDatabaseAdapterReportsQueryFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	for index, rows := range []*sqlmock.Rows{
-		nil,
-		sqliteProcessingJobRows().RowError(0, protocolErr),
+	for _, testCase := range []struct {
+		name string
+		rows *sqlmock.Rows
+	}{
+		{name: "query", rows: nil},
+		{name: "row", rows: sqliteProcessingJobRows().RowError(0, protocolErr)},
 	} {
-		database, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("case %d: create fake: %v", index, err)
-		}
-		mock.ExpectBegin()
-		query := mock.ExpectQuery(regexp.QuoteMeta(processingByMemberSQL))
-		if rows == nil {
-			query.WillReturnError(protocolErr)
-		} else {
-			query.WillReturnRows(rows)
-		}
-		mock.ExpectRollback()
-		if _, err := NewDatabaseStore(database).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
-			t.Fatalf("case %d: expected query error", index)
-		}
+		t.Run(testCase.name, func(t *testing.T) {
+			assertDatabaseQueryFailure(t, testCase.rows, protocolErr)
+		})
 	}
 }
 
 func TestValidateSQLiteSchemaReportsProtocolAndOccupiedDatabaseErrors(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	cases := []func(sqlmock.Sqlmock){
-		func(mock sqlmock.Sqlmock) {
+	cases := []namedSQLMockSetup{
+		{name: "foreign key pragma", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnError(protocolErr)
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "schema version", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
 			mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnError(protocolErr)
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "occupancy query", configure: func(mock sqlmock.Sqlmock) {
 			expectUnversionedSchema(mock)
 			mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM sqlite_master").WillReturnError(protocolErr)
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "occupied unversioned database", configure: func(mock sqlmock.Sqlmock) {
 			expectUnversionedSchema(mock)
 			mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM sqlite_master").WillReturnRows(
 				sqlmock.NewRows([]string{"count"}).AddRow(1))
-		},
+		}},
 	}
-	for index, configure := range cases {
-		database, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("case %d: create fake: %v", index, err)
-		}
-		configure(mock)
-		if _, err := validateSQLiteSchema(context.Background(), database); err == nil {
-			t.Fatalf("case %d: expected validation error", index)
-		}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertSQLiteSchemaValidationFailure(t, testCase.configure)
+		})
 	}
 }
 
 func TestCreateSQLiteSchemaReportsEveryTransactionFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	for index, configure := range schemaFailureProtocols(protocolErr) {
-		database, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("case %d: create fake: %v", index, err)
-		}
-		configure(mock)
-		if err := createSQLiteSchema(context.Background(), database); err == nil {
-			t.Fatalf("case %d: expected schema error", index)
-		}
+	for _, testCase := range schemaFailureProtocols(protocolErr) {
+		t.Run(testCase.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create fake: %v", err)
+			}
+			testCase.configure(mock)
+			if err := createSQLiteSchema(context.Background(), database); err == nil {
+				t.Fatal("expected schema error")
+			}
+		})
 	}
 }
 
-func schemaFailureProtocols(protocolErr error) []func(sqlmock.Sqlmock) {
-	return []func(sqlmock.Sqlmock){
-		func(mock sqlmock.Sqlmock) { mock.ExpectBegin().WillReturnError(protocolErr) },
-		func(mock sqlmock.Sqlmock) {
+type namedSQLMockSetup struct {
+	name      string
+	configure func(sqlmock.Sqlmock)
+}
+
+func assertDatabaseAdapterFailure(t *testing.T, configure func(sqlmock.Sqlmock)) {
+	t.Helper()
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create fake: %v", err)
+	}
+	configure(mock)
+	if err := NewDatabaseStore(database).PublishMemberState(context.Background(), testMemberID, fixedTime(), nil); err == nil {
+		t.Fatal("expected adapter error")
+	}
+}
+
+func assertDatabaseQueryFailure(t *testing.T, rows *sqlmock.Rows, protocolErr error) {
+	t.Helper()
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create fake: %v", err)
+	}
+	mock.ExpectBegin()
+	query := mock.ExpectQuery(regexp.QuoteMeta(processingByMemberSQL))
+	if rows == nil {
+		query.WillReturnError(protocolErr)
+	} else {
+		query.WillReturnRows(rows)
+	}
+	mock.ExpectRollback()
+	if _, err := NewDatabaseStore(database).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
+		t.Fatal("expected query error")
+	}
+}
+
+func assertSQLiteSchemaValidationFailure(t *testing.T, configure func(sqlmock.Sqlmock)) {
+	t.Helper()
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create fake: %v", err)
+	}
+	configure(mock)
+	if _, err := validateSQLiteSchema(context.Background(), database); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func schemaFailureProtocols(protocolErr error) []namedSQLMockSetup {
+	return []namedSQLMockSetup{
+		{name: "begin", configure: func(mock sqlmock.Sqlmock) { mock.ExpectBegin().WillReturnError(protocolErr) }},
+		{name: "schema statement", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements()[0])).WillReturnError(protocolErr)
 			mock.ExpectRollback()
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "schema version", configure: func(mock sqlmock.Sqlmock) {
 			expectSchemaStatements(mock)
 			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnError(protocolErr)
 			mock.ExpectRollback()
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "commit", configure: func(mock sqlmock.Sqlmock) {
 			expectSchemaStatements(mock)
 			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
 			mock.ExpectCommit().WillReturnError(protocolErr)
-		},
-		func(mock sqlmock.Sqlmock) {
+		}},
+		{name: "rollback", configure: func(mock sqlmock.Sqlmock) {
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaStatements()[0])).WillReturnError(protocolErr)
 			mock.ExpectRollback().WillReturnError(protocolErr)
-		},
+		}},
 	}
 }
 

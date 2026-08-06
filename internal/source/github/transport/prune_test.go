@@ -83,18 +83,25 @@ func TestPruneRunnerPoolsReportsConfigurationAndRegistryFailures(t *testing.T) {
 		ID: 2, Name: "stale", Labels: []upstream.Label{{Name: "stale", Type: "System"}},
 		RunnerGroupID: 17, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
 	}
-	tests := []*Client{
-		nil,
-		{},
-		{registry: &registryAPIFake{listErr: expectedErr}},
-		{registry: &registryAPIFake{scaleSets: []upstream.RunnerScaleSet{owned}, deleteErr: expectedErr}},
+	tests := []struct {
+		name   string
+		client *Client
+	}{
+		{name: "nil client", client: nil},
+		{name: "missing registry", client: &Client{}},
+		{name: "list failure", client: &Client{registry: &registryAPIFake{listErr: expectedErr}}},
+		{name: "delete failure", client: &Client{registry: &registryAPIFake{
+			scaleSets: []upstream.RunnerScaleSet{owned}, deleteErr: expectedErr,
+		}}},
 	}
-	for index, client := range tests {
-		if _, err := client.PruneRunnerPools(context.Background(), 17, nil, []OwnedRunnerPool{
-			{ID: 2, Name: "stale", RunnerGroupID: 17},
-		}); err == nil {
-			t.Fatalf("case %d succeeded", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := testCase.client.PruneRunnerPools(context.Background(), 17, nil, []OwnedRunnerPool{
+				{ID: 2, Name: "stale", RunnerGroupID: 17},
+			}); err == nil {
+				t.Fatal("prune succeeded")
+			}
+		})
 	}
 }
 

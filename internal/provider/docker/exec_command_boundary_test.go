@@ -103,7 +103,7 @@ func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
 	}
 }
 
-func TestNewExecCommandRunnerProvidesProductionDependencies(t *testing.T) {
+func TestNewExecCommandRunnerInitializesCommandBoundaries(t *testing.T) {
 	runner := NewExecCommandRunner()
 	if runner.newCommand == nil || runner.combinedOutput == nil || runner.inheritedEnvironment == nil {
 		t.Fatal("production command dependencies are incomplete")

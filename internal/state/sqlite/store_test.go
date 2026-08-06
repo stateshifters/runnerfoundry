@@ -43,26 +43,32 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 func TestTakeOldestRollsBackEveryPartialMove(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	for failureCall := 1; failureCall <= 2; failureCall++ {
-		failureCall := failureCall
-		executeCalls, rollbacks := 0, 0
-		transaction := Transaction{
-			queryRow: func(context.Context, string, ...any) Row { return rowFromValues(queuedJobValues()) },
-			execute: func(context.Context, string, ...any) (Result, error) {
-				executeCalls++
-				if executeCalls == failureCall {
-					return Result{}, protocolErr
-				}
-				return successfulResult(), nil
-			},
-			commit:   successfulCompletion,
-			rollback: func(context.Context) error { rollbacks++; return nil },
-		}
-		_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
-		if err == nil || rollbacks != 1 {
-			t.Fatalf("failure %d: err=%v rollbacks=%d", failureCall, err, rollbacks)
-		}
+	for name, failureCall := range map[string]int{"processing insertion": 1, "queue removal": 2} {
+		t.Run(name, func(t *testing.T) {
+			assertPartialClaimRollback(t, failureCall, protocolErr)
+		})
+	}
+}
+
+func assertPartialClaimRollback(t *testing.T, failureCall int, protocolErr error) {
+	t.Helper()
+	executeCalls, rollbacks := 0, 0
+	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(queuedJobValues()) },
+		execute: func(context.Context, string, ...any) (Result, error) {
+			executeCalls++
+			if executeCalls == failureCall {
+				return Result{}, protocolErr
+			}
+			return successfulResult(), nil
+		},
+		commit:   successfulCompletion,
+		rollback: func(context.Context) error { rollbacks++; return nil },
+	}
+	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
+	if err == nil || rollbacks != 1 {
+		t.Fatalf("err=%v rollbacks=%d", err, rollbacks)
 	}
 }
 

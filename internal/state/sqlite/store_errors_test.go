@@ -13,21 +13,23 @@ func TestEnqueueProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	transactions := []Transaction{
-		{execute: failingExecute(protocolErr), rollback: successfulCompletion},
-		{execute: func(context.Context, string, ...any) (Result, error) {
+	tests := []namedTransaction{
+		{name: "insert", transaction: Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion}},
+		{name: "insert result", transaction: Transaction{execute: func(context.Context, string, ...any) (Result, error) {
 			return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
-		}, rollback: successfulCompletion},
-		{execute: successfulExecute, queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion},
-		{execute: successfulExecute, queryRow: constantRow(rowFromValues(queuedJobValues())), commit: failingCompletion(protocolErr), rollback: successfulCompletion},
+		}, rollback: successfulCompletion}},
+		{name: "outcome scan", transaction: Transaction{execute: successfulExecute, queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }}), rollback: successfulCompletion}},
+		{name: "commit", transaction: Transaction{execute: successfulExecute, queryRow: constantRow(rowFromValues(queuedJobValues())), commit: failingCompletion(protocolErr), rollback: successfulCompletion}},
 	}
 	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).Queue(context.Background(), request); err == nil {
 		t.Fatal("expected begin failure")
 	}
-	for index, transaction := range transactions {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Queue(context.Background(), request); err == nil {
-			t.Fatalf("case %d: expected enqueue failure", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).Queue(context.Background(), request); err == nil {
+				t.Fatal("expected enqueue failure")
+			}
+		})
 	}
 }
 
@@ -76,21 +78,23 @@ func TestTakeOldestProtocolFailures(t *testing.T) {
 func TestTerminalizeSourceProtocolFailures(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	assertTransactionalMutationFailures(t, 2,
+	assertTransactionalMutationFailures(t, []string{"tombstone source", "remove queued job"},
 		func(store *Store) error { return store.TerminalizeSource(context.Background(), source) })
 }
 
-func assertTransactionalMutationFailures(t *testing.T, executeCalls int, operation func(*Store) error) {
+func assertTransactionalMutationFailures(t *testing.T, steps []string, operation func(*Store) error) {
 	t.Helper()
 	protocolErr := errors.New("protocol")
 	if err := operation(NewStore(Executor{begin: failingBegin(protocolErr)})); err == nil {
 		t.Fatal("expected mutation begin failure")
 	}
-	for failureCall := 1; failureCall <= executeCalls; failureCall++ {
-		transaction := transactionFailingExecute(failureCall, protocolErr)
-		if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
-			t.Fatalf("execute %d: expected mutation failure", failureCall)
-		}
+	for index, name := range steps {
+		t.Run(name, func(t *testing.T) {
+			transaction := transactionFailingExecute(index+1, protocolErr)
+			if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
+				t.Fatal("expected mutation failure")
+			}
+		})
 	}
 	transaction := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
 	if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
@@ -104,10 +108,12 @@ func TestProcessingLookupProtocolFailures(t *testing.T) {
 	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
 		t.Fatal("expected processing begin failure")
 	}
-	for index, transaction := range failingListTransactions(protocolErr) {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
-			t.Fatalf("case %d: expected processing failure", index)
-		}
+	for _, testCase := range namedFailingListTransactions(protocolErr) {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).ProcessingByMember(context.Background(), testMemberID, "linux"); err == nil {
+				t.Fatal("expected processing failure")
+			}
+		})
 	}
 }
 

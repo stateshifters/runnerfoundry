@@ -11,23 +11,7 @@ import (
 func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	cases := []struct {
-		name     string
-		executor Executor
-	}{
-		{name: "begin", executor: Executor{begin: func(context.Context) (Transaction, error) {
-			return Transaction{}, protocolErr
-		}}},
-		{name: "heartbeat execute", executor: Executor{begin: transactionBeginning(Transaction{
-			execute: failingExecute(protocolErr), rollback: successfulCompletion,
-		})}},
-		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{
-			execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion,
-		})}},
-		{name: "rollback", executor: Executor{begin: transactionBeginning(Transaction{
-			execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr),
-		})}},
-	}
+	cases := transactionFailureExecutors(protocolErr, "heartbeat execute")
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			store := NewStore(testCase.executor)
@@ -42,18 +26,13 @@ func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
 func TestRegistrationMutationReportsEachProtocolFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	executors := []Executor{
-		{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }},
-		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})},
-		{begin: transactionBeginning(Transaction{execute: successfulExecute,
-			commit: failingCompletion(protocolErr), rollback: successfulCompletion})},
-		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr),
-			rollback: failingCompletion(protocolErr)})},
-	}
-	for index, executor := range executors {
-		if err := NewStore(executor).DeleteRegistration(context.Background(), "repo", "linux"); err == nil {
-			t.Fatalf("case %d: expected registration mutation error", index)
-		}
+	tests := transactionFailureExecutors(protocolErr, "mutation")
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := NewStore(testCase.executor).DeleteRegistration(context.Background(), "repo", "linux"); err == nil {
+				t.Fatal("expected registration mutation error")
+			}
+		})
 	}
 }
 
@@ -61,13 +40,15 @@ func TestPublishMemberStateReportsCapacityReplacementFailures(t *testing.T) {
 	t.Parallel()
 
 	protocolErr := errors.New("protocol")
-	for failureCall := 2; failureCall <= 3; failureCall++ {
-		store := NewStore(Executor{begin: transactionBeginning(transactionFailingExecute(failureCall, protocolErr))})
-		err := store.PublishMemberState(context.Background(), testMemberIDA, fixedTime(),
-			[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}})
-		if !errors.Is(err, protocolErr) {
-			t.Fatalf("execute %d error = %v, want protocol error", failureCall, err)
-		}
+	for name, failureCall := range map[string]int{"capacity withdrawal": 2, "capacity publication": 3} {
+		t.Run(name, func(t *testing.T) {
+			store := NewStore(Executor{begin: transactionBeginning(transactionFailingExecute(failureCall, protocolErr))})
+			err := store.PublishMemberState(context.Background(), testMemberIDA, fixedTime(),
+				[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}})
+			if !errors.Is(err, protocolErr) {
+				t.Fatalf("error = %v, want protocol error", err)
+			}
+		})
 	}
 }
 
@@ -125,10 +106,12 @@ func TestJobAndRegistrationListsReportProtocolFailures(t *testing.T) {
 func assertTransactionalListFailures(t *testing.T, operation func(*Store) error) {
 	t.Helper()
 	protocolErr := errors.New("protocol")
-	for index, transaction := range failingListTransactions(protocolErr) {
-		if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
-			t.Fatalf("case %d: expected list error", index)
-		}
+	for _, testCase := range namedFailingListTransactions(protocolErr) {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := operation(NewStore(Executor{begin: transactionBeginning(testCase.transaction)})); err == nil {
+				t.Fatal("expected list error")
+			}
+		})
 	}
 	if err := operation(NewStore(Executor{begin: func(context.Context) (Transaction, error) {
 		return Transaction{}, protocolErr
@@ -152,6 +135,41 @@ func failingListTransactions(protocolErr error) []Transaction {
 		{query: func(context.Context, string, ...any) (Rows, error) { return rowsFromValues(nil), nil },
 			commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	}
+}
+
+type namedTransaction struct {
+	name        string
+	transaction Transaction
+}
+
+type namedExecutor struct {
+	name     string
+	executor Executor
+}
+
+func transactionFailureExecutors(protocolErr error, executeName string) []namedExecutor {
+	return []namedExecutor{
+		{name: "begin", executor: Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }}},
+		{name: executeName, executor: Executor{begin: transactionBeginning(Transaction{
+			execute: failingExecute(protocolErr), rollback: successfulCompletion,
+		})}},
+		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{
+			execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion,
+		})}},
+		{name: "rollback", executor: Executor{begin: transactionBeginning(Transaction{
+			execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr),
+		})}},
+	}
+}
+
+func namedFailingListTransactions(protocolErr error) []namedTransaction {
+	names := []string{"query", "row scan", "iteration", "close", "commit"}
+	transactions := failingListTransactions(protocolErr)
+	result := make([]namedTransaction, len(transactions))
+	for index := range transactions {
+		result[index] = namedTransaction{name: names[index], transaction: transactions[index]}
+	}
+	return result
 }
 
 func transactionBeginning(transaction Transaction) func(context.Context) (Transaction, error) {

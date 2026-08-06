@@ -13,18 +13,20 @@ func TestEnqueueReportsTransactionalFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	tests := []Transaction{
-		transactionFailingAtExecute(1, protocolErr),
-		transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil),
-		transactionWithRows([]Row{{scan: func(...any) error { return sql.ErrNoRows }},
-			{scan: func(...any) error { return protocolErr }}}, nil),
-		transactionWithRows([]Row{rowFromValues(queuedJobValues(testJobID1, request))}, protocolErr),
+	tests := []namedTransaction{
+		{name: "insert", transaction: transactionFailingAtExecute(1, protocolErr)},
+		{name: "existing job scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil)},
+		{name: "outcome scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return sql.ErrNoRows }},
+			{scan: func(...any) error { return protocolErr }}}, nil)},
+		{name: "commit", transaction: transactionWithRows([]Row{rowFromValues(queuedJobValues(testJobID1, request))}, protocolErr)},
 	}
-	for index, transaction := range tests {
-		store := NewStore(Executor{begin: transactionBeginning(transaction)})
-		if _, err := store.Queue(context.Background(), request); err == nil {
-			t.Fatalf("case %d: expected enqueue error", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := NewStore(Executor{begin: transactionBeginning(testCase.transaction)})
+			if _, err := store.Queue(context.Background(), request); err == nil {
+				t.Fatal("expected enqueue error")
+			}
+		})
 	}
 }
 
@@ -33,20 +35,22 @@ func TestTakeOldestReportsTransactionalFailures(t *testing.T) {
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
 	candidate := rowFromValues(queuedJobValues(testJobID1, request))
-	tests := []Transaction{
-		transactionFailingAtExecute(1, protocolErr),
-		transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil),
-		transactionWithRows([]Row{{scan: func(...any) error { return sql.ErrNoRows }}}, protocolErr),
-		transactionFailingAtExecuteWithRows(2, protocolErr, candidate),
-		transactionWithRows([]Row{candidate, {scan: func(...any) error { return protocolErr }}}, nil),
-		transactionFailingAtExecuteWithRows(3, protocolErr, candidate, candidate),
-		transactionWithRows([]Row{candidate, candidate}, protocolErr),
+	tests := []namedTransaction{
+		{name: "source lock", transaction: transactionFailingAtExecute(1, protocolErr)},
+		{name: "candidate scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil)},
+		{name: "empty commit", transaction: transactionWithRows([]Row{{scan: func(...any) error { return sql.ErrNoRows }}}, protocolErr)},
+		{name: "processing insertion", transaction: transactionFailingAtExecuteWithRows(2, protocolErr, candidate)},
+		{name: "locked candidate scan", transaction: transactionWithRows([]Row{candidate, {scan: func(...any) error { return protocolErr }}}, nil)},
+		{name: "queue removal", transaction: transactionFailingAtExecuteWithRows(3, protocolErr, candidate, candidate)},
+		{name: "commit", transaction: transactionWithRows([]Row{candidate, candidate}, protocolErr)},
 	}
-	for index, transaction := range tests {
-		store := NewStore(Executor{begin: transactionBeginning(transaction)})
-		if _, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA}); err == nil {
-			t.Fatalf("case %d: expected pickup error", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := NewStore(Executor{begin: transactionBeginning(testCase.transaction)})
+			if _, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA}); err == nil {
+				t.Fatal("expected pickup error")
+			}
+		})
 	}
 }
 
@@ -75,18 +79,20 @@ func TestTakeOldestHandlesCandidateCancelledWhileWaitingForSourceLock(t *testing
 func TestTerminalizeSourceReportsTransactionalFailures(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	assertTransactionalMutationFailures(t, 3,
+	assertTransactionalMutationFailures(t, []string{"serialize source", "tombstone source", "remove queued job"},
 		func(store *Store) error { return store.TerminalizeSource(context.Background(), source) })
 }
 
-func assertTransactionalMutationFailures(t *testing.T, executeCalls int, operation func(*Store) error) {
+func assertTransactionalMutationFailures(t *testing.T, steps []string, operation func(*Store) error) {
 	t.Helper()
 	protocolErr := errors.New("protocol")
-	for failureCall := 1; failureCall <= executeCalls; failureCall++ {
-		store := NewStore(Executor{begin: transactionBeginning(transactionFailingAtExecute(failureCall, protocolErr))})
-		if err := operation(store); err == nil {
-			t.Fatalf("execute %d: expected mutation failure", failureCall)
-		}
+	for index, name := range steps {
+		t.Run(name, func(t *testing.T) {
+			store := NewStore(Executor{begin: transactionBeginning(transactionFailingAtExecute(index+1, protocolErr))})
+			if err := operation(store); err == nil {
+				t.Fatal("expected mutation failure")
+			}
+		})
 	}
 	transaction := Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}
 	if err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {

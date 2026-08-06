@@ -25,15 +25,20 @@ func TestRegistrationMutationsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	registration := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux"}
-	for index, executor := range []Executor{
-		{begin: failingBegin(protocolErr)},
-		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})},
-		{begin: transactionBeginning(Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion})},
-		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr)})},
+	for _, testCase := range []struct {
+		name     string
+		executor Executor
+	}{
+		{name: "begin", executor: Executor{begin: failingBegin(protocolErr)}},
+		{name: "mutation", executor: Executor{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})}},
+		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion})}},
+		{name: "rollback", executor: Executor{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr)})}},
 	} {
-		if err := NewStore(executor).UpsertRegistration(context.Background(), registration); err == nil {
-			t.Fatalf("mutation case %d", index)
-		}
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := NewStore(testCase.executor).UpsertRegistration(context.Background(), registration); err == nil {
+				t.Fatal("mutation succeeded")
+			}
+		})
 	}
 }
 
@@ -43,9 +48,11 @@ func TestRegistrationListReportsProtocolFailures(t *testing.T) {
 	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).Registrations(context.Background()); err == nil {
 		t.Fatal("expected begin failure")
 	}
-	for index, transaction := range failingListTransactions(protocolErr) {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Registrations(context.Background()); err == nil {
-			t.Fatalf("list case %d", index)
-		}
+	for _, testCase := range namedFailingListTransactions(protocolErr) {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).Registrations(context.Background()); err == nil {
+				t.Fatal("list succeeded")
+			}
+		})
 	}
 }

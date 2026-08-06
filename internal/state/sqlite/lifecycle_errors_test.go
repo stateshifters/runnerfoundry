@@ -12,7 +12,7 @@ import (
 func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	assertTransactionalMutationFailures(t, 3,
+	assertTransactionalMutationFailures(t, []string{"mark processing started", "tombstone delayed start", "remove queued retry"},
 		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), source) })
 }
 
@@ -35,17 +35,19 @@ func TestRetryUnstartedProcessingReportsInsertFailures(t *testing.T) {
 		RetryUnstarted(context.Background(), testJobID); err == nil {
 		t.Fatal("expected processing retry begin failure")
 	}
-	transactions := []Transaction{
-		{queryRow: constantRow(rowFromValues(unstartedProcessingValues())), execute: failingExecute(protocolErr), rollback: successfulCompletion},
-		{execute: func(context.Context, string, ...any) (Result, error) {
+	tests := []namedTransaction{
+		{name: "queue insertion", transaction: Transaction{queryRow: constantRow(rowFromValues(unstartedProcessingValues())), execute: failingExecute(protocolErr), rollback: successfulCompletion}},
+		{name: "insertion result", transaction: Transaction{execute: func(context.Context, string, ...any) (Result, error) {
 			return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
-		}, queryRow: constantRow(rowFromValues(unstartedProcessingValues())), rollback: successfulCompletion},
+		}, queryRow: constantRow(rowFromValues(unstartedProcessingValues())), rollback: successfulCompletion}},
 	}
-	for index, transaction := range transactions {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RetryUnstarted(context.Background(), testJobID); err == nil {
-			t.Fatalf("case %d: expected retry insertion failure", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
+				RetryUnstarted(context.Background(), testJobID); err == nil {
+				t.Fatal("expected retry insertion failure")
+			}
+		})
 	}
 }
 
@@ -113,16 +115,21 @@ func TestRetryUnstartedProcessingReportsCommitFailures(t *testing.T) {
 func TestRemoveTerminalProcessingReportsMutationFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	executors := []Executor{
-		{begin: failingBegin(protocolErr)},
-		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})},
-		{begin: transactionBeginning(Transaction{execute: successfulExecute,
-			commit: failingCompletion(protocolErr), rollback: successfulCompletion})},
+	tests := []struct {
+		name     string
+		executor Executor
+	}{
+		{name: "begin", executor: Executor{begin: failingBegin(protocolErr)}},
+		{name: "removal", executor: Executor{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})}},
+		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{execute: successfulExecute,
+			commit: failingCompletion(protocolErr), rollback: successfulCompletion})}},
 	}
-	for index, executor := range executors {
-		if _, err := NewStore(executor).RemoveTerminal(context.Background(), testJobID); err == nil {
-			t.Fatalf("case %d: expected terminal removal failure", index)
-		}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(testCase.executor).RemoveTerminal(context.Background(), testJobID); err == nil {
+				t.Fatal("expected terminal removal failure")
+			}
+		})
 	}
 }
 

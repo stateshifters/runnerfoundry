@@ -37,8 +37,10 @@ func TestClaimOldestReportsEveryTransactionFailure(t *testing.T) {
 		t.Fatal("claim begin failure was ignored")
 	}
 	request := recoveryRequest()
-	for failureCall := 1; failureCall <= 3; failureCall++ {
-		assertClaimExecuteFailure(t, request, failureCall, protocolErr)
+	for name, failureCall := range map[string]int{"source lock": 1, "processing insertion": 2, "queue removal": 3} {
+		t.Run(name, func(t *testing.T) {
+			assertClaimExecuteFailure(t, request, failureCall, protocolErr)
+		})
 	}
 	protocol := &recordedTransaction{rows: []Row{{scan: func(...any) error { return protocolErr }}}}
 	if _, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err == nil {
@@ -60,11 +62,13 @@ func TestProcessingByPoolReportsEveryTransactionFailure(t *testing.T) {
 		ProcessingByPool(context.Background(), "linux"); err == nil {
 		t.Fatal("pool lookup begin failure was ignored")
 	}
-	for index, transaction := range failingListTransactions(protocolErr) {
-		if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			ProcessingByPool(context.Background(), "linux"); err == nil {
-			t.Fatalf("pool lookup failure %d was ignored", index)
-		}
+	for _, testCase := range namedFailingListTransactions(protocolErr) {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
+				ProcessingByPool(context.Background(), "linux"); err == nil {
+				t.Fatal("pool lookup failure was ignored")
+			}
+		})
 	}
 }
 
@@ -109,7 +113,7 @@ func assertClaimExecuteFailure(t *testing.T, request core.JobRequest, failureCal
 	}
 	if _, err := NewStore(Executor{begin: transactionBeginning(base)}).
 		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err == nil {
-		t.Fatalf("claim execute failure %d was ignored", failureCall)
+		t.Fatal("claim execute failure was ignored")
 	}
 }
 

@@ -73,3 +73,18 @@ func failingListTransactions(protocolErr error) []Transaction {
 			commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	}
 }
+
+type namedTransaction struct {
+	name        string
+	transaction Transaction
+}
+
+func namedFailingListTransactions(protocolErr error) []namedTransaction {
+	names := []string{"query", "row scan", "iteration", "close", "commit"}
+	transactions := failingListTransactions(protocolErr)
+	result := make([]namedTransaction, len(transactions))
+	for index := range transactions {
+		result[index] = namedTransaction{name: names[index], transaction: transactions[index]}
+	}
+	return result
+}

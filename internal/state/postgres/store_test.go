@@ -119,35 +119,42 @@ func TestStoreOperationsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	for index, operation := range protocolFailureOperations(request) {
-		store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }})
-		if err := operation(store); err == nil {
-			t.Fatalf("operation %d: expected begin error", index)
-		}
+	for _, testCase := range protocolFailureOperations(request) {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := NewStore(Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }})
+			if err := testCase.operation(store); err == nil {
+				t.Fatal("expected begin error")
+			}
+		})
 	}
 }
 
-func protocolFailureOperations(request core.JobRequest) []func(*Store) error {
-	return []func(*Store) error{
-		func(store *Store) error { _, err := store.Queue(context.Background(), request); return err },
-		func(store *Store) error {
+type namedStoreOperation struct {
+	name      string
+	operation func(*Store) error
+}
+
+func protocolFailureOperations(request core.JobRequest) []namedStoreOperation {
+	return []namedStoreOperation{
+		{name: "queue", operation: func(store *Store) error { _, err := store.Queue(context.Background(), request); return err }},
+		{name: "claim", operation: func(store *Store) error {
 			_, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
 			return err
-		},
-		func(store *Store) error { return store.TerminalizeSource(context.Background(), request.Source) },
-		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), request.Source) },
-		func(store *Store) error {
+		}},
+		{name: "terminalize source", operation: func(store *Store) error { return store.TerminalizeSource(context.Background(), request.Source) }},
+		{name: "mark runner started", operation: func(store *Store) error { return store.MarkRunnerStarted(context.Background(), request.Source) }},
+		{name: "processing list", operation: func(store *Store) error {
 			_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
 			return err
-		},
-		func(store *Store) error {
+		}},
+		{name: "retry", operation: func(store *Store) error {
 			_, err := store.RetryUnstarted(context.Background(), testJobID1)
 			return err
-		},
-		func(store *Store) error {
+		}},
+		{name: "remove terminal", operation: func(store *Store) error {
 			_, err := store.RemoveTerminal(context.Background(), testJobID1)
 			return err
-		},
+		}},
 	}
 }
 
