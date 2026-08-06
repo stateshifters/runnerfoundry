@@ -18,11 +18,11 @@ const (
 )
 
 type Config struct {
-	GitHub    GitHubConfig     `yaml:"github"`
-	Log       LogConfig        `yaml:"log"`
-	State     StateConfig      `yaml:"state"`
-	Prune     bool             `yaml:"prune"`
-	ScaleSets []ScaleSetConfig `yaml:"scale_sets"`
+	GitHub      GitHubConfig       `yaml:"github"`
+	Log         LogConfig          `yaml:"log"`
+	State       StateConfig        `yaml:"state"`
+	Prune       bool               `yaml:"prune"`
+	RunnerPools []RunnerPoolConfig `yaml:"scale_sets"`
 }
 
 type StateConfig struct {
@@ -63,7 +63,7 @@ type LogFileConfig struct {
 	MaxBackups *int   `yaml:"max_backups"`
 }
 
-type ScaleSetConfig struct {
+type RunnerPoolConfig struct {
 	Name        string         `yaml:"name"`
 	RunnerGroup string         `yaml:"runner_group"`
 	MaxRunners  int            `yaml:"max_runners"`
@@ -85,7 +85,7 @@ type LibvirtConfig struct {
 //
 // The returned Config has defaults applied for logging, discovery, and runner
 // groups. GitHub App secrets are checked when AppCredentials reads the key so
-// reload can validate a replacement before stopping active scale sets.
+// reload can validate a replacement before stopping active Runner Pools.
 func Load(reader io.Reader) (Config, error) {
 	var loadedConfig Config
 	decoder := yaml.NewDecoder(reader)

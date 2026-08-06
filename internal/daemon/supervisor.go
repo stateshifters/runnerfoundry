@@ -21,21 +21,21 @@ type generation interface {
 type generationBuilder func(context.Context, config.Config) (generation, error)
 
 func affectedRunnerPools(active config.Config, replacement config.Config) ([]core.RunnerPool, error) {
-	replacementProviders := make(map[core.RunnerPool]config.ProviderKind, len(replacement.ScaleSets))
-	for _, scaleSet := range replacement.ScaleSets {
-		kind, err := scaleSet.ProviderKind()
+	replacementProviders := make(map[core.RunnerPool]config.ProviderKind, len(replacement.RunnerPools))
+	for _, runnerPoolConfig := range replacement.RunnerPools {
+		kind, err := runnerPoolConfig.ProviderKind()
 		if err != nil {
-			return nil, fmt.Errorf("derive replacement provider kind for Runner Pool %q: %w", scaleSet.Name, err)
+			return nil, fmt.Errorf("derive replacement provider kind for Runner Pool %q: %w", runnerPoolConfig.Name, err)
 		}
-		replacementProviders[core.RunnerPool(scaleSet.Name)] = kind
+		replacementProviders[core.RunnerPool(runnerPoolConfig.Name)] = kind
 	}
 	affected := make([]core.RunnerPool, 0)
-	for _, scaleSet := range active.ScaleSets {
-		runnerPool := core.RunnerPool(scaleSet.Name)
+	for _, runnerPoolConfig := range active.RunnerPools {
+		runnerPool := core.RunnerPool(runnerPoolConfig.Name)
 		replacementProvider, exists := replacementProviders[runnerPool]
-		activeProvider, err := scaleSet.ProviderKind()
+		activeProvider, err := runnerPoolConfig.ProviderKind()
 		if err != nil {
-			return nil, fmt.Errorf("derive active provider kind for Runner Pool %q: %w", scaleSet.Name, err)
+			return nil, fmt.Errorf("derive active provider kind for Runner Pool %q: %w", runnerPoolConfig.Name, err)
 		}
 		if !exists || replacementProvider != activeProvider {
 			affected = append(affected, runnerPool)
@@ -250,9 +250,9 @@ func terminateFinalizers(ctx context.Context, finalizers []runtimeFinalizer) ([]
 }
 
 func configuredRunnerPools(configured config.Config) []core.RunnerPool {
-	runnerPools := make([]core.RunnerPool, 0, len(configured.ScaleSets))
-	for _, scaleSet := range configured.ScaleSets {
-		runnerPools = append(runnerPools, core.RunnerPool(scaleSet.Name))
+	runnerPools := make([]core.RunnerPool, 0, len(configured.RunnerPools))
+	for _, runnerPoolConfig := range configured.RunnerPools {
+		runnerPools = append(runnerPools, core.RunnerPool(runnerPoolConfig.Name))
 	}
 	return runnerPools
 }

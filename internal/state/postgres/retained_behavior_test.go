@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
@@ -48,7 +48,7 @@ func TestAvailableCapacity(t *testing.T) {
 
 func TestRegistrationBehavior(t *testing.T) {
 	t.Parallel()
-	registration := statecontract.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+	registration := githubsource.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
 	values := []any{registration.RepositoryURL, string(registration.RunnerPool), int64(1), int64(2), int64(3)}
 	transaction := Transaction{execute: successfulExecute,

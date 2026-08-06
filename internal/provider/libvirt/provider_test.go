@@ -14,9 +14,9 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	provider.Config.ConnectionURI = "qemu:///system"
 
 	err := provider.Start(context.Background(), StartRequest{
-		ScaleSetName: "vm-set",
-		RunnerName:   "vm-set-1",
-		JITConfig:    "secret",
+		RunnerPoolName: "vm-set",
+		RunnerName:     "vm-set-1",
+		JITConfig:      "secret",
 	})
 	if err != nil {
 		t.Fatalf("expected start success, got %v", err)
@@ -30,7 +30,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	if commandRunner.commands[0].Stdin == "" {
 		t.Fatal("expected rendered domain XML on stdin")
 	}
-	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:scale-set", "vm-set", "runnerfoundry.jit=secret"}) {
+	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:runner-pool", "vm-set", "runnerfoundry.jit=secret"}) {
 		t.Fatalf("expected rendered scaler metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
 	}
 	if containsAll(commandRunner.commands[0].Stdin, []string{"runnerfoundry.jit-env"}) {
@@ -38,7 +38,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	}
 }
 
-func TestListRebuildsOwnedDomainState(t *testing.T) {
+func TestListRecognizesLegacyScaleSetMetadata(t *testing.T) {
 	instances, _ := listOwnedDomainFixture(t)
 	expected := []RunnerInstance{
 		{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning},
@@ -46,6 +46,29 @@ func TestListRebuildsOwnedDomainState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(instances, expected) {
 		t.Fatalf("unexpected instances\nwant %#v\ngot  %#v", expected, instances)
+	}
+}
+
+func TestListRecognizesRunnerPoolMetadata(t *testing.T) {
+	commandRunner := &recordingCommandRunner{outputs: []string{
+		"runner-1\n",
+		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:runner-pool>linux</runnerfoundry:runner-pool><runnerfoundry:name>runner-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+		"running\n",
+	}}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []RunnerInstance{{
+		ID:             "runner-1",
+		RunnerName:     "runner-1",
+		RunnerPoolName: "linux",
+		State:          RunnerStateRunning,
+	}}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("List() instances = %#v, want %#v", instances, want)
 	}
 }
 
@@ -141,10 +164,10 @@ func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 	want := []RunnerInstance{{
-		ID:           "owned",
-		RunnerName:   "owned",
-		ScaleSetName: "vm-set",
-		State:        RunnerStateRunning,
+		ID:             "owned",
+		RunnerName:     "owned",
+		RunnerPoolName: "vm-set",
+		State:          RunnerStateRunning,
 	}}
 	if !reflect.DeepEqual(instances, want) {
 		t.Fatalf("List() instances = %#v, want %#v", instances, want)

@@ -24,9 +24,9 @@ func TestDockerComposeStartTranslatesSourceNeutralRequest(t *testing.T) {
 		t.Fatalf("start Docker Compose runner: %v", err)
 	}
 	expected := providerdocker.StartRequest{
-		ScaleSetName: "linux",
-		RunnerName:   "linux-1",
-		JITConfig:    "opaque-bootstrap",
+		RunnerPoolName: "linux",
+		RunnerName:     "linux-1",
+		JITConfig:      "opaque-bootstrap",
 	}
 	if transport.startRequest != expected {
 		t.Fatalf("start request = %#v, want %#v", transport.startRequest, expected)

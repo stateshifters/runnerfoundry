@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 const upsertRegistrationSQL = `INSERT INTO public.runnerfoundry_github_registrations
@@ -21,16 +21,16 @@ const registrationsSQL = `SELECT repository_url, runner_pool, installation_id, r
 const deleteRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations WHERE repository_url = $1 AND runner_pool = $2`
 const deleteAllRegistrationsSQL = `DELETE FROM public.runnerfoundry_github_registrations`
 
-var _ statecontract.RegistrationStore = (*Store)(nil)
+var _ githubsource.RegistrationRepository = (*Store)(nil)
 
-func (store *Store) UpsertRegistration(ctx context.Context, registration statecontract.Registration) error {
+func (store *Store) UpsertRegistration(ctx context.Context, registration githubsource.Registration) error {
 	return store.executeTransaction(ctx, "upsert registration", upsertRegistrationSQL, registration.RepositoryURL,
 		string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID)
 }
 
 func (store *Store) ReplaceRegistrations(
 	ctx context.Context,
-	registrations []statecontract.Registration,
+	registrations []githubsource.Registration,
 ) (resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
@@ -59,18 +59,18 @@ func (store *Store) Registration(
 	ctx context.Context,
 	repositoryURL string,
 	runnerPool core.RunnerPool,
-) (statecontract.Registration, bool, error) {
+) (githubsource.Registration, bool, error) {
 	registration, err := scanRegistration(store.executor.QueryRow(ctx, registrationSQL, repositoryURL, string(runnerPool)))
 	if errors.Is(err, sql.ErrNoRows) {
-		return statecontract.Registration{}, false, nil
+		return githubsource.Registration{}, false, nil
 	}
 	if err != nil {
-		return statecontract.Registration{}, false, fmt.Errorf("lookup registration: %w", err)
+		return githubsource.Registration{}, false, fmt.Errorf("lookup registration: %w", err)
 	}
 	return registration, true, nil
 }
 
-func (store *Store) Registrations(ctx context.Context) (_ []statecontract.Registration, resultErr error) {
+func (store *Store) Registrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin registrations lookup: %w", err)
@@ -96,18 +96,18 @@ func (store *Store) DeleteRegistration(ctx context.Context, repositoryURL string
 	return store.executeTransaction(ctx, "delete registration", deleteRegistrationSQL, repositoryURL, string(runnerPool))
 }
 
-func scanRegistration(row scanner) (statecontract.Registration, error) {
-	var registration statecontract.Registration
+func scanRegistration(row scanner) (githubsource.Registration, error) {
+	var registration githubsource.Registration
 	var runnerPool string
 	if err := row.Scan(&registration.RepositoryURL, &runnerPool, &registration.InstallationID,
 		&registration.RunnerGroupID, &registration.ScaleSetID); err != nil {
-		return statecontract.Registration{}, fmt.Errorf("scan registration: %w", err)
+		return githubsource.Registration{}, fmt.Errorf("scan registration: %w", err)
 	}
 	registration.RunnerPool = core.RunnerPool(runnerPool)
 	return registration, nil
 }
 
-func scanRegistrations(rows Rows) (registrations []statecontract.Registration, resultErr error) {
+func scanRegistrations(rows Rows) (registrations []githubsource.Registration, resultErr error) {
 	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
 	for rows.Next() {
 		registration, err := scanRegistration(rows)

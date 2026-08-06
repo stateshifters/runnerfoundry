@@ -21,7 +21,7 @@ func TestProductionProviderComposition(t *testing.T) {
 
 func TestProductionProviderCompositionRejectsMissingProvider(t *testing.T) {
 	if _, _, err := buildConfiguredProviders(context.Background(), config.Config{
-		ScaleSets: []config.ScaleSetConfig{{Name: "bad"}},
+		RunnerPools: []config.RunnerPoolConfig{{Name: "bad"}},
 	}, executionDependencies{}); err == nil {
 		t.Fatal("invalid provider composition succeeded")
 	}
@@ -43,7 +43,7 @@ func mixedConfiguredProviders() (
 	execution.AggregateRunnerInventory,
 	error,
 ) {
-	configured := config.Config{ScaleSets: []config.ScaleSetConfig{
+	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{
 		{Name: "docker", Docker: &config.DockerConfig{ComposeFile: "compose.yml", Service: "runner"}},
 		{Name: "libvirt", Libvirt: &config.LibvirtConfig{
 			ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml",
@@ -62,7 +62,7 @@ func mixedConfiguredProviders() (
 }
 
 func TestProductionInventoryContainsOnlyActiveConfigurationEndpoints(t *testing.T) {
-	configured := config.Config{ScaleSets: []config.ScaleSetConfig{{
+	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{{
 		Name: "linux",
 		Libvirt: &config.LibvirtConfig{
 			ConnectionURI: "qemu:///new", DomainXMLTemplate: "domain.xml",

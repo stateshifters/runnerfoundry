@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
@@ -70,7 +70,7 @@ func TestStorePublicRegistrationBehaviors(t *testing.T) {
 	t.Parallel()
 	store := NewStore(successfulBehaviorExecutor())
 	ctx := context.Background()
-	registration := statecontract.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
+	registration := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
 		RunnerGroupID: 2, ScaleSetID: 3}
 	if err := store.UpsertRegistration(ctx, registration); err != nil {
 		t.Fatalf("upsert: %v", err)

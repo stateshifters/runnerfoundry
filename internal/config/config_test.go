@@ -16,9 +16,16 @@ func TestLoadAcceptsGitHubAppSettings(t *testing.T) {
 	}
 }
 
+func TestLoadMapsExternalScaleSetsToRunnerPools(t *testing.T) {
+	loadedConfig := loadValidConfig(t)
+	if len(loadedConfig.RunnerPools) != 1 || loadedConfig.RunnerPools[0].Name != "docker-set" {
+		t.Fatalf("loaded Runner Pools = %#v", loadedConfig.RunnerPools)
+	}
+}
+
 func TestLoadAppliesGitHubDefaults(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
-	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.ScaleSets[0].RunnerGroup != "default" {
+	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.RunnerPools[0].RunnerGroup != "default" {
 		t.Fatalf("loaded defaults = %#v", loadedConfig)
 	}
 }
@@ -286,26 +293,26 @@ func TestAppCredentialsRejectUnreadableOrEmptyPrivateKey(t *testing.T) {
 }
 
 func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
-	scaleSet := ScaleSetConfig{
+	runnerPool := RunnerPoolConfig{
 		Name:        "linux",
 		RunnerGroup: "custom",
 		MaxRunners:  1,
 		Docker:      &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 	}
-	if err := scaleSet.validate(map[string]bool{}); err != nil {
+	if err := runnerPool.validate(map[string]bool{}); err != nil {
 		t.Fatalf("expected scale set to validate, got %v", err)
 	}
-	if scaleSet.RunnerGroup != "custom" {
-		t.Fatalf("expected explicit runner group, got %q", scaleSet.RunnerGroup)
+	if runnerPool.RunnerGroup != "custom" {
+		t.Fatalf("expected explicit runner group, got %q", runnerPool.RunnerGroup)
 	}
 }
 
 func TestScaleSetValidationAcceptsCompleteLibvirtProvider(t *testing.T) {
-	scaleSet := ScaleSetConfig{
+	runnerPool := RunnerPoolConfig{
 		Name: "vm", MaxRunners: 1,
 		Libvirt: &LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"},
 	}
-	if err := scaleSet.validate(map[string]bool{}); err != nil {
+	if err := runnerPool.validate(map[string]bool{}); err != nil {
 		t.Fatalf("expected libvirt scale set, got %v", err)
 	}
 }
@@ -331,8 +338,8 @@ scale_sets:
 ` + validScaleSet("docker-set")
 }
 
-func baseConfig(privateKeyPath string, scaleSets string) string {
-	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + scaleSets
+func baseConfig(privateKeyPath string, runnerPools string) string {
+	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + runnerPools
 }
 
 func validScaleSet(name string) string {

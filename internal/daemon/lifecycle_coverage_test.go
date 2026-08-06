@@ -166,8 +166,8 @@ func TestReplaceActiveGenerationReportsHandoffFailures(t *testing.T) {
 
 func TestAffectedRunnerPoolsReportsInvalidProviderConfigurations(t *testing.T) {
 	t.Parallel()
-	invalid := config.Config{ScaleSets: []config.ScaleSetConfig{{Name: "invalid"}}}
-	valid := config.Config{ScaleSets: []config.ScaleSetConfig{{Name: "docker", Docker: &config.DockerConfig{}}}}
+	invalid := config.Config{RunnerPools: []config.RunnerPoolConfig{{Name: "invalid"}}}
+	valid := config.Config{RunnerPools: []config.RunnerPoolConfig{{Name: "docker", Docker: &config.DockerConfig{}}}}
 	if _, err := affectedRunnerPools(valid, invalid); err == nil {
 		t.Fatal("invalid replacement provider was accepted")
 	}
@@ -287,7 +287,7 @@ func TestBuildProductionProvidersReportsDockerHostnameFailures(t *testing.T) {
 	originalReadHostname := productionReadHostname
 	t.Cleanup(func() { productionReadHostname = originalReadHostname })
 
-	configured := config.Config{ScaleSets: []config.ScaleSetConfig{{
+	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{{
 		Name: "linux",
 		Docker: &config.DockerConfig{
 			ComposeFile: "compose.yml",

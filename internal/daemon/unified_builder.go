@@ -100,12 +100,12 @@ func assembleConfiguredRuntime(
 ) (assembledRuntime, error) {
 	assembled := assembledRuntime{
 		managerConfig: githubsource.ManagerConfig{Prune: configured.Prune},
-		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.ScaleSets)),
-		pools:         make([]RunnerPoolRuntime, 0, len(configured.ScaleSets)),
-		finalizers:    make([]runtimeFinalizer, 0, len(configured.ScaleSets)),
+		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
+		pools:         make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
+		finalizers:    make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
 	}
-	for _, scaleSet := range configured.ScaleSets {
-		if err := assembled.appendScaleSet(scaleSet, dependencies); err != nil {
+	for _, runnerPoolConfig := range configured.RunnerPools {
+		if err := assembled.appendRunnerPool(runnerPoolConfig, dependencies); err != nil {
 			return assembledRuntime{}, err
 		}
 	}
@@ -115,11 +115,11 @@ func assembleConfiguredRuntime(
 	return assembled, nil
 }
 
-func (assembled *assembledRuntime) appendScaleSet(
-	scaleSet config.ScaleSetConfig,
+func (assembled *assembledRuntime) appendRunnerPool(
+	runnerPoolConfig config.RunnerPoolConfig,
 	dependencies unifiedBuilderDependencies,
 ) error {
-	runnerPool := core.RunnerPool(scaleSet.Name)
+	runnerPool := core.RunnerPool(runnerPoolConfig.Name)
 	provider := dependencies.providers[runnerPool]
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
@@ -128,13 +128,13 @@ func (assembled *assembledRuntime) appendScaleSet(
 		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
 	)
 	assembled.localCapacity = append(assembled.localCapacity, core.RunnerPoolCapacity{
-		RunnerPool: runnerPool, Capacity: scaleSet.MaxRunners,
+		RunnerPool: runnerPool, Capacity: runnerPoolConfig.MaxRunners,
 	})
 	assembled.managerConfig.RunnerPools = append(assembled.managerConfig.RunnerPools, githubsource.RunnerPoolConfig{
-		RunnerPool: runnerPool, RunnerGroup: scaleSet.RunnerGroup,
+		RunnerPool: runnerPool, RunnerGroup: runnerPoolConfig.RunnerGroup,
 	})
 	pool := orchestrationPool{
-		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, scaleSet.MaxRunners), orchestrator: orchestrator,
+		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, runnerPoolConfig.MaxRunners), orchestrator: orchestrator,
 		runnerPool: runnerPool,
 	}
 	assembled.pools = append(assembled.pools, RunnerPoolRuntime{

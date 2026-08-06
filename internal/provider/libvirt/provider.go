@@ -22,16 +22,16 @@ const (
 )
 
 type RunnerInstance struct {
-	ID           string
-	RunnerName   string
-	ScaleSetName string
-	State        RunnerState
+	ID             string
+	RunnerName     string
+	RunnerPoolName string
+	State          RunnerState
 }
 
 type StartRequest struct {
-	ScaleSetName string
-	RunnerName   string
-	JITConfig    string
+	RunnerPoolName string
+	RunnerName     string
+	JITConfig      string
 }
 
 type Config struct {
@@ -173,7 +173,7 @@ func (provider Provider) List(ctx context.Context, requestedPools ...string) ([]
 
 func listedInstance(instance RunnerInstance, requestedPools []string) RunnerInstance {
 	if len(requestedPools) != 0 {
-		instance.ScaleSetName = ""
+		instance.RunnerPoolName = ""
 	}
 	return instance
 }
@@ -187,11 +187,11 @@ func (provider Provider) instanceForDomain(
 	if err != nil {
 		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
 	}
-	scaleSetName := metadataValue(domainXML, contract.OwnershipScaleSet)
-	if scaleSetName == "" {
+	runnerPoolName := runnerPoolMetadataValue(domainXML)
+	if runnerPoolName == "" {
 		return RunnerInstance{}, false, nil
 	}
-	if len(requestedPools) != 0 && scaleSetName != requestedPools[0] {
+	if len(requestedPools) != 0 && runnerPoolName != requestedPools[0] {
 		return RunnerInstance{}, false, nil
 	}
 	domainState, err := provider.CommandRunner.ReadDomainState(ctx, provider.Config.ConnectionURI, domainName)
@@ -203,10 +203,10 @@ func (provider Provider) instanceForDomain(
 		runnerName = domainName
 	}
 	return RunnerInstance{
-		ID:           domainName,
-		RunnerName:   runnerName,
-		ScaleSetName: scaleSetName,
-		State:        libvirtState(domainState),
+		ID:             domainName,
+		RunnerName:     runnerName,
+		RunnerPoolName: runnerPoolName,
+		State:          libvirtState(domainState),
 	}, true, nil
 }
 
@@ -221,7 +221,7 @@ func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) e
 }
 
 func (provider Provider) Validate(ctx context.Context) error {
-	if _, err := provider.renderDomainXML(StartRequest{ScaleSetName: "validation", RunnerName: "validation"}); err != nil {
+	if _, err := provider.renderDomainXML(StartRequest{RunnerPoolName: "validation", RunnerName: "validation"}); err != nil {
 		return err
 	}
 	if _, err := provider.CommandRunner.ReadConnectionURI(ctx, provider.Config.ConnectionURI); err != nil {
@@ -239,9 +239,9 @@ func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
 		return "", fmt.Errorf("read libvirt XML template: %w", err)
 	}
 	renderedXML, err := libvirtxml.DomainTemplate{XML: string(templateBytes)}.Render(libvirtxml.RenderRequest{
-		ScaleSetName: request.ScaleSetName,
-		RunnerName:   request.RunnerName,
-		JITConfig:    request.JITConfig,
+		RunnerPoolName: request.RunnerPoolName,
+		RunnerName:     request.RunnerName,
+		JITConfig:      request.JITConfig,
 	})
 	if err != nil {
 		return "", fmt.Errorf("render libvirt XML template: %w", err)
@@ -257,14 +257,23 @@ func metadataValue(domainXML string, key string) string {
 	return legacyMetadataValue(domainXML, key)
 }
 
+func runnerPoolMetadataValue(domainXML string) string {
+	if value := metadataValue(domainXML, contract.OwnershipRunnerPool); value != "" {
+		return value
+	}
+	return metadataValue(domainXML, contract.LegacyOwnershipScaleSet)
+}
+
 func namespacedMetadataValue(domainXML string, key string) string {
 	var metadata domainMetadata
 	if err := xml.Unmarshal([]byte(domainXML), &metadata); err != nil {
 		return ""
 	}
 	switch key {
-	case contract.OwnershipScaleSet:
-		return metadata.Metadata.Runner.ScaleSet
+	case contract.OwnershipRunnerPool:
+		return metadata.Metadata.Runner.RunnerPool
+	case contract.LegacyOwnershipScaleSet:
+		return metadata.Metadata.Runner.LegacyScaleSet
 	case contract.OwnershipRunner:
 		return metadata.Metadata.Runner.Name
 	default:
@@ -296,8 +305,9 @@ type scalerMetadata struct {
 }
 
 type scalerRunnerMetadata struct {
-	ScaleSet string `xml:"urn:runnerfoundry scale-set"`
-	Name     string `xml:"urn:runnerfoundry name"`
+	RunnerPool     string `xml:"urn:runnerfoundry runner-pool"`
+	LegacyScaleSet string `xml:"urn:runnerfoundry scale-set"`
+	Name           string `xml:"urn:runnerfoundry name"`
 }
 
 func libvirtState(rawState string) RunnerState {

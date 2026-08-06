@@ -8,7 +8,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
 func TestNewManagerRejectsMissingDependencies(t *testing.T) {
@@ -117,14 +116,14 @@ func TestManagerReconcileRetainsDesiredAndRemovesStaleRegistrations(t *testing.T
 	retained := managerRecord(repository.URL, 11)
 	retainedManager := newFixture(
 		newManagerFactoryFake([]transport.Repository{repository}),
-		&registrationRepositoryFake{records: []statecontract.Registration{retained}},
+		&registrationRepositoryFake{records: []githubsource.Registration{retained}},
 	)
 	if err := retainedManager.Reconcile(context.Background(), config); err != nil {
 		t.Fatalf("retain desired registration: %v", err)
 	}
 
 	stale := managerRecord("https://github.com/octo/stale", 9)
-	deleteStore := &registrationRepositoryFake{records: []statecontract.Registration{stale}, deleteErr: wantErr}
+	deleteStore := &registrationRepositoryFake{records: []githubsource.Registration{stale}, deleteErr: wantErr}
 	emptyManager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, deleteStore)
 	assertReconcileFails(t, emptyManager, githubsource.ManagerConfig{}, wantErr)
 	deleteStore.deleteErr = nil
@@ -144,13 +143,13 @@ func TestManagerRefreshMembersReportsFailures(t *testing.T) {
 	record := managerRecord("https://github.com/octo/repo", 17)
 	factory := newManagerFactoryFake(nil)
 	factory.err = wantErr
-	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []statecontract.Registration{record}})
+	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []githubsource.Registration{record}})
 	if err := manager.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("factory error = %v", err)
 	}
 
 	factory = newManagerFactoryFake([]transport.Repository{managerTransportRepository(record)})
-	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []statecontract.Registration{record, record}})
+	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []githubsource.Registration{record, record}})
 	if err := manager.RefreshMembers(context.Background()); err == nil {
 		t.Fatal("duplicate member routes accepted")
 	}
@@ -178,7 +177,7 @@ func TestManagerOpenLeaderReportsFactoryAndSessionFailures(t *testing.T) {
 	wantErr := errors.New("open failed")
 	handler := &recordingEventHandler{events: &[]string{}}
 	record := managerRecord("https://github.com/octo/repo", 17)
-	store := &registrationRepositoryFake{records: []statecontract.Registration{record}}
+	store := &registrationRepositoryFake{records: []githubsource.Registration{record}}
 	factory := newManagerFactoryFake(nil)
 	factory.err = wantErr
 	manager := newManagerFixture(t, &managerDiscovererFake{}, factory.Client, store)

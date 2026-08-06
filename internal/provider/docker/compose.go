@@ -21,16 +21,16 @@ const (
 )
 
 type RunnerInstance struct {
-	ID           string
-	RunnerName   string
-	ScaleSetName string
-	State        RunnerState
+	ID             string
+	RunnerName     string
+	RunnerPoolName string
+	State          RunnerState
 }
 
 type StartRequest struct {
-	ScaleSetName string
-	RunnerName   string
-	JITConfig    string
+	RunnerPoolName string
+	RunnerName     string
+	JITConfig      string
 }
 
 type ComposeConfig struct {
@@ -40,7 +40,7 @@ type ComposeConfig struct {
 
 type CommandRunner interface {
 	StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error
-	ListComposeRunners(ctx context.Context, scaleSetName string) (string, error)
+	ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error)
 	RemoveComposeRunner(ctx context.Context, containerID string) error
 	ListComposeServices(ctx context.Context, config ComposeConfig) (string, error)
 }
@@ -64,7 +64,7 @@ func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config C
 		arguments: append(composeArgs(config),
 			"run", "--detach", "--rm",
 			"--name", request.RunnerName,
-			"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+			"--label", contract.OwnershipRunnerPool+"="+request.RunnerPoolName,
 			"--label", contract.OwnershipRunner+"="+request.RunnerName,
 			"--env", JITConfigEnvironment,
 			config.Service,
@@ -75,10 +75,10 @@ func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config C
 	return err
 }
 
-func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, scaleSetName string) (string, error) {
+func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error) {
 	arguments := []string{"ps", "--all", "--format", "json"}
-	if scaleSetName != "" {
-		arguments = append(arguments, "--filter", "label="+contract.OwnershipScaleSet+"="+scaleSetName)
+	if runnerPoolName != "" {
+		arguments = append(arguments, "--filter", "label="+contract.OwnershipRunnerPool+"="+runnerPoolName)
 	}
 	return runner.runDocker(ctx, dockerInvocation{arguments: arguments})
 }
@@ -188,26 +188,34 @@ func (provider ComposeProvider) List(ctx context.Context, requestedPools ...stri
 	}
 	instances := make([]RunnerInstance, 0, len(containers))
 	for _, container := range containers {
-		labels := parseLabels(container.Labels)
-		scaleSetName := labels[contract.OwnershipScaleSet]
-		if scaleSetName == "" {
+		instance, owned := runnerInstance(container, requestedPools)
+		if !owned {
 			continue
 		}
-		if len(requestedPools) != 0 && scaleSetName != requestedPools[0] {
-			continue
-		}
-		reportedScaleSet := scaleSetName
-		if len(requestedPools) != 0 {
-			reportedScaleSet = ""
-		}
-		instances = append(instances, RunnerInstance{
-			ID:           container.ID,
-			RunnerName:   labels[contract.OwnershipRunner],
-			ScaleSetName: reportedScaleSet,
-			State:        dockerState(container.State),
-		})
+		instances = append(instances, instance)
 	}
 	return instances, nil
+}
+
+func runnerInstance(container dockerContainer, requestedPools []string) (RunnerInstance, bool) {
+	labels := parseLabels(container.Labels)
+	runnerPoolName := labels[contract.OwnershipRunnerPool]
+	if runnerPoolName == "" {
+		runnerPoolName = labels[contract.LegacyOwnershipScaleSet]
+	}
+	if runnerPoolName == "" || len(requestedPools) != 0 && runnerPoolName != requestedPools[0] {
+		return RunnerInstance{}, false
+	}
+	reportedRunnerPool := runnerPoolName
+	if len(requestedPools) != 0 {
+		reportedRunnerPool = ""
+	}
+	return RunnerInstance{
+		ID:             container.ID,
+		RunnerName:     labels[contract.OwnershipRunner],
+		RunnerPoolName: reportedRunnerPool,
+		State:          dockerState(container.State),
+	}, true
 }
 
 func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {

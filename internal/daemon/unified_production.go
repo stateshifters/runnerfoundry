@@ -247,8 +247,8 @@ func buildProductionProviders(
 }
 
 func configurationUsesDocker(configured config.Config) bool {
-	for _, scaleSet := range configured.ScaleSets {
-		if kind, err := scaleSet.ProviderKind(); err == nil && kind == config.ProviderKindDocker {
+	for _, runnerPoolConfig := range configured.RunnerPools {
+		if kind, err := runnerPoolConfig.ProviderKind(); err == nil && kind == config.ProviderKindDocker {
 			return true
 		}
 	}
@@ -260,14 +260,14 @@ func buildConfiguredProviders(
 	configured config.Config,
 	dependencies executionDependencies,
 ) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	providers := make(map[core.RunnerPool]execution.ExecutionProvider, len(configured.ScaleSets))
-	inventories := make([]execution.RunnerInventory, 0, len(configured.ScaleSets))
-	for _, scaleSet := range configured.ScaleSets {
-		provider, err := buildExecutionProvider(ctx, scaleSet, dependencies)
+	providers := make(map[core.RunnerPool]execution.ExecutionProvider, len(configured.RunnerPools))
+	inventories := make([]execution.RunnerInventory, 0, len(configured.RunnerPools))
+	for _, runnerPoolConfig := range configured.RunnerPools {
+		provider, err := buildExecutionProvider(ctx, runnerPoolConfig, dependencies)
 		if err != nil {
 			return nil, execution.AggregateRunnerInventory{}, err
 		}
-		providers[core.RunnerPool(scaleSet.Name)] = provider
+		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider
 		inventories = append(inventories, provider)
 	}
 	inventory := execution.NewAggregateRunnerInventory(inventories...)

@@ -16,7 +16,7 @@ func TestConfigurationLoadingUsesConfiguredReader(t *testing.T) {
 		}
 		return contents, nil
 	}
-	if configured, err := loadConfig("config.yml"); err != nil || len(configured.ScaleSets) != 1 {
+	if configured, err := loadConfig("config.yml"); err != nil || len(configured.RunnerPools) != 1 {
 		t.Fatalf("load config = %#v, %v", configured, err)
 	}
 	readConfigFile = func(string) ([]byte, error) { return nil, errors.New("unavailable") }

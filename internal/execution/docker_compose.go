@@ -64,9 +64,9 @@ func (provider DockerComposeProvider) Validate(ctx context.Context) error {
 
 func (provider DockerComposeProvider) Start(ctx context.Context, request StartRequest) error {
 	err := provider.provider.Start(ctx, providerdocker.StartRequest{
-		ScaleSetName: string(request.RunnerPool),
-		RunnerName:   request.RunnerName,
-		JITConfig:    string(request.Bootstrap.content),
+		RunnerPoolName: string(request.RunnerPool),
+		RunnerName:     request.RunnerName,
+		JITConfig:      string(request.Bootstrap.content),
 	})
 	if err != nil {
 		return fmt.Errorf("start Docker Compose runner: %w", err)
@@ -84,7 +84,7 @@ func (provider DockerComposeProvider) Inspect(ctx context.Context) ([]RunnerInst
 		translated = append(translated, RunnerInstance{
 			ID:         instance.ID,
 			RunnerName: instance.RunnerName,
-			RunnerPool: core.RunnerPool(instance.ScaleSetName),
+			RunnerPool: core.RunnerPool(instance.RunnerPoolName),
 			State:      RunnerState(instance.State),
 		})
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
@@ -106,7 +106,7 @@ func TestReplaceRegistrationsRequestsOneCommittedSnapshot(t *testing.T) {
 		statements = append(statements, statement)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
-	records := []statecontract.Registration{{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+	records := []githubsource.Registration{{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}}
 	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ReplaceRegistrations(context.Background(), records); err != nil {
@@ -175,7 +175,7 @@ func TestRecoverUnstartedReportsEveryTransactionFailure(t *testing.T) {
 
 func TestReplaceRegistrationsReportsTransactionFailures(t *testing.T) {
 	wantErr := errors.New("protocol")
-	records := []statecontract.Registration{{RepositoryURL: "repo", RunnerPool: "linux"}}
+	records := []githubsource.Registration{{RepositoryURL: "repo", RunnerPool: "linux"}}
 	executors := []Executor{
 		{begin: failingBegin(wantErr)},
 		{begin: transactionBeginning(transactionFailingExecute(1, wantErr))},

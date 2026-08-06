@@ -26,6 +26,8 @@ A source adapter owns everything specific to a Git hosting or CI system:
 
 The adapter translates those details into the core terms defined by the product contract. Core ingestion, queueing, execution, and persistence contracts use `Job` and `Runner Pool`; they do not expose source-specific types.
 
+Source-specific registration persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding registration types or methods to the source-neutral state contract.
+
 GitHub Actions is the only supported source. Its adapter maps GitHub runner scale sets and job requests to Runner Pools and internal jobs. GitHub does not expose a supported operation for reporting a provisioning failure for an individual job, so RunnerFoundry cleans up and retries the same job without manufacturing a result. If a source later provides that operation, reporting remains specific to its adapter and must not introduce a persisted result lifecycle into the core.
 
 The GitHub adapter applies messages in their lifecycle order. `JobAvailable` acquires and enqueues demand, and `JobAssigned` provides idempotent acquisition recovery. `JobStarted` durably records that the runner accepted the job. Every `JobCompleted` message is terminal regardless of its result value. The adapter acknowledges each message only after its required state change is durable.

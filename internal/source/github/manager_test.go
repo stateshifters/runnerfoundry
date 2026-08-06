@@ -9,7 +9,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
 )
 
 func TestManagerReconcilesRegistrationsAndPrunes(t *testing.T) {
@@ -43,7 +42,7 @@ func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	t.Parallel()
 
 	record := managerRecord("https://github.com/octo/repo", 17)
-	repository := &registrationRepositoryFake{records: []statecontract.Registration{record}}
+	repository := &registrationRepositoryFake{records: []githubsource.Registration{record}}
 	transportRepository := managerTransportRepository(record)
 	factory := newManagerFactoryFake([]transport.Repository{transportRepository})
 	factory.clients[record.RepositoryURL].bootstrap = []byte("opaque")
@@ -104,14 +103,14 @@ func TestManagerRetriesFailedLeaderSessionClosure(t *testing.T) {
 type leaderManagerFixture struct {
 	manager *githubsource.Manager
 	session *managerSessionFake
-	record  statecontract.Registration
+	record  githubsource.Registration
 	handler *recordingEventHandler
 }
 
 func openLeaderManagerFixture(t *testing.T) leaderManagerFixture {
 	t.Helper()
 	record := managerRecord("https://github.com/octo/repo", 17)
-	repository := &registrationRepositoryFake{records: []statecontract.Registration{record}}
+	repository := &registrationRepositoryFake{records: []githubsource.Registration{record}}
 	transportRepository := managerTransportRepository(record)
 	factory := newManagerFactoryFake([]transport.Repository{transportRepository})
 	session := &managerSessionFake{
@@ -124,7 +123,7 @@ func openLeaderManagerFixture(t *testing.T) leaderManagerFixture {
 	return leaderManagerFixture{manager: manager, session: session, record: record, handler: handler}
 }
 
-func managerTransportRepository(record statecontract.Registration) transport.Repository {
+func managerTransportRepository(record githubsource.Registration) transport.Repository {
 	return transport.Repository{
 		InstallationID: transport.InstallationID(record.InstallationID), URL: record.RepositoryURL,
 	}
@@ -144,8 +143,8 @@ func newManagerFixture(
 	return manager
 }
 
-func managerRecord(repositoryURL string, registrationID int) statecontract.Registration {
-	return statecontract.Registration{
+func managerRecord(repositoryURL string, registrationID int) githubsource.Registration {
+	return githubsource.Registration{
 		RepositoryURL: repositoryURL, InstallationID: 1, RunnerPool: core.RunnerPool("linux"),
 		RunnerGroupID: 1, ScaleSetID: int64(registrationID),
 	}
@@ -161,26 +160,26 @@ func (discoverer *managerDiscovererFake) Discover(context.Context) (transport.Di
 }
 
 type registrationRepositoryFake struct {
-	records   []statecontract.Registration
+	records   []githubsource.Registration
 	listErr   error
 	upsertErr error
 	deleteErr error
 }
 
-func (repository *registrationRepositoryFake) ReplaceRegistrations(_ context.Context, records []statecontract.Registration) error {
+func (repository *registrationRepositoryFake) ReplaceRegistrations(_ context.Context, records []githubsource.Registration) error {
 	if repository.listErr != nil {
 		return repository.listErr
 	}
 	if repository.upsertErr != nil {
 		return repository.upsertErr
 	}
-	repository.records = append([]statecontract.Registration(nil), records...)
+	repository.records = append([]githubsource.Registration(nil), records...)
 	return repository.deleteErr
 }
 
 func (repository *registrationRepositoryFake) UpsertRegistration(
 	_ context.Context,
-	record statecontract.Registration,
+	record githubsource.Registration,
 ) error {
 	if repository.upsertErr != nil {
 		return repository.upsertErr
@@ -200,17 +199,17 @@ func (repository *registrationRepositoryFake) Registration(
 	_ context.Context,
 	repositoryURL string,
 	runnerPool core.RunnerPool,
-) (statecontract.Registration, bool, error) {
+) (githubsource.Registration, bool, error) {
 	for _, record := range repository.records {
 		if record.RepositoryURL == repositoryURL && record.RunnerPool == runnerPool {
 			return record, true, repository.listErr
 		}
 	}
-	return statecontract.Registration{}, false, repository.listErr
+	return githubsource.Registration{}, false, repository.listErr
 }
 
-func (repository *registrationRepositoryFake) Registrations(context.Context) ([]statecontract.Registration, error) {
-	return append([]statecontract.Registration(nil), repository.records...), repository.listErr
+func (repository *registrationRepositoryFake) Registrations(context.Context) ([]githubsource.Registration, error) {
+	return append([]githubsource.Registration(nil), repository.records...), repository.listErr
 }
 
 func (repository *registrationRepositoryFake) DeleteRegistration(

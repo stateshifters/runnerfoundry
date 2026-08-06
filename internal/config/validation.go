@@ -18,11 +18,11 @@ const (
 	ProviderKindLibvirt ProviderKind = "libvirt"
 )
 
-func (scaleSet ScaleSetConfig) ProviderKind() (ProviderKind, error) {
-	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
+func (runnerPool RunnerPoolConfig) ProviderKind() (ProviderKind, error) {
+	if (runnerPool.Docker == nil) == (runnerPool.Libvirt == nil) {
 		return "", errors.New("exactly one of docker or libvirt is required")
 	}
-	if scaleSet.Docker != nil {
+	if runnerPool.Docker != nil {
 		return ProviderKindDocker, nil
 	}
 	return ProviderKindLibvirt, nil
@@ -53,7 +53,7 @@ func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.State.validate(); err != nil {
 		return err
 	}
-	return loadedConfig.validateScaleSets()
+	return loadedConfig.validateRunnerPools()
 }
 
 func (logConfig *LogConfig) validateFile() error {
@@ -129,57 +129,57 @@ func (githubConfig *GitHubConfig) validate() error {
 	return nil
 }
 
-func (loadedConfig *Config) validateScaleSets() error {
-	if len(loadedConfig.ScaleSets) == 0 {
-		return errors.New("at least one scale set is required")
+func (loadedConfig *Config) validateRunnerPools() error {
+	if len(loadedConfig.RunnerPools) == 0 {
+		return errors.New("at least one Runner Pool is required")
 	}
 	seenNames := map[string]bool{}
-	for scaleSetIndex := range loadedConfig.ScaleSets {
-		if err := loadedConfig.ScaleSets[scaleSetIndex].validate(seenNames); err != nil {
+	for runnerPoolIndex := range loadedConfig.RunnerPools {
+		if err := loadedConfig.RunnerPools[runnerPoolIndex].validate(seenNames); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
-	if scaleSet.Name == "" {
+func (runnerPool *RunnerPoolConfig) validate(seenNames map[string]bool) error {
+	if runnerPool.Name == "" {
 		return errors.New("scale_sets[].name is required")
 	}
-	if seenNames[scaleSet.Name] {
-		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	if seenNames[runnerPool.Name] {
+		return fmt.Errorf("duplicate Runner Pool name %q", runnerPool.Name)
 	}
-	seenNames[scaleSet.Name] = true
-	if scaleSet.RunnerGroup == "" {
-		scaleSet.RunnerGroup = "default"
+	seenNames[runnerPool.Name] = true
+	if runnerPool.RunnerGroup == "" {
+		runnerPool.RunnerGroup = "default"
 	}
-	if scaleSet.MaxRunners <= 0 {
-		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
+	if runnerPool.MaxRunners <= 0 {
+		return fmt.Errorf("runner pool %q max_runners must be positive", runnerPool.Name)
 	}
-	if err := scaleSet.validateProvider(); err != nil {
-		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
+	if err := runnerPool.validateProvider(); err != nil {
+		return fmt.Errorf("runner pool %q: %w", runnerPool.Name, err)
 	}
 	return nil
 }
 
-func (scaleSet *ScaleSetConfig) validateProvider() error {
-	kind, err := scaleSet.ProviderKind()
+func (runnerPool *RunnerPoolConfig) validateProvider() error {
+	kind, err := runnerPool.ProviderKind()
 	if err != nil {
 		return err
 	}
 	if kind == ProviderKindDocker {
-		if scaleSet.Docker.ComposeFile == "" {
+		if runnerPool.Docker.ComposeFile == "" {
 			return errors.New("docker.compose_file is required")
 		}
-		if scaleSet.Docker.Service == "" {
+		if runnerPool.Docker.Service == "" {
 			return errors.New("docker.service is required")
 		}
 		return nil
 	}
-	if scaleSet.Libvirt.ConnectionURI == "" {
+	if runnerPool.Libvirt.ConnectionURI == "" {
 		return errors.New("libvirt.connection_uri is required")
 	}
-	if scaleSet.Libvirt.DomainXMLTemplate == "" {
+	if runnerPool.Libvirt.DomainXMLTemplate == "" {
 		return errors.New("libvirt.domain_xml_template is required")
 	}
 	return nil

@@ -17,7 +17,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
 	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
 	sqlitestate "github.com/meza/RunnerFoundry/internal/state/sqlite"
 )
@@ -518,4 +517,4 @@ func TestGenerationConfigLoaderReportsReloadFailureAndAcceptsSameBackend(t *test
 }
 
 var _ unifiedStore = (*builderStoreFake)(nil)
-var _ statecontract.RegistrationStore = (*builderStoreFake)(nil)
+var _ githubsource.RegistrationRepository = (*builderStoreFake)(nil)

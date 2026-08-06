@@ -18,9 +18,9 @@ type DomainTemplate struct {
 }
 
 type RenderRequest struct {
-	ScaleSetName string
-	RunnerName   string
-	JITConfig    string
+	RunnerPoolName string
+	RunnerName     string
+	JITConfig      string
 }
 
 var marshalDomainXML = func(domain *upstream.Domain) (string, error) {
@@ -93,9 +93,9 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 
 func scalerMetadata(request RenderRequest) string {
 	return fmt.Sprintf(
-		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:scale-set>%s</runnerfoundry:scale-set><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
+		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:runner-pool>%s</runnerfoundry:runner-pool><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
 		MetadataNamespace,
-		escapeXML(request.ScaleSetName),
+		escapeXML(request.RunnerPoolName),
 		escapeXML(request.RunnerName),
 	)
 }

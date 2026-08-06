@@ -23,7 +23,7 @@ func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
 	if _, err = runner.ListComposeRunners(context.Background(), "linux"); err != nil {
 		t.Fatal(err)
 	}
-	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json", "--filter", "label=runnerfoundry.scale-set=linux")
+	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json", "--filter", "label=runnerfoundry.runner-pool=linux")
 
 	if err = runner.RemoveComposeRunner(context.Background(), "runner-id"); err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
 	provider := ComposeProvider{CommandRunner: recording.runner(), Config: ComposeConfig{Service: "runner"}}
 
 	err := provider.Start(context.Background(), StartRequest{
-		ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: jitConfig,
+		RunnerPoolName: "linux", RunnerName: "linux-1", JITConfig: jitConfig,
 	})
 	if err == nil {
 		t.Fatal("expected docker failure")
@@ -75,7 +75,7 @@ func assertPrivateJITArguments(t *testing.T, arguments []string, jitConfig strin
 	t.Helper()
 	assertDockerArguments(t, arguments,
 		"compose", "-f", "", "run", "--detach", "--rm", "--name", "linux-1",
-		"--label", "runnerfoundry.scale-set=linux", "--label", "runnerfoundry.runner=linux-1",
+		"--label", "runnerfoundry.runner-pool=linux", "--label", "runnerfoundry.runner=linux-1",
 		"--env", JITConfigEnvironment, "runner",
 	)
 	if jitConfig != "" && strings.Contains(fmt.Sprint(arguments), jitConfig) {

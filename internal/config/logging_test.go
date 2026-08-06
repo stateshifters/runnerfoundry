@@ -100,7 +100,7 @@ func validInMemoryConfiguration() Config {
 		GitHub: GitHubConfig{App: GitHubAppConfig{AppID: 1, PrivateKeyFile: "private-key.pem"}},
 		Log:    LogConfig{Format: "text", Level: "info"},
 		State:  StateConfig{Path: "state.db"},
-		ScaleSets: []ScaleSetConfig{{
+		RunnerPools: []RunnerPoolConfig{{
 			Name: "linux", MaxRunners: 1,
 			Docker: &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 		}},

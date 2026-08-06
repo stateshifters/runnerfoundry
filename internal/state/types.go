@@ -5,18 +5,7 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
-
-type Registration = githubsource.Registration
-
-type RegistrationStore interface {
-	githubsource.RegistrationRepository
-	UpsertRegistration(ctx context.Context, registration Registration) error
-	Registration(ctx context.Context, repositoryURL string, runnerPool core.RunnerPool) (Registration, bool, error)
-	Registrations(ctx context.Context) ([]Registration, error)
-	DeleteRegistration(ctx context.Context, repositoryURL string, runnerPool core.RunnerPool) error
-}
 
 type MemberRegistry interface {
 	// PublishMemberState atomically renews the member heartbeat and replaces its complete

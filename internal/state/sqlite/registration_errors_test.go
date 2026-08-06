@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 func TestRegistrationLookupReportsMissingAndProtocolFailure(t *testing.T) {
@@ -24,7 +24,7 @@ func TestRegistrationLookupReportsMissingAndProtocolFailure(t *testing.T) {
 func TestRegistrationMutationsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	registration := statecontract.Registration{RepositoryURL: "repo", RunnerPool: "linux"}
+	registration := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux"}
 	for index, executor := range []Executor{
 		{begin: failingBegin(protocolErr)},
 		{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})},

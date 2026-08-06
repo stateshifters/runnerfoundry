@@ -22,7 +22,7 @@ type configuredExecutionProvider struct{ execution.ExecutionProvider }
 
 func buildExecutionProvider(
 	ctx context.Context,
-	configured config.ScaleSetConfig,
+	configured config.RunnerPoolConfig,
 	dependencies executionDependencies,
 ) (configuredExecutionProvider, error) {
 	provider, err := configuredProvider(configured, dependencies)
@@ -36,7 +36,7 @@ func buildExecutionProvider(
 }
 
 func configuredProvider(
-	configured config.ScaleSetConfig,
+	configured config.RunnerPoolConfig,
 	dependencies executionDependencies,
 ) (configuredExecutionProvider, error) {
 	kind, err := configured.ProviderKind()

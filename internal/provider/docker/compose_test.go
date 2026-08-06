@@ -20,15 +20,15 @@ func TestStartDelegatesComposeConfigAndRunnerRequest(t *testing.T) {
 	}
 
 	err := provider.Start(context.Background(), StartRequest{
-		ScaleSetName: "linux",
-		RunnerName:   "linux-1",
-		JITConfig:    "secret",
+		RunnerPoolName: "linux",
+		RunnerName:     "linux-1",
+		JITConfig:      "secret",
 	})
 	if err != nil {
 		t.Fatalf("expected start success, got %v", err)
 	}
 	expectedConfig := ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"}
-	expectedRequest := StartRequest{ScaleSetName: "linux", RunnerName: "linux-1", JITConfig: "secret"}
+	expectedRequest := StartRequest{RunnerPoolName: "linux", RunnerName: "linux-1", JITConfig: "secret"}
 	if !reflect.DeepEqual(commandRunner.startConfig, expectedConfig) {
 		t.Fatalf("unexpected compose config: %#v", commandRunner.startConfig)
 	}
@@ -37,10 +37,10 @@ func TestStartDelegatesComposeConfigAndRunnerRequest(t *testing.T) {
 	}
 }
 
-func TestListClassifiesComposeContainerStates(t *testing.T) {
+func TestListRecognizesCurrentAndLegacyOwnershipMarkers(t *testing.T) {
 	commandRunner := &recordingCommandRunner{
 		output: `[
-{"ID":"1","Names":"runner-1","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-1"},
+{"ID":"1","Names":"runner-1","State":"running","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=runner-1"},
 {"ID":"2","Names":"runner-2","State":"exited","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-2"},
 {"ID":"3","Names":"runner-3","State":"removing","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-3"},
 {"ID":"4","Names":"runner-4","State":"dead","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=runner-4"},
@@ -101,10 +101,10 @@ func TestListIgnoresContainersWithoutRunnerFoundryOwnership(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 	want := []RunnerInstance{{
-		ID:           "owned",
-		RunnerName:   "linux-1",
-		ScaleSetName: "linux",
-		State:        RunnerStateRunning,
+		ID:             "owned",
+		RunnerName:     "linux-1",
+		RunnerPoolName: "linux",
+		State:          RunnerStateRunning,
 	}}
 	if !reflect.DeepEqual(instances, want) {
 		t.Fatalf("List() instances = %#v, want %#v", instances, want)
@@ -262,8 +262,8 @@ func (runner *recordingCommandRunner) StartComposeRunner(_ context.Context, conf
 	return nil
 }
 
-func (runner *recordingCommandRunner) ListComposeRunners(_ context.Context, scaleSetName string) (string, error) {
-	return runner.record(Command{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName}})
+func (runner *recordingCommandRunner) ListComposeRunners(_ context.Context, runnerPoolName string) (string, error) {
+	return runner.record(Command{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipRunnerPool + "=" + runnerPoolName}})
 }
 
 func (runner *recordingCommandRunner) RemoveComposeRunner(_ context.Context, containerID string) error {

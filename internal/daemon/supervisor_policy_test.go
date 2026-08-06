@@ -14,11 +14,11 @@ func TestAffectedRunnerPoolsIncludesOnlyRemovedAndProviderTypeChanges(t *testing
 	t.Parallel()
 	docker := &config.DockerConfig{}
 	libvirt := &config.LibvirtConfig{}
-	active := config.Config{ScaleSets: []config.ScaleSetConfig{
+	active := config.Config{RunnerPools: []config.RunnerPoolConfig{
 		{Name: "unchanged", Docker: docker}, {Name: "resized", MaxRunners: 1, Docker: docker},
 		{Name: "switched", Docker: docker}, {Name: "removed", Libvirt: libvirt},
 	}}
-	replacement := config.Config{ScaleSets: []config.ScaleSetConfig{
+	replacement := config.Config{RunnerPools: []config.RunnerPoolConfig{
 		{Name: "unchanged", Docker: docker}, {Name: "resized", MaxRunners: 9, Docker: docker},
 		{Name: "switched", Libvirt: libvirt}, {Name: "added", Docker: docker},
 	}}
@@ -169,9 +169,9 @@ func TestFinalShutdownHonorsActiveRunnerPolicy(t *testing.T) {
 }
 
 func managedWithPools(generation generation, runnerPools ...string) *managedGeneration {
-	configured := config.Config{ScaleSets: make([]config.ScaleSetConfig, 0, len(runnerPools))}
+	configured := config.Config{RunnerPools: make([]config.RunnerPoolConfig, 0, len(runnerPools))}
 	for _, runnerPool := range runnerPools {
-		configured.ScaleSets = append(configured.ScaleSets, config.ScaleSetConfig{Name: runnerPool, Docker: &config.DockerConfig{}})
+		configured.RunnerPools = append(configured.RunnerPools, config.RunnerPoolConfig{Name: runnerPool, Docker: &config.DockerConfig{}})
 	}
 	return &managedGeneration{generation: generation, configured: configured}
 }

@@ -13,7 +13,6 @@ import (
 	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	"github.com/meza/RunnerFoundry/internal/state"
 )
 
 func daemonTestID(seed byte) core.MemberID {
@@ -149,7 +148,7 @@ func assertPoolAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchest
 func builderConfig() config.Config {
 	return config.Config{
 		GitHub: config.GitHubConfig{DiscoveryInterval: "1m"},
-		ScaleSets: []config.ScaleSetConfig{{
+		RunnerPools: []config.RunnerPoolConfig{{
 			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
 		}},
 	}
@@ -203,7 +202,7 @@ type builderStoreFake struct {
 	capacityPublished chan struct{}
 	heartbeats        int
 	capacities        int
-	registrations     []state.Registration
+	registrations     []githubsource.Registration
 	operationErr      error
 }
 
@@ -268,19 +267,19 @@ func (*builderStoreFake) WithdrawMemberCapacity(context.Context, core.MemberID) 
 func (*builderStoreFake) AvailableRunnerPoolCapacity(context.Context, core.RunnerPool, time.Time) (int, error) {
 	return 1, nil
 }
-func (store *builderStoreFake) UpsertRegistration(_ context.Context, registration state.Registration) error {
+func (store *builderStoreFake) UpsertRegistration(_ context.Context, registration githubsource.Registration) error {
 	store.registrations = append(store.registrations, registration)
 	return nil
 }
-func (store *builderStoreFake) ReplaceRegistrations(_ context.Context, registrations []state.Registration) error {
-	store.registrations = append([]state.Registration(nil), registrations...)
+func (store *builderStoreFake) ReplaceRegistrations(_ context.Context, registrations []githubsource.Registration) error {
+	store.registrations = append([]githubsource.Registration(nil), registrations...)
 	return nil
 }
-func (*builderStoreFake) Registration(context.Context, string, core.RunnerPool) (state.Registration, bool, error) {
-	return state.Registration{}, false, nil
+func (*builderStoreFake) Registration(context.Context, string, core.RunnerPool) (githubsource.Registration, bool, error) {
+	return githubsource.Registration{}, false, nil
 }
-func (store *builderStoreFake) Registrations(context.Context) ([]state.Registration, error) {
-	return append([]state.Registration(nil), store.registrations...), nil
+func (store *builderStoreFake) Registrations(context.Context) ([]githubsource.Registration, error) {
+	return append([]githubsource.Registration(nil), store.registrations...), nil
 }
 func (*builderStoreFake) DeleteRegistration(context.Context, string, core.RunnerPool) error {
 	return nil

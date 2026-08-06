@@ -67,9 +67,9 @@ func (provider LibvirtProvider) Validate(ctx context.Context) error {
 
 func (provider LibvirtProvider) Start(ctx context.Context, request StartRequest) error {
 	err := provider.provider.Start(ctx, providerlibvirt.StartRequest{
-		ScaleSetName: string(request.RunnerPool),
-		RunnerName:   request.RunnerName,
-		JITConfig:    string(request.Bootstrap.content),
+		RunnerPoolName: string(request.RunnerPool),
+		RunnerName:     request.RunnerName,
+		JITConfig:      string(request.Bootstrap.content),
 	})
 	if err != nil {
 		return fmt.Errorf("start libvirt runner: %w", err)
@@ -87,7 +87,7 @@ func (provider LibvirtProvider) Inspect(ctx context.Context) ([]RunnerInstance, 
 		translated = append(translated, RunnerInstance{
 			ID:         instance.ID,
 			RunnerName: instance.RunnerName,
-			RunnerPool: core.RunnerPool(instance.ScaleSetName),
+			RunnerPool: core.RunnerPool(instance.RunnerPoolName),
 			State:      RunnerState(instance.State),
 		})
 	}

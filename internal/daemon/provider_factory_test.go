@@ -14,7 +14,7 @@ func TestBuildExecutionProviderValidatesConfiguredDockerComposeService(t *testin
 	dependencies := executionDependencies{
 		dockerCommands: dockerCommandsFake{services: "runner\n"},
 	}
-	provider, err := buildExecutionProvider(context.Background(), config.ScaleSetConfig{
+	provider, err := buildExecutionProvider(context.Background(), config.RunnerPoolConfig{
 		Name: "linux",
 		Docker: &config.DockerConfig{
 			ComposeFile: "compose.yaml",
@@ -29,7 +29,7 @@ func TestBuildExecutionProviderValidatesConfiguredDockerComposeService(t *testin
 func TestBuildExecutionProviderBuildsLibvirtProvider(t *testing.T) {
 	t.Parallel()
 
-	configured := config.ScaleSetConfig{Name: "linux", Libvirt: &config.LibvirtConfig{
+	configured := config.RunnerPoolConfig{Name: "linux", Libvirt: &config.LibvirtConfig{
 		ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml",
 	}}
 	if _, err := buildExecutionProvider(context.Background(), configured, executionDependencies{}); err == nil {
@@ -56,7 +56,7 @@ func TestBuildExecutionProviderReportsValidationFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("validation failed")
-	_, err := buildExecutionProvider(context.Background(), config.ScaleSetConfig{
+	_, err := buildExecutionProvider(context.Background(), config.RunnerPoolConfig{
 		Name: "linux", Docker: &config.DockerConfig{ComposeFile: "compose.yml", Service: "runner"},
 	}, executionDependencies{dockerCommands: dockerCommandsErrorFake{err: wantErr}})
 	if !errors.Is(err, wantErr) {
@@ -65,7 +65,7 @@ func TestBuildExecutionProviderReportsValidationFailure(t *testing.T) {
 }
 
 func TestBuildExecutionProviderRejectsMissingProvider(t *testing.T) {
-	if _, err := buildExecutionProvider(context.Background(), config.ScaleSetConfig{Name: "linux"}, executionDependencies{}); err == nil {
+	if _, err := buildExecutionProvider(context.Background(), config.RunnerPoolConfig{Name: "linux"}, executionDependencies{}); err == nil {
 		t.Fatal("provider-less Runner Pool was accepted")
 	}
 }

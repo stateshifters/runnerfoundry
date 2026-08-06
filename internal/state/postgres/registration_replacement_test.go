@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
 func TestReplaceRegistrationsRequestsOneCommittedSnapshot(t *testing.T) {
 	protocol := &recordedTransaction{}
-	records := []statecontract.Registration{{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+	records := []githubsource.Registration{{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}}
 	if err := NewStore(protocol.executor()).ReplaceRegistrations(context.Background(), records); err != nil {
 		t.Fatalf("replace registrations: %v", err)
@@ -24,7 +24,7 @@ func TestReplaceRegistrationsRequestsOneCommittedSnapshot(t *testing.T) {
 
 func TestReplaceRegistrationsReportsTransactionFailures(t *testing.T) {
 	wantErr := errors.New("protocol")
-	records := []statecontract.Registration{{RepositoryURL: "repo", RunnerPool: "linux"}}
+	records := []githubsource.Registration{{RepositoryURL: "repo", RunnerPool: "linux"}}
 	executors := []Executor{
 		{begin: func(context.Context) (Transaction, error) { return Transaction{}, wantErr }},
 		{begin: transactionBeginning(transactionFailingExecute(1, wantErr))},
