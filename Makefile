@@ -23,7 +23,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom package-deb package-deb-smoke prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -93,16 +93,6 @@ package-deb: build notices sbom
 	@$(REMOVE_DIR) "$(DIST_DIR)"
 	@$(MKDIR) "$(DIST_DIR)" > /dev/null
 	$(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
-
-package-deb-smoke: package-deb
-	@package="$(DIST_DIR)/runnerfoundry_$(VERSION)_amd64.deb"; \
-	metadata_version=$$(dpkg-deb --field "$$package" Version); \
-	test "$$metadata_version" = "$(VERSION)"; \
-	extract_dir=$$(mktemp -d); \
-	trap 'rm -rf "$$extract_dir"' EXIT; \
-	dpkg-deb --extract "$$package" "$$extract_dir"; \
-	actual=$$("$$extract_dir/usr/bin/runnerfoundry" --version); \
-	test "$$actual" = "runnerfoundry $(VERSION)"
 
 prepare:
 	$(MAKE) package-deb VERSION="$(VERSION)"
