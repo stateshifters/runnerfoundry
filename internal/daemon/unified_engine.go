@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -90,29 +91,76 @@ func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 	defer engine.cycleMutex.Unlock()
 	now := engine.currentTime()
 	liveMemberCutoff := now.Add(-engine.memberTTL)
-	cycleErrors := make([]error, 0)
+	cycleErrors := engine.runMemberPhases(ctx)
+	cycleErrors = append(cycleErrors, engine.runExecutionPhases(ctx, liveMemberCutoff)...)
+	return errors.Join(cycleErrors...)
+}
 
+func (engine *UnifiedEngine) runMemberPhases(ctx context.Context) []error {
+	cycleErrors := make([]error, 0, 2)
+	started := engine.phaseStarted("heartbeat", "membership", "")
 	if err := engine.membership.Heartbeat(ctx); err != nil {
+		engine.phaseCompleted("heartbeat", "membership", "", started, err)
 		cycleErrors = append(cycleErrors, fmt.Errorf("heartbeat member: %w", err))
+	} else {
+		engine.phaseCompleted("heartbeat", "membership", "", started, nil)
 	}
+	started = engine.phaseStarted("refresh_member_routes", "source", "")
 	if err := engine.source.RefreshMembers(ctx); err != nil {
+		engine.phaseCompleted("refresh_member_routes", "source", "", started, err)
 		cycleErrors = append(cycleErrors, fmt.Errorf("refresh source member routes: %w", err))
+	} else {
+		engine.phaseCompleted("refresh_member_routes", "source", "", started, nil)
 	}
+	return cycleErrors
+}
 
+func (engine *UnifiedEngine) runExecutionPhases(ctx context.Context, liveMemberCutoff time.Time) []error {
+	cycleErrors := make([]error, 0)
+	started := engine.phaseStarted("leader_work", "source", "")
 	leader, leaderErrors := engine.runLeaderWork(ctx, liveMemberCutoff)
+	engine.phaseCompleted("leader_work", "source", "", started, errors.Join(leaderErrors...))
 	cycleErrors = append(cycleErrors, leaderErrors...)
+	started = engine.phaseStarted("refresh_inventory", "inventory", "")
 	if err := engine.refreshInventory(ctx); err != nil {
+		engine.phaseCompleted("refresh_inventory", "inventory", "", started, err)
 		cycleErrors = append(cycleErrors, err)
-		return errors.Join(cycleErrors...)
+		return cycleErrors
 	}
+	engine.phaseCompleted("refresh_inventory", "inventory", "", started, nil)
 	if leader && engine.inventory != nil {
-		cycleErrors = append(cycleErrors, engine.recoverForeign(ctx)...)
+		started = engine.phaseStarted("recover_foreign", "recovery", "")
+		foreignErrors := engine.recoverForeign(ctx)
+		engine.phaseCompleted("recover_foreign", "recovery", "", started, errors.Join(foreignErrors...))
+		cycleErrors = append(cycleErrors, foreignErrors...)
 	}
 	for _, runnerPool := range engine.pools {
-		cycleErrors = append(cycleErrors, engine.runPoolWork(ctx, runnerPool)...)
+		started = engine.phaseStarted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool)
+		poolErrors := engine.runPoolWork(ctx, runnerPool)
+		engine.phaseCompleted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool, started, errors.Join(poolErrors...))
+		cycleErrors = append(cycleErrors, poolErrors...)
 	}
 
-	return errors.Join(cycleErrors...)
+	return cycleErrors
+}
+
+func (engine *UnifiedEngine) phaseStarted(operation, stage string, runnerPool core.RunnerPool) time.Time {
+	started := engine.currentTime()
+	reportProgress(engine.report, slog.LevelDebug, operationalEvent{
+		operation: operation, stage: stage, outcome: "started", runnerPool: runnerPool,
+	})
+	return started
+}
+
+func (engine *UnifiedEngine) phaseCompleted(operation, stage string, runnerPool core.RunnerPool, started time.Time, err error) {
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	reportProgress(engine.report, slog.LevelDebug, operationalEvent{
+		operation: operation, stage: stage, outcome: outcome, runnerPool: runnerPool,
+		duration: engine.currentTime().Sub(started),
+	})
 }
 
 func (engine *UnifiedEngine) refreshInventory(ctx context.Context) error {

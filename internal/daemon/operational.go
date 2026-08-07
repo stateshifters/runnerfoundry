@@ -28,20 +28,39 @@ type operationalStatus struct {
 }
 
 type operationalEvent struct {
-	operation     string
-	outcome       string
-	runnerPool    core.RunnerPool
-	jobID         core.JobID
-	count         int
-	capacity      int
-	leadership    operationalLeadership
-	err           error
-	errorCategory string
+	operation         string
+	stage             string
+	outcome           string
+	runnerPool        core.RunnerPool
+	jobID             core.JobID
+	repository        string
+	endpoint          string
+	diagnostic        string
+	sourceRequestID   int64
+	count             int
+	repositoryCount   int
+	installationCount int
+	current           int
+	total             int
+	capacity          int
+	duration          time.Duration
+	leadership        operationalLeadership
+	err               error
+	errorCategory     string
 }
 
 type operationalEventEnvelope struct {
 	event operationalEvent
 	cause error
+}
+
+type progressEventEnvelope struct {
+	level slog.Level
+	event operationalEvent
+}
+
+func (envelope progressEventEnvelope) Error() string {
+	return "progress event: " + envelope.event.operation
 }
 
 func (envelope operationalEventEnvelope) Error() string {
@@ -58,6 +77,12 @@ func reportOperational(report func(error), event operationalEvent) {
 func reportOperationalError(report func(error), event operationalEvent, cause error) {
 	if report != nil {
 		report(operationalEventEnvelope{event: event, cause: cause})
+	}
+}
+
+func reportProgress(report func(error), level slog.Level, event operationalEvent) {
+	if report != nil {
+		report(progressEventEnvelope{level: level, event: event})
 	}
 }
 
@@ -89,6 +114,11 @@ func newProductionRuntimeReporter(
 }
 
 func (reporter *productionRuntimeReporter) reportMaintenance(err error) {
+	var progress progressEventEnvelope
+	if errors.As(err, &progress) {
+		reporter.ReportProgress(progress.level, progress.event)
+		return
+	}
 	var envelope operationalEventEnvelope
 	if errors.As(err, &envelope) {
 		reporter.Report(envelope.event)
@@ -110,6 +140,10 @@ func (reporter *productionRuntimeReporter) Report(event operationalEvent) {
 	}
 	reporter.reportEvent(now, event)
 	reporter.publishStatus()
+}
+
+func (reporter *productionRuntimeReporter) ReportProgress(level slog.Level, event operationalEvent) {
+	reporter.writeEvent(level, "RunnerFoundry progress event", event, nil)
 }
 
 func (reporter *productionRuntimeReporter) reportEvent(now time.Time, event operationalEvent) {
@@ -160,19 +194,90 @@ func (reporter *productionRuntimeReporter) reportRecovery(now time.Time, event o
 }
 
 func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event operationalEvent, extra []slog.Attr) {
-	attributes := []slog.Attr{slog.String("operation", event.operation), slog.String("member", string(reporter.member)),
-		slog.String("outcome", event.outcome)}
+	reporter.writeEvent(level, "RunnerFoundry operational event", event, extra)
+}
+
+func (reporter *productionRuntimeReporter) writeEvent(
+	level slog.Level,
+	message string,
+	event operationalEvent,
+	extra []slog.Attr,
+) {
+	attributes := make([]slog.Attr, 0, len(extra)+20)
+	attributes = append(attributes, slog.String("operation", event.operation), slog.String("member", string(reporter.member)))
+	attributes = append(attributes, eventStageAttributes(event)...)
+	attributes = append(attributes, eventIdentityAttributes(event)...)
+	attributes = append(attributes, eventCountAttributes(event)...)
+	attributes = append(attributes, eventContextAttributes(event)...)
+	attributes = append(attributes, eventResultAttributes(event)...)
+	attributes = append(attributes, extra...)
+	reporter.logging.Logger().LogAttrs(context.Background(), level, message, attributes...)
+}
+
+func eventStageAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 2)
+	if event.stage != "" {
+		attributes = append(attributes, slog.String("stage", event.stage))
+	}
+	attributes = append(attributes, slog.String("outcome", event.outcome))
+	return attributes
+}
+
+func eventIdentityAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 2)
 	if event.runnerPool != "" {
 		attributes = append(attributes, slog.String("runner_pool", string(event.runnerPool)))
 	}
 	if event.jobID != (core.JobID{}) {
 		attributes = append(attributes, slog.String("job_id", event.jobID.String()))
 	}
+	return attributes
+}
+
+func eventCountAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 5)
 	if event.count != 0 {
 		attributes = append(attributes, slog.Int("count", event.count))
 	}
+	if event.repositoryCount != 0 {
+		attributes = append(attributes, slog.Int("repository_count", event.repositoryCount))
+	}
+	if event.installationCount != 0 {
+		attributes = append(attributes, slog.Int("installation_count", event.installationCount))
+	}
+	if event.current != 0 {
+		attributes = append(attributes, slog.Int("current", event.current))
+	}
+	if event.total != 0 {
+		attributes = append(attributes, slog.Int("total", event.total))
+	}
+	return attributes
+}
+
+func eventContextAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 4)
+	if event.repository != "" {
+		attributes = append(attributes, slog.String("repository", event.repository))
+	}
+	if event.endpoint != "" {
+		attributes = append(attributes, slog.String("endpoint", event.endpoint))
+	}
+	if event.diagnostic != "" {
+		attributes = append(attributes, slog.String("diagnostic", event.diagnostic))
+	}
+	if event.sourceRequestID != 0 {
+		attributes = append(attributes, slog.Int64("source_request_id", event.sourceRequestID))
+	}
+	return attributes
+}
+
+func eventResultAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 4)
 	if event.capacity != 0 {
 		attributes = append(attributes, slog.Int("capacity", event.capacity))
+	}
+	if event.duration != 0 {
+		attributes = append(attributes, slog.Int64("duration_ms", event.duration.Milliseconds()))
 	}
 	if event.leadership != "" {
 		attributes = append(attributes, slog.String("leadership", string(event.leadership)))
@@ -180,8 +285,7 @@ func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event oper
 	if event.err != nil {
 		attributes = append(attributes, slog.String("error_category", classifyOperationalError(event)))
 	}
-	attributes = append(attributes, extra...)
-	reporter.logging.Logger().LogAttrs(context.Background(), level, "RunnerFoundry operational event", attributes...)
+	return attributes
 }
 
 func classifyOperationalError(event operationalEvent) string {

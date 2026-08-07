@@ -216,7 +216,12 @@ func TestMaintenanceGenerationReportsFirstCycleAndDeactivationFailures(t *testin
 	generation := newMaintenanceGeneration(
 		engine,
 		&manualCycleTicker{ticks: make(chan time.Time)},
-		func(err error) { reports <- err },
+		func(err error) {
+			var progress progressEventEnvelope
+			if !errors.As(err, &progress) {
+				reports <- err
+			}
+		},
 		nil,
 		nil,
 	)

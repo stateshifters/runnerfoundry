@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -87,11 +88,12 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 // resources. Activation commits after the local generation gate is acquired;
 // maintenance begins immediately in the background.
 type maintenanceGeneration struct {
-	engine     cycleEngine
-	ticker     cycleTicker
-	report     func(error)
-	closers    []runtimeCloser
-	finalizers []runtimeFinalizer
+	engine      cycleEngine
+	ticker      cycleTicker
+	report      func(error)
+	currentTime func() time.Time
+	closers     []runtimeCloser
+	finalizers  []runtimeFinalizer
 
 	mutex         sync.Mutex
 	closeMutex    sync.Mutex
@@ -118,7 +120,8 @@ func newMaintenanceGeneration(
 	}
 	return &maintenanceGeneration{
 		engine: engine, ticker: ticker, report: report,
-		closers: append([]runtimeCloser(nil), closers...), finalizers: append([]runtimeFinalizer(nil), finalizers...),
+		currentTime: time.Now,
+		closers:     append([]runtimeCloser(nil), closers...), finalizers: append([]runtimeFinalizer(nil), finalizers...),
 		closerClosed: make([]bool, len(closers)),
 	}
 }
@@ -158,6 +161,9 @@ func (generation *maintenanceGeneration) Activate(ctx context.Context) error {
 		return err
 	}
 	generation.startRunLoop(ctx)
+	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
+		operation: "generation", stage: "activation", outcome: "activated",
+	})
 	return nil
 }
 
@@ -196,21 +202,33 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) {
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
-	generation.runCycle(ctx)
+	generation.runCycle(ctx, "immediate", slog.LevelInfo)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-generation.ticker.Ticks():
-			generation.runCycle(ctx)
+			generation.runCycle(ctx, "scheduled", slog.LevelDebug)
 		}
 	}
 }
 
-func (generation *maintenanceGeneration) runCycle(ctx context.Context) {
+func (generation *maintenanceGeneration) runCycle(ctx context.Context, stage string, startLevel slog.Level) {
+	started := generation.currentTime()
+	reportProgress(generation.report, startLevel, operationalEvent{
+		operation: "maintenance_cycle", stage: stage, outcome: "started",
+	})
 	generation.cycleMutex.Lock()
 	err := generation.engine.Cycle(ctx)
 	generation.cycleMutex.Unlock()
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	reportProgress(generation.report, slog.LevelDebug, operationalEvent{
+		operation: "maintenance_cycle", stage: stage, outcome: outcome,
+		duration: generation.currentTime().Sub(started),
+	})
 	generation.reportCycle(err)
 }
 
@@ -230,6 +248,9 @@ func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {
 	}
 	cancel, done := generation.runCancel, generation.runDone
 	generation.mutex.Unlock()
+	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
+		operation: "generation", stage: "deactivation", outcome: "started",
+	})
 	cancel()
 	select {
 	case <-done:
@@ -244,6 +265,9 @@ func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {
 	generation.runCancel = nil
 	generation.runDone = nil
 	generation.mutex.Unlock()
+	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
+		operation: "generation", stage: "deactivation", outcome: "completed",
+	})
 	return nil
 }
 
@@ -256,11 +280,19 @@ func (generation *maintenanceGeneration) Close(ctx context.Context) error {
 	if generation.beginClose() {
 		return nil
 	}
+	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
+		operation: "generation", stage: "shutdown", outcome: "started",
+	})
 	closeErr := errors.Join(generation.closeEngine(ctx), generation.closeResources(ctx))
 	if closeErr == nil {
 		generation.mutex.Lock()
 		generation.closed = true
 		generation.mutex.Unlock()
+	}
+	if closeErr == nil {
+		reportProgress(generation.report, slog.LevelInfo, operationalEvent{
+			operation: "generation", stage: "shutdown", outcome: "completed",
+		})
 	}
 	return closeErr
 }

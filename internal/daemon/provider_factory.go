@@ -12,10 +12,11 @@ import (
 )
 
 type executionDependencies struct {
-	dockerCommands  dockerprovider.CommandRunner
-	libvirtCommands libvirtprovider.CommandRunner
-	readTemplate    func(string) ([]byte, error)
-	memberHostname  string
+	dockerCommands   dockerprovider.CommandRunner
+	libvirtCommands  libvirtprovider.CommandRunner
+	readTemplate     func(string) ([]byte, error)
+	memberHostname   string
+	providerObserver func(execution.ProviderActivity)
 }
 
 type configuredExecutionProvider struct{ execution.ExecutionProvider }
@@ -60,7 +61,7 @@ func configuredDockerProvider(
 			Service:     configured.Docker.Service,
 		}, execution.HostIdentity(dependencies.memberHostname),
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider)}
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider, dependencies.providerObserver)}
 }
 
 func configuredLibvirtProvider(
@@ -83,5 +84,5 @@ func configuredLibvirtProvider(
 		template,
 		execution.HostIdentity(dependencies.memberHostname),
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider)}, nil
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider, dependencies.providerObserver)}, nil
 }

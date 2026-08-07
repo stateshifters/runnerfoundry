@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -18,6 +19,11 @@ type githubPollResult struct {
 type githubPollAttempt struct {
 	cancel context.CancelFunc
 	result chan githubPollResult
+}
+
+type runnerPoolPublication struct {
+	capacity int
+	count    int
 }
 
 // Poll advances leader-owned GitHub message polling without waiting for an
@@ -40,20 +46,33 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]struct{}) {
 	pollErrors := make([]error, 0)
 	changedPools := make(map[core.RunnerPool]struct{})
-	for adapter, attempt := range source.polls {
-		select {
-		case result := <-attempt.result:
-			delete(source.polls, adapter)
-			if result.messageReceived {
-				changedPools[adapter.RunnerPool] = struct{}{}
-			}
-			if result.err != nil {
-				pollErrors = append(pollErrors, describeGitHubPollError(adapter, result.err))
-			}
-		default:
+	for _, adapter := range source.adapters {
+		attempt, exists := source.polls[adapter]
+		if !exists {
+			continue
+		}
+		result, complete := completedPoll(attempt)
+		if !complete {
+			continue
+		}
+		delete(source.polls, adapter)
+		if result.messageReceived {
+			changedPools[adapter.RunnerPool] = struct{}{}
+		}
+		if result.err != nil {
+			pollErrors = append(pollErrors, describeGitHubPollError(adapter, result.err))
 		}
 	}
 	return pollErrors, changedPools
+}
+
+func completedPoll(attempt *githubPollAttempt) (githubPollResult, bool) {
+	select {
+	case result := <-attempt.result:
+		return result, true
+	default:
+		return githubPollResult{}, false
+	}
 }
 
 func (source *githubSourceRuntime) stopChangedPools(
@@ -74,24 +93,49 @@ func (source *githubSourceRuntime) launchIdlePolls(
 	liveMemberCutoff time.Time,
 ) []error {
 	capacityErrors := make([]error, 0)
+	capacities := make(map[core.RunnerPool]runnerPoolPublication)
 	for _, adapter := range source.adapters {
 		if _, active := source.polls[adapter]; active {
 			continue
 		}
-		capacity, err := source.capacities.AvailableRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
+		capacity, err := source.launchAdapterPoll(ctx, adapter, liveMemberCutoff, capacities)
 		if err != nil {
-			capacity = 0
-			reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
-				runnerPool: adapter.RunnerPool, err: err, capacity: capacity})
-			capacityErrors = append(capacityErrors,
-				fmt.Errorf("read Runner Pool %q available capacity: %w", adapter.RunnerPool, err))
-		} else {
-			reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "published",
-				runnerPool: adapter.RunnerPool, capacity: capacity})
+			capacityErrors = append(capacityErrors, err)
 		}
 		source.launchPoll(ctx, adapter, capacity)
 	}
+	source.publishCapacityChanges(capacities)
 	return capacityErrors
+}
+
+func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapter *githubsource.Adapter,
+	liveMemberCutoff time.Time, capacities map[core.RunnerPool]runnerPoolPublication,
+) (int, error) {
+	capacity, err := source.capacities.AvailableRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
+	if err != nil {
+		reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
+			runnerPool: adapter.RunnerPool, err: err})
+		return 0, fmt.Errorf("read Runner Pool %q available capacity: %w", adapter.RunnerPool, err)
+	}
+	reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
+		outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository, capacity: capacity})
+	aggregate := capacities[adapter.RunnerPool]
+	aggregate.capacity = capacity
+	aggregate.count++
+	capacities[adapter.RunnerPool] = aggregate
+	return capacity, nil
+}
+
+func (source *githubSourceRuntime) publishCapacityChanges(capacities map[core.RunnerPool]runnerPoolPublication) {
+	for runnerPool, aggregate := range capacities {
+		previous, exists := source.publishedCapacity[runnerPool]
+		if exists && previous == aggregate.capacity {
+			continue
+		}
+		source.publishedCapacity[runnerPool] = aggregate.capacity
+		reportProgress(source.report, slog.LevelInfo, operationalEvent{operation: "capacity_publication", stage: "runner_pool",
+			outcome: "published", runnerPool: runnerPool, capacity: aggregate.capacity, count: aggregate.count})
+	}
 }
 
 func (source *githubSourceRuntime) launchPoll(

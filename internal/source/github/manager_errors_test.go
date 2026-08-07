@@ -15,13 +15,13 @@ func TestNewManagerRejectsMissingDependencies(t *testing.T) {
 	discoverer := &managerDiscovererFake{}
 	factory := newManagerFactoryFake(nil)
 	repository := &registrationRepositoryFake{}
-	if _, err := githubsource.NewManager(nil, factory.Client, repository); err == nil {
+	if _, err := githubsource.NewManager(nil, factory.Client, repository, githubsource.ManagerObserver{}); err == nil {
 		t.Fatal("missing discoverer accepted")
 	}
-	if _, err := githubsource.NewManager(discoverer, nil, repository); err == nil {
+	if _, err := githubsource.NewManager(discoverer, nil, repository, githubsource.ManagerObserver{}); err == nil {
 		t.Fatal("missing factory accepted")
 	}
-	if _, err := githubsource.NewManager(discoverer, factory.Client, nil); err == nil {
+	if _, err := githubsource.NewManager(discoverer, factory.Client, nil, githubsource.ManagerObserver{}); err == nil {
 		t.Fatal("missing repository accepted")
 	}
 }

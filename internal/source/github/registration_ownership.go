@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
@@ -104,19 +105,36 @@ func (manager *Manager) pruneRegistrations(
 	active []Registration,
 	owned []Registration,
 ) ([]Registration, error) {
-	for _, repository := range repositories {
+	for index, repository := range repositories {
+		started := manager.observer.currentTime()
+		manager.reportPruneRepository(repository.URL, index+1, len(repositories), "started", started, nil)
 		client, err := manager.factory(ctx, repository)
 		if err != nil {
+			manager.reportPruneRepository(repository.URL, index+1, len(repositories), "failed", started, err)
 			return nil, fmt.Errorf("create GitHub prune client for repository %q: %w", repository.URL, err)
 		}
 		retained, err := pruneRepository(ctx, client,
 			registrationsForRepository(active, repository.URL), registrationsForRepository(owned, repository.URL))
 		if err != nil {
+			manager.reportPruneRepository(repository.URL, index+1, len(repositories), "failed", started, err)
 			return nil, fmt.Errorf("prune repository %q: %w", repository.URL, err)
 		}
+		manager.reportPruneRepository(repository.URL, index+1, len(repositories), "completed", started, nil)
 		owned = replaceRepositoryRegistrations(owned, repository.URL, retained)
 	}
 	return owned, nil
+}
+
+func (manager *Manager) reportPruneRepository(repository string, current, total int, outcome string,
+	started time.Time, err error,
+) {
+	duration := time.Duration(0)
+	if outcome != "started" {
+		duration = manager.observer.currentTime().Sub(started)
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+		Stage: "prune_repository", Outcome: outcome, Repository: repository,
+		Current: current, Total: total, Duration: duration, Err: err})
 }
 
 func registrationsForRepository(registrations []Registration, repositoryURL string) []Registration {

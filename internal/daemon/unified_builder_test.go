@@ -178,6 +178,7 @@ func newBuilderManager(t *testing.T, store *builderStoreFake) *githubsource.Mana
 			return githubsource.ManagerClient{}, errors.New("unexpected client request")
 		},
 		store,
+		githubsource.ManagerObserver{},
 	)
 	if err != nil {
 		t.Fatalf("create manager: %v", err)

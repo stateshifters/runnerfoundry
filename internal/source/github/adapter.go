@@ -50,6 +50,7 @@ type EventHandler interface {
 type Adapter struct {
 	Client        MessageClient
 	Handler       EventHandler
+	Observer      ManagerObserver
 	Repository    string
 	RunnerPool    core.RunnerPool
 	LastMessageID int
@@ -75,33 +76,74 @@ func (adapter *Adapter) PollOnce(ctx context.Context, maxCapacity int) (bool, er
 // Poll receives at most one message and advances each result flag only after
 // that protocol step succeeds. Calls on one Adapter must be serialized.
 func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, error) {
-	if adapter.Client == nil {
-		return PollResult{}, errors.New("GitHub message client is required")
+	pollStarted := adapter.Observer.currentTime()
+	adapter.reportPoll("poll", "started", pollStarted, nil)
+	if err := adapter.validatePollBoundaries(); err != nil {
+		return PollResult{}, err
 	}
-	if adapter.Handler == nil {
-		return PollResult{}, errors.New("GitHub event handler is required")
-	}
-	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, maxCapacity)
-	if errors.Is(err, ErrNoMessage) {
-		return PollResult{}, nil
-	}
+	message, empty, err := adapter.receiveMessage(ctx, maxCapacity, pollStarted)
 	if err != nil {
-		return PollResult{}, fmt.Errorf("receive GitHub scale-set message: %w", err)
+		return PollResult{}, err
 	}
-	if message == nil {
-		return PollResult{}, errors.New("GitHub message client returned nil without ErrNoMessage")
+	if empty {
+		return PollResult{}, nil
 	}
 	result := PollResult{Received: true}
 	if err := adapter.handleMessage(ctx, message); err != nil {
 		return result, err
 	}
 	result.Handled = true
-	if err := adapter.Client.DeleteMessage(ctx, message.MessageID); err != nil {
-		return result, fmt.Errorf("acknowledge GitHub scale-set message %d: %w", message.MessageID, err)
+	if err := adapter.acknowledgeMessage(ctx, message.MessageID, pollStarted); err != nil {
+		return result, err
 	}
 	adapter.LastMessageID = message.MessageID
 	result.Acknowledged = true
+	adapter.reportPoll("poll", "completed", pollStarted, nil)
 	return result, nil
+}
+
+func (adapter *Adapter) validatePollBoundaries() error {
+	if adapter.Client == nil {
+		return errors.New("GitHub message client is required")
+	}
+	if adapter.Handler == nil {
+		return errors.New("GitHub event handler is required")
+	}
+	return nil
+}
+
+func (adapter *Adapter) receiveMessage(ctx context.Context, maxCapacity int, started time.Time) (*upstream.RunnerScaleSetMessage, bool, error) {
+	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, maxCapacity)
+	if errors.Is(err, ErrNoMessage) {
+		adapter.reportPoll("poll", "empty", started, nil)
+		return nil, true, nil
+	}
+	if err != nil {
+		adapter.reportPoll("poll", "failed", started, err)
+		return nil, false, fmt.Errorf("receive GitHub scale-set message: %w", err)
+	}
+	if message == nil {
+		return nil, false, errors.New("GitHub message client returned nil without ErrNoMessage")
+	}
+	return message, false, nil
+}
+
+func (adapter *Adapter) acknowledgeMessage(ctx context.Context, messageID int, started time.Time) error {
+	if err := adapter.Client.DeleteMessage(ctx, messageID); err != nil {
+		adapter.reportPoll("acknowledge_message", "failed", started, err)
+		return fmt.Errorf("acknowledge GitHub scale-set message %d: %w", messageID, err)
+	}
+	adapter.reportPoll("acknowledge_message", "completed", started, nil)
+	return nil
+}
+
+func (adapter *Adapter) reportPoll(stage, outcome string, started time.Time, err error) {
+	activity := ManagerActivity{Visibility: ActivityDebug, Operation: "source_poll", Stage: stage, Outcome: outcome,
+		Repository: adapter.Repository, RunnerPool: adapter.RunnerPool, Err: err}
+	if outcome != "started" {
+		activity.Duration = adapter.Observer.currentTime().Sub(started)
+	}
+	adapter.Observer.report(activity)
 }
 
 func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.RunnerScaleSetMessage) error {
@@ -119,10 +161,24 @@ func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.Run
 	if err := adapter.persistRequests(ctx, effects.Assigned); err != nil {
 		return err
 	}
+	adapter.reportMessageCount("job_ingestion", "enqueue_jobs", len(acquired)+len(effects.Assigned))
 	if err := adapter.persistStarted(ctx, effects.Started); err != nil {
 		return err
 	}
-	return adapter.persistCompleted(ctx, effects.Completed)
+	adapter.reportMessageCount("job_observation", "runner_started", len(effects.Started))
+	if err := adapter.persistCompleted(ctx, effects.Completed); err != nil {
+		return err
+	}
+	adapter.reportMessageCount("job_observation", "terminalized", len(effects.Completed))
+	return nil
+}
+
+func (adapter *Adapter) reportMessageCount(operation, stage string, count int) {
+	if count == 0 {
+		return
+	}
+	adapter.Observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: operation,
+		Stage: stage, Outcome: "completed", Repository: adapter.Repository, RunnerPool: adapter.RunnerPool, Count: count})
 }
 
 func (adapter *Adapter) acquireAvailable(ctx context.Context, effects messageEffects) ([]identifiedRequest, error) {
@@ -295,9 +351,18 @@ func (adapter *Adapter) jobRequest(requestID int64, enqueuedAt time.Time) (core.
 }
 
 func (adapter *Adapter) request(ctx context.Context, requestID int64, request core.JobRequest) error {
+	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
+		Stage: "persist_job", Outcome: "started", Repository: adapter.Repository,
+		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID})
 	if err := adapter.Handler.Request(ctx, request); err != nil {
+		adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
+			Stage: "persist_job", Outcome: "failed", Repository: adapter.Repository,
+			RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, Err: err})
 		return fmt.Errorf("durably handle GitHub request %d: %w", requestID, err)
 	}
+	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
+		Stage: "persist_job", Outcome: "completed", Repository: adapter.Repository,
+		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID})
 	return nil
 }
 

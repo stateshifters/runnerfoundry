@@ -57,6 +57,31 @@ func TestDeadlineProviderAppliesStartDeadline(t *testing.T) {
 	assertRecordedDeadline(t, provider, "start", providerStartTimeout)
 }
 
+func TestDeadlineProviderReportsProviderOperations(t *testing.T) {
+	t.Parallel()
+
+	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
+	var activities []ProviderActivity
+	wrapped := WithOperationDeadlines(provider, func(activity ProviderActivity) {
+		activities = append(activities, activity)
+	})
+	if err := wrapped.Start(context.Background(), StartRequest{RunnerPool: "linux", EndpointID: "endpoint-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.Destroy(context.Background(), RunnerInstance{RunnerPool: "linux", EndpointID: "endpoint-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 4 {
+		t.Fatalf("activities = %#v, want start/completed for two operations", activities)
+	}
+	for index, want := range []string{"start:started", "start:completed", "destroy:started", "destroy:completed"} {
+		got := activities[index]
+		if got.Operation+":"+got.Outcome != want || got.RunnerPool != "linux" || got.EndpointID != "endpoint-a" {
+			t.Fatalf("activity %d = %#v, want %s with context", index, got, want)
+		}
+	}
+}
+
 func newDeadlineTestProvider() (*deadlineRecordingProvider, OperationDeadlineProvider) {
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
 	return provider, WithOperationDeadlines(provider)

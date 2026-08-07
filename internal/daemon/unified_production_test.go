@@ -179,6 +179,7 @@ func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
 		_ githubsource.RepositoryDiscoverer,
 		factory githubsource.ManagerClientFactoryFunc,
 		_ githubsource.RegistrationRepository,
+		_ githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		if _, err := factory(context.Background(), transport.Repository{}); err != nil {
 			return nil, err
@@ -187,7 +188,7 @@ func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
 	}
 	configured := builderConfig()
 	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
-	built, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies)
+	built, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies)
 	if err != nil || built != manager {
 		t.Fatalf("GitHub manager = (%p, %v)", built, err)
 	}
@@ -205,7 +206,7 @@ func TestProductionGitHubManagerReportsBoundaryFailures(t *testing.T) {
 	configured.GitHub.App.PrivateKeyFile = "key.pem"
 	dependencies := newProductionDependencies()
 	dependencies.readFile = func(string) ([]byte, error) { return nil, wantErr }
-	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("credentials error = %v", err)
 	}
 }
@@ -221,7 +222,7 @@ func assertProductionDiscovererFailure(
 	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, wantErr
 	}
-	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("discoverer error = %v", err)
 	}
 }
@@ -236,6 +237,7 @@ func assertProductionClientFailure(t *testing.T, configured config.Config, store
 		_ githubsource.RepositoryDiscoverer,
 		factory githubsource.ManagerClientFactoryFunc,
 		_ githubsource.RegistrationRepository,
+		_ githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		_, err := factory(context.Background(), transport.Repository{})
 		return nil, err
@@ -243,7 +245,7 @@ func assertProductionClientFailure(t *testing.T, configured config.Config, store
 	dependencies.newClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
 		return nil, wantErr
 	}
-	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("client error = %v", err)
 	}
 }
@@ -258,10 +260,11 @@ func assertProductionManagerFailure(t *testing.T, configured config.Config, stor
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
+		githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		return nil, wantErr
 	}
-	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, dependencies); !errors.Is(err, wantErr) {
+	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("manager error = %v", err)
 	}
 }
@@ -323,6 +326,7 @@ func productionGenerationDependencies(manager *githubsource.Manager) productionD
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
+		githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		return manager, nil
 	}
@@ -386,6 +390,7 @@ func (fixture productionGenerationFailureFixture) managerDependencies() producti
 		githubsource.RepositoryDiscoverer,
 		githubsource.ManagerClientFactoryFunc,
 		githubsource.RegistrationRepository,
+		githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		return fixture.manager, nil
 	}

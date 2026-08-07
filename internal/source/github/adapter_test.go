@@ -40,6 +40,47 @@ func TestPollOnceAcquiresAvailableWorkBeforePersistingBatchEffects(t *testing.T)
 	assertEvents(t, client.events, batchEffectEvents(t))
 }
 
+func TestAdapterReportsPollAndDurableMessageActivities(t *testing.T) {
+	queueTime := time.Date(2026, time.August, 5, 10, 30, 0, 0, time.UTC)
+	message := messageWithAllEffects(queueTime)
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}, acquired: []int64{42}}
+	handler := &recordingEventHandler{events: &client.events}
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(client, handler)
+	adapter.Observer = githubsource.ManagerObserver{
+		Report:      func(activity githubsource.ManagerActivity) { activities = append(activities, activity) },
+		CurrentTime: func() time.Time { return time.Unix(1_700_000_000, 0) },
+	}
+
+	if _, err := adapter.PollOnce(context.Background(), 7); err != nil {
+		t.Fatalf("poll message: %v", err)
+	}
+
+	infoOutcomes, debugRequests := adapterActivityResults(activities)
+	wantInfo := []string{
+		"job_ingestion:enqueue_jobs:2",
+		"job_observation:runner_started:1",
+		"job_observation:terminalized:2",
+	}
+	if !reflect.DeepEqual(infoOutcomes, wantInfo) || !reflect.DeepEqual(debugRequests, []int64{42, 43}) {
+		t.Fatalf("info outcomes=%#v debug requests=%#v", infoOutcomes, debugRequests)
+	}
+}
+
+func adapterActivityResults(activities []githubsource.ManagerActivity) ([]string, []int64) {
+	infoOutcomes := make([]string, 0)
+	debugRequests := make([]int64, 0)
+	for _, activity := range activities {
+		if activity.Visibility == githubsource.ActivityInfo && activity.Outcome == "completed" {
+			infoOutcomes = append(infoOutcomes, activity.Operation+":"+activity.Stage+":"+strconv.Itoa(activity.Count))
+		}
+		if activity.Visibility == githubsource.ActivityDebug && activity.Stage == "persist_job" && activity.Outcome == "completed" {
+			debugRequests = append(debugRequests, activity.SourceRequestID)
+		}
+	}
+	return infoOutcomes, debugRequests
+}
+
 func messageWithAllEffects(queueTime time.Time) *upstream.RunnerScaleSetMessage {
 	return &upstream.RunnerScaleSetMessage{
 		MessageID: 17,

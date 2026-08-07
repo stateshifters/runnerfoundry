@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
@@ -127,6 +128,7 @@ type Manager struct {
 	discoverer    RepositoryDiscoverer
 	factory       ManagerClientFactoryFunc
 	registrations RegistrationRepository
+	observer      ManagerObserver
 	source        *Source
 	leaders       []ManagedSession
 	retiring      []ManagedSession
@@ -141,13 +143,14 @@ func NewManager(
 	discoverer RepositoryDiscoverer,
 	factory ManagerClientFactoryFunc,
 	registrations RegistrationRepository,
+	observer ManagerObserver,
 ) (*Manager, error) {
 	if discoverer == nil || factory == nil || registrations == nil {
 		return nil, errors.New("GitHub discoverer, client factory, and registration repository are required")
 	}
 	source := &Source{routes: make(map[routeKey]memberRoute)}
 	return &Manager{
-		discoverer: discoverer, factory: factory, registrations: registrations, source: source,
+		discoverer: discoverer, factory: factory, registrations: registrations, observer: observer, source: source,
 	}, nil
 }
 
@@ -158,17 +161,33 @@ func (manager *Manager) Source() *Source {
 // Reconcile discovers repositories, ensures every configured Runner Pool,
 // optionally prunes absent owned scale sets, and atomically persists the
 // resulting registration records.
-func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) error {
+func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) (resultErr error) {
+	reconciliationStarted := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "reconciliation", Outcome: "started"})
+	defer func() {
+		outcome := "completed"
+		if resultErr != nil {
+			outcome = "failed"
+		}
+		manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+			Stage: "reconciliation", Outcome: outcome,
+			Duration: manager.observer.currentTime().Sub(reconciliationStarted), Err: resultErr})
+	}()
 	if err := validateManagerConfig(config); err != nil {
 		return err
 	}
-	previous, err := manager.registrations.RegistrationSnapshot(ctx)
+	return manager.reconcileConfigured(ctx, config)
+}
+
+func (manager *Manager) reconcileConfigured(ctx context.Context, config ManagerConfig) error {
+	previous, err := manager.loadRegistrationSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("load owned GitHub registrations: %w", err)
+		return err
 	}
-	result, err := manager.discoverer.Discover(ctx)
+	result, err := manager.discoverRepositories(ctx)
 	if err != nil {
-		return fmt.Errorf("discover GitHub repositories: %w", err)
+		return err
 	}
 	if failureErr := discoveryFailures(result.InstallationFailures); failureErr != nil {
 		return failureErr
@@ -179,12 +198,79 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) err
 	}
 	owned := mergeOwnedRegistrations(previous.Owned, active)
 	if config.Prune {
-		owned, err = manager.pruneRegistrations(ctx, result.Repositories, active, owned)
+		owned, err = manager.pruneOwnedRegistrations(ctx, result.Repositories, active, owned)
 		if err != nil {
 			return err
 		}
 	}
-	if err := manager.replaceRegistrations(ctx, RegistrationSnapshot{Active: active, Owned: owned}); err != nil {
+	return manager.persistRegistrationSnapshot(ctx, active, owned)
+}
+
+func (manager *Manager) loadRegistrationSnapshot(ctx context.Context) (RegistrationSnapshot, error) {
+	started := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "load_registration_snapshot", Outcome: "started"})
+	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "load_registration_snapshot", Outcome: outcome, Count: len(snapshot.Active), Err: err,
+		Duration: manager.observer.currentTime().Sub(started)})
+	if err != nil {
+		return RegistrationSnapshot{}, fmt.Errorf("load owned GitHub registrations: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (manager *Manager) discoverRepositories(ctx context.Context) (transport.DiscoveryResult, error) {
+	started := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "discover_repositories", Outcome: "started"})
+	result, err := manager.discoverer.Discover(ctx)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "discover_repositories", Outcome: outcome, RepositoryCount: len(result.Repositories),
+		InstallationCount: discoveredInstallationCount(result), Err: err,
+		Duration: manager.observer.currentTime().Sub(started)})
+	if err != nil {
+		return transport.DiscoveryResult{}, fmt.Errorf("discover GitHub repositories: %w", err)
+	}
+	return result, nil
+}
+
+func (manager *Manager) pruneOwnedRegistrations(ctx context.Context, repositories []transport.Repository, active, owned []Registration) ([]Registration, error) {
+	started := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "prune_registrations", Outcome: "started", Total: len(owned)})
+	pruned, err := manager.pruneRegistrations(ctx, repositories, active, owned)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "prune_registrations", Outcome: outcome, Count: len(pruned), Err: err,
+		Duration: manager.observer.currentTime().Sub(started)})
+	return pruned, err
+}
+
+func (manager *Manager) persistRegistrationSnapshot(ctx context.Context, active, owned []Registration) error {
+	started := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "persist_registrations", Outcome: "started", Total: len(active)})
+	err := manager.replaceRegistrations(ctx, RegistrationSnapshot{Active: active, Owned: owned})
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "persist_registrations", Outcome: outcome, Count: len(active), Err: err,
+		Duration: manager.observer.currentTime().Sub(started)})
+	if err != nil {
 		return fmt.Errorf("persist GitHub registrations: %w", err)
 	}
 	return nil
@@ -196,14 +282,58 @@ func (manager *Manager) ensureRegistrations(
 	config ManagerConfig,
 ) ([]Registration, error) {
 	records := make([]Registration, 0, len(repositories)*len(config.RunnerPools))
-	for _, repository := range repositories {
-		repositoryRecords, err := manager.ensureRepository(ctx, repository, config)
+	total := len(repositories)
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "configure_repositories", Outcome: "started", Total: total})
+	for index, repository := range repositories {
+		current := index + 1
+		manager.reportRepositoryProgress(current, total)
+		repositoryRecords, err := manager.ensureRepositoryWithActivity(ctx, repository, config, current, total)
 		if err != nil {
+			manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+				Stage: "configure_repositories", Outcome: "failed", Current: current, Total: total, Err: err})
 			return nil, err
 		}
 		records = append(records, repositoryRecords...)
 	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+		Stage: "configure_repositories", Outcome: "completed", Count: len(records), Total: total})
 	return records, nil
+}
+
+func (manager *Manager) reportRepositoryProgress(current, total int) {
+	if shouldReportManagerProgress(current, total) {
+		manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
+			Stage: "configure_repositories", Outcome: "progress", Current: current, Total: total})
+	}
+}
+
+func (manager *Manager) ensureRepositoryWithActivity(ctx context.Context, repository transport.Repository,
+	config ManagerConfig, current, total int,
+) ([]Registration, error) {
+	started := manager.observer.currentTime()
+	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+		Stage: "configure_repository", Outcome: "started", Repository: repository.URL, Current: current, Total: total})
+	records, err := manager.ensureRepository(ctx, repository, config)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+		Stage: "configure_repository", Outcome: outcome, Repository: repository.URL, Current: current, Total: total,
+		Count: len(records), Duration: manager.observer.currentTime().Sub(started), Err: err})
+	return records, err
+}
+
+func discoveredInstallationCount(result transport.DiscoveryResult) int {
+	installations := make(map[transport.InstallationID]struct{}, len(result.Repositories)+len(result.InstallationFailures))
+	for _, repository := range result.Repositories {
+		installations[repository.InstallationID] = struct{}{}
+	}
+	for installationID := range result.InstallationFailures {
+		installations[installationID] = struct{}{}
+	}
+	return len(installations)
 }
 
 func (manager *Manager) ensureRepository(
@@ -219,19 +349,44 @@ func (manager *Manager) ensureRepository(
 		return nil, fmt.Errorf("create GitHub client for repository %q: %w", repository.URL, err)
 	}
 	records := make([]Registration, 0, len(config.RunnerPools))
-	for _, runnerPool := range config.RunnerPools {
-		registration, ensureErr := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
+	for index, runnerPool := range config.RunnerPools {
+		record, ensureErr := manager.ensureRunnerPoolRecord(ctx, client, repository, runnerPool, index+1, len(config.RunnerPools))
 		if ensureErr != nil {
-			return nil, fmt.Errorf("ensure Runner Pool %q for repository %q: %w",
-				runnerPool.RunnerPool, repository.URL, ensureErr)
+			return nil, ensureErr
 		}
-		records = append(records, Registration{
-			RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
-			InstallationID: repository.InstallationID, RunnerGroupID: registration.RunnerGroupID,
-			ScaleSetID: registration.ID,
-		})
+		records = append(records, record)
 	}
 	return records, nil
+}
+
+func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client ManagerClient, repository transport.Repository,
+	runnerPool RunnerPoolConfig, current, total int,
+) (Registration, error) {
+	started := manager.observer.currentTime()
+	manager.reportRunnerPoolActivity(repository.URL, runnerPool.RunnerPool, current, total, "started", started, nil)
+	registration, err := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.reportRunnerPoolActivity(repository.URL, runnerPool.RunnerPool, current, total, outcome, started, err)
+	if err != nil {
+		return Registration{}, fmt.Errorf("ensure Runner Pool %q for repository %q: %w", runnerPool.RunnerPool, repository.URL, err)
+	}
+	return Registration{RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
+		InstallationID: repository.InstallationID, RunnerGroupID: registration.RunnerGroupID, ScaleSetID: registration.ID}, nil
+}
+
+func (manager *Manager) reportRunnerPoolActivity(repository string, runnerPool core.RunnerPool, current, total int,
+	outcome string, started time.Time, err error,
+) {
+	duration := time.Duration(0)
+	if outcome != "started" {
+		duration = manager.observer.currentTime().Sub(started)
+	}
+	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+		Stage: "configure_runner_pool", Outcome: outcome, Repository: repository, RunnerPool: runnerPool,
+		Current: current, Total: total, Duration: duration, Err: err})
 }
 
 func (manager *Manager) replaceRegistrations(ctx context.Context, snapshot RegistrationSnapshot) error {
@@ -265,133 +420,63 @@ func discoveryFailures(failures map[transport.InstallationID]error) error {
 
 // RefreshMembers replaces bootstrap routes from the persisted registration
 // snapshot. No leader message session is needed on ordinary members.
-func (manager *Manager) RefreshMembers(ctx context.Context) error {
+func (manager *Manager) RefreshMembers(ctx context.Context) (resultErr error) {
+	started := manager.observer.currentTime()
+	routeCount := 0
+	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_routes",
+		Stage: "replace_routes", Outcome: "started"})
+	defer func() {
+		outcome := "completed"
+		if resultErr != nil {
+			outcome = "failed"
+		}
+		manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_routes",
+			Stage: "replace_routes", Outcome: outcome, Count: routeCount,
+			Duration: manager.observer.currentTime().Sub(started), Err: resultErr})
+	}()
 	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("list GitHub registrations: %w", err)
 	}
-	routes := make([]MemberRoute, 0, len(snapshot.Active))
-	for _, record := range snapshot.Active {
+	routes, err := manager.buildMemberRoutes(ctx, snapshot.Active)
+	if err != nil {
+		return err
+	}
+	if err := manager.source.ReplaceRoutes(routes); err != nil {
+		return fmt.Errorf("replace GitHub member routes: %w", err)
+	}
+	routeCount = len(routes)
+	return nil
+}
+
+func (manager *Manager) buildMemberRoutes(ctx context.Context, registrations []Registration) ([]MemberRoute, error) {
+	routes := make([]MemberRoute, 0, len(registrations))
+	for index, record := range registrations {
+		started := manager.observer.currentTime()
+		manager.reportRouteActivity(record, index+1, len(registrations), "started", started, nil)
 		repository := repositoryFromRegistration(record)
 		client, clientErr := manager.factory(ctx, repository)
 		if clientErr != nil {
-			return fmt.Errorf("create GitHub member client for repository %q: %w", record.RepositoryURL, clientErr)
+			manager.reportRouteActivity(record, index+1, len(registrations), "failed", started, clientErr)
+			return nil, fmt.Errorf("create GitHub member client for repository %q: %w", record.RepositoryURL, clientErr)
 		}
 		routes = append(routes, MemberRoute{
 			Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
 			Client: managedBootstrapClient{client: client}, Registration: transportRegistration(record),
 		})
+		manager.reportRouteActivity(record, index+1, len(registrations), "completed", started, nil)
 	}
-	if err := manager.source.ReplaceRoutes(routes); err != nil {
-		return fmt.Errorf("replace GitHub member routes: %w", err)
-	}
-	return nil
+	return routes, nil
 }
 
-// OpenLeader opens one actions/scaleset message session per persisted
-// registration and returns its polling adapter. Callers pass current shared
-// capacity to each PollOnce call.
-func (manager *Manager) OpenLeader(
-	ctx context.Context,
-	owner string,
-	handler EventHandler,
-) ([]*Adapter, error) {
-	if owner == "" || handler == nil {
-		return nil, errors.New("GitHub leader owner and event handler are required")
+func (manager *Manager) reportRouteActivity(record Registration, current, total int, outcome string,
+	started time.Time, err error,
+) {
+	duration := time.Duration(0)
+	if outcome != "started" {
+		duration = manager.observer.currentTime().Sub(started)
 	}
-	cleanupErr := manager.retryRetiring(ctx)
-	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
-	if err != nil {
-		return nil, errors.Join(cleanupErr, fmt.Errorf("list GitHub registrations: %w", err))
-	}
-	sessions, adapters, err := manager.openLeaderRecords(ctx, snapshot.Active, owner, handler)
-	if err != nil {
-		return nil, errors.Join(cleanupErr, err)
-	}
-	oldSessions := manager.leaders
-	manager.leaders = sessions
-	return adapters, errors.Join(cleanupErr, manager.retireSessions(ctx, oldSessions))
-}
-
-func (manager *Manager) openLeaderRecords(
-	ctx context.Context,
-	records []Registration,
-	owner string,
-	handler EventHandler,
-) ([]ManagedSession, []*Adapter, error) {
-	sessions := make([]ManagedSession, 0, len(records))
-	adapters := make([]*Adapter, 0, len(records))
-	for _, record := range records {
-		opened, err := manager.openLeaderRecord(ctx, record, owner, handler)
-		if err != nil {
-			return nil, nil, manager.closeOpened(ctx, sessions, err)
-		}
-		sessions = append(sessions, opened.session)
-		adapters = append(adapters, opened.adapter)
-	}
-	return sessions, adapters, nil
-}
-
-func (manager *Manager) openLeaderRecord(
-	ctx context.Context,
-	record Registration,
-	owner string,
-	handler EventHandler,
-) (openedLeader, error) {
-	client, err := manager.factory(ctx, repositoryFromRegistration(record))
-	if err != nil {
-		return openedLeader{}, err
-	}
-	session, err := client.OpenSession(ctx, transportRegistration(record), owner)
-	if err != nil {
-		return openedLeader{}, err
-	}
-	if session == nil {
-		return openedLeader{}, errors.New("GitHub client returned nil message session")
-	}
-	return openedLeader{
-		session: session,
-		adapter: &Adapter{
-			Client: session, Handler: handler, Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
-		},
-	}, nil
-}
-
-func repositoryFromRegistration(record Registration) transport.Repository {
-	return transport.Repository{InstallationID: record.InstallationID, URL: record.RepositoryURL}
-}
-
-func transportRegistration(record Registration) transport.Registration {
-	return transport.Registration{
-		ID: record.ScaleSetID, Name: string(record.RunnerPool), RunnerGroupID: record.RunnerGroupID,
-	}
-}
-
-func (manager *Manager) closeOpened(ctx context.Context, sessions []ManagedSession, cause error) error {
-	return errors.Join(cause, manager.retireSessions(ctx, sessions))
-}
-
-// CloseLeader closes every actions/scaleset message session.
-func (manager *Manager) CloseLeader(ctx context.Context) error {
-	sessions := append(manager.retiring, manager.leaders...)
-	manager.leaders = nil
-	manager.retiring = nil
-	return manager.retireSessions(ctx, sessions)
-}
-
-func (manager *Manager) retireSessions(ctx context.Context, sessions []ManagedSession) error {
-	var joined error
-	for _, session := range sessions {
-		if err := session.Close(ctx); err != nil {
-			manager.retiring = append(manager.retiring, session)
-			joined = errors.Join(joined, fmt.Errorf("close GitHub message session: %w", err))
-		}
-	}
-	return joined
-}
-
-func (manager *Manager) retryRetiring(ctx context.Context) error {
-	sessions := manager.retiring
-	manager.retiring = nil
-	return manager.retireSessions(ctx, sessions)
+	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_routes",
+		Stage: "configure_route", Outcome: outcome, Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
+		Current: current, Total: total, Duration: duration, Err: err})
 }

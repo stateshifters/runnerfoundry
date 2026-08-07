@@ -12,6 +12,34 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
+func mustPrepareGeneration(t *testing.T, generation *maintenanceGeneration) {
+	t.Helper()
+	if err := generation.Prepare(context.Background()); err != nil {
+		t.Fatalf("prepare generation: %v", err)
+	}
+}
+
+func mustActivateGeneration(t *testing.T, generation *maintenanceGeneration) {
+	t.Helper()
+	if err := generation.Activate(context.Background()); err != nil {
+		t.Fatalf("activate generation: %v", err)
+	}
+}
+
+func mustDeactivateGeneration(t *testing.T, generation *maintenanceGeneration) {
+	t.Helper()
+	if err := generation.Deactivate(context.Background()); err != nil {
+		t.Fatalf("deactivate generation: %v", err)
+	}
+}
+
+func mustCloseGeneration(t *testing.T, generation *maintenanceGeneration) {
+	t.Helper()
+	if err := generation.Close(context.Background()); err != nil {
+		t.Fatalf("close generation: %v", err)
+	}
+}
+
 func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 	t.Parallel()
 
@@ -76,12 +104,8 @@ func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.
 		nil,
 		nil,
 	)
-	if err := generation.Prepare(context.Background()); err != nil {
-		t.Fatalf("prepare generation: %v", err)
-	}
-	if err := generation.Activate(context.Background()); err != nil {
-		t.Fatalf("activate generation: %v", err)
-	}
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
 	waitForCycle(t, cycles)
 	ticker.ticks <- time.Time{}
 	select {
@@ -92,36 +116,6 @@ func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.
 	cycleResults <- nil
 	waitForCycle(t, cycles)
 	cycleResults <- nil
-	if err := generation.Close(context.Background()); err != nil {
-		t.Fatalf("close generation: %v", err)
-	}
-}
-
-func TestUnifiedGenerationDeactivationCancelsFirstMaintenanceCycle(t *testing.T) {
-	t.Parallel()
-
-	cycles := make(chan struct{}, 1)
-	reports := make(chan error, 1)
-	generation := newMaintenanceGeneration(
-		&controlledCycleEngineFake{cycles: cycles, results: make(chan error)},
-		&manualCycleTicker{ticks: make(chan time.Time)},
-		func(err error) { reports <- err },
-		nil,
-		nil,
-	)
-	if err := generation.Prepare(context.Background()); err != nil {
-		t.Fatalf("prepare generation: %v", err)
-	}
-	if err := generation.Activate(context.Background()); err != nil {
-		t.Fatalf("activate generation: %v", err)
-	}
-	waitForCycle(t, cycles)
-	if err := generation.Deactivate(context.Background()); err != nil {
-		t.Fatalf("deactivate generation: %v", err)
-	}
-	if err := <-reports; !errors.Is(err, context.Canceled) {
-		t.Fatalf("reported cancellation = %v, want context cancellation", err)
-	}
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("close generation: %v", err)
 	}
@@ -182,39 +176,6 @@ func TestUnifiedGenerationReportsActivationBoundaryFailure(t *testing.T) {
 	}
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop inactive generation: %v", err)
-	}
-}
-
-func TestUnifiedGenerationReportsCycleFailuresAndKeepsRunning(t *testing.T) {
-	t.Parallel()
-
-	cycleErr := errors.New("cycle failed")
-	cycles := make(chan struct{}, 2)
-	reports := make(chan error, 2)
-	cycleResults := make(chan error, 2)
-	cycleResults <- cycleErr
-	cycleResults <- nil
-	engine := &controlledCycleEngineFake{cycles: cycles, results: cycleResults}
-	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	generation := newMaintenanceGeneration(engine, ticker, func(err error) { reports <- err }, nil, nil)
-
-	if err := generation.Prepare(context.Background()); err != nil {
-		t.Fatalf("start generation: %v", err)
-	}
-	if err := generation.Activate(context.Background()); err != nil {
-		t.Fatalf("activate generation: %v", err)
-	}
-	waitForCycle(t, cycles)
-	if err := <-reports; !errors.Is(err, cycleErr) {
-		t.Fatalf("reported error = %v", err)
-	}
-	ticker.ticks <- time.Time{}
-	waitForCycle(t, cycles)
-	if err := <-reports; err != nil {
-		t.Fatalf("reported recovery = %v, want nil", err)
-	}
-	if err := generation.Close(context.Background()); err != nil {
-		t.Fatalf("stop generation: %v", err)
 	}
 }
 

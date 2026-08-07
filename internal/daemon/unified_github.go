@@ -32,6 +32,7 @@ type githubSourceRuntime struct {
 	nextMemberRefresh time.Time
 	adapters          []*githubsource.Adapter
 	polls             map[*githubsource.Adapter]*githubPollAttempt
+	publishedCapacity map[core.RunnerPool]int
 	leaderInstalled   bool
 	report            func(error)
 }
@@ -48,7 +49,7 @@ func newGitHubSourceRuntime(
 	return &githubSourceRuntime{
 		manager: manager, capacities: capacities, owner: owner, handler: handler,
 		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
-		polls: make(map[*githubsource.Adapter]*githubPollAttempt),
+		polls: make(map[*githubsource.Adapter]*githubPollAttempt), publishedCapacity: make(map[core.RunnerPool]int),
 	}
 }
 

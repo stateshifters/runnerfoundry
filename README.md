@@ -332,7 +332,19 @@ sudo journalctl -u runnerfoundry -f
 
 `READY=1` means RunnerFoundry accepted its configuration, opened its required local and durable-state resources, validated its providers, and activated the runtime generation. It does not wait for Git source discovery, message sessions, inventory, reconciliation, recovery, or provisioning. While the first maintenance cycle is pending, `systemctl status` reports `ready` with unknown leadership. Maintenance then reports source-neutral runtime health as `operational` or `degraded`; cluster leadership is shown separately as `unknown`, `standby`, or `leader`. A rejected reload that restores or preserves the active generation does not make the service degraded.
 
-Text and JSON logs use the same structured operational fields. The `operation` field identifies maintenance, reload, leadership, capacity publication, claims, runner starts or retries, and successful cleanup. Events include only non-secret identifiers such as `member`, `runner_pool`, and `job_id`, plus an `outcome` and `error_category`; raw error details are not logged. Repeated failures are logged immediately, whenever their fingerprint changes, and every five minutes while unchanged. The recovery event includes the recurrence count and failure duration.
+Text and JSON logs use the same structured fields. At `info`, operators see generation and leadership transitions, the immediate maintenance cycle, bounded GitHub reconciliation and session checkpoints, changed aggregate Runner Pool capacity, durable job ingestion, claims, runner starts and retries, terminal observations, and cleanup. Repository and session progress is emitted for the first item, each 5% boundary, and the final item, so normal output remains bounded as an installation grows. `warn` and `error` retain the corresponding operational records. Repeated failures are logged immediately, whenever their fingerprint changes, and every five minutes while unchanged. Recovery includes the recurrence count and failure duration.
+
+Set the existing `log.level` to `debug` to add every scheduled maintenance cycle and serialized phase; the exact repository URL, Runner Pool, session, endpoint, source request, and external operation; and per-repository capacity and poll outcomes. Debug output does not include message payloads, request headers, provider commands, environment variables, domain XML, Compose content, or JIT input. GitHub boundary errors may include their error text. Provider errors are logged only after provider-specific protection, while PostgreSQL errors remain category-only.
+
+Progress records use `operation`, `stage`, and `outcome`, with `current`, `total`, `duration_ms`, and `repository` when applicable. Discovery completion includes `repository_count` and `installation_count`. Other stable context includes `member`, `runner_pool`, `endpoint`, `source_request_id`, `job_id`, `capacity`, and `count`. Protect three value classes when collecting or sharing logs: GitHub App private keys, PostgreSQL credentials or DSNs, and JIT configuration.
+
+Example OpenSearch query-string filters (adjust the service field to match the collector):
+
+```text
+service.name:runnerfoundry AND outcome:started AND stage:*
+service.name:runnerfoundry AND outcome:failed AND operation:*
+service.name:runnerfoundry AND repository:"https://github.com/example/project"
+```
 
 ### Reload configuration
 

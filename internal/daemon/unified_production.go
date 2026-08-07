@@ -45,7 +45,7 @@ type productionDependencies struct {
 	httpTransport         http.RoundTripper
 	newDiscoverer         func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
 	newClient             func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
-	newManager            func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository) (*githubsource.Manager, error)
+	newManager            func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
 	newTicker             func(time.Duration) *time.Ticker
 	currentTime           func() time.Time
 	openSQLite            func(context.Context, string) (*sqlitestate.Store, error)
@@ -60,6 +60,7 @@ type productionDependencies struct {
 	buildProviderSet      func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
 	readHostname          func() (string, error)
 	logDestinationFactory logDestinationFactory
+	providerObserver      func(execution.ProviderActivity)
 	openState             func(context.Context, config.Config, productionDependencies) (*productionState, error)
 	buildGeneration       func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error)
 }
@@ -87,10 +88,11 @@ func buildProductionGenerationWithDependencies(
 	report func(error),
 	dependencies productionDependencies,
 ) (*maintenanceGeneration, error) {
-	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.store, dependencies)
+	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.store, report, dependencies)
 	if err != nil {
 		return nil, err
 	}
+	dependencies.providerObserver = newProviderObserver(report)
 	providers, inventory, err := dependencies.buildProviderSet(ctx, configured, state.member, dependencies)
 	if err != nil {
 		return nil, err
@@ -105,6 +107,7 @@ func buildProductionGenerationWithDependencies(
 func buildProductionGitHubManagerWithDependencies(
 	configured config.Config,
 	store unifiedStore,
+	report func(error),
 	dependencies productionDependencies,
 ) (*githubsource.Manager, error) {
 	credentials, err := configured.GitHub.AppCredentials(dependencies.readFile)
@@ -119,22 +122,27 @@ func buildProductionGitHubManagerWithDependencies(
 
 	manager, err := dependencies.newManager(
 		discoverer,
-		githubsource.ManagerClientFactoryFunc(func(
-			clientContext context.Context,
-			repository transport.Repository,
-		) (githubsource.ManagerClient, error) {
-			client, clientErr := dependencies.newClient(repository, transportCredentials, dependencies.httpTransport)
-			if clientErr != nil {
-				return githubsource.ManagerClient{}, fmt.Errorf("create scale-set client: %w", clientErr)
-			}
-			return githubsource.NewTransportManagerClient(client), nil
-		}),
+		productionManagerClientFactory(transportCredentials, dependencies),
 		store,
+		newGitHubManagerObserver(report, dependencies.currentTime),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub lifecycle manager: %w", err)
 	}
 	return manager, nil
+}
+
+func productionManagerClientFactory(
+	credentials transport.Credentials,
+	dependencies productionDependencies,
+) githubsource.ManagerClientFactoryFunc {
+	return func(_ context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
+		client, err := dependencies.newClient(repository, credentials, dependencies.httpTransport)
+		if err != nil {
+			return githubsource.ManagerClient{}, fmt.Errorf("create scale-set client: %w", err)
+		}
+		return githubsource.NewTransportManagerClient(client), nil
+	}
 }
 
 type productionGenerationComponents struct {
@@ -277,6 +285,7 @@ func buildProductionProvidersWithDependencies(
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
 		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
 		readTemplate: dependencies.readFile, memberHostname: hostname,
+		providerObserver: dependencies.providerObserver,
 	})
 }
 
