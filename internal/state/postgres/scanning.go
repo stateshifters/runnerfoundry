@@ -31,21 +31,6 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	return processing, nil
 }
 
-func scanProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) {
-	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
-	for rows.Next() {
-		job, err := scanProcessingJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate processing jobs: %w", err)
-	}
-	return jobs, nil
-}
-
 func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
 	var sourceAdapter, sourceIdentifier, runnerPool string

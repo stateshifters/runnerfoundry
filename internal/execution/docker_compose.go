@@ -30,6 +30,14 @@ func (provider DockerComposeProvider) KnowsEndpoint(endpointID InventoryEndpoint
 	return provider.EndpointID() == endpointID
 }
 
+func (provider DockerComposeProvider) CanInspectEndpointForMember(
+	endpointID InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	return provider.KnowsEndpoint(endpointID) &&
+		strings.EqualFold(strings.TrimSpace(string(provider.hostname)), strings.TrimSpace(string(memberID)))
+}
+
 func (provider DockerComposeProvider) Refresh(ctx context.Context) error {
 	_, err := provider.Inspect(ctx)
 	return err

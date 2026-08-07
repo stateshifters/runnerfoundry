@@ -229,7 +229,7 @@ func TestMaintenanceGenerationReportsActivationCycleAndDeactivationFailures(t *t
 	}
 }
 
-func TestMaintenanceGenerationDeduplicatesFailuresAndReportsRecovery(t *testing.T) {
+func TestMaintenanceGenerationForwardsEveryFailureAndRecovery(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("cycle failed")
@@ -244,8 +244,8 @@ func TestMaintenanceGenerationDeduplicatesFailuresAndReportsRecovery(t *testing.
 	generation.reportCycle(wantErr)
 	generation.reportCycle(wantErr)
 	generation.reportCycle(nil)
-	if len(reports) != 2 || !errors.Is(reports[0], wantErr) || reports[1] != nil {
-		t.Fatalf("cycle reports = %#v, want one failure and one recovery", reports)
+	if len(reports) != 3 || !errors.Is(reports[0], wantErr) || !errors.Is(reports[1], wantErr) || reports[2] != nil {
+		t.Fatalf("cycle reports = %#v, want every failure and recovery", reports)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestLoggingGenerationDelegatesDeactivation(t *testing.T) {
 	}
 }
 
-func TestBuildProductionProvidersReportsDockerHostnameFailures(t *testing.T) {
+func TestBuildProductionProvidersRejectsMissingMemberIdentity(t *testing.T) {
 	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{{
 		Name: "linux",
 		Docker: &config.DockerConfig{
@@ -290,15 +290,9 @@ func TestBuildProductionProvidersReportsDockerHostnameFailures(t *testing.T) {
 			Service:     "runner",
 		},
 	}}}
-	wantErr := errors.New("hostname unavailable")
 	dependencies := newProductionDependencies()
-	dependencies.readHostname = func() (string, error) { return "", wantErr }
-	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), configured, dependencies); !errors.Is(err, wantErr) {
-		t.Fatalf("hostname read error = %v, want %v", err, wantErr)
-	}
-	dependencies.readHostname = func() (string, error) { return " \n", nil }
-	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), configured, dependencies); err == nil {
-		t.Fatal("empty Docker hostname was accepted")
+	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), configured, "", dependencies); err == nil {
+		t.Fatal("empty provider member identity was accepted")
 	}
 }
 
@@ -347,6 +341,9 @@ func (*runnerInventoryRefreshFake) InspectEndpoint(context.Context, execution.In
 	return nil, nil
 }
 func (*runnerInventoryRefreshFake) KnowsEndpoint(execution.InventoryEndpointID) bool { return true }
+func (*runnerInventoryRefreshFake) CanInspectEndpointForMember(execution.InventoryEndpointID, core.MemberID) bool {
+	return true
+}
 func (*runnerInventoryRefreshFake) Destroy(context.Context, execution.RunnerInstance) error {
 	return nil
 }

@@ -200,6 +200,15 @@ func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.Run
 	return nil
 }
 
+func (pool orchestrationPool) RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error {
+	result, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
+	reportCleanup(pool.report, runnerPool, result)
+	if err != nil {
+		return fmt.Errorf("recover foreign pool work: %w", err)
+	}
+	return nil
+}
+
 func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerPool }
 
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {

@@ -37,6 +37,7 @@ type EndpointInventory interface {
 	EndpointID() InventoryEndpointID
 	InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error)
 	KnowsEndpoint(endpointID InventoryEndpointID) bool
+	CanInspectEndpointForMember(endpointID InventoryEndpointID, memberID core.MemberID) bool
 	Destroy(ctx context.Context, instance RunnerInstance) error
 }
 

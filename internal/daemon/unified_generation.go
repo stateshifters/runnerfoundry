@@ -103,7 +103,6 @@ type maintenanceGeneration struct {
 	engineClosed  bool
 	closerClosed  []bool
 	closed        bool
-	failures      map[string]string
 }
 
 func newMaintenanceGeneration(
@@ -120,7 +119,6 @@ func newMaintenanceGeneration(
 		engine: engine, ticker: ticker, report: report,
 		closers: append([]runtimeCloser(nil), closers...), finalizers: append([]runtimeFinalizer(nil), finalizers...),
 		closerClosed: make([]bool, len(closers)),
-		failures:     make(map[string]string),
 	}
 }
 
@@ -221,21 +219,10 @@ func (generation *maintenanceGeneration) run(ctx context.Context, done chan stru
 }
 
 func (generation *maintenanceGeneration) reportCycle(err error) {
-	generation.mutex.Lock()
-	defer generation.mutex.Unlock()
 	if err == nil {
-		if len(generation.failures) != 0 {
-			clear(generation.failures)
-			generation.report(nil)
-		}
+		generation.report(nil)
 		return
 	}
-	operation := "maintenance_cycle"
-	fingerprint := fmt.Sprintf("%T:%s", err, err.Error())
-	if generation.failures[operation] == fingerprint {
-		return
-	}
-	generation.failures[operation] = fingerprint
 	generation.report(fmt.Errorf("runtime maintenance cycle: %w", err))
 }
 

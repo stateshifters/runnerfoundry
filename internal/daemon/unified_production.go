@@ -57,7 +57,7 @@ type productionDependencies struct {
 	newPGStore            func(postgresstate.Connection) *postgresstate.Store
 	closePool             func(*pgxpool.Pool)
 	tryLeader             func(*cluster.Store, context.Context) (*cluster.LeaderLease, error)
-	buildProviderSet      func(context.Context, config.Config, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
+	buildProviderSet      func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
 	readHostname          func() (string, error)
 	logDestinationFactory logDestinationFactory
 	openState             func(context.Context, config.Config, productionDependencies) (*productionState, error)
@@ -91,7 +91,7 @@ func buildProductionGenerationWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	providers, inventory, err := dependencies.buildProviderSet(ctx, configured, dependencies)
+	providers, inventory, err := dependencies.buildProviderSet(ctx, configured, state.member, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -267,33 +267,17 @@ func openProductionPostgreSQLStateWithDependencies(
 func buildProductionProvidersWithDependencies(
 	ctx context.Context,
 	configured config.Config,
+	member core.MemberID,
 	dependencies productionDependencies,
 ) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	hostname := ""
-	if configurationUsesDocker(configured) {
-		var err error
-		hostname, err = dependencies.readHostname()
-		if err != nil {
-			return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("read Docker inventory hostname: %w", err)
-		}
-		hostname = strings.TrimSpace(hostname)
-		if hostname == "" {
-			return nil, execution.AggregateRunnerInventory{}, errors.New("docker inventory hostname is empty")
-		}
+	hostname := strings.TrimSpace(string(member))
+	if len(configured.RunnerPools) != 0 && hostname == "" {
+		return nil, execution.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
 	}
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
 		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
 		readTemplate: dependencies.readFile, memberHostname: hostname,
 	})
-}
-
-func configurationUsesDocker(configured config.Config) bool {
-	for _, runnerPoolConfig := range configured.RunnerPools {
-		if kind, err := runnerPoolConfig.ProviderKind(); err == nil && kind == config.ProviderKindDocker {
-			return true
-		}
-	}
-	return false
 }
 
 func buildConfiguredProviders(

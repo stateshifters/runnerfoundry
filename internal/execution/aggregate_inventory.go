@@ -114,6 +114,18 @@ func (inventory AggregateRunnerInventory) KnowsEndpoint(endpointID InventoryEndp
 	return false
 }
 
+func (inventory AggregateRunnerInventory) CanInspectEndpointForMember(
+	endpointID InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	for _, backend := range inventory.inventories {
+		if backend.CanInspectEndpointForMember(endpointID, memberID) {
+			return true
+		}
+	}
+	return false
+}
+
 // InspectEndpoint obtains fresh evidence from the matching child inventory and
 // returns an error when the endpoint is no longer configured.
 func (inventory AggregateRunnerInventory) InspectEndpoint(

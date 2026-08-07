@@ -93,6 +93,35 @@ func TestProcessOneRetainsProcessingWhenPartialStartCannotBeInspected(t *testing
 	assertFailedStartRetainsProcessing(t, jobID, provider, startErr)
 }
 
+func TestProcessOneRetainsTimedOutProvisioningWhenOutcomeCannotBeInspected(t *testing.T) {
+	jobID := uuid.New()
+	provider := &providerFake{
+		start: func(context.Context, execution.StartRequest) error { return context.DeadlineExceeded },
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+	assertFailedStartRetainsProcessing(t, jobID, provider, context.DeadlineExceeded)
+}
+
+func TestProcessOneRequeuesTimedOutProvisioningOnlyAfterConfirmedAbsence(t *testing.T) {
+	jobID := uuid.New()
+	retried := false
+	provider := &providerFake{
+		start:   func(context.Context, execution.StartRequest) error { return context.DeadlineExceeded },
+		inspect: func(context.Context) ([]execution.RunnerInstance, error) { return nil, nil },
+	}
+	store := processingStore(jobID, func(context.Context, core.JobID) (bool, error) {
+		retried = true
+		return true, nil
+	})
+	orchestrator := runtimeengine.NewOrchestrator(store, successfulBootstrapper(), provider, provider, "member", testCurrentTime)
+	processed, err := orchestrator.ProcessOne(context.Background(), "linux")
+	if !processed || !errors.Is(err, context.DeadlineExceeded) || !retried {
+		t.Fatalf("ProcessOne() = (%v, %v), retried=%t", processed, err, retried)
+	}
+}
+
 func TestProcessOneRetainsProcessingWhenPartialStartCannotBeDestroyed(t *testing.T) {
 	jobID := uuid.New()
 	startErr := errors.New("start failed")

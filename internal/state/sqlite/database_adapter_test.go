@@ -18,6 +18,7 @@ func TestOpenUsesInjectedDatabaseProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create database protocol fake: %v", err)
 	}
+	expectExclusiveSQLiteOwnership(mock)
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(
 		sqlmock.NewRows([]string{"user_version"}).AddRow(sqliteSchemaVersion))
@@ -50,6 +51,7 @@ func TestOpenReportsOpenAndInitializationFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create database protocol fake: %v", err)
 	}
+	expectExclusiveSQLiteOwnership(mock)
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnError(protocolErr)
 	mock.ExpectClose().WillReturnError(protocolErr)
 	initializationFailure := func(string, string) (*sql.DB, error) { return database, nil }
@@ -377,6 +379,13 @@ func expectSchemaStatements(mock sqlmock.Sqlmock) {
 	}
 }
 
+func expectExclusiveSQLiteOwnership(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA main.locking_mode=EXCLUSIVE")).WillReturnRows(
+		sqlmock.NewRows([]string{"locking_mode"}).AddRow("exclusive"))
+	mock.ExpectExec(regexp.QuoteMeta("BEGIN EXCLUSIVE")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("COMMIT")).WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
 func sqliteQueuedJobRows(now time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "enqueued_at"}).
 		AddRow(testJobIDText, "github", "request-3", "linux", now.UnixNano())
@@ -384,6 +393,7 @@ func sqliteQueuedJobRows(now time.Time) *sqlmock.Rows {
 
 func sqliteProcessingJobRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"job_id", "source_name", "source_reference", "runner_pool", "member_id",
-		"runner_started", "source_terminal"}).
-		AddRow(testJobIDText, "github", "request-3", "linux", testMemberIDText, false, false)
+		"claimed_at", "inventory_endpoint_id", "runner_started", "source_terminal"}).
+		AddRow(testJobIDText, "github", "request-3", "linux", testMemberIDText,
+			fixedTime().UnixNano(), "test:endpoint", false, false)
 }

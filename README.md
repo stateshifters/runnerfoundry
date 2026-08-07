@@ -33,7 +33,7 @@ GitHub does not expose a supported operation for reporting a provisioning failur
 - **Standalone with PostgreSQL:** one RunnerFoundry member and one PostgreSQL database.
 - **Clustered with PostgreSQL:** multiple RunnerFoundry members sharing PostgreSQL.
 
-SQLite supports one member only. PostgreSQL supports both standalone and clustered operation.
+SQLite supports one member only. While RunnerFoundry is running, it holds the SQLite database in exclusive locking mode: a second daemon and external SQLite readers cannot access the live database until RunnerFoundry stops. PostgreSQL supports both standalone and clustered operation.
 
 ## Quick start
 
@@ -196,7 +196,7 @@ Configure exactly one state backend:
 
 | Setting | Requirement | Purpose |
 | --- | --- | --- |
-| `state.path` | Required for SQLite | SQLite database path. Only one member may open it. |
+| `state.path` | Required for SQLite | SQLite database path. RunnerFoundry exclusively owns the live database until it stops. |
 | `state.postgres` | Required for PostgreSQL | PostgreSQL connection and stable-role settings. |
 
 One member using `state.postgres` is standalone. Multiple members sharing it form a cluster. Changing backends or PostgreSQL settings requires a restart.

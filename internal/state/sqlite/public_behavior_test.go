@@ -26,6 +26,7 @@ func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	}
 	processingJobs, err := store.ProcessingByMember(ctx, testMemberID, "linux")
 	if err != nil || len(processingJobs) != 1 || processingJobs[0].Job.ID != testJobID ||
+		!processingJobs[0].ClaimedAt.Equal(fixedTime()) || processingJobs[0].InventoryEndpointID != "test:endpoint" ||
 		!processingJobs[0].RunnerStarted || !processingJobs[0].SourceTerminal {
 		t.Fatalf("processing = %#v, %v", processingJobs, err)
 	}
@@ -108,7 +109,7 @@ func successfulBehaviorExecutor() Executor {
 			case registrationsSQL:
 				return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
 			case processingByMemberSQL:
-				return rowsFromValues([][]any{processingJobValues()}), nil
+				return rowsFromValues([][]any{claimedProcessingJobValues()}), nil
 			default:
 				return rowsFromValues(nil), nil
 			}
@@ -132,6 +133,11 @@ func successfulBehaviorExecutor() Executor {
 
 func processingJobValues() []any {
 	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText, true, true}
+}
+
+func claimedProcessingJobValues() []any {
+	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText,
+		fixedTime().UnixNano(), "test:endpoint", true, true}
 }
 
 func rowFromValues(values []any) Row {

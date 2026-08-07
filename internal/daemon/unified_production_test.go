@@ -329,6 +329,7 @@ func productionGenerationDependencies(manager *githubsource.Manager) productionD
 	dependencies.buildProviderSet = func(
 		context.Context,
 		config.Config,
+		core.MemberID,
 		productionDependencies,
 	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 		provider := builderProviderFake{}
@@ -397,6 +398,7 @@ func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testi
 	dependencies.buildProviderSet = func(
 		context.Context,
 		config.Config,
+		core.MemberID,
 		productionDependencies,
 	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
 		return nil, execution.AggregateRunnerInventory{}, fixture.wantErr

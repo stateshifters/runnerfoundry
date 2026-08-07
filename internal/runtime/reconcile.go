@@ -34,26 +34,11 @@ const (
 )
 
 func (orchestrator *Orchestrator) OccupiedSlots(ctx context.Context, runnerPool core.RunnerPool) (int, error) {
-	processing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
+	processing, err := orchestrator.store.ProcessingByMember(ctx, orchestrator.member, runnerPool)
 	if err != nil {
 		return 0, fmt.Errorf("list processing work for Runner Pool %q: %w", runnerPool, err)
 	}
-	instances, err := orchestrator.inventory.Inspect(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("inspect occupied runners for Runner Pool %q: %w", runnerPool, err)
-	}
-	occupied := make(map[core.RunnerName]struct{}, len(processing)+len(instances))
-	for _, job := range processing {
-		occupied[runnerName(job.Job.ID)] = struct{}{}
-	}
-	for _, instance := range instancesForPool(instances, runnerPool) {
-		key := instance.RunnerName
-		if key == "" {
-			key = core.RunnerName("provider:" + instance.ID)
-		}
-		occupied[key] = struct{}{}
-	}
-	return len(occupied), nil
+	return len(processing), nil
 }
 
 // ReconcilePool repairs member-owned processing after provisioning failures or
@@ -63,7 +48,24 @@ func (orchestrator *Orchestrator) ReconcilePool(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
 ) (PoolReconciliation, error) {
-	return orchestrator.loadAndReconcilePool(ctx, runnerPool, preserveRunning)
+	ownedProcessing, err := orchestrator.store.ProcessingByMember(ctx, orchestrator.member, runnerPool)
+	if err != nil {
+		return PoolReconciliation{}, fmt.Errorf("list member processing work for Runner Pool %q: %w", runnerPool, err)
+	}
+	poolProcessing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
+	if err != nil {
+		return PoolReconciliation{}, fmt.Errorf("list pool processing work for Runner Pool %q: %w", runnerPool, err)
+	}
+	instances, err := orchestrator.inventory.Inspect(ctx)
+	if err != nil {
+		return PoolReconciliation{}, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err)
+	}
+	poolInstances := instancesForPool(instances, runnerPool)
+	instancesByName := indexInstancesByName(poolInstances)
+	result, processingErr := orchestrator.reconcileOwnedProcessing(ctx, ownedProcessing, instancesByName, preserveRunning)
+	removedOrphans, orphanErr := orchestrator.cleanupOrphanedRunners(ctx, poolInstances, poolProcessing)
+	result.RemovedRunners += removedOrphans
+	return result, errors.Join(processingErr, orphanErr)
 }
 
 // TerminatePool destroys member-owned resources for an operator-requested
@@ -74,39 +76,74 @@ func (orchestrator *Orchestrator) TerminatePool(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
 ) (PoolReconciliation, error) {
-	return orchestrator.loadAndReconcilePool(ctx, runnerPool, terminateRunning)
-}
-
-func (orchestrator *Orchestrator) loadAndReconcilePool(
-	ctx context.Context,
-	runnerPool core.RunnerPool,
-	purpose reconciliationPurpose,
-) (PoolReconciliation, error) {
-	processing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
+	processing, err := orchestrator.store.ProcessingByMember(ctx, orchestrator.member, runnerPool)
 	if err != nil {
-		return PoolReconciliation{}, fmt.Errorf("list processing work for Runner Pool %q: %w", runnerPool, err)
+		return PoolReconciliation{}, fmt.Errorf("list member processing work for Runner Pool %q: %w", runnerPool, err)
 	}
 	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err)
 	}
-	return orchestrator.reconcileInventory(ctx, processing, instancesForPool(instances, runnerPool), purpose)
+	return orchestrator.reconcileOwnedProcessing(
+		ctx, processing, indexInstancesByName(instancesForPool(instances, runnerPool)), terminateRunning,
+	)
 }
 
-func (orchestrator *Orchestrator) reconcileInventory(
+// RecoverForeignPool performs leader-authorized cleanup and recovery for
+// processing owned by other members. Callers must establish cluster leadership
+// before invoking it; endpoints that cannot be inspected from this member are
+// retained without mutation.
+func (orchestrator *Orchestrator) RecoverForeignPool(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+) (PoolReconciliation, error) {
+	processing, err := orchestrator.store.ProcessingByPool(ctx, runnerPool)
+	if err != nil {
+		return PoolReconciliation{}, fmt.Errorf("list foreign processing work for Runner Pool %q: %w", runnerPool, err)
+	}
+	instances, err := orchestrator.inventory.Inspect(ctx)
+	if err != nil {
+		return PoolReconciliation{}, fmt.Errorf("inspect foreign Runner Pool %q: %w", runnerPool, err)
+	}
+	return orchestrator.reconcileForeignProcessing(ctx, processing, instancesForPool(instances, runnerPool))
+}
+
+func (orchestrator *Orchestrator) reconcileForeignProcessing(
 	ctx context.Context,
 	processing []core.ProcessingJob,
 	instances []execution.RunnerInstance,
-	purpose reconciliationPurpose,
 ) (PoolReconciliation, error) {
+	instancesByName := indexInstancesByName(instances)
+	result := PoolReconciliation{}
+	failures := make([]error, 0)
+	for _, job := range processing {
+		if job.MemberID == orchestrator.member {
+			continue
+		}
+		result.RemainingProcessing++
+		if !orchestrator.inventory.CanInspectEndpointForMember(job.InventoryEndpointID, job.MemberID) {
+			continue
+		}
+		instance, present := instancesByName[runnerName(job.Job.ID)]
+		var instanceReference *execution.RunnerInstance
+		if present && (instance.EndpointID == "" || instance.EndpointID == job.InventoryEndpointID) {
+			instanceReference = &instance
+		}
+		change, err := orchestrator.reconcileProcessing(ctx, job, instanceReference, preserveRunning)
+		result.RemovedRunners += change.removedRunners
+		result.RemovedProcessing += change.removedProcessing
+		result.RemainingProcessing -= change.noLongerProcessing
+		failures = appendFailure(failures, err)
+	}
+	return result, errors.Join(failures...)
+}
+
+func indexInstancesByName(instances []execution.RunnerInstance) map[core.RunnerName]execution.RunnerInstance {
 	instancesByName := make(map[core.RunnerName]execution.RunnerInstance, len(instances))
 	for _, instance := range instances {
 		instancesByName[instance.RunnerName] = instance
 	}
-	result, processingErr := orchestrator.reconcileOwnedProcessing(ctx, processing, instancesByName, purpose)
-	removedOrphans, orphanErr := orchestrator.cleanupOrphanedRunners(ctx, instances, processing)
-	result.RemovedRunners += removedOrphans
-	return result, errors.Join(processingErr, orphanErr)
+	return instancesByName
 }
 
 func (orchestrator *Orchestrator) reconcileOwnedProcessing(

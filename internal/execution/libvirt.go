@@ -14,6 +14,7 @@ import (
 // contracts.
 type LibvirtProvider struct {
 	provider providerlibvirt.Provider
+	hostname HostIdentity
 }
 
 func (provider LibvirtProvider) EndpointID() InventoryEndpointID {
@@ -35,6 +36,20 @@ func (provider LibvirtProvider) KnowsEndpoint(endpointID InventoryEndpointID) bo
 	return provider.EndpointID() == endpointID
 }
 
+func (provider LibvirtProvider) CanInspectEndpointForMember(
+	endpointID InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	if !provider.KnowsEndpoint(endpointID) {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(provider.provider.Config.ConnectionURI))
+	if err == nil && parsed.Host != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(string(provider.hostname)), strings.TrimSpace(string(memberID)))
+}
+
 func (provider LibvirtProvider) Refresh(ctx context.Context) error {
 	_, err := provider.Inspect(ctx)
 	return err
@@ -53,13 +68,14 @@ func NewLibvirtProvider(
 	transport providerlibvirt.CommandRunner,
 	config providerlibvirt.Config,
 	domainTemplate []byte,
+	hostname HostIdentity,
 ) LibvirtProvider {
 	template := append([]byte(nil), domainTemplate...)
 	return LibvirtProvider{provider: providerlibvirt.NewProviderWithTemplateReader(
 		transport,
 		config,
 		func(string) ([]byte, error) { return append([]byte(nil), template...), nil },
-	)}
+	), hostname: hostname}
 }
 
 func (provider LibvirtProvider) Validate(ctx context.Context) error {

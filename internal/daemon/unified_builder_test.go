@@ -140,6 +140,9 @@ func assertPoolAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestr
 	if err := pool.Reconcile(context.Background(), "linux"); err != nil {
 		t.Fatal(err)
 	}
+	if err := pool.RecoverForeign(context.Background(), "linux"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertPoolAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchestrator, wantErr error) {
@@ -150,6 +153,9 @@ func assertPoolAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchest
 	}
 	if err := pool.Reconcile(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("reconcile error = %v", err)
+	}
+	if err := pool.RecoverForeign(context.Background(), "linux"); !errors.Is(err, wantErr) {
+		t.Fatalf("foreign recovery error = %v", err)
 	}
 }
 
@@ -192,6 +198,12 @@ func (builderProviderFake) Start(context.Context, execution.StartRequest) error 
 func (builderProviderFake) EndpointID() execution.InventoryEndpointID           { return "test:builder" }
 func (provider builderProviderFake) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
 	return provider.EndpointID() == endpointID
+}
+func (provider builderProviderFake) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	_ core.MemberID,
+) bool {
+	return provider.KnowsEndpoint(endpointID)
 }
 func (provider builderProviderFake) Refresh(ctx context.Context) error {
 	_, err := provider.Inspect(ctx)

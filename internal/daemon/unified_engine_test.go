@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/meza/RunnerFoundry/internal/execution"
 )
 
 func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
@@ -51,6 +52,62 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestUnifiedEngineRunsForeignRecoveryOnlyForTheLeaderAfterInventoryRefresh(t *testing.T) {
+	events := runEngineCycleWithInventory(t, true)
+	refreshIndex := eventIndex(events, "refresh-inventory")
+	recoveryIndex := eventIndex(events, "recover-foreign:linux")
+	reconcileIndex := eventIndex(events, "reconcile:linux")
+	if refreshIndex >= recoveryIndex || recoveryIndex >= reconcileIndex {
+		t.Fatalf("events = %#v, want refresh then foreign recovery then reconciliation", events)
+	}
+}
+
+func TestUnifiedEngineFollowerSkipsForeignRecovery(t *testing.T) {
+	events := runEngineCycleWithInventory(t, false)
+	if occurrences(events, "recover-foreign:linux") != 0 {
+		t.Fatalf("events = %#v, want no follower recovery", events)
+	}
+}
+
+func runEngineCycleWithInventory(t *testing.T, leader bool) []string {
+	t.Helper()
+	events := make([]string, 0)
+	engine := unifiedEngineFixture(&events)
+	engine.leadership = leadershipFake{leader: leader, events: &events}
+	engine.inventory = inventoryRuntimeFake{events: &events}
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle() error = %v", err)
+	}
+	return events
+}
+
+func TestUnifiedEngineSkipsRecoveryAndLocalWorkWhenInventoryRefreshFails(t *testing.T) {
+	events := make([]string, 0)
+	wantErr := errors.New("inventory unavailable")
+	engine := unifiedEngineFixture(&events)
+	engine.inventory = inventoryRuntimeFake{events: &events, err: wantErr}
+
+	err := engine.Cycle(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Cycle() error = %v, want inventory failure", err)
+	}
+	if occurrences(events, "recover-foreign:linux") != 0 || occurrences(events, "reconcile:linux") != 0 {
+		t.Fatalf("events = %#v, want no recovery or local work after failed refresh", events)
+	}
+}
+
+func TestUnifiedEngineReportsForeignRecoveryFailureAndContinuesLocalWork(t *testing.T) {
+	events := make([]string, 0)
+	wantErr := errors.New("foreign recovery failed")
+	engine := unifiedEngineFixture(&events)
+	engine.inventory = inventoryRuntimeFake{events: &events}
+	engine.pools[0].runtime = poolRuntimeFake{events: &events, recoverErr: wantErr}
+	err := engine.Cycle(context.Background())
+	if !errors.Is(err, wantErr) || occurrences(events, "reconcile:linux") != 1 {
+		t.Fatalf("Cycle() = %v, events=%#v", err, events)
 	}
 }
 
@@ -278,6 +335,12 @@ type poolRuntimeFake struct {
 	events       *[]string
 	requestErr   error
 	reconcileErr error
+	recoverErr   error
+}
+
+func (fake poolRuntimeFake) RecoverForeign(context.Context, core.RunnerPool) error {
+	*fake.events = append(*fake.events, "recover-foreign:linux")
+	return fake.recoverErr
 }
 
 func (fake poolRuntimeFake) RequestWork(context.Context, core.RunnerPool) error {
@@ -298,3 +361,34 @@ func occurrences(events []string, target string) int {
 	}
 	return count
 }
+
+func eventIndex(events []string, target string) int {
+	for index, event := range events {
+		if event == target {
+			return index
+		}
+	}
+	return -1
+}
+
+type inventoryRuntimeFake struct {
+	events *[]string
+	err    error
+}
+
+func (fake inventoryRuntimeFake) EndpointID() execution.InventoryEndpointID   { return "test:endpoint" }
+func (inventoryRuntimeFake) KnowsEndpoint(execution.InventoryEndpointID) bool { return true }
+func (inventoryRuntimeFake) CanInspectEndpointForMember(execution.InventoryEndpointID, core.MemberID) bool {
+	return true
+}
+func (fake inventoryRuntimeFake) Refresh(context.Context) error {
+	*fake.events = append(*fake.events, "refresh-inventory")
+	return fake.err
+}
+func (inventoryRuntimeFake) Inspect(context.Context) ([]execution.RunnerInstance, error) {
+	return nil, nil
+}
+func (inventoryRuntimeFake) InspectEndpoint(context.Context, execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
+	return nil, nil
+}
+func (inventoryRuntimeFake) Destroy(context.Context, execution.RunnerInstance) error { return nil }

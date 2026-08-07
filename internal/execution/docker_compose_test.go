@@ -153,6 +153,10 @@ func TestDockerComposeEndpointOperationsAreExplicit(t *testing.T) {
 		provider.KnowsEndpoint("docker-compose:member-b?compose=compose.yaml&service=runner") {
 		t.Fatalf("endpoint identity = %q", provider.EndpointID())
 	}
+	if !provider.CanInspectEndpointForMember(endpointID, "member-a") ||
+		provider.CanInspectEndpointForMember(endpointID, "member-b") {
+		t.Fatal("Docker endpoint inspection must remain local to its owning member")
+	}
 	if err := provider.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}

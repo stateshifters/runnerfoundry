@@ -93,11 +93,12 @@ func TestTakeOldestLeavesEmptyQueueUnchanged(t *testing.T) {
 func TestProcessingByMemberReturnsCurrentOwnership(t *testing.T) {
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
-	values := processingJobValues(job, testMemberIDA)
-	values[5], values[6] = true, true
+	values := claimedProcessingJobValues(job, testMemberIDA)
+	values[7], values[8] = true, true
 	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{values})}
 	processing, err := NewStore(protocol.executor()).ProcessingByMember(context.Background(), testMemberIDA, "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job != job || processing[0].MemberID != testMemberIDA ||
+		!processing[0].ClaimedAt.Equal(fixedTime()) || processing[0].InventoryEndpointID != "test:endpoint" ||
 		!processing[0].RunnerStarted || !processing[0].SourceTerminal || protocol.commitCalls != 1 ||
 		len(protocol.statements) != 1 || !strings.Contains(protocol.statements[0], "source_tombstones") {
 		t.Fatalf("processing = %#v, commits=%d, error=%v", processing, protocol.commitCalls, err)
@@ -208,6 +209,11 @@ func queuedJobValues(identifier core.JobID, request core.JobRequest) []any {
 
 func processingJobValues(job core.Job, memberID core.MemberID) []any {
 	return []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), memberID, false, false}
+}
+
+func claimedProcessingJobValues(job core.Job, memberID core.MemberID) []any {
+	return []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), memberID,
+		fixedTime(), core.InventoryEndpointID("test:endpoint"), false, false}
 }
 
 func rowFromValues(values []any) Row {

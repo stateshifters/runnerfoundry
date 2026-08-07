@@ -62,7 +62,7 @@ const tombstoneDelayedStartSQL = `INSERT INTO public.runnerfoundry_source_tombst
 	SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM public.runnerfoundry_queued_jobs
 		WHERE source_name = $1 AND source_reference = $2)
 	ON CONFLICT(source_name, source_reference) DO NOTHING`
-const processingByMemberSQL = `SELECT ` + processingJobColumns + `
+const processingByMemberSQL = `SELECT ` + claimedProcessingJobColumns + `
 	FROM public.runnerfoundry_processing_jobs WHERE member_id = $1 AND runner_pool = $2`
 
 type Store struct{ executor Executor }
@@ -158,7 +158,7 @@ func (store *Store) ProcessingByMember(
 	if err != nil {
 		return nil, fmt.Errorf("query processing jobs: %w", err)
 	}
-	jobs, err := scanProcessingJobs(rows)
+	jobs, err := scanClaimedProcessingJobs(rows)
 	if err != nil {
 		return nil, err
 	}

@@ -44,15 +44,29 @@ func configuredProvider(
 		return configuredExecutionProvider{}, fmt.Errorf("runner pool %q: %w", configured.Name, err)
 	}
 	if kind == config.ProviderKindDocker {
-		provider := execution.NewDockerComposeProvider(
-			dependencies.dockerCommands,
-			dockerprovider.ComposeConfig{
-				ComposeFile: configured.Docker.ComposeFile,
-				Service:     configured.Docker.Service,
-			}, execution.HostIdentity(dependencies.memberHostname),
-		)
-		return configuredExecutionProvider{ExecutionProvider: provider}, nil
+		return configuredDockerProvider(configured, dependencies), nil
 	}
+	return configuredLibvirtProvider(configured, dependencies)
+}
+
+func configuredDockerProvider(
+	configured config.RunnerPoolConfig,
+	dependencies executionDependencies,
+) configuredExecutionProvider {
+	provider := execution.NewDockerComposeProvider(
+		dependencies.dockerCommands,
+		dockerprovider.ComposeConfig{
+			ComposeFile: configured.Docker.ComposeFile,
+			Service:     configured.Docker.Service,
+		}, execution.HostIdentity(dependencies.memberHostname),
+	)
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider)}
+}
+
+func configuredLibvirtProvider(
+	configured config.RunnerPoolConfig,
+	dependencies executionDependencies,
+) (configuredExecutionProvider, error) {
 	if dependencies.readTemplate == nil {
 		return configuredExecutionProvider{}, errors.New("libvirt template reader is required")
 	}
@@ -67,6 +81,7 @@ func configuredProvider(
 			DomainXMLTemplate: configured.Libvirt.DomainXMLTemplate,
 		},
 		template,
+		execution.HostIdentity(dependencies.memberHostname),
 	)
-	return configuredExecutionProvider{ExecutionProvider: provider}, nil
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider)}, nil
 }

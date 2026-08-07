@@ -23,6 +23,40 @@ func TestOperationalReporterPublishesHealthAndRateLimitedTextEvents(t *testing.T
 	assertOperationalStatusSnapshot(t, notifier.statuses)
 }
 
+func TestMaintenanceGenerationAndReporterOwnRecurrenceInOnePlace(t *testing.T) {
+	destination := &memoryLogDestination{}
+	reporter, now := newOperationalReporterFixture(t, "text", destination)
+	generation := newMaintenanceGeneration(
+		&lifecycleCycleEngineFake{},
+		&manualCycleTicker{ticks: make(chan time.Time)},
+		reporter.reportMaintenance,
+		nil,
+		nil,
+	)
+	wantErr := errors.New("cycle failed")
+	generation.reportCycle(wantErr)
+	*now = (*now).Add(time.Minute)
+	generation.reportCycle(wantErr)
+	*now = (*now).Add(4 * time.Minute)
+	generation.reportCycle(wantErr)
+	*now = (*now).Add(time.Minute)
+	generation.reportCycle(nil)
+
+	output := destination.String()
+	for _, snapshot := range []string{
+		"operation=maintenance member=member-a outcome=failed error_category=operation recurrence_count=1",
+		"operation=maintenance member=member-a outcome=failed error_category=operation recurrence_count=3",
+		"operation=maintenance member=member-a outcome=recovered recurrence_count=3 failure_duration=6m0s",
+	} {
+		if !strings.Contains(output, snapshot) {
+			t.Fatalf("end-to-end log snapshot %q missing from %q", snapshot, output)
+		}
+	}
+	if strings.Count(output, "outcome=failed") != 2 {
+		t.Fatalf("failure log count = %d, want immediate and five-minute recurrence", strings.Count(output, "outcome=failed"))
+	}
+}
+
 func exerciseOperationalRateLimiting(reporter *productionRuntimeReporter, now *time.Time) {
 	reporter.Report(operationalEvent{operation: "leadership", outcome: "acquired", leadership: leadershipLeader})
 	reporter.Report(operationalEvent{operation: "maintenance", outcome: "failed", err: errors.New("secret detail")})

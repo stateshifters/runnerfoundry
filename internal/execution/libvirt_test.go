@@ -15,6 +15,7 @@ func TestLibvirtStartTransportsOpaqueBootstrapInGuestConfiguration(t *testing.T)
 		transport,
 		providerlibvirt.Config{ConnectionURI: "qemu:///system"},
 		[]byte(`<domain type="kvm"><name>template</name></domain>`),
+		"member-a",
 	)
 
 	err := provider.Start(context.Background(), StartRequest{
@@ -51,7 +52,7 @@ func TestLibvirtInspectReturnsOwnedRunnerState(t *testing.T) {
 			"linux-vm-2": "shut off",
 		},
 	}
-	provider := NewLibvirtProvider(transport, libvirtTestConfig(), []byte(`<domain><name>template</name></domain>`))
+	provider := NewLibvirtProvider(transport, libvirtTestConfig(), []byte(`<domain><name>template</name></domain>`), "member-a")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -73,7 +74,7 @@ func TestLibvirtInspectReturnsOwnedRunnerState(t *testing.T) {
 
 func TestLibvirtDestroyTranslatesRunnerIdentityAndState(t *testing.T) {
 	transport := &recordingLibvirtTransport{}
-	provider := NewLibvirtProvider(transport, libvirtTestConfig(), []byte(`<domain><name>template</name></domain>`))
+	provider := NewLibvirtProvider(transport, libvirtTestConfig(), []byte(`<domain><name>template</name></domain>`), "member-a")
 
 	err := provider.Destroy(context.Background(), RunnerInstance{
 		ID:         "linux-vm-1",
@@ -94,6 +95,7 @@ func TestLibvirtValidateChecksTemplateAndConnection(t *testing.T) {
 		transport,
 		libvirtTestConfig(),
 		[]byte(`<domain type="kvm"><name>template</name></domain>`),
+		"member-a",
 	)
 
 	if err := provider.Validate(context.Background()); err != nil {
@@ -110,6 +112,7 @@ func TestLibvirtValidatePreservesTransportFailure(t *testing.T) {
 		&recordingLibvirtTransport{connectionErr: expectedErr},
 		libvirtTestConfig(),
 		[]byte(`<domain type="kvm"><name>template</name></domain>`),
+		"member-a",
 	)
 
 	err := provider.Validate(context.Background())
@@ -124,6 +127,7 @@ func TestLibvirtInspectPreservesTransportFailure(t *testing.T) {
 		&recordingLibvirtTransport{listErr: expectedErr},
 		libvirtTestConfig(),
 		[]byte(`<domain><name>template</name></domain>`),
+		"member-a",
 	)
 
 	_, err := provider.Inspect(context.Background())
@@ -138,6 +142,7 @@ func TestLibvirtStartPreservesTransportFailure(t *testing.T) {
 		&recordingLibvirtTransport{createErr: expectedErr},
 		libvirtTestConfig(),
 		[]byte(`<domain><name>template</name></domain>`),
+		"member-a",
 	)
 
 	err := provider.Start(context.Background(), StartRequest{})
@@ -152,6 +157,7 @@ func TestLibvirtDestroyPreservesTransportFailure(t *testing.T) {
 		&recordingLibvirtTransport{destroyErr: expectedErr},
 		libvirtTestConfig(),
 		[]byte(`<domain><name>template</name></domain>`),
+		"member-a",
 	)
 
 	err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning})
@@ -161,7 +167,7 @@ func TestLibvirtDestroyPreservesTransportFailure(t *testing.T) {
 }
 
 func TestLibvirtEndpointOperationsAreExplicit(t *testing.T) {
-	provider := NewLibvirtProvider(&recordingLibvirtTransport{}, libvirtTestConfig(), libvirtTemplate())
+	provider := NewLibvirtProvider(&recordingLibvirtTransport{}, libvirtTestConfig(), libvirtTemplate(), "member-b")
 	endpointID := InventoryEndpointID("libvirt:qemu:///system")
 	if provider.EndpointID() != endpointID || !provider.KnowsEndpoint(endpointID) || provider.KnowsEndpoint("unknown") {
 		t.Fatalf("endpoint identity = %q", provider.EndpointID())
@@ -174,6 +180,27 @@ func TestLibvirtEndpointOperationsAreExplicit(t *testing.T) {
 	}
 	if _, err := provider.InspectEndpoint(context.Background(), "unknown"); err == nil {
 		t.Fatal("unknown endpoint accepted")
+	}
+}
+
+func TestLibvirtEndpointInspectionRespectsLocalAndRemoteOwnership(t *testing.T) {
+	local := NewLibvirtProvider(&recordingLibvirtTransport{}, libvirtTestConfig(), libvirtTemplate(), "member-b")
+	if !local.CanInspectEndpointForMember(local.EndpointID(), "member-b") ||
+		local.CanInspectEndpointForMember(local.EndpointID(), "member-a") ||
+		local.CanInspectEndpointForMember("libvirt:unknown", "member-b") {
+		t.Fatal("local libvirt endpoint must be inspectable only by its owning member")
+	}
+	remoteConfig := libvirtTestConfig()
+	remoteConfig.ConnectionURI = "qemu+ssh://hypervisor.example/system"
+	remote := NewLibvirtProvider(&recordingLibvirtTransport{}, remoteConfig, libvirtTemplate(), "member-b")
+	if !remote.CanInspectEndpointForMember(remote.EndpointID(), "member-a") {
+		t.Fatal("explicit remote libvirt endpoint must be inspectable by another member")
+	}
+	invalidConfig := libvirtTestConfig()
+	invalidConfig.ConnectionURI = "qemu://host/%zz"
+	invalid := NewLibvirtProvider(&recordingLibvirtTransport{}, invalidConfig, libvirtTemplate(), "member-b")
+	if !invalid.CanInspectEndpointForMember(invalid.EndpointID(), "member-b") {
+		t.Fatal("an unparseable libvirt URI must fail closed to its owning member")
 	}
 }
 
@@ -190,7 +217,7 @@ func TestLibvirtEndpointNormalizesConnectionURI(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			configured := libvirtTestConfig()
 			configured.ConnectionURI = test.uri
-			provider := NewLibvirtProvider(&recordingLibvirtTransport{}, configured, []byte("<domain/>"))
+			provider := NewLibvirtProvider(&recordingLibvirtTransport{}, configured, []byte("<domain/>"), "member-a")
 			if got := provider.EndpointID(); got != test.want {
 				t.Fatalf("endpoint ID = %q, want %q", got, test.want)
 			}

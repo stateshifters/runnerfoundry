@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/meza/RunnerFoundry/internal/core"
 	providerdocker "github.com/meza/RunnerFoundry/internal/provider/docker"
 )
 
@@ -105,8 +106,8 @@ func TestAggregateRunnerInventoryDeduplicatesConcreteMechanismsAndEndpoints(t *t
 	inventory := NewAggregateRunnerInventory(
 		NewDockerComposeProvider(firstDockerTransport, providerdockerTestConfig(), "local"),
 		NewDockerComposeProvider(secondDockerTransport, providerdockerTestConfig(), "local"),
-		NewLibvirtProvider(firstLibvirtTransport, libvirtTestConfig(), libvirtTemplate()),
-		NewLibvirtProvider(secondLibvirtTransport, libvirtTestConfig(), libvirtTemplate()),
+		NewLibvirtProvider(firstLibvirtTransport, libvirtTestConfig(), libvirtTemplate(), "member-a"),
+		NewLibvirtProvider(secondLibvirtTransport, libvirtTestConfig(), libvirtTemplate(), "member-a"),
 	)
 
 	if _, err := inventory.Inspect(context.Background()); err != nil {
@@ -179,6 +180,16 @@ func TestAggregateRunnerInventoryRefreshesAndReusesCycleSnapshot(t *testing.T) {
 	}
 }
 
+func TestAggregateRunnerInventoryDelegatesEndpointInspectability(t *testing.T) {
+	inventory := NewAggregateRunnerInventory(&runnerInventoryFake{identity: "docker:member"})
+	if !inventory.CanInspectEndpointForMember("docker:member", "member") {
+		t.Fatal("configured endpoint was not inspectable")
+	}
+	if inventory.CanInspectEndpointForMember("unknown", "member") {
+		t.Fatal("unknown endpoint was inspectable")
+	}
+}
+
 func TestAggregateRunnerInventoryRefreshFailsClosed(t *testing.T) {
 	wantErr := errors.New("offline")
 	inventory := NewAggregateRunnerInventory(&runnerInventoryFake{identity: "docker:member", inspectErr: wantErr})
@@ -235,6 +246,13 @@ func (inventory *runnerInventoryFake) EndpointID() InventoryEndpointID {
 }
 func (inventory *runnerInventoryFake) KnowsEndpoint(endpointID InventoryEndpointID) bool {
 	return inventory.EndpointID() == endpointID
+}
+
+func (inventory *runnerInventoryFake) CanInspectEndpointForMember(
+	endpointID InventoryEndpointID,
+	_ core.MemberID,
+) bool {
+	return inventory.KnowsEndpoint(endpointID)
 }
 func (inventory *runnerInventoryFake) Refresh(ctx context.Context) error {
 	_, err := inventory.Inspect(ctx)

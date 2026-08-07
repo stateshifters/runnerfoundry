@@ -64,6 +64,7 @@ type jobStoreFake struct {
 	terminalize     func(context.Context, core.SourceReference) error
 	started         func(context.Context, core.SourceReference) error
 	list            func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
+	poolList        func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error)
 	retry           func(context.Context, core.JobID) (bool, error)
 	retryOutcome    core.RetryOutcome
 	recover         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
@@ -104,6 +105,9 @@ func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.M
 	return store.list(ctx, member, pool)
 }
 func (store *jobStoreFake) ProcessingByPool(ctx context.Context, pool core.RunnerPool) ([]core.ProcessingJob, error) {
+	if store.poolList != nil {
+		return store.poolList(ctx, pool)
+	}
 	return store.ProcessingByMember(ctx, "", pool)
 }
 func (store *jobStoreFake) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.RetryResult, error) {
@@ -163,9 +167,10 @@ func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, 
 func testCurrentTime() time.Time { return time.Unix(1, 0).UTC() }
 
 type providerFake struct {
-	start   func(context.Context, execution.StartRequest) error
-	inspect func(context.Context) ([]execution.RunnerInstance, error)
-	destroy func(context.Context, execution.RunnerInstance) error
+	start      func(context.Context, execution.StartRequest) error
+	inspect    func(context.Context) ([]execution.RunnerInstance, error)
+	destroy    func(context.Context, execution.RunnerInstance) error
+	canInspect func(execution.InventoryEndpointID, core.MemberID) bool
 }
 
 func (*providerFake) Validate(context.Context) error { return nil }
@@ -178,6 +183,15 @@ func (provider *providerFake) Start(ctx context.Context, request execution.Start
 func (provider *providerFake) EndpointID() execution.InventoryEndpointID { return "test:endpoint" }
 func (provider *providerFake) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
 	return provider.EndpointID() == endpointID
+}
+func (provider *providerFake) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	if provider.canInspect != nil {
+		return provider.canInspect(endpointID, memberID)
+	}
+	return provider.KnowsEndpoint(endpointID)
 }
 func (provider *providerFake) Refresh(ctx context.Context) error {
 	_, err := provider.Inspect(ctx)
