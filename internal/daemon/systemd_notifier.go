@@ -3,28 +3,48 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/coreos/go-systemd/v22/daemon"
 )
 
 type systemdNotifier struct {
-	notify func(bool, string) (bool, error)
+	notify     func(bool, string) (bool, error)
+	mutex      sync.Mutex
+	lastStatus operationalStatus
+	hasStatus  bool
 }
 
-func newSystemdNotifier() systemdNotifier {
-	return systemdNotifier{notify: daemon.SdNotify}
+func newSystemdNotifier() *systemdNotifier {
+	return &systemdNotifier{notify: daemon.SdNotify}
 }
 
-func (notifier systemdNotifier) Ready(ctx context.Context) error {
-	return notifySystemd(ctx, daemon.SdNotifyReady+"\nSTATUS=operational leadership=unknown", notifier.notify)
+func (notifier *systemdNotifier) Ready(ctx context.Context) error {
+	notifier.mutex.Lock()
+	defer notifier.mutex.Unlock()
+	status := "ready leadership=unknown"
+	if notifier.hasStatus {
+		status = fmt.Sprintf("%s leadership=%s", notifier.lastStatus.health, notifier.lastStatus.leadership)
+	}
+	return notifySystemd(ctx, daemon.SdNotifyReady+"\nSTATUS="+status, notifier.notify)
 }
 
-func (notifier systemdNotifier) Reloading(ctx context.Context) error {
+func (notifier *systemdNotifier) Reloading(ctx context.Context) error {
+	notifier.mutex.Lock()
+	defer notifier.mutex.Unlock()
 	state := daemon.SdNotifyReloading + "\n" + daemon.SdNotifyMonotonicUsec()
-	return notifySystemd(ctx, state, notifier.notify)
+	if err := notifySystemd(ctx, state, notifier.notify); err != nil {
+		return err
+	}
+	notifier.hasStatus = false
+	return nil
 }
 
-func (notifier systemdNotifier) Status(ctx context.Context, status operationalStatus) error {
+func (notifier *systemdNotifier) Status(ctx context.Context, status operationalStatus) error {
+	notifier.mutex.Lock()
+	defer notifier.mutex.Unlock()
+	notifier.lastStatus = status
+	notifier.hasStatus = true
 	return notifySystemd(ctx, "STATUS="+string(status.health)+" leadership="+string(status.leadership), notifier.notify)
 }
 

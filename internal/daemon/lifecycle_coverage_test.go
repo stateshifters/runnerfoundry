@@ -206,23 +206,28 @@ func TestGatedCycleEngineReportsDeactivationFailure(t *testing.T) {
 	}
 }
 
-func TestMaintenanceGenerationReportsActivationCycleAndDeactivationFailures(t *testing.T) {
+func TestMaintenanceGenerationReportsFirstCycleAndDeactivationFailures(t *testing.T) {
 	t.Parallel()
 
 	cycleErr := errors.New("first cycle failed")
 	deactivateErr := errors.New("deactivate failed")
 	engine := &lifecycleCycleEngineFake{cycleErr: cycleErr, deactivateErr: deactivateErr}
-	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
+	reports := make(chan error, 1)
+	generation := newMaintenanceGeneration(
+		engine,
+		&manualCycleTicker{ticks: make(chan time.Time)},
+		func(err error) { reports <- err },
+		nil,
+		nil,
+	)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := generation.Activate(context.Background()); !errors.Is(err, cycleErr) || !errors.Is(err, deactivateErr) {
-		t.Fatalf("activation error = %v, want cycle and deactivation failures", err)
-	}
-
-	engine.cycleErr = nil
 	if err := generation.Activate(context.Background()); err != nil {
-		t.Fatalf("activate retry: %v", err)
+		t.Fatalf("activation error = %v, want maintenance to run asynchronously", err)
+	}
+	if err := <-reports; !errors.Is(err, cycleErr) {
+		t.Fatalf("reported first-cycle error = %v, want %v", err, cycleErr)
 	}
 	if err := generation.Deactivate(context.Background()); !errors.Is(err, deactivateErr) {
 		t.Fatalf("deactivation error = %v, want %v", err, deactivateErr)

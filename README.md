@@ -330,7 +330,7 @@ sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
-`systemctl status` reports source-neutral runtime health as `operational` or `degraded`; cluster leadership is shown separately as `unknown`, `standby`, or `leader`. `READY=1` continues to mean that the active generation completed its first maintenance cycle. A rejected reload that restores or preserves the active generation does not make the service degraded.
+`READY=1` means RunnerFoundry accepted its configuration, opened its required local and durable-state resources, validated its providers, and activated the runtime generation. It does not wait for Git source discovery, message sessions, inventory, reconciliation, recovery, or provisioning. While the first maintenance cycle is pending, `systemctl status` reports `ready` with unknown leadership. Maintenance then reports source-neutral runtime health as `operational` or `degraded`; cluster leadership is shown separately as `unknown`, `standby`, or `leader`. A rejected reload that restores or preserves the active generation does not make the service degraded.
 
 Text and JSON logs use the same structured operational fields. The `operation` field identifies maintenance, reload, leadership, capacity publication, claims, runner starts or retries, and successful cleanup. Events include only non-secret identifiers such as `member`, `runner_pool`, and `job_id`, plus an `outcome` and `error_category`; raw error details are not logged. Repeated failures are logged immediately, whenever their fingerprint changes, and every five minutes while unchanged. The recovery event includes the recurrence count and failure duration.
 
@@ -340,7 +340,7 @@ Text and JSON logs use the same structured operational fields. The `operation` f
 sudo systemctl reload runnerfoundry
 ```
 
-Reload validates and prepares the replacement configuration before applying it. The replacement acquires the local work gate and completes one successful maintenance cycle before it becomes active and the service reports `READY`. If activation fails, RunnerFoundry rolls back prepared logging and reactivates the previous generation. State-backend changes require a restart.
+Reload validates and prepares the replacement configuration before applying it. The replacement becomes active and the service reports `READY` after it acquires the local work gate. Its first maintenance cycle starts immediately in the background. An external dependency or maintenance failure degrades the replacement but does not reject it or reactivate the previous generation. A configuration, preparation, provider-validation, durable-state, or local-activation failure rejects the replacement, rolls back prepared resources, and preserves or reactivates the previous generation. State-backend changes require a restart.
 
 Runner reconciliation is provider-agnostic. Docker inventory endpoint identity includes the member hostname and Compose mechanism; libvirt endpoint identity uses the normalized connection URI. Each endpoint returns all observable RunnerFoundry resources with their Runner Pool, is queried once per maintenance cycle, and is then partitioned by pool. Duplicate configured endpoints are queried once. Inventory errors retain processing because absence was not established. Failed provisioning triggers a fresh inspection of the exact endpoint recorded with the claim.
 

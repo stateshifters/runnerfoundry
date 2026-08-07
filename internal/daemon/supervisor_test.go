@@ -4,10 +4,82 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/core"
 )
+
+func TestSupervisorReportsReadyBeforeFirstMaintenanceCycleCompletes(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtimeGeneration, cycles, releaseCycle := newBlockedMaintenanceGeneration(t)
+	ready := make(chan struct{}, 1)
+	notifier := &fakeSupervisorNotifier{readySignal: ready}
+	supervisorResult := make(chan error, 1)
+	go func() {
+		supervisorResult <- supervise(
+			ctx,
+			nil,
+			func() (config.Config, error) { return config.Config{}, nil },
+			func(context.Context, config.Config) (generation, error) { return runtimeGeneration, nil },
+			notifier,
+			func(error) {},
+			LeaveActiveRunners,
+		)
+	}()
+
+	waitForCycle(t, cycles)
+	waitForSupervisorSignal(t, ready, "systemd readiness")
+	releaseCycle()
+	cancel()
+	if err := <-supervisorResult; err != nil {
+		t.Fatalf("supervise runtime: %v", err)
+	}
+}
+
+func TestSupervisorReportsReloadReadyBeforeReplacementMaintenanceCompletes(t *testing.T) {
+	t.Parallel()
+
+	replacement, cycles, releaseCycle := newBlockedMaintenanceGeneration(t)
+	handoff := &generationHandoff{
+		policy: LeaveActiveRunners,
+		active: &managedGeneration{generation: &fakeGeneration{}},
+	}
+	ready := make(chan struct{}, 1)
+	notifier := &fakeSupervisorNotifier{readySignal: ready}
+	reloadResult := make(chan error, 1)
+	go func() {
+		reloadResult <- reloadGeneration(
+			context.Background(),
+			func() (config.Config, error) { return config.Config{}, nil },
+			func(context.Context, config.Config) (generation, error) { return replacement, nil },
+			notifier,
+			handoff,
+		)
+	}()
+
+	waitForCycle(t, cycles)
+	waitForSupervisorSignal(t, ready, "replacement readiness")
+	releaseCycle()
+	if err := <-reloadResult; err != nil {
+		t.Fatalf("reload runtime: %v", err)
+	}
+	if err := handoff.active.Close(context.Background()); err != nil {
+		t.Fatalf("close replacement: %v", err)
+	}
+}
+
+func waitForSupervisorSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
 
 func TestSupervisorReplacesGenerationOnlyAfterReplacementStarts(t *testing.T) {
 	first := &fakeGeneration{}
@@ -333,10 +405,14 @@ type fakeSupervisorNotifier struct {
 	reloading    int
 	readyErr     error
 	reloadingErr error
+	readySignal  chan<- struct{}
 }
 
 func (notifier *fakeSupervisorNotifier) Ready(context.Context) error {
 	notifier.ready++
+	if notifier.readySignal != nil {
+		notifier.readySignal <- struct{}{}
+	}
 	return notifier.readyErr
 }
 

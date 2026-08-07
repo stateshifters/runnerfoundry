@@ -84,7 +84,8 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 }
 
 // maintenanceGeneration owns one prepared, restartable set of runtime
-// resources. Activation does not commit until one complete cycle succeeds.
+// resources. Activation commits after the local generation gate is acquired;
+// maintenance begins immediately in the background.
 type maintenanceGeneration struct {
 	engine     cycleEngine
 	ticker     cycleTicker
@@ -153,7 +154,7 @@ func (generation *maintenanceGeneration) Activate(ctx context.Context) error {
 	if err := generation.activationReadiness(); err != nil {
 		return err
 	}
-	if err := generation.activateEngine(ctx); err != nil {
+	if err := generation.activateEngine(); err != nil {
 		return err
 	}
 	generation.startRunLoop(ctx)
@@ -175,19 +176,9 @@ func (generation *maintenanceGeneration) activationReadiness() error {
 	return nil
 }
 
-func (generation *maintenanceGeneration) activateEngine(ctx context.Context) error {
+func (generation *maintenanceGeneration) activateEngine() error {
 	if err := generation.engine.Activate(); err != nil {
 		return fmt.Errorf("activate generation engine: %w", err)
-	}
-	generation.cycleMutex.Lock()
-	err := generation.engine.Cycle(ctx)
-	generation.cycleMutex.Unlock()
-	if err != nil {
-		deactivateErr := generation.engine.Deactivate(context.WithoutCancel(ctx))
-		if deactivateErr != nil {
-			deactivateErr = fmt.Errorf("deactivate failed generation engine: %w", deactivateErr)
-		}
-		return errors.Join(fmt.Errorf("run first maintenance cycle: %w", err), deactivateErr)
 	}
 	return nil
 }
@@ -205,17 +196,22 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) {
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	generation.runCycle(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-generation.ticker.Ticks():
-			generation.cycleMutex.Lock()
-			err := generation.engine.Cycle(ctx)
-			generation.cycleMutex.Unlock()
-			generation.reportCycle(err)
+			generation.runCycle(ctx)
 		}
 	}
+}
+
+func (generation *maintenanceGeneration) runCycle(ctx context.Context) {
+	generation.cycleMutex.Lock()
+	err := generation.engine.Cycle(ctx)
+	generation.cycleMutex.Unlock()
+	generation.reportCycle(err)
 }
 
 func (generation *maintenanceGeneration) reportCycle(err error) {
