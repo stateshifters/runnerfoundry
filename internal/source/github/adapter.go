@@ -89,10 +89,16 @@ func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, 
 		return PollResult{}, nil
 	}
 	result := PollResult{Received: true}
+	if err := ctx.Err(); err != nil {
+		return result, fmt.Errorf("GitHub poll canceled before message handling: %w", err)
+	}
 	if err := adapter.handleMessage(ctx, message); err != nil {
 		return result, err
 	}
 	result.Handled = true
+	if err := ctx.Err(); err != nil {
+		return result, fmt.Errorf("GitHub poll canceled before message acknowledgement: %w", err)
+	}
 	if err := adapter.acknowledgeMessage(ctx, message.MessageID, pollStarted); err != nil {
 		return result, err
 	}

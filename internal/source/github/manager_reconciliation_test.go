@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -21,8 +22,12 @@ func TestManagerReconcilesRegistrationsAndPrunes(t *testing.T) {
 	config := githubsource.ManagerConfig{Prune: true, RunnerPools: []githubsource.RunnerPoolConfig{{
 		RunnerPool: core.RunnerPool("linux"), RunnerGroup: "default",
 	}}}
-	if err := manager.Reconcile(context.Background(), config); err != nil {
+	snapshot, err := manager.Reconcile(context.Background(), config)
+	if err != nil {
 		t.Fatalf("reconcile registrations: %v", err)
+	}
+	if !reflect.DeepEqual(snapshot.Active, repository.records) {
+		t.Fatalf("returned snapshot = %#v, committed %#v", snapshot.Active, repository.records)
 	}
 	if len(repository.records) != 2 {
 		t.Fatalf("persisted registrations = %#v, want two", repository.records)
@@ -43,7 +48,7 @@ func TestManagerRetainsOwnershipWhenConfigurationIsRemovedWithoutPrune(t *testin
 	discoverer := &managerDiscovererFake{repositories: []transport.Repository{{InstallationID: 1, URL: record.RepositoryURL}}}
 	factory := newManagerFactoryFake(discoverer.repositories)
 	manager := newManagerFixture(t, discoverer, factory.Client, repository)
-	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{}); err != nil {
+	if _, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{}); err != nil {
 		t.Fatalf("reconcile removed configuration: %v", err)
 	}
 	if len(repository.snapshot.Active) != 0 {

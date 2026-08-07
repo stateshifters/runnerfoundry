@@ -10,6 +10,7 @@ import (
 
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
+	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
 
 type membershipRuntime interface {
@@ -28,7 +29,7 @@ type sourceRuntime interface {
 }
 
 type poolRuntime interface {
-	RequestWork(ctx context.Context, runnerPool core.RunnerPool) error
+	RequestWork(ctx context.Context, runnerPool core.RunnerPool) (runtimeengine.ProcessResult, error)
 	Reconcile(ctx context.Context, runnerPool core.RunnerPool) error
 	RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error
 }
@@ -52,6 +53,8 @@ type UnifiedEngineConfig struct {
 	Pools       []RunnerPoolRuntime
 	Inventory   execution.RunnerInventory
 	Report      func(error)
+	JobGate     *queuedJobEligibilityGate
+	WakeJobs    func(core.RunnerPool)
 }
 
 // UnifiedEngine advances one source-neutral lifecycle for a member. Callers own
@@ -65,9 +68,10 @@ type UnifiedEngine struct {
 	pools          []RunnerPoolRuntime
 	inventory      execution.RunnerInventory
 	leaderOpen     bool
-	leaderClosing  bool
 	cycleMutex     sync.Mutex
 	report         func(error)
+	jobGate        *queuedJobEligibilityGate
+	wakeJobs       func(core.RunnerPool)
 	reportedLeader operationalLeadership
 }
 
@@ -81,6 +85,8 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 		pools:       append([]RunnerPoolRuntime(nil), config.Pools...),
 		inventory:   config.Inventory,
 		report:      config.Report,
+		jobGate:     config.JobGate,
+		wakeJobs:    config.WakeJobs,
 	}
 }
 
@@ -92,7 +98,15 @@ func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
 	now := engine.currentTime()
 	liveMemberCutoff := now.Add(-engine.memberTTL)
 	cycleErrors := engine.runMemberPhases(ctx)
-	cycleErrors = append(cycleErrors, engine.runExecutionPhases(ctx, liveMemberCutoff)...)
+	started := engine.phaseStarted("leader_work", "source", "")
+	leader, leaderErrors := engine.runLeaderWork(ctx, liveMemberCutoff)
+	engine.phaseCompleted("leader_work", "source", "", started, errors.Join(leaderErrors...))
+	cycleErrors = append(cycleErrors, leaderErrors...)
+	var recoverForeign func(context.Context) []error
+	if leader {
+		recoverForeign = engine.recoverForeign
+	}
+	cycleErrors = append(cycleErrors, engine.runExecutionPhases(ctx, recoverForeign)...)
 	return errors.Join(cycleErrors...)
 }
 
@@ -115,22 +129,45 @@ func (engine *UnifiedEngine) runMemberPhases(ctx context.Context) []error {
 	return cycleErrors
 }
 
-func (engine *UnifiedEngine) runExecutionPhases(ctx context.Context, liveMemberCutoff time.Time) []error {
+func (engine *UnifiedEngine) runExecutionPhases(
+	ctx context.Context,
+	recoverForeign func(context.Context) []error,
+) []error {
+	if engine.jobGate == nil {
+		return engine.runEligibleExecutionPhases(ctx, recoverForeign, nil)
+	}
+	eligibleRunnerPools := make([]core.RunnerPool, 0, len(engine.pools))
+	var cycleErrors []error
+	engine.jobGate.Maintain(func(maintenance *queuedJobMaintenance) {
+		cycleErrors = engine.runEligibleExecutionPhases(ctx, recoverForeign, func(runnerPool core.RunnerPool) {
+			maintenance.MarkEligible(runnerPool)
+			eligibleRunnerPools = append(eligibleRunnerPools, runnerPool)
+		})
+	})
+	if engine.wakeJobs != nil {
+		for _, runnerPool := range eligibleRunnerPools {
+			engine.wakeJobs(runnerPool)
+		}
+	}
+	return cycleErrors
+}
+
+func (engine *UnifiedEngine) runEligibleExecutionPhases(
+	ctx context.Context,
+	recoverForeign func(context.Context) []error,
+	markEligible func(core.RunnerPool),
+) []error {
 	cycleErrors := make([]error, 0)
-	started := engine.phaseStarted("leader_work", "source", "")
-	leader, leaderErrors := engine.runLeaderWork(ctx, liveMemberCutoff)
-	engine.phaseCompleted("leader_work", "source", "", started, errors.Join(leaderErrors...))
-	cycleErrors = append(cycleErrors, leaderErrors...)
-	started = engine.phaseStarted("refresh_inventory", "inventory", "")
+	started := engine.phaseStarted("refresh_inventory", "inventory", "")
 	if err := engine.refreshInventory(ctx); err != nil {
 		engine.phaseCompleted("refresh_inventory", "inventory", "", started, err)
 		cycleErrors = append(cycleErrors, err)
 		return cycleErrors
 	}
 	engine.phaseCompleted("refresh_inventory", "inventory", "", started, nil)
-	if leader && engine.inventory != nil {
+	if recoverForeign != nil && engine.inventory != nil {
 		started = engine.phaseStarted("recover_foreign", "recovery", "")
-		foreignErrors := engine.recoverForeign(ctx)
+		foreignErrors := recoverForeign(ctx)
 		engine.phaseCompleted("recover_foreign", "recovery", "", started, errors.Join(foreignErrors...))
 		cycleErrors = append(cycleErrors, foreignErrors...)
 	}
@@ -139,6 +176,9 @@ func (engine *UnifiedEngine) runExecutionPhases(ctx context.Context, liveMemberC
 		poolErrors := engine.runPoolWork(ctx, runnerPool)
 		engine.phaseCompleted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool, started, errors.Join(poolErrors...))
 		cycleErrors = append(cycleErrors, poolErrors...)
+		if len(poolErrors) == 0 && markEligible != nil {
+			markEligible(runnerPool.RunnerPool)
+		}
 	}
 
 	return cycleErrors
@@ -195,11 +235,6 @@ func (engine *UnifiedEngine) runLeaderWork(ctx context.Context, liveMemberCutoff
 		return false, engine.closeLostLeadership(ctx)
 	}
 	engine.reportLeadership(leadershipLeader)
-	if engine.leaderClosing {
-		if closeErrors := engine.closeSourceLeadership(ctx, "finish closing source leadership"); len(closeErrors) != 0 {
-			return true, closeErrors
-		}
-	}
 	if err = engine.openLeadership(ctx); err != nil {
 		return true, []error{err}
 	}
@@ -222,16 +257,16 @@ func (engine *UnifiedEngine) closeLostLeadership(ctx context.Context) []error {
 	if !engine.leaderOpen {
 		return nil
 	}
-	engine.leaderClosing = true
 	return engine.closeSourceLeadership(ctx, "close lost source leadership")
 }
 
 func (engine *UnifiedEngine) closeSourceLeadership(ctx context.Context, description string) []error {
+	// Leadership loss is a hard fence. Cleanup failure must not make the old
+	// term active again or prevent a later term from opening.
+	engine.leaderOpen = false
 	if err := engine.source.CloseLeader(ctx); err != nil {
 		return []error{fmt.Errorf("%s: %w", description, err)}
 	}
-	engine.leaderOpen = false
-	engine.leaderClosing = false
 	return nil
 }
 
@@ -255,15 +290,26 @@ func (engine *UnifiedEngine) runOwnedLeaderWork(ctx context.Context, liveMemberC
 }
 
 func (engine *UnifiedEngine) runPoolWork(ctx context.Context, runnerPool RunnerPoolRuntime) []error {
-	poolErrors := make([]error, 0, 1)
 	if err := runnerPool.runtime.Reconcile(ctx, runnerPool.RunnerPool); err != nil {
-		poolErrors = append(poolErrors, fmt.Errorf("reconcile Runner Pool %q: %w", runnerPool.RunnerPool, err))
-		return poolErrors
+		return []error{fmt.Errorf("reconcile Runner Pool %q: %w", runnerPool.RunnerPool, err)}
 	}
-	if err := runnerPool.runtime.RequestWork(ctx, runnerPool.RunnerPool); err != nil {
-		poolErrors = append(poolErrors, fmt.Errorf("request work for Runner Pool %q: %w", runnerPool.RunnerPool, err))
+	return nil
+}
+
+func (engine *UnifiedEngine) RequestWork(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+) (runtimeengine.ProcessResult, error) {
+	for _, configuredPool := range engine.pools {
+		if configuredPool.RunnerPool == runnerPool {
+			result, err := configuredPool.runtime.RequestWork(ctx, runnerPool)
+			if err != nil {
+				return result, fmt.Errorf("request work from Runner Pool %q: %w", runnerPool, err)
+			}
+			return result, nil
+		}
 	}
-	return poolErrors
+	return runtimeengine.ProcessResult{}, fmt.Errorf("configured Runner Pool %q was not found", runnerPool)
 }
 
 // Close releases leader-owned source sessions. It is idempotent and does not
@@ -272,7 +318,6 @@ func (engine *UnifiedEngine) Close(ctx context.Context) error {
 	if !engine.leaderOpen {
 		return nil
 	}
-	engine.leaderClosing = true
 	if closeErrors := engine.closeSourceLeadership(ctx, "close source leadership"); len(closeErrors) != 0 {
 		return errors.Join(closeErrors...)
 	}

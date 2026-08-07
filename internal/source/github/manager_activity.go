@@ -32,9 +32,9 @@ type ManagerActivity struct {
 	Err               error
 }
 
-// ManagerObserver receives synchronous lifecycle observations. Report must return
-// promptly because manager work remains serialized. CurrentTime makes durations
-// deterministic for callers and tests.
+// ManagerObserver receives lifecycle observations serialized by Manager. Report
+// must return promptly because active repository work waits for it. CurrentTime
+// may be called concurrently and must be safe for parallel repository work.
 type ManagerObserver struct {
 	Report      func(ManagerActivity)
 	CurrentTime func() time.Time
@@ -51,6 +51,12 @@ func (observer ManagerObserver) currentTime() time.Time {
 		return time.Time{}
 	}
 	return observer.CurrentTime()
+}
+
+func (manager *Manager) report(activity ManagerActivity) {
+	manager.activityMu.Lock()
+	defer manager.activityMu.Unlock()
+	manager.observer.report(activity)
 }
 
 func shouldReportManagerProgress(current int, total int) bool {

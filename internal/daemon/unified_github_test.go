@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/core"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
 func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T) {
@@ -96,6 +98,7 @@ func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)
 	}
+	awaitGitHubDiscovery(t, source)
 	if err := source.Poll(context.Background(), now); err != nil {
 		t.Fatalf("publish before discovery is due: %v", err)
 	}
@@ -103,9 +106,11 @@ func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 	if err := source.Poll(context.Background(), now); err != nil {
 		t.Fatalf("publish when discovery is due: %v", err)
 	}
-	if manager.reconciles != 2 || manager.opens != 2 {
-		t.Fatalf("reconciles=%d opens=%d, want 2 each", manager.reconciles, manager.opens)
+	awaitGitHubDiscovery(t, source)
+	if manager.reconciles != 2 || manager.opens != 0 {
+		t.Fatalf("reconciles=%d opens=%d, want two discoveries and no empty repository opens", manager.reconciles, manager.opens)
 	}
+	mustCloseGitHubSource(t, source)
 }
 
 func TestGitHubSourceRuntimeRefreshesMemberRoutesAtDiscoveryCadence(t *testing.T) {
@@ -131,96 +136,6 @@ func TestGitHubSourceRuntimeRefreshesMemberRoutesAtDiscoveryCadence(t *testing.T
 	}
 }
 
-func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
-	t.Parallel()
-
-	firstErr := errors.New("first session failed")
-	firstClient := &capacityMessageClientFake{err: firstErr, finished: make(chan struct{}, 1)}
-	secondClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
-	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: firstClient, Handler: eventHandlerFake{}, RunnerPool: "first"},
-		{Client: secondClient, Handler: eventHandlerFake{}, RunnerPool: "second"},
-	}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	if err := source.OpenLeader(context.Background()); err != nil {
-		t.Fatalf("open leader: %v", err)
-	}
-	if err := source.Poll(context.Background(), time.Time{}); err != nil {
-		t.Fatalf("launch polls: %v", err)
-	}
-	<-firstClient.finished
-	<-secondClient.finished
-	err := source.Poll(context.Background(), time.Time{})
-	if !errors.Is(err, firstErr) {
-		t.Fatalf("poll error = %v, want first session failure", err)
-	}
-	if closeErr := source.CloseLeader(context.Background()); closeErr != nil {
-		t.Fatalf("close leader: %v", closeErr)
-	}
-}
-
-func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t *testing.T) {
-	t.Parallel()
-
-	firstClient := newBlockingCapacityMessageClient()
-	secondClient := newBlockingCapacityMessageClient()
-	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: firstClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: secondClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
-	}}
-	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}},
-		"member-1", eventHandlerFake{}, githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
-	mustOpenGitHubSource(t, source)
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	assertPolledCapacity(t, firstClient.started, 7, "first repository")
-	assertPolledCapacity(t, secondClient.started, 7, "second repository")
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	select {
-	case capacity := <-firstClient.started:
-		t.Fatalf("first repository received overlapping poll with capacity %d", capacity)
-	default:
-	}
-	select {
-	case capacity := <-secondClient.started:
-		t.Fatalf("second repository received overlapping poll with capacity %d", capacity)
-	default:
-	}
-	mustCloseGitHubSource(t, source)
-}
-
-func TestGitHubSourceRuntimeRefreshesPeerCapacityAfterMessage(t *testing.T) {
-	t.Parallel()
-
-	messageClient := newMessageThenBlockingClient()
-	peerClient := newBlockingCapacityMessageClient()
-	unrelatedClient := newBlockingCapacityMessageClient()
-	adapters := []*githubsource.Adapter{
-		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
-		{Client: unrelatedClient, Handler: eventHandlerFake{}, Repository: "three", RunnerPool: "windows"},
-	}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7, "windows": 3}}
-	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	source, manager := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
-	mustOpenGitHubSource(t, source)
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	assertPolledCapacity(t, messageClient.started, 7, "message repository")
-	assertPolledCapacity(t, peerClient.started, 7, "peer repository")
-	assertPolledCapacity(t, unrelatedClient.started, 3, "unrelated repository")
-	<-messageClient.firstReturned
-	preserveCompletedPollResult(source, manager.adapters[0])
-
-	capacities.capacities["linux"] = 6
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	assertPolledCapacity(t, messageClient.started, 6, "refreshed message repository")
-	assertPolledCapacity(t, peerClient.started, 6, "refreshed peer repository")
-	assertNoPolledCapacity(t, unrelatedClient.started, "unrelated repository")
-	mustCloseGitHubSource(t, source)
-}
-
 func TestGitHubSourceRuntimeRestoresExistingAdaptersAfterReplacementOpenFails(t *testing.T) {
 	t.Parallel()
 
@@ -234,16 +149,22 @@ func TestGitHubSourceRuntimeRestoresExistingAdaptersAfterReplacementOpenFails(t 
 	mustOpenGitHubSource(t, source)
 
 	now = now.Add(time.Minute)
-	manager.adapters = nil
-	manager.openErr = errors.New("replacement failed")
-	if err := source.Poll(context.Background(), now.Add(-time.Minute)); err == nil {
-		t.Fatal("replacement open failure was not reported")
+	replacementErr := errors.New("replacement failed")
+	manager.setRepositoryOpen(
+		[]*githubsource.Adapter{{Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{},
+			Repository: "one", RunnerPool: "windows"}}, replacementErr)
+	mustPollGitHubSource(t, source, now.Add(-time.Minute))
+	awaitGitHubDiscovery(t, source)
+	awaitGitHubOpeningError(t, source, replacementErr)
+	if len(source.adapters) != 1 {
+		t.Fatalf("adapters after replacement failure = %#v, want one existing adapter", source.adapters)
 	}
-	if len(source.adapters) != 1 || source.adapters[0] != adapter {
+	managed, managedSession := source.adapters[0].Client.(githubManagedSessionFake)
+	if !managedSession || managed.MessageClient != client {
 		t.Fatalf("adapters after replacement failure = %#v, want existing adapter", source.adapters)
 	}
 	assertPolledCapacity(t, client.started, 1, "restored repository")
-	manager.openErr = nil
+	manager.setOpenError(nil)
 	mustCloseGitHubSource(t, source)
 }
 
@@ -262,12 +183,8 @@ func TestGitHubSourceRuntimeRetainsPollsWhenCancellationDeadlineExpires(t *testi
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, client.started, 1, "stubborn repository")
 
-	now = now.Add(time.Minute)
 	cancelledContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := source.Poll(cancelledContext, now.Add(-time.Minute)); err == nil {
-		t.Fatal("discovery replacement ignored poll cancellation deadline")
-	}
 	if err := source.CloseLeader(cancelledContext); err == nil {
 		t.Fatal("leader close ignored poll cancellation deadline")
 	}
@@ -288,14 +205,14 @@ func TestGitHubSourceRuntimeReportsPeerInvalidationDeadline(t *testing.T) {
 	}
 	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 2, "windows": 1}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	source, manager := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
+	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, messageClient.started, 2, "message repository")
 	assertPolledCapacity(t, peerClient.started, 2, "peer repository")
 	assertPolledCapacity(t, unrelatedClient.started, 1, "unrelated repository")
 	<-messageClient.firstReturned
-	preserveCompletedPollResult(source, manager.adapters[0])
+	preserveCompletedPollResult(source, source.adapters[0])
 
 	cancelledContext, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -314,25 +231,17 @@ func TestGitHubSourceRuntimeKeepsInstalledAdaptersWhenOldSessionCloseFails(t *te
 	messageClient := &capacityMessageClientFake{}
 	manager := &githubManagerFake{
 		adapters: []*githubsource.Adapter{{Client: messageClient, Handler: eventHandlerFake{}, RunnerPool: "linux"}},
-		openErr:  closeErr,
+		closeErr: closeErr,
 	}
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 
-	if err := source.OpenLeader(context.Background()); !errors.Is(err, closeErr) {
-		t.Fatalf("open error = %v, want old close error", err)
+	mustOpenGitHubSource(t, source)
+	if err := source.CloseLeader(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("close error = %v, want %v", err, closeErr)
 	}
-	if err := source.OpenLeader(context.Background()); err != nil || manager.opens != 1 {
-		t.Fatalf("acknowledge installed replacement = %v, opens %d, want one open", err, manager.opens)
-	}
-	if err := source.Poll(context.Background(), time.Time{}); err != nil {
-		t.Fatalf("poll installed replacement: %v", err)
-	}
-	if err := source.CloseLeader(context.Background()); err != nil {
-		t.Fatalf("close replacement: %v", err)
-	}
-	if messageClient.calls != 1 {
-		t.Fatal("replacement adapter was not polled")
+	if source.leaderInstalled || source.term != nil || len(source.adapters) != 0 {
+		t.Fatal("failed session cleanup restored fenced leadership")
 	}
 }
 
@@ -349,17 +258,18 @@ func TestGitHubSourceRuntimeReportsLifecycleAndCapacityFailures(t *testing.T) {
 	}
 	manager.refreshErr = nil
 	manager.reconcileErr = wantErr
-	if err := source.OpenLeader(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("reconcile error = %v", err)
+	if err := source.OpenLeader(context.Background()); err != nil {
+		t.Fatalf("open leader: %v", err)
 	}
-	if err := source.Poll(context.Background(), now); !errors.Is(err, wantErr) {
-		t.Fatalf("due discovery error = %v", err)
-	}
+	awaitGitHubDiscoveryError(t, source, wantErr)
+	mustCloseGitHubSource(t, source)
 	manager.reconcileErr = nil
 	manager.refreshErr = wantErr
-	if err := source.OpenLeader(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("open refresh error = %v", err)
+	if err := source.OpenLeader(context.Background()); err != nil {
+		t.Fatalf("open leader: %v", err)
 	}
+	awaitGitHubDiscoveryError(t, source, wantErr)
+	mustCloseGitHubSource(t, source)
 }
 
 func TestGitHubSourceRuntimeReportsCapacityAndCloseFailures(t *testing.T) {
@@ -372,9 +282,7 @@ func TestGitHubSourceRuntimeReportsCapacityAndCloseFailures(t *testing.T) {
 	manager.refreshErr = nil
 	messageClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
 	manager.adapters = []*githubsource.Adapter{{Client: messageClient, Handler: eventHandlerFake{}, RunnerPool: "linux"}}
-	if err := source.OpenLeader(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	mustOpenGitHubSource(t, source)
 	source.capacities = &capacityAggregatorFake{err: wantErr}
 	if err := source.Poll(context.Background(), now); !errors.Is(err, wantErr) {
 		t.Fatalf("capacity error = %v", err)
@@ -390,33 +298,153 @@ func TestGitHubSourceRuntimeReportsCapacityAndCloseFailures(t *testing.T) {
 }
 
 type githubManagerFake struct {
+	mu           sync.Mutex
 	adapters     []*githubsource.Adapter
 	reconciles   int
 	opens        int
 	openErr      error
 	reconcileErr error
 	refreshErr   error
+	snapshotErr  error
 	closeErr     error
 	events       []string
 }
 
-func (fake *githubManagerFake) Reconcile(context.Context, githubsource.ManagerConfig) error {
+func (fake *githubManagerFake) setRepositoryOpen(adapters []*githubsource.Adapter, openErr error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.adapters = adapters
+	fake.openErr = openErr
+}
+
+func (fake *githubManagerFake) setOpenError(openErr error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.openErr = openErr
+}
+
+func (fake *githubManagerFake) setCloseError(closeErr error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.closeErr = closeErr
+}
+
+func (fake *githubManagerFake) setSnapshotError(snapshotErr error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.snapshotErr = snapshotErr
+}
+
+func (fake *githubManagerFake) RegistrationSnapshot(context.Context) (githubsource.RegistrationSnapshot, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.snapshotFacts(), fake.snapshotErr
+}
+
+func (fake *githubManagerFake) Reconcile(context.Context, githubsource.ManagerConfig) (githubsource.RegistrationSnapshot, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
 	fake.reconciles++
 	fake.events = append(fake.events, "reconcile")
-	return fake.reconcileErr
+	return fake.snapshotFacts(), fake.reconcileErr
 }
 func (fake *githubManagerFake) RefreshMembers(context.Context) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
 	fake.events = append(fake.events, "refresh")
 	return fake.refreshErr
 }
 func (fake *githubManagerFake) OpenLeader(context.Context, string, githubsource.EventHandler) ([]*githubsource.Adapter, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
 	fake.opens++
 	fake.events = append(fake.events, "open")
 	return fake.adapters, fake.openErr
 }
 func (fake *githubManagerFake) CloseLeader(context.Context) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
 	fake.events = append(fake.events, "close")
 	return fake.closeErr
+}
+
+func (fake *githubManagerFake) OpenRepositorySessions(
+	ctx context.Context,
+	records []githubsource.Registration,
+	owner string,
+	handler githubsource.EventHandler,
+) (*githubsource.RepositorySessionGeneration, error) {
+	adapters, openErr := fake.beginRepositorySessionOpen()
+	if openErr != nil {
+		return nil, openErr
+	}
+	manager, err := newFakeRepositorySessionManager(fake, adapters)
+	if err != nil {
+		return nil, err
+	}
+	generation, err := manager.OpenRepositorySessions(ctx, records, owner, handler)
+	if err != nil {
+		return generation, fmt.Errorf("open test repository sessions: %w", err)
+	}
+	return generation, nil
+}
+
+func (fake *githubManagerFake) beginRepositorySessionOpen() ([]*githubsource.Adapter, error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.opens++
+	fake.events = append(fake.events, "open")
+	if fake.openErr != nil {
+		return nil, fake.openErr
+	}
+	return append([]*githubsource.Adapter(nil), fake.adapters...), nil
+}
+
+func newFakeRepositorySessionManager(
+	fake *githubManagerFake,
+	adapters []*githubsource.Adapter,
+) (*githubsource.Manager, error) {
+	manager, err := githubsource.NewManager(termDiscoverer{}, func(
+		context.Context,
+		transport.Repository,
+	) (githubsource.ManagerClient, error) {
+		return githubsource.ManagerClient{OpenSession: func(
+			_ context.Context,
+			registration transport.Registration,
+			_ string,
+		) (githubsource.ManagedSession, error) {
+			index := int(registration.ID) - 1
+			return githubManagedSessionFake{MessageClient: adapters[index].Client, manager: fake}, nil
+		}}, nil
+	}, &termRegistrationRepository{}, githubsource.ManagerObserver{})
+	if err != nil {
+		return nil, fmt.Errorf("create test GitHub manager: %w", err)
+	}
+	return manager, nil
+}
+
+func (fake *githubManagerFake) snapshotFacts() githubsource.RegistrationSnapshot {
+	records := make([]githubsource.Registration, 0, len(fake.adapters))
+	for index, adapter := range fake.adapters {
+		repository := adapter.Repository
+		if repository == "" {
+			repository = fmt.Sprintf("https://github.example/repository-%d", index+1)
+		}
+		records = append(records, githubsource.Registration{RepositoryURL: repository, InstallationID: 1,
+			RunnerPool: adapter.RunnerPool, RunnerGroupID: 1, ScaleSetID: transport.ScaleSetID(index + 1)})
+	}
+	return githubsource.RegistrationSnapshot{Active: records, Owned: append([]githubsource.Registration(nil), records...)}
+}
+
+type githubManagedSessionFake struct {
+	githubsource.MessageClient
+	manager *githubManagerFake
+}
+
+func (session githubManagedSessionFake) Close(context.Context) error {
+	session.manager.mu.Lock()
+	defer session.manager.mu.Unlock()
+	return session.manager.closeErr
 }
 
 type capacityAggregatorFake struct {
@@ -441,11 +469,15 @@ type capacityMessageClientFake struct {
 	finished    chan struct{}
 }
 
-func (fake *capacityMessageClientFake) GetMessage(_ context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+func (fake *capacityMessageClientFake) GetMessage(ctx context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
 	fake.maxCapacity = maxCapacity
 	fake.calls++
 	if fake.finished != nil {
-		fake.finished <- struct{}{}
+		select {
+		case fake.finished <- struct{}{}:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("finish test message request: %w", ctx.Err())
+		}
 	}
 	if fake.err != nil {
 		return nil, fake.err
@@ -538,57 +570,3 @@ func (eventHandlerFake) RunnerStarted(context.Context, core.SourceReference) err
 	return nil
 }
 func (eventHandlerFake) Terminalize(context.Context, core.SourceReference) error { return nil }
-
-func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
-	t.Helper()
-	if err := source.OpenLeader(context.Background()); err != nil {
-		t.Fatalf("open GitHub source: %v", err)
-	}
-}
-
-func mustPollGitHubSource(t *testing.T, source *githubSourceRuntime, cutoff time.Time) {
-	t.Helper()
-	if err := source.Poll(context.Background(), cutoff); err != nil {
-		t.Fatalf("poll GitHub source: %v", err)
-	}
-}
-
-func mustCloseGitHubSource(t *testing.T, source *githubSourceRuntime) {
-	t.Helper()
-	if err := source.CloseLeader(context.Background()); err != nil {
-		t.Fatalf("close GitHub source: %v", err)
-	}
-}
-
-func assertPolledCapacity(t *testing.T, capacities <-chan int, want int, repository string) {
-	t.Helper()
-	if capacity := <-capacities; capacity != want {
-		t.Fatalf("%s capacity = %d, want %d", repository, capacity, want)
-	}
-}
-
-func assertNoPolledCapacity(t *testing.T, capacities <-chan int, repository string) {
-	t.Helper()
-	select {
-	case capacity := <-capacities:
-		t.Fatalf("%s was restarted with capacity %d", repository, capacity)
-	default:
-	}
-}
-
-func preserveCompletedPollResult(source *githubSourceRuntime, adapter *githubsource.Adapter) {
-	attempt := source.polls[adapter]
-	result := <-attempt.result
-	attempt.result <- result
-}
-
-func newGitHubPollingTestSource(
-	adapters []*githubsource.Adapter,
-	capacities *capacityAggregatorFake,
-	currentTime func() time.Time,
-) (*githubSourceRuntime, *githubManagerFake) {
-	manager := &githubManagerFake{adapters: adapters}
-	source := newGitHubSourceRuntime(manager, capacities, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, currentTime)
-	return source, manager
-}

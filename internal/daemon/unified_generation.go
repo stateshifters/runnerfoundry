@@ -94,6 +94,7 @@ type maintenanceGeneration struct {
 	currentTime func() time.Time
 	closers     []runtimeCloser
 	finalizers  []runtimeFinalizer
+	processor   *queuedJobProcessor
 
 	mutex         sync.Mutex
 	closeMutex    sync.Mutex
@@ -160,7 +161,9 @@ func (generation *maintenanceGeneration) Activate(ctx context.Context) error {
 	if err := generation.activateEngine(); err != nil {
 		return err
 	}
-	generation.startRunLoop(ctx)
+	if err := generation.startRunLoop(ctx); err != nil {
+		return errors.Join(err, generation.engine.Deactivate(ctx))
+	}
 	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
 		operation: "generation", stage: "activation", outcome: "activated",
 	})
@@ -189,15 +192,22 @@ func (generation *maintenanceGeneration) activateEngine() error {
 	return nil
 }
 
-func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) {
-	generation.mutex.Lock()
+func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) error {
 	runContext, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if generation.processor != nil {
+		if err := generation.processor.Start(runContext); err != nil {
+			cancel()
+			return fmt.Errorf("start queued-job processor: %w", err)
+		}
+	}
+	generation.mutex.Lock()
 	generation.runCancel = cancel
 	generation.runDone = make(chan struct{})
 	generation.active = true
 	done := generation.runDone
 	generation.mutex.Unlock()
 	go generation.run(runContext, done)
+	return nil
 }
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
@@ -241,24 +251,15 @@ func (generation *maintenanceGeneration) reportCycle(err error) {
 }
 
 func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {
-	generation.mutex.Lock()
-	if !generation.active {
-		generation.mutex.Unlock()
+	cancel, done, active := generation.deactivationState()
+	if !active {
 		return nil
 	}
-	cancel, done := generation.runCancel, generation.runDone
-	generation.mutex.Unlock()
 	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
 		operation: "generation", stage: "deactivation", outcome: "started",
 	})
-	cancel()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return fmt.Errorf("wait for runtime generation: %w", ctx.Err())
-	}
-	if err := generation.engine.Deactivate(ctx); err != nil {
-		return fmt.Errorf("deactivate generation engine: %w", err)
+	if err := generation.stopActiveRuntime(ctx, cancel, done); err != nil {
+		return err
 	}
 	generation.mutex.Lock()
 	generation.active = false
@@ -268,6 +269,34 @@ func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {
 	reportProgress(generation.report, slog.LevelInfo, operationalEvent{
 		operation: "generation", stage: "deactivation", outcome: "completed",
 	})
+	return nil
+}
+
+func (generation *maintenanceGeneration) deactivationState() (context.CancelFunc, <-chan struct{}, bool) {
+	generation.mutex.Lock()
+	defer generation.mutex.Unlock()
+	return generation.runCancel, generation.runDone, generation.active
+}
+
+func (generation *maintenanceGeneration) stopActiveRuntime(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	done <-chan struct{},
+) error {
+	cancel()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return fmt.Errorf("wait for runtime generation: %w", ctx.Err())
+	}
+	if generation.processor != nil {
+		if err := generation.processor.Stop(ctx); err != nil {
+			return fmt.Errorf("stop queued-job processor: %w", err)
+		}
+	}
+	if err := generation.engine.Deactivate(ctx); err != nil {
+		return fmt.Errorf("deactivate generation engine: %w", err)
+	}
 	return nil
 }
 

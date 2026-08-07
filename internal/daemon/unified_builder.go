@@ -52,21 +52,34 @@ func buildUnifiedGeneration(
 	if err != nil {
 		return nil, err
 	}
-	engine := buildConfiguredEngine(assembled, dependencies, discoveryInterval)
+	jobGate := newQueuedJobEligibilityGate()
+	var processor *queuedJobProcessor
+	wakeJobs := func(runnerPool core.RunnerPool) {
+		if processor != nil {
+			processor.Wake(runnerPool)
+		}
+	}
+	engine := buildConfiguredEngine(assembled, dependencies, discoveryInterval, jobGate, wakeJobs)
+	processor = newQueuedJobProcessor(engine, jobGate, dependencies.report)
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
-	return newMaintenanceGeneration(
+	generation := newMaintenanceGeneration(
 		processEngine, dependencies.ticker, dependencies.report, configuredClosers(dependencies),
 		assembled.finalizers,
-	), nil
+	)
+	generation.processor = processor
+	return generation, nil
 }
 
 func buildConfiguredEngine(
 	assembled assembledRuntime,
 	dependencies unifiedBuilderDependencies,
 	discoveryInterval time.Duration,
+	jobGate *queuedJobEligibilityGate,
+	wakeJobs func(core.RunnerPool),
 ) *UnifiedEngine {
 	source := newGitHubSourceRuntime(
-		dependencies.manager, dependencies.store, string(dependencies.member), runtimeengine.NewQueueHandler(dependencies.store),
+		dependencies.manager, dependencies.store, string(dependencies.member),
+		runtimeengine.NewQueueHandlerWithWake(dependencies.store, wakeJobs),
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
 	source.report = dependencies.report
@@ -77,6 +90,7 @@ func buildConfiguredEngine(
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
 		Membership: membership, Leadership: dependencies.leadership, Source: source, Pools: assembled.pools,
 		Inventory: dependencies.inventory, Report: dependencies.report,
+		JobGate: jobGate, WakeJobs: wakeJobs,
 	})
 }
 
@@ -166,13 +180,16 @@ type orchestrationPool struct {
 	report       func(error)
 }
 
-func (pool orchestrationPool) RequestWork(ctx context.Context, _ core.RunnerPool) error {
+func (pool orchestrationPool) RequestWork(
+	ctx context.Context,
+	_ core.RunnerPool,
+) (runtimeengine.ProcessResult, error) {
 	result, err := pool.worker.RequestWork(ctx)
 	reportProcessOutcome(pool.report, pool.runnerPool, result, err)
 	if err != nil {
-		return fmt.Errorf("request pool work: %w", err)
+		return result, fmt.Errorf("request pool work: %w", err)
 	}
-	return nil
+	return result, nil
 }
 
 func reportProcessOutcome(report func(error), runnerPool core.RunnerPool, result runtimeengine.ProcessResult, err error) {

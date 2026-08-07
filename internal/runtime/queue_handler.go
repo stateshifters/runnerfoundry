@@ -9,13 +9,24 @@ import (
 
 // QueueHandler translates durable source assignments and cancellations into
 // the source-neutral queue without owning runner execution.
-type QueueHandler struct{ store core.JobQueueStore }
+type QueueHandler struct {
+	store  core.JobQueueStore
+	wakeUp func(core.RunnerPool)
+}
 
 func NewQueueHandler(store core.JobQueueStore) *QueueHandler { return &QueueHandler{store: store} }
 
+func NewQueueHandlerWithWake(store core.JobQueueStore, wakeUp func(core.RunnerPool)) *QueueHandler {
+	return &QueueHandler{store: store, wakeUp: wakeUp}
+}
+
 func (handler *QueueHandler) Request(ctx context.Context, request core.JobRequest) error {
-	if _, err := handler.store.Queue(ctx, request); err != nil {
+	result, err := handler.store.Queue(ctx, request)
+	if err != nil {
 		return fmt.Errorf("enqueue source request %q: %w", request.Source.ID, err)
+	}
+	if handler.wakeUp != nil && (result.Outcome == core.QueueQueued || result.Outcome == core.QueueAlreadyQueued) {
+		handler.wakeUp(request.RunnerPool)
 	}
 	return nil
 }

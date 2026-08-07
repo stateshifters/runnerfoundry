@@ -23,7 +23,7 @@ func TestManagerPrunesStoredGroupWithoutCurrentConfiguration(t *testing.T) {
 		return transport.PruneResult{Removed: owned}, nil
 	}
 	manager := newManagerFixture(t, discoverer, factory.Client, repository)
-	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
+	if _, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
 		t.Fatalf("prune stored runner group: %v", err)
 	}
 	if len(repository.snapshot.Owned) != 0 {
@@ -50,7 +50,7 @@ func TestManagerReplacesChangedOwnershipAndPrunesOldFingerprint(t *testing.T) {
 	}
 	manager := newManagerFixture(t, discoverer, factory.Client, repository)
 	config := githubsource.ManagerConfig{Prune: true, RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "new"}}}
-	if err := manager.Reconcile(context.Background(), config); err != nil {
+	if _, err := manager.Reconcile(context.Background(), config); err != nil {
 		t.Fatalf("reconcile changed registration: %v", err)
 	}
 	if len(repository.snapshot.Owned) != 1 || repository.snapshot.Owned[0].ScaleSetID != 12 ||

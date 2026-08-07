@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -30,17 +31,220 @@ type runnerPoolPublication struct {
 // upstream long poll. Calls must remain serialized with OpenLeader and
 // CloseLeader; each adapter has at most one in-flight request.
 func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff time.Time) error {
-	pollErrors, changedPools := source.harvestPolls()
+	if !source.leaderInstalled || source.term == nil {
+		return nil
+	}
+	term := source.term
+	pollErrors := source.harvestRepositoryOpenResults(ctx, term)
+	pollErrors = append(pollErrors, source.harvestDiscovery(ctx, term)...)
+	pollErrors = append(pollErrors, source.retireRemovedRepositories(ctx)...)
+	source.collectAbandonedGenerations()
+	if cleanupErr := source.retryRetiringGenerations(ctx); cleanupErr != nil {
+		pollErrors = append(pollErrors, cleanupErr)
+	}
+	harvestedPollErrors, changedPools := source.harvestPolls()
+	pollErrors = append(pollErrors, harvestedPollErrors...)
 	if err := source.stopChangedPools(ctx, changedPools); err != nil {
 		pollErrors = append(pollErrors, err)
 	}
-	if !source.currentTime().Before(source.nextDiscovery) {
-		if err := source.reconcileAndOpen(ctx); err != nil {
-			pollErrors = append(pollErrors, err)
-		}
+	if !source.currentTime().Before(source.nextDiscovery) && !term.discoveryActive {
+		source.startDiscovery(ctx, term)
+		source.nextDiscovery = source.currentTime().Add(source.discoveryInterval)
 	}
 	pollErrors = append(pollErrors, source.launchIdlePolls(ctx, liveMemberCutoff)...)
 	return errors.Join(pollErrors...)
+}
+
+func (source *githubSourceRuntime) harvestRepositoryOpenResults(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+) []error {
+	results := source.drainRepositoryOpenResults(term)
+	sort.SliceStable(results, func(first, second int) bool {
+		return results[first].repository < results[second].repository
+	})
+	resultErrors := make([]error, 0, len(results))
+	for _, result := range results {
+		if err := source.installRepositoryGeneration(ctx, term, result); err != nil {
+			resultErrors = append(resultErrors, err)
+		}
+	}
+	return resultErrors
+}
+
+func (*githubSourceRuntime) drainRepositoryOpenResults(
+	term *githubLeadershipTerm,
+) []githubRepositoryOpenResult {
+	results := make([]githubRepositoryOpenResult, 0)
+	for {
+		select {
+		case result := <-term.openResults:
+			results = append(results, result)
+		default:
+			return results
+		}
+	}
+}
+
+func (source *githubSourceRuntime) installRepositoryGeneration(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	result githubRepositoryOpenResult,
+) error {
+	if pending, expected := source.opening[result.repository]; expected && sameRegistrations(pending, result.records) {
+		delete(source.opening, result.repository)
+	}
+	if !source.acceptsRepositoryResult(term, result) {
+		return source.closeRepositoryGeneration(ctx, result.generation, "discard stale GitHub repository sessions")
+	}
+	if result.err != nil {
+		return source.handleRepositoryOpenFailure(ctx, term, result)
+	}
+	if result.generation == nil {
+		return fmt.Errorf("open GitHub repository sessions for %q: manager returned nil generation", result.repository)
+	}
+	previous := source.generations[result.repository]
+	if err := source.stopRepositoryGenerationPolls(ctx, previous); err != nil {
+		cleanupErr := source.closeRepositoryGeneration(ctx, result.generation, "retire rejected GitHub repository sessions")
+		source.scheduleRequiredRepositoryGenerations(ctx, term)
+		return errors.Join(err, cleanupErr)
+	}
+	source.generations[result.repository] = result.generation
+	source.rebuildAdapters()
+	source.reportSessionActivationProgress()
+	return source.closeRepositoryGeneration(ctx, previous,
+		fmt.Sprintf("retire replaced GitHub repository sessions for %q", result.repository))
+}
+
+func (source *githubSourceRuntime) acceptsRepositoryResult(
+	term *githubLeadershipTerm,
+	result githubRepositoryOpenResult,
+) bool {
+	return result.epoch == term.epoch && source.term == term && source.leaderInstalled &&
+		sameRegistrations(source.desired[result.repository], result.records)
+}
+
+func (source *githubSourceRuntime) handleRepositoryOpenFailure(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	result githubRepositoryOpenResult,
+) error {
+	cleanupErr := source.closeRepositoryGeneration(ctx, result.generation, "retire partial GitHub repository sessions")
+	source.scheduleRequiredRepositoryGenerations(ctx, term)
+	return errors.Join(
+		fmt.Errorf("open GitHub repository sessions for %q: %w", result.repository, result.err),
+		cleanupErr,
+	)
+}
+
+func (source *githubSourceRuntime) stopRepositoryGenerationPolls(
+	ctx context.Context,
+	generation *githubsource.RepositorySessionGeneration,
+) error {
+	if generation == nil {
+		return nil
+	}
+	adapters := make(map[*githubsource.Adapter]struct{})
+	for _, adapter := range generation.Adapters() {
+		adapters[adapter] = struct{}{}
+	}
+	return source.stopPolls(ctx, func(adapter *githubsource.Adapter) bool {
+		_, found := adapters[adapter]
+		return found
+	})
+}
+
+func (source *githubSourceRuntime) closeRepositoryGeneration(
+	ctx context.Context,
+	generation *githubsource.RepositorySessionGeneration,
+	description string,
+) error {
+	if generation == nil {
+		return nil
+	}
+	if err := generation.Close(ctx); err != nil {
+		source.retiring = append(source.retiring, generation)
+		return fmt.Errorf("%s: %w", description, err)
+	}
+	return nil
+}
+
+func (source *githubSourceRuntime) harvestDiscovery(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+) []error {
+	select {
+	case result := <-term.discoveryResult:
+		term.discoveryActive = false
+		if result.epoch != term.epoch || source.term != term || !source.leaderInstalled {
+			return nil
+		}
+		if result.err != nil {
+			return []error{fmt.Errorf("reconcile GitHub registrations: %w", result.err)}
+		}
+		source.desired = groupActiveRegistrations(result.snapshot.Active)
+		resultErrors := make([]error, 0)
+		source.beginSessionActivation()
+		source.scheduleRequiredRepositoryGenerations(ctx, term)
+		if err := source.manager.RefreshMembers(ctx); err != nil {
+			resultErrors = append(resultErrors, fmt.Errorf("refresh GitHub member routes: %w", err))
+		} else {
+			source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
+		}
+		return resultErrors
+	default:
+		return nil
+	}
+}
+
+func (source *githubSourceRuntime) retireRemovedRepositories(ctx context.Context) []error {
+	resultErrors := make([]error, 0)
+	for _, repository := range sortedGenerationRepositories(source.generations) {
+		if _, retained := source.desired[repository]; retained {
+			continue
+		}
+		generation := source.generations[repository]
+		generationAdapters := make(map[*githubsource.Adapter]struct{})
+		for _, adapter := range generation.Adapters() {
+			generationAdapters[adapter] = struct{}{}
+		}
+		if err := source.stopPolls(ctx, func(adapter *githubsource.Adapter) bool {
+			_, found := generationAdapters[adapter]
+			return found
+		}); err != nil {
+			resultErrors = append(resultErrors, err)
+			continue
+		}
+		delete(source.generations, repository)
+		if err := generation.Close(ctx); err != nil {
+			source.retiring = append(source.retiring, generation)
+			resultErrors = append(resultErrors,
+				fmt.Errorf("retire removed GitHub repository sessions for %q: %w", repository, err))
+		}
+	}
+	source.rebuildAdapters()
+	return resultErrors
+}
+
+func (source *githubSourceRuntime) retryRetiringGenerations(ctx context.Context) error {
+	retiring := source.retiring
+	source.retiring = nil
+	var joined error
+	for _, generation := range retiring {
+		if err := generation.Close(ctx); err != nil {
+			source.retiring = append(source.retiring, generation)
+			joined = errors.Join(joined, err)
+		}
+	}
+	return joined
+}
+
+func (source *githubSourceRuntime) rebuildAdapters() {
+	adapters := make([]*githubsource.Adapter, 0)
+	for _, repository := range sortedGenerationRepositories(source.generations) {
+		adapters = append(adapters, source.generations[repository].Adapters()...)
+	}
+	source.adapters = adapters
 }
 
 func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]struct{}) {

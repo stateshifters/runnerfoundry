@@ -20,17 +20,6 @@ func managerRepositories(count int) []transport.Repository {
 	return repositories
 }
 
-func managerRecords(count int) ([]githubsource.Registration, []transport.Repository) {
-	records := make([]githubsource.Registration, count)
-	repositories := make([]transport.Repository, count)
-	for index := range records {
-		repositoryURL := fmt.Sprintf("https://github.com/octo/repository-%03d", index+1)
-		records[index] = managerRecord(repositoryURL, index+11)
-		repositories[index] = managerTransportRepository(records[index])
-	}
-	return records, repositories
-}
-
 func collectManagerProgress(activities []githubsource.ManagerActivity, infoStage, debugStage string) ([]int, []string) {
 	progress := make([]int, 0)
 	repositories := make([]string, 0)
@@ -74,7 +63,7 @@ func TestManagerReportsBoundedRepositoryReconciliationProgress(t *testing.T) {
 	factory := newManagerFactoryFake(repositories)
 	manager, activities := newObservedManager(t, &managerDiscovererFake{repositories: repositories}, factory.Client, &registrationRepositoryFake{})
 	configured := githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}}}
-	if err := manager.Reconcile(context.Background(), configured); err != nil {
+	if _, err := manager.Reconcile(context.Background(), configured); err != nil {
 		t.Fatalf("reconcile repositories: %v", err)
 	}
 	progress, debugRepositories := collectManagerProgress(*activities, "configure_repositories", "configure_repository")
@@ -84,30 +73,12 @@ func TestManagerReportsBoundedRepositoryReconciliationProgress(t *testing.T) {
 	}
 }
 
-func TestManagerReportsBoundedSessionOpeningProgress(t *testing.T) {
-	records, repositories := managerRecords(150)
-	factory := newManagerFactoryFake(repositories)
-	for _, record := range records {
-		factory.clients[record.RepositoryURL].session = &managerSessionFake{key: transport.SessionKey{
-			Repository: record.RepositoryURL, RunnerPool: string(record.RunnerPool)}}
-	}
-	manager, activities := newObservedManager(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: records})
-	if _, err := manager.OpenLeader(context.Background(), "member-1", &recordingEventHandler{}); err != nil {
-		t.Fatalf("open leader sessions: %v", err)
-	}
-	progress, debugRepositories := collectManagerProgress(*activities, "open_sessions", "open_session")
-	want := []int{1, 8, 15, 23, 30, 38, 45, 53, 60, 68, 75, 83, 90, 98, 105, 113, 120, 128, 135, 143, 150}
-	if !reflect.DeepEqual(progress, want) || len(debugRepositories) != len(records) {
-		t.Fatalf("session progress=%#v debug repositories=%d", progress, len(debugRepositories))
-	}
-}
-
 func TestManagerReportsCompletedReconciliationStages(t *testing.T) {
 	repositories := []transport.Repository{{InstallationID: 1, URL: "https://github.com/octo/repository"}}
 	factory := newManagerFactoryFake(repositories)
 	manager, activities := newObservedManager(t, &managerDiscovererFake{repositories: repositories}, factory.Client, &registrationRepositoryFake{})
 	configured := githubsource.ManagerConfig{Prune: true, RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}}}
-	if err := manager.Reconcile(context.Background(), configured); err != nil {
+	if _, err := manager.Reconcile(context.Background(), configured); err != nil {
 		t.Fatalf("reconcile repositories: %v", err)
 	}
 	completed := make([]string, 0)
@@ -134,7 +105,7 @@ func TestManagerReportsEachConfiguredRunnerPoolAtDebug(t *testing.T) {
 	factory := newManagerFactoryFake([]transport.Repository{repository})
 	manager, activities := newObservedManager(t, &managerDiscovererFake{repositories: []transport.Repository{repository}}, factory.Client, &registrationRepositoryFake{})
 	configured := githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}, {RunnerPool: "windows", RunnerGroup: "default"}}}
-	if err := manager.Reconcile(context.Background(), configured); err != nil {
+	if _, err := manager.Reconcile(context.Background(), configured); err != nil {
 		t.Fatalf("reconcile repositories: %v", err)
 	}
 	runnerPools := make([]core.RunnerPool, 0)

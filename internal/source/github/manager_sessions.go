@@ -4,70 +4,144 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
-// OpenLeader opens one actions/scaleset message session per persisted registration.
-func (manager *Manager) OpenLeader(ctx context.Context, owner string, handler EventHandler) ([]*Adapter, error) {
-	if owner == "" || handler == nil {
-		return nil, errors.New("GitHub leader owner and event handler are required")
-	}
-	cleanupErr := manager.retryRetiring(ctx)
-	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
-	if err != nil {
-		return nil, errors.Join(cleanupErr, fmt.Errorf("list GitHub registrations: %w", err))
-	}
-	sessions, adapters, err := manager.openLeaderRecords(ctx, snapshot.Active, owner, handler)
-	if err != nil {
-		return nil, errors.Join(cleanupErr, err)
-	}
-	oldSessions := manager.leaders
-	manager.leaders = sessions
-	return adapters, errors.Join(cleanupErr, manager.retireSessions(ctx, oldSessions))
+// RepositorySessionGeneration owns the complete set of message sessions for
+// one repository snapshot. Its views are defensive copies. Close attempts all
+// sessions in registration order and retains failed sessions for a later retry.
+type RepositorySessionGeneration struct {
+	repository    string
+	registrations []Registration
+	adapters      []*Adapter
+	sessions      []ManagedSession
+	retire        func(context.Context, ManagedSession, int, int) error
+	closeMu       sync.Mutex
 }
 
-func (manager *Manager) openLeaderRecords(ctx context.Context, records []Registration, owner string,
+func (generation *RepositorySessionGeneration) Repository() string {
+	return generation.repository
+}
+
+func (generation *RepositorySessionGeneration) Registrations() []Registration {
+	return append([]Registration(nil), generation.registrations...)
+}
+
+func (generation *RepositorySessionGeneration) Adapters() []*Adapter {
+	return append([]*Adapter(nil), generation.adapters...)
+}
+
+// Close releases every session in the generation. Sessions that fail to close
+// remain owned by the generation and are retried on the next call.
+func (generation *RepositorySessionGeneration) Close(ctx context.Context) error {
+	generation.closeMu.Lock()
+	defer generation.closeMu.Unlock()
+	remaining := make([]ManagedSession, 0)
+	var joined error
+	for index, session := range generation.sessions {
+		if err := generation.retire(ctx, session, index+1, len(generation.sessions)); err != nil {
+			remaining = append(remaining, session)
+			joined = errors.Join(joined, fmt.Errorf("close GitHub message session: %w", err))
+		}
+	}
+	generation.sessions = remaining
+	return joined
+}
+
+// OpenRepositorySessions opens an all-or-nothing message-session generation
+// for the supplied committed registrations. Records must be non-empty and all
+// belong to the same repository. Runner Pool sessions open sequentially in
+// record order; any partial generation is closed before an error is returned.
+func (manager *Manager) OpenRepositorySessions(
+	ctx context.Context,
+	records []Registration,
+	owner string,
 	handler EventHandler,
-) ([]ManagedSession, []*Adapter, error) {
-	sessions := make([]ManagedSession, 0, len(records))
-	adapters := make([]*Adapter, 0, len(records))
-	total := len(records)
-	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-		Stage: "open_sessions", Outcome: "started", Total: total})
-	for index, record := range records {
-		current := index + 1
-		if shouldReportManagerProgress(current, total) {
-			manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-				Stage: "open_sessions", Outcome: "progress", Current: current, Total: total})
-		}
-		opened, err := manager.openLeaderRecordWithActivity(ctx, record, owner, handler, current, total)
-		if err != nil {
-			manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-				Stage: "open_sessions", Outcome: "failed", Current: current, Total: total, Err: err})
-			return nil, nil, manager.closeOpened(ctx, sessions, err)
-		}
-		sessions = append(sessions, opened.session)
-		adapters = append(adapters, opened.adapter)
+) (*RepositorySessionGeneration, error) {
+	repository, err := validateRepositorySessionRecords(records, owner, handler)
+	if err != nil {
+		return nil, err
 	}
-	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-		Stage: "open_sessions", Outcome: "completed", Count: len(sessions), Total: total})
-	return sessions, adapters, nil
+	client, err := manager.factory(ctx, repositoryFromRegistration(records[0]))
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub session client for repository %q: %w", repository, err)
+	}
+	generation := &RepositorySessionGeneration{
+		repository: repository, registrations: append([]Registration(nil), records...),
+		adapters: make([]*Adapter, 0, len(records)), sessions: make([]ManagedSession, 0, len(records)),
+		retire: manager.retireRepositorySession,
+	}
+	for index, record := range records {
+		if openErr := manager.openRepositorySession(ctx, generation, client, record, owner, handler, index, len(records)); openErr != nil {
+			return failedRepositoryGeneration(ctx, generation, record, openErr)
+		}
+	}
+	return generation, nil
 }
 
-func (manager *Manager) openLeaderRecordWithActivity(ctx context.Context, record Registration, owner string,
-	handler EventHandler, current, total int,
-) (openedLeader, error) {
+func (manager *Manager) openRepositorySession(
+	ctx context.Context,
+	generation *RepositorySessionGeneration,
+	client ManagerClient,
+	record Registration,
+	owner string,
+	handler EventHandler,
+	index int,
+	total int,
+) error {
 	started := manager.observer.currentTime()
-	manager.reportSessionActivity(record, current, total, "started", started, nil)
-	opened, err := manager.openLeaderRecord(ctx, record, owner, handler)
+	manager.reportSessionActivity(record, index+1, total, "started", started, nil)
+	opened, err := manager.openLeaderRecordWithClient(ctx, client, record, owner, handler)
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
+	} else {
+		generation.sessions = append(generation.sessions, opened.session)
+		generation.adapters = append(generation.adapters, opened.adapter)
 	}
-	manager.reportSessionActivity(record, current, total, outcome, started, err)
-	return opened, err
+	manager.reportSessionActivity(record, index+1, total, outcome, started, err)
+	return err
+}
+
+func failedRepositoryGeneration(
+	ctx context.Context,
+	generation *RepositorySessionGeneration,
+	record Registration,
+	openErr error,
+) (*RepositorySessionGeneration, error) {
+	cleanupErr := generation.Close(ctx)
+	resultErr := errors.Join(
+		fmt.Errorf("open GitHub session for repository %q Runner Pool %q: %w",
+			generation.Repository(), record.RunnerPool, openErr),
+		cleanupErr,
+	)
+	if cleanupErr != nil {
+		return generation, resultErr
+	}
+	return nil, resultErr
+}
+
+func validateRepositorySessionRecords(
+	records []Registration,
+	owner string,
+	handler EventHandler,
+) (string, error) {
+	if len(records) == 0 || owner == "" || handler == nil {
+		return "", errors.New("GitHub repository registrations, leader owner, and event handler are required")
+	}
+	repository := records[0].RepositoryURL
+	if repository == "" {
+		return "", errors.New("GitHub repository registration URL is required")
+	}
+	for _, record := range records[1:] {
+		if record.RepositoryURL != repository {
+			return "", errors.New("GitHub repository session registrations must belong to one repository")
+		}
+	}
+	return repository, nil
 }
 
 func (manager *Manager) reportSessionActivity(record Registration, current, total int, outcome string,
@@ -77,18 +151,41 @@ func (manager *Manager) reportSessionActivity(record Registration, current, tota
 	if outcome != "started" {
 		duration = manager.observer.currentTime().Sub(started)
 	}
-	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
+	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
 		Stage: "open_session", Outcome: outcome, Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
 		Current: current, Total: total, Duration: duration, Err: err})
 }
 
-func (manager *Manager) openLeaderRecord(ctx context.Context, record Registration, owner string,
+func (manager *Manager) retireRepositorySession(
+	ctx context.Context,
+	session ManagedSession,
+	current int,
+	total int,
+) error {
+	started := manager.observer.currentTime()
+	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
+		Stage: "retire_session", Outcome: "started", Current: current, Total: total})
+	err := session.Close(ctx)
+	outcome := "completed"
+	if err != nil {
+		outcome = "failed"
+	}
+	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
+		Stage: "retire_session", Outcome: outcome, Current: current, Total: total,
+		Duration: manager.observer.currentTime().Sub(started), Err: err})
+	if err != nil {
+		return fmt.Errorf("retire GitHub session: %w", err)
+	}
+	return nil
+}
+
+func (manager *Manager) openLeaderRecordWithClient(
+	ctx context.Context,
+	client ManagerClient,
+	record Registration,
+	owner string,
 	handler EventHandler,
 ) (openedLeader, error) {
-	client, err := manager.factory(ctx, repositoryFromRegistration(record))
-	if err != nil {
-		return openedLeader{}, err
-	}
 	session, err := client.OpenSession(ctx, transportRegistration(record), owner)
 	if err != nil {
 		return openedLeader{}, err
@@ -106,69 +203,4 @@ func repositoryFromRegistration(record Registration) transport.Repository {
 
 func transportRegistration(record Registration) transport.Registration {
 	return transport.Registration{ID: record.ScaleSetID, Name: string(record.RunnerPool), RunnerGroupID: record.RunnerGroupID}
-}
-
-func (manager *Manager) closeOpened(ctx context.Context, sessions []ManagedSession, cause error) error {
-	return errors.Join(cause, manager.retireSessions(ctx, sessions))
-}
-
-// CloseLeader closes every actions/scaleset message session.
-func (manager *Manager) CloseLeader(ctx context.Context) error {
-	sessions := append(manager.retiring, manager.leaders...)
-	manager.leaders = nil
-	manager.retiring = nil
-	return manager.retireSessions(ctx, sessions)
-}
-
-func (manager *Manager) retireSessions(ctx context.Context, sessions []ManagedSession) error {
-	if len(sessions) == 0 {
-		return nil
-	}
-	started := manager.observer.currentTime()
-	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-		Stage: "retire_sessions", Outcome: "started", Total: len(sessions)})
-	var joined error
-	for index, session := range sessions {
-		current := index + 1
-		if err := manager.retireSession(ctx, session, current, len(sessions)); err != nil {
-			manager.retiring = append(manager.retiring, session)
-			joined = errors.Join(joined, fmt.Errorf("close GitHub message session: %w", err))
-		}
-		if shouldReportManagerProgress(current, len(sessions)) {
-			manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-				Stage: "retire_sessions", Outcome: "progress", Current: current, Total: len(sessions)})
-		}
-	}
-	outcome := "completed"
-	if joined != nil {
-		outcome = "failed"
-	}
-	manager.observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_sessions",
-		Stage: "retire_sessions", Outcome: outcome, Count: len(sessions), Total: len(sessions),
-		Duration: manager.observer.currentTime().Sub(started), Err: joined})
-	return joined
-}
-
-func (manager *Manager) retireSession(ctx context.Context, session ManagedSession, current, total int) error {
-	started := manager.observer.currentTime()
-	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
-		Stage: "retire_session", Outcome: "started", Current: current, Total: total})
-	err := session.Close(ctx)
-	outcome := "completed"
-	if err != nil {
-		outcome = "failed"
-	}
-	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
-		Stage: "retire_session", Outcome: outcome, Current: current, Total: total,
-		Duration: manager.observer.currentTime().Sub(started), Err: err})
-	if err != nil {
-		return fmt.Errorf("retire GitHub session: %w", err)
-	}
-	return nil
-}
-
-func (manager *Manager) retryRetiring(ctx context.Context) error {
-	sessions := manager.retiring
-	manager.retiring = nil
-	return manager.retireSessions(ctx, sessions)
 }

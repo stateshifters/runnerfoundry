@@ -20,7 +20,7 @@ func TestManagerRetainsUndiscoveredRepositoryOwnership(t *testing.T) {
 		Active: []githubsource.Registration{record}, Owned: []githubsource.Registration{record},
 	}}
 	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
-	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
+	if _, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
 		t.Fatalf("reconcile undiscovered repository: %v", err)
 	}
 	if len(repository.snapshot.Active) != 0 || len(repository.snapshot.Owned) != 1 || repository.snapshot.Owned[0] != record {
@@ -32,9 +32,9 @@ func TestManagerPreservesSnapshotAfterPartialPruneFailureAndRetries(t *testing.T
 	t.Parallel()
 
 	fixture := newPartialPruneRetryFixture(t)
-	err := fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true})
+	_, err := fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true})
 	assertPartialPruneFailure(t, fixture, err)
-	if err = fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
+	if _, err = fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
 		t.Fatalf("retry prune: %v", err)
 	}
 	if fixture.repository.replaceCalls != 1 || len(fixture.repository.snapshot.Owned) != 0 {
@@ -92,7 +92,7 @@ func TestManagerReportsPruneClientCreationFailure(t *testing.T) {
 	manager := newManagerFixture(t, discoverer, func(context.Context, transport.Repository) (githubsource.ManagerClient, error) {
 		return githubsource.ManagerClient{}, wantErr
 	}, &snapshotRepositoryFake{})
-	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); !errors.Is(err, wantErr) {
+	if _, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); !errors.Is(err, wantErr) {
 		t.Fatalf("reconcile error = %v, want %v", err, wantErr)
 	}
 }
@@ -137,6 +137,25 @@ func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	}
 }
 
+func TestManagerReturnsDefensiveCommittedRegistrationSnapshot(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 17)
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{
+		Active: []githubsource.Registration{record}, Owned: []githubsource.Registration{record},
+	}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+
+	snapshot, err := manager.RegistrationSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("RegistrationSnapshot() error = %v", err)
+	}
+	snapshot.Active[0] = githubsource.Registration{}
+	if repository.snapshot.Active[0] != record {
+		t.Fatal("RegistrationSnapshot() exposed repository-owned state")
+	}
+}
+
 func TestManagerReportsMemberRouteReplacement(t *testing.T) {
 	record := managerRecord("https://github.com/octo/repo", 17)
 	repository := &registrationRepositoryFake{records: []githubsource.Registration{record}}
@@ -154,72 +173,6 @@ func TestManagerReportsMemberRouteReplacement(t *testing.T) {
 	if route.Repository != record.RepositoryURL || route.RunnerPool != record.RunnerPool {
 		t.Fatalf("debug route activity = %#v", route)
 	}
-}
-
-func TestManagerOpensPollAdaptersAndClosesLeaderSessions(t *testing.T) {
-	t.Parallel()
-
-	fixture := openLeaderManagerFixture(t)
-	adapters, err := fixture.manager.OpenLeader(context.Background(), "member-1", fixture.handler)
-	if err != nil {
-		t.Fatalf("open leader: %v", err)
-	}
-	if len(adapters) != 1 {
-		t.Fatalf("poll adapters = %#v, want one", adapters)
-	}
-	if _, err := adapters[0].PollOnce(context.Background(), 0); err != nil {
-		t.Fatalf("poll opened session: %v", err)
-	}
-	if err := fixture.manager.CloseLeader(context.Background()); err != nil {
-		t.Fatalf("close leader: %v", err)
-	}
-	if !fixture.session.closed {
-		t.Fatal("leader session was not closed")
-	}
-}
-
-func TestManagerRetriesFailedLeaderSessionClosure(t *testing.T) {
-	t.Parallel()
-
-	fixture := openLeaderManagerFixture(t)
-	if _, err := fixture.manager.OpenLeader(context.Background(), "member-1", fixture.handler); err != nil {
-		t.Fatalf("open leader: %v", err)
-	}
-	wantErr := errors.New("close failed")
-	fixture.session.closeErr = wantErr
-	if err := fixture.manager.CloseLeader(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("first close error = %v, want %v", err, wantErr)
-	}
-	fixture.session.closeErr = nil
-	if err := fixture.manager.CloseLeader(context.Background()); err != nil {
-		t.Fatalf("retry close: %v", err)
-	}
-	if fixture.session.closes != 2 {
-		t.Fatalf("session close attempts = %d, want 2", fixture.session.closes)
-	}
-}
-
-type leaderManagerFixture struct {
-	manager *githubsource.Manager
-	session *managerSessionFake
-	record  githubsource.Registration
-	handler *recordingEventHandler
-}
-
-func openLeaderManagerFixture(t *testing.T) leaderManagerFixture {
-	t.Helper()
-	record := managerRecord("https://github.com/octo/repo", 17)
-	repository := &registrationRepositoryFake{records: []githubsource.Registration{record}}
-	transportRepository := managerTransportRepository(record)
-	factory := newManagerFactoryFake([]transport.Repository{transportRepository})
-	session := &managerSessionFake{
-		key:      transport.SessionKey{Repository: record.RepositoryURL, RunnerPool: string(record.RunnerPool)},
-		messages: []*upstream.RunnerScaleSetMessage{{MessageID: 31}},
-	}
-	factory.clients[record.RepositoryURL].session = session
-	manager := newManagerFixture(t, &managerDiscovererFake{}, factory.Client, repository)
-	handler := &recordingEventHandler{events: &session.events}
-	return leaderManagerFixture{manager: manager, session: session, record: record, handler: handler}
 }
 
 func managerTransportRepository(record githubsource.Registration) transport.Repository {
@@ -250,12 +203,15 @@ func managerRecord(repositoryURL string, registrationID int) githubsource.Regist
 }
 
 type managerDiscovererFake struct {
-	repositories []transport.Repository
-	err          error
+	repositories         []transport.Repository
+	installationFailures map[transport.InstallationID]error
+	err                  error
 }
 
 func (discoverer *managerDiscovererFake) Discover(context.Context) (transport.DiscoveryResult, error) {
-	return transport.DiscoveryResult{Repositories: discoverer.repositories}, discoverer.err
+	return transport.DiscoveryResult{
+		Repositories: discoverer.repositories, InstallationFailures: discoverer.installationFailures,
+	}, discoverer.err
 }
 
 type registrationRepositoryFake struct {
@@ -429,7 +385,6 @@ func (client *managerClientFake) PruneRunnerPools(
 type managerSessionFake struct {
 	key      transport.SessionKey
 	messages []*upstream.RunnerScaleSetMessage
-	events   []string
 	closed   bool
 	closes   int
 	closeErr error

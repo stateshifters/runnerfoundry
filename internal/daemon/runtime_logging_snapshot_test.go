@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,13 @@ func TestHermeticRuntimeCompositionReportsReadinessAndRuntimeProgress(t *testing
 	waitForSupervisorSignal(t, fixture.notifier.ready, "systemd readiness while discovery is blocked")
 	close(fixture.discoverer.release)
 	assertOperationalHealth(t, fixture.notifier.statuses)
+	<-fixture.cycleCompleted
+	waitForSnapshotTerm(t, fixture.source)
+	runSnapshotCycle(t, fixture.ticker, fixture.cycleCompleted)
+	waitForSnapshotTerm(t, fixture.source)
+	<-fixture.sessionOpened
+	runSnapshotCycle(t, fixture.ticker, fixture.cycleCompleted)
+	<-fixture.pollStarted
 	cancel()
 	if err := <-result; err != nil {
 		t.Fatal(err)
@@ -29,11 +37,16 @@ func TestHermeticRuntimeCompositionReportsReadinessAndRuntimeProgress(t *testing
 }
 
 type runtimeLoggingFixture struct {
-	destination *memoryLogDestination
-	notifier    *runtimeSnapshotNotifier
-	discoverer  *blockingRepositoryDiscoverer
-	reporter    *productionRuntimeReporter
-	generation  *maintenanceGeneration
+	destination    *memoryLogDestination
+	notifier       *runtimeSnapshotNotifier
+	discoverer     *blockingRepositoryDiscoverer
+	reporter       *productionRuntimeReporter
+	generation     *maintenanceGeneration
+	source         *githubSourceRuntime
+	ticker         *manualCycleTicker
+	cycleCompleted chan struct{}
+	sessionOpened  chan struct{}
+	pollStarted    chan struct{}
 }
 
 func newRuntimeLoggingFixture(t *testing.T) runtimeLoggingFixture {
@@ -51,17 +64,23 @@ func newRuntimeLoggingFixture(t *testing.T) runtimeLoggingFixture {
 	reporter.notifier = notifier
 	discoverer := &blockingRepositoryDiscoverer{started: make(chan struct{}), release: make(chan struct{})}
 	store := newBuilderStoreFake()
-	manager := newRuntimeSnapshotManager(t, discoverer, store, reporter, now)
-	runtimeGeneration := newRuntimeSnapshotGeneration(manager, store, reporter, now)
+	sessionOpened := make(chan struct{})
+	pollStarted := make(chan struct{})
+	manager := newRuntimeSnapshotManager(t, discoverer, store, reporter, now, sessionOpened, pollStarted)
+	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
+	runtimeGeneration, source, cycleCompleted := newRuntimeSnapshotGeneration(manager, store, reporter, now, ticker)
 	return runtimeLoggingFixture{destination: destination, notifier: notifier, discoverer: discoverer,
-		reporter: reporter, generation: runtimeGeneration}
+		reporter: reporter, generation: runtimeGeneration, source: source, ticker: ticker,
+		cycleCompleted: cycleCompleted,
+		sessionOpened:  sessionOpened, pollStarted: pollStarted}
 }
 
 func newRuntimeSnapshotManager(t *testing.T, discoverer githubsource.RepositoryDiscoverer, store *builderStoreFake,
-	reporter *productionRuntimeReporter, now time.Time,
+	reporter *productionRuntimeReporter, now time.Time, sessionOpened chan struct{}, pollStarted chan struct{},
 ) *githubsource.Manager {
 	t.Helper()
-	manager, err := githubsource.NewManager(discoverer, runtimeSnapshotClientFactory(&runtimeSnapshotSession{}), store,
+	manager, err := githubsource.NewManager(discoverer,
+		runtimeSnapshotClientFactory(&runtimeSnapshotSession{pollStarted: pollStarted}, sessionOpened), store,
 		newGitHubManagerObserver(reporter.reportMaintenance, func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)
@@ -70,8 +89,8 @@ func newRuntimeSnapshotManager(t *testing.T, discoverer githubsource.RepositoryD
 }
 
 func newRuntimeSnapshotGeneration(manager *githubsource.Manager, store *builderStoreFake,
-	reporter *productionRuntimeReporter, now time.Time,
-) *maintenanceGeneration {
+	reporter *productionRuntimeReporter, now time.Time, ticker *manualCycleTicker,
+) (*maintenanceGeneration, *githubSourceRuntime, chan struct{}) {
 	source := newGitHubSourceRuntime(manager, store, "member-a", eventHandlerFake{}, githubsource.ManagerConfig{
 		RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}},
 	}, time.Hour, func() time.Time { return now })
@@ -83,10 +102,40 @@ func newRuntimeSnapshotGeneration(manager *githubsource.Manager, store *builderS
 		Source: source, Pools: []RunnerPoolRuntime{{RunnerPool: "linux", runtime: poolRuntimeFake{events: &events}}},
 		Inventory: inventoryRuntimeFake{events: &events}, Report: reporter.reportMaintenance,
 	})
-	runtimeGeneration := newMaintenanceGeneration(newGatedCycleEngine(engine, leadershipFake{leader: true, events: &events}),
-		&manualCycleTicker{ticks: make(chan time.Time)}, reporter.reportMaintenance, nil, nil)
+	cycleCompleted := make(chan struct{}, 1)
+	observedEngine := &cycleCompletionEngine{cycleEngine: newGatedCycleEngine(
+		engine, leadershipFake{leader: true, events: &events}), completed: cycleCompleted}
+	runtimeGeneration := newMaintenanceGeneration(observedEngine,
+		ticker, reporter.reportMaintenance, nil, nil)
 	runtimeGeneration.currentTime = func() time.Time { return now }
-	return runtimeGeneration
+	return runtimeGeneration, source, cycleCompleted
+}
+
+func runSnapshotCycle(t *testing.T, ticker *manualCycleTicker, completed <-chan struct{}) {
+	t.Helper()
+	ticker.ticks <- time.Time{}
+	<-completed
+}
+
+func waitForSnapshotTerm(t *testing.T, source *githubSourceRuntime) {
+	t.Helper()
+	if err := source.waitForTerm(context.Background(), source.term); err != nil {
+		t.Fatalf("wait for GitHub background work: %v", err)
+	}
+}
+
+type cycleCompletionEngine struct {
+	cycleEngine
+	completed chan<- struct{}
+}
+
+func (engine *cycleCompletionEngine) Cycle(ctx context.Context) error {
+	err := engine.cycleEngine.Cycle(ctx)
+	engine.completed <- struct{}{}
+	if err != nil {
+		return fmt.Errorf("run observed cycle: %w", err)
+	}
+	return nil
 }
 
 func (fixture runtimeLoggingFixture) start(ctx context.Context) <-chan error {
@@ -125,13 +174,18 @@ func assertRuntimeLogSnapshot(t *testing.T, output string) {
 	}
 }
 
-func runtimeSnapshotClientFactory(session githubsource.ManagedSession) githubsource.ManagerClientFactoryFunc {
+func runtimeSnapshotClientFactory(
+	session githubsource.ManagedSession,
+	sessionOpened chan struct{},
+) githubsource.ManagerClientFactoryFunc {
+	var opened sync.Once
 	return func(context.Context, transport.Repository) (githubsource.ManagerClient, error) {
 		return githubsource.ManagerClient{
 			EnsureRunnerPool: func(context.Context, string, string) (transport.Registration, error) {
 				return transport.Registration{ID: 11, Name: "linux", RunnerGroupID: 7}, nil
 			},
 			OpenSession: func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error) {
+				opened.Do(func() { close(sessionOpened) })
 				return session, nil
 			},
 			GenerateBootstrap: func(context.Context, transport.Registration, string) ([]byte, error) { return nil, nil },
@@ -157,9 +211,13 @@ func (discoverer *blockingRepositoryDiscoverer) Discover(ctx context.Context) (t
 	}
 }
 
-type runtimeSnapshotSession struct{}
+type runtimeSnapshotSession struct {
+	pollStarted chan struct{}
+	pollOnce    sync.Once
+}
 
-func (*runtimeSnapshotSession) GetMessage(ctx context.Context, _, _ int) (*upstream.RunnerScaleSetMessage, error) {
+func (session *runtimeSnapshotSession) GetMessage(ctx context.Context, _, _ int) (*upstream.RunnerScaleSetMessage, error) {
+	session.pollOnce.Do(func() { close(session.pollStarted) })
 	<-ctx.Done()
 	return nil, fmt.Errorf("wait for poll cancellation: %w", ctx.Err())
 }

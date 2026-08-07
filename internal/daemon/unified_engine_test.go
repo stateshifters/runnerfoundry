@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
+	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
 
 func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
@@ -27,7 +29,7 @@ func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
 
 			want := []string{
 				"heartbeat", "refresh-members", "leadership", "open-leader",
-				"poll", "reconcile:linux", "request:linux",
+				"poll", "reconcile:linux",
 			}
 			if !reflect.DeepEqual(events, want) {
 				t.Fatalf("events = %#v, want %#v", events, want)
@@ -47,9 +49,7 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 		t.Fatalf("cycle follower runtime: %v", err)
 	}
 
-	want := []string{
-		"heartbeat", "refresh-members", "leadership", "reconcile:linux", "request:linux",
-	}
+	want := []string{"heartbeat", "refresh-members", "leadership", "reconcile:linux"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
@@ -144,22 +144,117 @@ func TestUnifiedEngineContinuesIndependentMaintenanceAfterFailures(t *testing.T)
 		t.Fatalf("cycle error = %v, want heartbeat error", err)
 	}
 	if occurrences(events, "reconcile:linux") != 1 || occurrences(events, "request:linux") != 0 {
-		t.Fatalf("events = %#v, want failed reconciliation to prevent a claim", events)
+		t.Fatalf("events = %#v, want maintenance to avoid claims", events)
 	}
 }
 
-func TestUnifiedEngineReportsRequestFailureAfterSuccessfulReconciliation(t *testing.T) {
+func TestUnifiedEngineNeverClaimsWorkInsideMaintenance(t *testing.T) {
 	t.Parallel()
 
-	wantErr := errors.New("claim unavailable")
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
-	engine.pools[0].runtime = poolRuntimeFake{events: &events, requestErr: wantErr}
-	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("cycle error = %v, want request failure", err)
+	engine.pools[0].runtime = poolRuntimeFake{events: &events, requestErr: errors.New("claim unavailable")}
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("cycle error = %v", err)
 	}
-	if want := []string{"reconcile:linux", "request:linux"}; !reflect.DeepEqual(events[len(events)-2:], want) {
-		t.Fatalf("pool events = %#v, want %#v", events[len(events)-2:], want)
+	if occurrences(events, "request:linux") != 0 {
+		t.Fatalf("maintenance requested work: %#v", events)
+	}
+}
+
+func TestUnifiedEngineWakesOnlySuccessfullyReconciledRunnerPools(t *testing.T) {
+	events := make([]string, 0)
+	woken := make([]core.RunnerPool, 0, 1)
+	engine := unifiedEngineFixture(&events)
+	engine.jobGate = newQueuedJobEligibilityGate()
+	engine.wakeJobs = func(runnerPool core.RunnerPool) { woken = append(woken, runnerPool) }
+
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("successful cycle: %v", err)
+	}
+	if !reflect.DeepEqual(woken, []core.RunnerPool{"linux"}) {
+		t.Fatalf("successful wakes = %#v, want linux", woken)
+	}
+
+	woken = nil
+	engine.pools[0].runtime = poolRuntimeFake{events: &events, reconcileErr: errors.New("reconcile failed")}
+	if err := engine.Cycle(context.Background()); err == nil {
+		t.Fatal("failed reconciliation unexpectedly succeeded")
+	}
+	if len(woken) != 0 {
+		t.Fatalf("failed reconciliation wakes = %#v", woken)
+	}
+}
+
+func TestStandbyUnifiedEngineWakesIndependentQueuedJobProcessor(t *testing.T) {
+	events := make([]string, 0)
+	requests := make(chan core.RunnerPool, 1)
+	pool := processorPoolRuntimeFake{requests: requests}
+	engine := unifiedEngineFixture(&events)
+	engine.leadership = leadershipFake{leader: false, events: &events}
+	engine.pools[0].runtime = pool
+	gate := newQueuedJobEligibilityGate()
+	processor := newQueuedJobProcessor(engine, gate, nil)
+	engine.jobGate = gate
+	engine.wakeJobs = processor.Wake
+	if err := processor.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { stopQueuedJobProcessor(t, processor) })
+
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("standby Cycle() error = %v", err)
+	}
+	select {
+	case runnerPool := <-requests:
+		if runnerPool != "linux" {
+			t.Fatalf("requested Runner Pool = %q, want linux", runnerPool)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standby member did not process durable queued work")
+	}
+}
+
+func TestUnifiedEngineDoesNotHoldProviderGateDuringSourcePolling(t *testing.T) {
+	events := make([]string, 0)
+	pollStarted := make(chan struct{})
+	releasePoll := make(chan struct{})
+	engine := unifiedEngineFixture(&events)
+	engine.source = blockingPollSourceRuntime{
+		sourceRuntimeFake: sourceRuntimeFake{events: &events},
+		started:           pollStarted,
+		release:           releasePoll,
+	}
+	engine.jobGate = newQueuedJobEligibilityGate()
+	engine.jobGate.eligible["linux"] = struct{}{}
+
+	cycleDone := make(chan error, 1)
+	go func() { cycleDone <- engine.Cycle(context.Background()) }()
+	<-pollStarted
+	assertProviderGateAvailable(t, engine.jobGate)
+	close(releasePoll)
+	if err := <-cycleDone; err != nil {
+		t.Fatalf("Cycle() error = %v", err)
+	}
+}
+
+func assertProviderGateAvailable(t *testing.T, gate *queuedJobEligibilityGate) {
+	t.Helper()
+	requestDone := make(chan error, 1)
+	requestEvents := make([]string, 0)
+	go func() {
+		_, _, err := gate.requestIfEligible(
+			context.Background(), "linux", poolRuntimeFake{events: &requestEvents},
+		)
+		requestDone <- err
+	}()
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatalf("requestIfEligible() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider gate remained held while source polling was blocked")
 	}
 }
 
@@ -226,12 +321,13 @@ func TestUnifiedEngineReportsLeadershipCloseFailures(t *testing.T) {
 	mustRunEngineCycle(t, engine)
 	engine.leadership = leadershipFake{events: &events}
 	assertEngineCycleError(t, engine, wantErr, "lost leadership close")
-	assertEngineCycleError(t, engine, wantErr, "lost leadership close retry")
-	if occurrences(events, "close-leader") != 2 {
-		t.Fatalf("close attempts = %d, want retry", occurrences(events, "close-leader"))
+	if err := engine.Cycle(context.Background()); err != nil {
+		t.Fatalf("standby cycle after failed cleanup: %v", err)
+	}
+	if occurrences(events, "close-leader") != 1 {
+		t.Fatalf("close attempts = %d, want hard fence without retry", occurrences(events, "close-leader"))
 	}
 	engine.leadership = leadershipFake{leader: true, events: &events}
-	assertEngineCycleError(t, engine, wantErr, "regained leadership close")
 	engine.source = sourceRuntimeFake{events: &events}
 	mustRunEngineCycle(t, engine)
 	if err := engine.openLeadership(context.Background()); err != nil {
@@ -240,6 +336,22 @@ func TestUnifiedEngineReportsLeadershipCloseFailures(t *testing.T) {
 	engine.source = sourceRuntimeFake{events: &events, closeErr: wantErr}
 	if err := engine.Close(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("engine close error = %v", err)
+	}
+}
+
+type blockingPollSourceRuntime struct {
+	sourceRuntimeFake
+	started chan struct{}
+	release chan struct{}
+}
+
+func (fake blockingPollSourceRuntime) Poll(ctx context.Context, _ time.Time) error {
+	close(fake.started)
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for blocked source poll: %w", ctx.Err())
+	case <-fake.release:
+		return nil
 	}
 }
 
@@ -338,14 +450,33 @@ type poolRuntimeFake struct {
 	recoverErr   error
 }
 
+type processorPoolRuntimeFake struct {
+	requests chan<- core.RunnerPool
+}
+
+func (fake processorPoolRuntimeFake) RequestWork(
+	_ context.Context,
+	runnerPool core.RunnerPool,
+) (runtimeengine.ProcessResult, error) {
+	fake.requests <- runnerPool
+	return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}, nil
+}
+func (processorPoolRuntimeFake) Reconcile(context.Context, core.RunnerPool) error { return nil }
+func (processorPoolRuntimeFake) RecoverForeign(context.Context, core.RunnerPool) error {
+	return nil
+}
+
 func (fake poolRuntimeFake) RecoverForeign(context.Context, core.RunnerPool) error {
 	*fake.events = append(*fake.events, "recover-foreign:linux")
 	return fake.recoverErr
 }
 
-func (fake poolRuntimeFake) RequestWork(context.Context, core.RunnerPool) error {
+func (fake poolRuntimeFake) RequestWork(
+	context.Context,
+	core.RunnerPool,
+) (runtimeengine.ProcessResult, error) {
 	*fake.events = append(*fake.events, "request:linux")
-	return fake.requestErr
+	return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}, fake.requestErr
 }
 func (fake poolRuntimeFake) Reconcile(context.Context, core.RunnerPool) error {
 	*fake.events = append(*fake.events, "reconcile:linux")

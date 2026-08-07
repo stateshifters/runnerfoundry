@@ -134,7 +134,7 @@ func newBuilderOrchestrator(
 func assertPoolAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestrator) {
 	t.Helper()
 	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(orchestrator, "linux", 1), orchestrator: orchestrator}
-	if err := pool.RequestWork(context.Background(), "linux"); err != nil {
+	if _, err := pool.RequestWork(context.Background(), "linux"); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.Reconcile(context.Background(), "linux"); err != nil {
@@ -148,7 +148,7 @@ func assertPoolAdapterSuccess(t *testing.T, orchestrator *runtimeengine.Orchestr
 func assertPoolAdapterFailures(t *testing.T, orchestrator *runtimeengine.Orchestrator, wantErr error) {
 	t.Helper()
 	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(orchestrator, "linux", 1), orchestrator: orchestrator}
-	if err := pool.RequestWork(context.Background(), "linux"); !errors.Is(err, wantErr) {
+	if _, err := pool.RequestWork(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("request error = %v", err)
 	}
 	if err := pool.Reconcile(context.Background(), "linux"); !errors.Is(err, wantErr) {

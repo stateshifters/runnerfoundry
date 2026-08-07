@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
+	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 )
 
 func mustPrepareGeneration(t *testing.T, generation *maintenanceGeneration) {
@@ -89,6 +90,41 @@ func TestUnifiedGenerationActivatesBeforeFirstMaintenanceCycleCompletes(t *testi
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("close generation: %v", err)
 	}
+}
+
+func TestUnifiedGenerationStartsAndJoinsQueuedJobProcessorWithinActivation(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestStopped := make(chan struct{})
+	requester := queuedJobRequesterFake{request: func(
+		ctx context.Context,
+		_ core.RunnerPool,
+	) (runtimeengine.ProcessResult, error) {
+		close(requestStarted)
+		<-ctx.Done()
+		close(requestStopped)
+		return runtimeengine.ProcessResult{}, ctx.Err()
+	}}
+	gate := newQueuedJobEligibilityGate()
+	gate.Maintain(func(maintenance *queuedJobMaintenance) {
+		maintenance.MarkEligible("linux")
+	})
+	processor := newQueuedJobProcessor(requester, gate, nil)
+	processor.Wake("linux")
+	engine := &processorLifecycleEngineFake{processorStopped: requestStopped}
+	generation := newMaintenanceGeneration(
+		engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	generation.processor = processor
+	mustPrepareGeneration(t, generation)
+
+	mustActivateGeneration(t, generation)
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued-job processor did not start with the generation")
+	}
+	mustDeactivateGeneration(t, generation)
+	mustCloseGeneration(t, generation)
 }
 
 func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.T) {
@@ -365,6 +401,25 @@ type controlledCycleEngineFake struct {
 	cycles  chan<- struct{}
 	results <-chan error
 }
+
+type processorLifecycleEngineFake struct {
+	processorStopped <-chan struct{}
+}
+
+func (*processorLifecycleEngineFake) Activate() error { return nil }
+func (*processorLifecycleEngineFake) Cycle(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+func (fake *processorLifecycleEngineFake) Deactivate(context.Context) error {
+	select {
+	case <-fake.processorStopped:
+		return nil
+	default:
+		return errors.New("engine deactivated before queued-job processor stopped")
+	}
+}
+func (*processorLifecycleEngineFake) Close(context.Context) error { return nil }
 
 func (*controlledCycleEngineFake) Activate() error { return nil }
 func (*controlledCycleEngineFake) Deactivate(context.Context) error {

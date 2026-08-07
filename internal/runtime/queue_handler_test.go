@@ -43,6 +43,52 @@ func TestQueueHandlerPersistsRunnerStart(t *testing.T) {
 	}
 }
 
+func TestQueueHandlerWakesProcessingOnlyAfterDurableEnqueue(t *testing.T) {
+	queued := make(chan core.RunnerPool, 1)
+	queueErr := error(nil)
+	store := &jobStoreFake{enqueue: func(context.Context, core.JobRequest) (core.Job, bool, error) {
+		return core.Job{}, true, queueErr
+	}}
+	handler := runtimeengine.NewQueueHandlerWithWake(store, func(runnerPool core.RunnerPool) { queued <- runnerPool })
+	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
+
+	if err := handler.Request(context.Background(), request); err != nil {
+		t.Fatalf("queue request: %v", err)
+	}
+	select {
+	case runnerPool := <-queued:
+		if runnerPool != request.RunnerPool {
+			t.Fatalf("wake Runner Pool = %q, want %q", runnerPool, request.RunnerPool)
+		}
+	default:
+		t.Fatal("durable enqueue did not wake processing")
+	}
+
+	queueErr = errors.New("queue unavailable")
+	if err := handler.Request(context.Background(), request); err == nil {
+		t.Fatal("failed enqueue unexpectedly succeeded")
+	}
+	select {
+	case runnerPool := <-queued:
+		t.Fatalf("failed enqueue woke Runner Pool %q", runnerPool)
+	default:
+	}
+}
+
+func TestQueueHandlerDoesNotWakeForDurableNonQueuedOutcome(t *testing.T) {
+	woken := false
+	handler := runtimeengine.NewQueueHandlerWithWake(
+		queueOutcomeStoreFake{outcome: core.QueueProcessing},
+		func(core.RunnerPool) { woken = true },
+	)
+	if err := handler.Request(context.Background(), core.JobRequest{RunnerPool: "linux"}); err != nil {
+		t.Fatalf("Request() error = %v", err)
+	}
+	if woken {
+		t.Fatal("processing source outcome woke queued-job processing")
+	}
+}
+
 func TestQueueHandlerPersistsTerminalEvent(t *testing.T) {
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
 	store := &jobStoreFake{terminalize: func(_ context.Context, actual core.SourceReference) error {
@@ -74,4 +120,18 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 	if err := handler.Terminalize(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
 		t.Fatalf("Terminalize() error = %v", err)
 	}
+}
+
+type queueOutcomeStoreFake struct {
+	outcome core.QueueOutcome
+}
+
+func (fake queueOutcomeStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+	return core.EnqueueResult{Outcome: fake.outcome}, nil
+}
+func (queueOutcomeStoreFake) MarkRunnerStarted(context.Context, core.SourceReference) error {
+	return nil
+}
+func (queueOutcomeStoreFake) TerminalizeSource(context.Context, core.SourceReference) error {
+	return nil
 }

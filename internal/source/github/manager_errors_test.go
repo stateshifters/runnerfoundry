@@ -44,7 +44,7 @@ func TestManagerReconcileRejectsInvalidConfigurationAndDiscoveryFailures(t *test
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			manager := newManagerFixture(t, testCase.discoverer, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{})
-			if err := manager.Reconcile(context.Background(), testCase.config); err == nil {
+			if _, err := manager.Reconcile(context.Background(), testCase.config); err == nil {
 				t.Fatal("Reconcile() error = nil, want failure")
 			}
 		})
@@ -52,7 +52,7 @@ func TestManagerReconcileRejectsInvalidConfigurationAndDiscoveryFailures(t *test
 	manager := newManagerFixture(
 		t, &installationFailureDiscoverer{err: wantErr}, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{},
 	)
-	if err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{}); !errors.Is(err, wantErr) {
+	if _, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{}); !errors.Is(err, wantErr) {
 		t.Fatalf("installation failure = %v, want %v", err, wantErr)
 	}
 }
@@ -118,7 +118,7 @@ func TestManagerReconcileRetainsDesiredAndRemovesStaleRegistrations(t *testing.T
 		newManagerFactoryFake([]transport.Repository{repository}),
 		&registrationRepositoryFake{records: []githubsource.Registration{retained}},
 	)
-	if err := retainedManager.Reconcile(context.Background(), config); err != nil {
+	if _, err := retainedManager.Reconcile(context.Background(), config); err != nil {
 		t.Fatalf("retain desired registration: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestManagerReconcileRetainsDesiredAndRemovesStaleRegistrations(t *testing.T
 	emptyManager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, deleteStore)
 	assertReconcileFails(t, emptyManager, githubsource.ManagerConfig{}, wantErr)
 	deleteStore.deleteErr = nil
-	if err := emptyManager.Reconcile(context.Background(), githubsource.ManagerConfig{}); err != nil {
+	if _, err := emptyManager.Reconcile(context.Background(), githubsource.ManagerConfig{}); err != nil {
 		t.Fatalf("delete stale registration: %v", err)
 	}
 }
@@ -155,45 +155,28 @@ func TestManagerRefreshMembersReportsFailures(t *testing.T) {
 	}
 }
 
-func TestManagerOpenLeaderReportsFailures(t *testing.T) {
-	t.Parallel()
-	wantErr := errors.New("open failed")
-	handler := &recordingEventHandler{events: &[]string{}}
-	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{})
-	if _, err := manager.OpenLeader(context.Background(), "", handler); err == nil {
-		t.Fatal("empty owner accepted")
-	}
-	if _, err := manager.OpenLeader(context.Background(), "owner", nil); err == nil {
-		t.Fatal("nil handler accepted")
-	}
-	manager = newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{listErr: wantErr})
-	if _, err := manager.OpenLeader(context.Background(), "owner", handler); !errors.Is(err, wantErr) {
-		t.Fatalf("list error = %v", err)
+func TestManagerRegistrationSnapshotReportsRepositoryFailure(t *testing.T) {
+	wantErr := errors.New("snapshot failed")
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client,
+		&registrationRepositoryFake{listErr: wantErr})
+	if _, err := manager.RegistrationSnapshot(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("RegistrationSnapshot() error = %v, want %v", err, wantErr)
 	}
 }
 
-func TestManagerOpenLeaderReportsFactoryAndSessionFailures(t *testing.T) {
-	t.Parallel()
-	wantErr := errors.New("open failed")
-	handler := &recordingEventHandler{events: &[]string{}}
-	record := managerRecord("https://github.com/octo/repo", 17)
-	store := &registrationRepositoryFake{records: []githubsource.Registration{record}}
-	factory := newManagerFactoryFake(nil)
-	factory.err = wantErr
-	manager := newManagerFixture(t, &managerDiscovererFake{}, factory.Client, store)
-	if _, err := manager.OpenLeader(context.Background(), "owner", handler); !errors.Is(err, wantErr) {
-		t.Fatalf("factory error = %v", err)
-	}
-
-	factory = newManagerFactoryFake([]transport.Repository{managerTransportRepository(record)})
-	factory.clients[record.RepositoryURL].openErr = wantErr
-	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, store)
-	if _, err := manager.OpenLeader(context.Background(), "owner", handler); !errors.Is(err, wantErr) {
-		t.Fatalf("open error = %v", err)
-	}
-	factory.clients[record.RepositoryURL].openErr = nil
-	if _, err := manager.OpenLeader(context.Background(), "owner", handler); err == nil {
-		t.Fatal("nil session accepted")
+func TestManagerSortsMultipleInstallationFailures(t *testing.T) {
+	firstErr := errors.New("first installation failed")
+	secondErr := errors.New("second installation failed")
+	discoverer := &managerDiscovererFake{installationFailures: map[transport.InstallationID]error{
+		2: secondErr,
+		1: firstErr,
+	}}
+	manager := newManagerFixture(t, discoverer, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{})
+	_, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
+		RunnerPool: "linux", RunnerGroup: "default",
+	}}})
+	if !errors.Is(err, firstErr) || !errors.Is(err, secondErr) {
+		t.Fatalf("Reconcile() error = %v, want both installation failures", err)
 	}
 }
 
@@ -204,7 +187,7 @@ func assertReconcileFails(
 	wantErr error,
 ) {
 	t.Helper()
-	if err := manager.Reconcile(context.Background(), config); !errors.Is(err, wantErr) {
+	if _, err := manager.Reconcile(context.Background(), config); !errors.Is(err, wantErr) {
 		t.Fatalf("Reconcile() error = %v, want %v", err, wantErr)
 	}
 }

@@ -132,7 +132,7 @@ func (manager *Manager) reportPruneRepository(repository string, current, total 
 	if outcome != "started" {
 		duration = manager.observer.currentTime().Sub(started)
 	}
-	manager.observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
 		Stage: "prune_repository", Outcome: outcome, Repository: repository,
 		Current: current, Total: total, Duration: duration, Err: err})
 }
