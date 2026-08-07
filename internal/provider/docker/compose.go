@@ -11,6 +11,7 @@ import (
 	"github.com/meza/RunnerFoundry/internal/provider/contract"
 )
 
+// RunnerState is Docker's normalized lifecycle observation.
 type RunnerState string
 
 const (
@@ -20,36 +21,46 @@ const (
 	RunnerStateUnknown   = contract.RunnerStateUnknown
 )
 
+// RunnerInstance is one owned Compose container returned by List.
 type RunnerInstance struct {
-	ID         string
-	RunnerName string
-	State      RunnerState
+	ID             string
+	RunnerName     string
+	RunnerPoolName string
+	State          RunnerState
 }
 
+// StartRequest contains the ownership labels and opaque JIT configuration for
+// one ephemeral runner. JITConfig is passed through child-only environment.
 type StartRequest struct {
-	ScaleSetName string
-	RunnerName   string
-	JITConfig    string
+	RunnerPoolName string
+	RunnerName     string
+	JITConfig      string
 }
 
+// ComposeConfig selects one service from one Compose file.
 type ComposeConfig struct {
 	ComposeFile string
 	Service     string
 }
 
+// CommandRunner is the Docker command boundary. Implementations return command
+// failures without exposing private JIT values.
 type CommandRunner interface {
 	StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error
-	ListComposeRunners(ctx context.Context, scaleSetName string) (string, error)
+	ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error)
 	RemoveComposeRunner(ctx context.Context, containerID string) error
 	ListComposeServices(ctx context.Context, config ComposeConfig) (string, error)
 }
 
+// ExecCommandRunner invokes the local Docker CLI without retaining command or
+// environment state between calls.
 type ExecCommandRunner struct {
 	newCommand           func(context.Context, string, ...string) *exec.Cmd
 	combinedOutput       func(*exec.Cmd) ([]byte, error)
 	inheritedEnvironment func() []string
 }
 
+// NewExecCommandRunner constructs the production Docker CLI boundary.
 func NewExecCommandRunner() ExecCommandRunner {
 	return ExecCommandRunner{
 		newCommand:           exec.CommandContext,
@@ -63,7 +74,7 @@ func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config C
 		arguments: append(composeArgs(config),
 			"run", "--detach", "--rm",
 			"--name", request.RunnerName,
-			"--label", contract.OwnershipScaleSet+"="+request.ScaleSetName,
+			"--label", contract.OwnershipRunnerPool+"="+request.RunnerPoolName,
 			"--label", contract.OwnershipRunner+"="+request.RunnerName,
 			"--env", JITConfigEnvironment,
 			config.Service,
@@ -74,10 +85,12 @@ func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config C
 	return err
 }
 
-func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, scaleSetName string) (string, error) {
-	return runner.runDocker(ctx, dockerInvocation{arguments: []string{
-		"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipScaleSet + "=" + scaleSetName,
-	}})
+func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error) {
+	arguments := []string{"ps", "--all", "--format", "json"}
+	if runnerPoolName != "" {
+		arguments = append(arguments, "--filter", "label="+contract.OwnershipRunnerPool+"="+runnerPoolName)
+	}
+	return runner.runDocker(ctx, dockerInvocation{arguments: arguments})
 }
 
 func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
@@ -161,11 +174,14 @@ func redactPrivateValues(value string, privateEnvironment []privateEnvironmentVa
 	return redactedValue
 }
 
+// ComposeProvider owns runner containers bearing RunnerFoundry ownership
+// labels for Config. Callers must Validate before Start.
 type ComposeProvider struct {
 	CommandRunner CommandRunner
 	Config        ComposeConfig
 }
 
+// Start creates one detached, self-removing runner container.
 func (provider ComposeProvider) Start(ctx context.Context, request StartRequest) error {
 	err := provider.CommandRunner.StartComposeRunner(ctx, provider.Config, request)
 	if err != nil {
@@ -174,8 +190,10 @@ func (provider ComposeProvider) Start(ctx context.Context, request StartRequest)
 	return nil
 }
 
-func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) ([]RunnerInstance, error) {
-	output, err := provider.CommandRunner.ListComposeRunners(ctx, scaleSetName)
+// List returns all owned containers when requestedPools is empty, or filters by
+// the first requested Runner Pool. A filtered result omits RunnerPoolName.
+func (provider ComposeProvider) List(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
+	output, err := provider.CommandRunner.ListComposeRunners(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list compose runners: %w", err)
 	}
@@ -185,25 +203,38 @@ func (provider ComposeProvider) List(ctx context.Context, scaleSetName string) (
 	}
 	instances := make([]RunnerInstance, 0, len(containers))
 	for _, container := range containers {
-		labels := parseLabels(container.Labels)
-		if labels[contract.OwnershipScaleSet] != scaleSetName {
+		instance, owned := runnerInstance(container, requestedPools)
+		if !owned {
 			continue
 		}
-		instances = append(instances, RunnerInstance{
-			ID:         container.ID,
-			RunnerName: labels[contract.OwnershipRunner],
-			State:      dockerState(container.State),
-		})
+		instances = append(instances, instance)
 	}
 	return instances, nil
 }
 
-func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	switch instance.State {
-	case RunnerStateRunning, RunnerStateCompleted:
-	default:
-		return nil
+func runnerInstance(container dockerContainer, requestedPools []string) (RunnerInstance, bool) {
+	labels := parseLabels(container.Labels)
+	runnerPoolName := labels[contract.OwnershipRunnerPool]
+	if runnerPoolName == "" {
+		runnerPoolName = labels[contract.LegacyOwnershipScaleSet]
 	}
+	if runnerPoolName == "" || len(requestedPools) != 0 && runnerPoolName != requestedPools[0] {
+		return RunnerInstance{}, false
+	}
+	reportedRunnerPool := runnerPoolName
+	if len(requestedPools) != 0 {
+		reportedRunnerPool = ""
+	}
+	return RunnerInstance{
+		ID:             container.ID,
+		RunnerName:     labels[contract.OwnershipRunner],
+		RunnerPoolName: reportedRunnerPool,
+		State:          dockerState(container.State),
+	}, true
+}
+
+// Destroy forcibly removes instance by its provider ID.
+func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
 	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
 	if err != nil {
 		return fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err)
@@ -211,6 +242,7 @@ func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInst
 	return nil
 }
 
+// Validate resolves the Compose model and requires Config.Service to exist.
 func (provider ComposeProvider) Validate(ctx context.Context) error {
 	output, err := provider.CommandRunner.ListComposeServices(ctx, provider.Config)
 	if err != nil {

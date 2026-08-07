@@ -11,8 +11,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/libtnb/logrotate"
 	"github.com/meza/RunnerFoundry/internal/config"
 )
+
+func TestProductionLogFactoryDelegatesRotatingWriterConstruction(t *testing.T) {
+	called := false
+	openRotatingLogFile := func(string, ...logrotate.Option) (*logrotate.Writer, error) {
+		called = true
+		return &logrotate.Writer{}, nil
+	}
+	factory := newProductionLogDestinationFactoryWithRotator(openRotatingLogFile)
+	if _, err := factory.openRotatingFile(rotatingFileSettings{}, func(error) {}); err != nil || !called {
+		t.Fatalf("rotating writer = (called %t, error %v)", called, err)
+	}
+}
 
 func TestLogDestinationFactoryUsesStandardOutputWithoutFileConfiguration(t *testing.T) {
 	standardOutput := &bytes.Buffer{}
@@ -208,3 +221,17 @@ func testDaemonAbsolutePath(elements ...string) string {
 	}
 	return filepath.Join(append([]string{string(filepath.Separator)}, elements...)...)
 }
+
+type recordingLogDestination struct {
+	bytes.Buffer
+	closeCalls int
+}
+
+func (destination *recordingLogDestination) Close() error {
+	destination.closeCalls++
+	return nil
+}
+
+type errorWriter struct{ err error }
+
+func (writer errorWriter) Write([]byte) (int, error) { return 0, writer.err }

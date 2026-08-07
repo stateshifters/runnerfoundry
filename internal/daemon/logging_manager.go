@@ -15,12 +15,6 @@ type logDestinationFactory interface {
 	Open(logConfig config.LogConfig) (io.WriteCloser, error)
 }
 
-type logDestinationFactoryFunc func(config.LogConfig) (io.WriteCloser, error)
-
-func (factory logDestinationFactoryFunc) Open(logConfig config.LogConfig) (io.WriteCloser, error) {
-	return factory(logConfig)
-}
-
 type loggingManager struct {
 	factory logDestinationFactory
 	handler *reloadableLogHandler
@@ -53,33 +47,86 @@ func (manager *loggingManager) Close() error {
 }
 
 type preparedLogging struct {
-	manager   *loggingManager
-	target    loggingTarget
-	mutex     sync.Mutex
-	completed bool
+	manager        *loggingManager
+	target         loggingTarget
+	previous       *loggingTarget
+	cleanup        io.WriteCloser
+	cleanupFailure string
+	mutex          sync.Mutex
+	completed      bool
+	activated      bool
 }
 
 func (prepared *preparedLogging) Activate() error {
 	prepared.mutex.Lock()
 	defer prepared.mutex.Unlock()
-	if prepared.completed {
+	if prepared.completed || prepared.activated {
 		return errors.New("prepared logging configuration is already completed")
 	}
+	previous := prepared.manager.handler.swap(prepared.target)
+	prepared.previous = &previous
+	prepared.activated = true
+	return nil
+}
+
+func (prepared *preparedLogging) Commit() error {
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if !prepared.activated || prepared.completed {
+		return errors.New("prepared logging configuration is not active")
+	}
 	prepared.completed = true
-	return prepared.manager.handler.replace(prepared.target)
+	prepared.cleanup = prepared.previous.destination
+	prepared.cleanupFailure = "close replaced log destination"
+	prepared.attemptCleanupWithoutFailingCommit()
+	return nil
+}
+
+func (prepared *preparedLogging) Rollback() error {
+	prepared.mutex.Lock()
+	defer prepared.mutex.Unlock()
+	if !prepared.activated || prepared.completed {
+		return nil
+	}
+	candidate := prepared.manager.handler.swap(*prepared.previous)
+	prepared.completed = true
+	prepared.cleanup = candidate.destination
+	prepared.cleanupFailure = "close replacement log destination"
+	return prepared.attemptCleanup()
 }
 
 func (prepared *preparedLogging) Close() error {
 	prepared.mutex.Lock()
 	defer prepared.mutex.Unlock()
-	if prepared.completed {
+	if !prepared.completed {
+		prepared.completed = true
+		if prepared.activated {
+			candidate := prepared.manager.handler.swap(*prepared.previous)
+			prepared.cleanup = candidate.destination
+			prepared.cleanupFailure = "close rolled-back log destination"
+		} else {
+			prepared.cleanup = prepared.target.destination
+			prepared.cleanupFailure = "close prepared log destination"
+		}
+	}
+	return prepared.attemptCleanup()
+}
+
+func (prepared *preparedLogging) attemptCleanup() error {
+	if prepared.cleanup == nil {
 		return nil
 	}
-	prepared.completed = true
-	if err := prepared.target.destination.Close(); err != nil {
-		return fmt.Errorf("close prepared log destination: %w", err)
+	if err := prepared.cleanup.Close(); err != nil {
+		return fmt.Errorf("%s: %w", prepared.cleanupFailure, err)
 	}
+	prepared.cleanup = nil
 	return nil
+}
+
+func (prepared *preparedLogging) attemptCleanupWithoutFailingCommit() {
+	if prepared.cleanup != nil && prepared.cleanup.Close() == nil {
+		prepared.cleanup = nil
+	}
 }
 
 type loggingTarget struct {
@@ -162,14 +209,19 @@ func (handler *reloadableLogHandler) decorated(active slog.Handler) slog.Handler
 }
 
 func (handler *reloadableLogHandler) replace(replacement loggingTarget) error {
-	handler.state.mutex.Lock()
-	previous := handler.state.target
-	handler.state.target = replacement
-	handler.state.mutex.Unlock()
+	previous := handler.swap(replacement)
 	if err := previous.destination.Close(); err != nil {
 		return fmt.Errorf("close replaced log destination: %w", err)
 	}
 	return nil
+}
+
+func (handler *reloadableLogHandler) swap(replacement loggingTarget) loggingTarget {
+	handler.state.mutex.Lock()
+	previous := handler.state.target
+	handler.state.target = replacement
+	handler.state.mutex.Unlock()
+	return previous
 }
 
 type noOpWriteCloser struct {

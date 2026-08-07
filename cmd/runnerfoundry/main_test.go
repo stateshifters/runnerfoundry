@@ -23,6 +23,25 @@ func TestRunMainWritesExecutionErrorsToStderr(t *testing.T) {
 	}
 }
 
+func TestRunMainWritesInvalidActiveRunnerPolicyDiagnosticSnapshot(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := runMain(
+		[]string{"--config", "config.yaml", "--active-runner-policy", "invalid"},
+		io.Discard,
+		&stderr,
+		nil,
+		nil,
+		testProcessLifecycle(),
+	)
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	expected := "active runner policy must be leave or terminate\n"
+	if stderr.String() != expected {
+		t.Fatalf("stderr snapshot mismatch\nexpected: %q\nactual:   %q", expected, stderr.String())
+	}
+}
+
 func TestRunMainWritesPostgreSQLMigrationDiagnosticSnapshot(t *testing.T) {
 	runMigration := func(context.Context, migrationRequest) (migrationStatus, error) {
 		return migrationStatus{}, errors.New(
@@ -63,19 +82,49 @@ func TestRunMainReturnsSuccess(t *testing.T) {
 	}
 }
 
-func TestMainExitsWithCommandResult(t *testing.T) {
-	originalProcess := productionProcess
-	t.Cleanup(func() {
-		productionProcess = originalProcess
-	})
-	exitCode := -1
-	productionProcess = processRuntime{
-		args: []string{"--unsupported"}, stdout: io.Discard, stderr: io.Discard,
-		lifecycle: testProcessLifecycle(), exit: func(code int) { exitCode = code },
+func TestRunMainPrintsVersionBeforeInitializingProcessLifecycle(t *testing.T) {
+	var stdout bytes.Buffer
+	lifecycle := processLifecycle{
+		notifyContext: func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
+			t.Fatal("process lifecycle must not initialize for a version request")
+			return nil, nil
+		},
+		notifySignals: func(chan<- os.Signal, ...os.Signal) {
+			t.Fatal("reload signals must not initialize for a version request")
+		},
+		stopSignals: func(chan<- os.Signal) {},
 	}
-	main()
+	if exitCode := runMain([]string{"--version"}, &stdout, io.Discard, nil, nil, lifecycle); exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
+	}
+	if stdout.String() != "runnerfoundry dev\n" {
+		t.Fatalf("version snapshot mismatch: %q", stdout.String())
+	}
+}
+
+func TestRunMainReturnsFailureWhenVersionCannotBeWritten(t *testing.T) {
+	lifecycle := processLifecycle{
+		notifyContext: func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
+			t.Fatal("process lifecycle must not initialize for a version request")
+			return nil, nil
+		},
+	}
+	if exitCode := runMain([]string{"--version"}, failingWriter{}, io.Discard, nil, nil, lifecycle); exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestRunProcessExitsWithCommandResult(t *testing.T) {
+	exitCode := -1
+	runtime := newProductionProcess()
+	runtime.args = []string{"--unsupported"}
+	runtime.stdout = io.Discard
+	runtime.stderr = io.Discard
+	runtime.lifecycle = testProcessLifecycle()
+	runtime.exit = func(code int) { exitCode = code }
+	runProcess(runtime)
 	if exitCode != 1 {
-		t.Fatalf("main exit code = %d, want 1", exitCode)
+		t.Fatalf("process exit code = %d, want 1", exitCode)
 	}
 }
 

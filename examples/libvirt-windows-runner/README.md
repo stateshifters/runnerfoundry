@@ -43,6 +43,12 @@ packer build .
 unset PKR_VAR_winrm_password
 ```
 
+Run the hermetic launcher test with PowerShell 7 on the build host. It does not read firmware, create files, start a runner, or shut down the host:
+
+```sh
+pwsh -NoProfile -File runnerfoundry-jit-launcher.Tests.ps1
+```
+
 `PKR_VAR_winrm_password` is a generated build credential. Keep it out of shell tracing and logs. The sealing script deletes the `packer` account, disables the built-in Administrator account and WinRM, and removes cached unattended files and temporary provisioning state.
 
 Packer builds a 2-vCPU, 4 GiB, 64 GiB qcow2 image with Q35, Unified Extensible Firmware Interface (UEFI), and VirtIO storage and networking. It attaches the pinned VirtIO ISO and directs Windows PE to its Windows Server 2025 storage and network drivers.
@@ -63,7 +69,7 @@ The sample XML uses the libvirt `default` network and a transient overlay backed
 
 ## Configure RunnerFoundry
 
-Point a libvirt infrastructure provider at the installed XML:
+Point a libvirt-backed Runner Pool at the installed XML through the GitHub adapter's `scale_sets` setting:
 
 ```yaml
 scale_sets:
@@ -81,7 +87,7 @@ RunnerFoundry owns the rendered transient domain name, its `urn:runnerfoundry` m
 runnerfoundry.jit=<encoded-jit-configuration>
 ```
 
-The guest reads raw SMBIOS data without logging or persisting that value. Its `LocalSystem` startup task copies the clean, unregistered runner template into writable runtime storage and invokes `run.cmd --jitconfig` once. Because this required interface places the JIT value on a process command line, configure Windows process-creation auditing and endpoint telemetry so they do not record this task's command-line arguments. The launcher allows at most six hours. On timeout it requires `taskkill.exe /T /F` to succeed and verifies that the runner process exits before cleanup. It removes runtime and work state in `finally`, then attempts `Stop-Computer -Force`; if that fails, it runs `shutdown.exe /s /t 0 /f`.
+The guest reads raw SMBIOS data without logging or persisting that value. Its `LocalSystem` startup task copies the clean, unregistered runner template into writable runtime storage and supplies the JIT value only through the child runner's inherited `ACTIONS_RUNNER_INPUT_JITCONFIG` environment variable. The value is absent from process command-line arguments, and the launcher restores its own process environment immediately after starting the runner. The launcher allows at most six hours. On timeout it requires `taskkill.exe /T /F` to succeed and verifies that the runner process exits before cleanup. It removes runtime and work state in `finally`, then attempts `Stop-Computer -Force`; if that fails, it runs `shutdown.exe /s /t 0 /f`.
 
 ## Choose the infrastructure provider
 

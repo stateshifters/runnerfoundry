@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/meza/RunnerFoundry/internal/buildinfo"
 	"github.com/meza/RunnerFoundry/internal/daemon"
 )
 
@@ -20,15 +21,33 @@ func executeCommand(
 	runDaemon daemonCommand,
 	runMigration migrationCommand,
 ) error {
+	if isVersionRequest(args) {
+		return writeVersion(stdout)
+	}
 	if len(args) > 0 && args[0] == "migrate" {
 		return executeMigrationCommand(ctx, args[1:], stdout, commandOutput, runMigration)
 	}
-	configPath, err := parseConfigPath(args, commandOutput)
+	request, err := parseDaemonRequest(args, commandOutput)
 	if err != nil {
 		return err
 	}
-	if err := runDaemon(ctx, daemon.Options{ConfigPath: configPath, ReloadRequests: reloadRequests}); err != nil {
+	if err := runDaemon(ctx, daemon.Options{
+		ConfigPath:         request.configPath,
+		ReloadRequests:     reloadRequests,
+		ActiveRunnerPolicy: request.activeRunnerPolicy,
+	}); err != nil {
 		return fmt.Errorf("run RunnerFoundry: %w", err)
+	}
+	return nil
+}
+
+func isVersionRequest(args []string) bool {
+	return len(args) == 1 && args[0] == "--version"
+}
+
+func writeVersion(output io.Writer) error {
+	if _, err := fmt.Fprintf(output, "runnerfoundry %s\n", buildinfo.Version()); err != nil {
+		return fmt.Errorf("write RunnerFoundry version: %w", err)
 	}
 	return nil
 }
@@ -54,8 +73,8 @@ func executeMigrationCommand(
 		}
 		return nil
 	}
-	if _, err := fmt.Fprintf(stdout, "current=%d target=%d compatibility_floor=%d known=%d..%d\n",
-		status.Current, status.Target, status.CompatibilityFloor, status.Minimum, status.Target); err != nil {
+	if _, err := fmt.Fprintf(stdout, "current=%d target=%d known=%d..%d\n",
+		status.Current, status.Target, status.Minimum, status.Target); err != nil {
 		return fmt.Errorf("write migration status: %w", err)
 	}
 	return nil

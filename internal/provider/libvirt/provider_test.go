@@ -14,9 +14,9 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	provider.Config.ConnectionURI = "qemu:///system"
 
 	err := provider.Start(context.Background(), StartRequest{
-		ScaleSetName: "vm-set",
-		RunnerName:   "vm-set-1",
-		JITConfig:    "secret",
+		RunnerPoolName: "vm-set",
+		RunnerName:     "vm-set-1",
+		JITConfig:      "secret",
 	})
 	if err != nil {
 		t.Fatalf("expected start success, got %v", err)
@@ -30,7 +30,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	if commandRunner.commands[0].Stdin == "" {
 		t.Fatal("expected rendered domain XML on stdin")
 	}
-	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:scale-set", "vm-set", "runnerfoundry.jit=secret"}) {
+	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:runner-pool", "vm-set", "runnerfoundry.jit=secret"}) {
 		t.Fatalf("expected rendered scaler metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
 	}
 	if containsAll(commandRunner.commands[0].Stdin, []string{"runnerfoundry.jit-env"}) {
@@ -38,7 +38,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	}
 }
 
-func TestListRebuildsOwnedDomainState(t *testing.T) {
+func TestListRecognizesLegacyScaleSetMetadata(t *testing.T) {
 	instances, _ := listOwnedDomainFixture(t)
 	expected := []RunnerInstance{
 		{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning},
@@ -46,6 +46,29 @@ func TestListRebuildsOwnedDomainState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(instances, expected) {
 		t.Fatalf("unexpected instances\nwant %#v\ngot  %#v", expected, instances)
+	}
+}
+
+func TestListRecognizesRunnerPoolMetadata(t *testing.T) {
+	commandRunner := &recordingCommandRunner{outputs: []string{
+		"runner-1\n",
+		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:runner-pool>linux</runnerfoundry:runner-pool><runnerfoundry:name>runner-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+		"running\n",
+	}}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []RunnerInstance{{
+		ID:             "runner-1",
+		RunnerName:     "runner-1",
+		RunnerPoolName: "linux",
+		State:          RunnerStateRunning,
+	}}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("List() instances = %#v, want %#v", instances, want)
 	}
 }
 
@@ -125,6 +148,57 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 	}
 }
 
+func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs: []string{
+			"unowned\nowned\n",
+			`<domain><metadata><example>unowned</example></metadata></domain>`,
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>owned</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+			"running\n",
+		},
+	}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []RunnerInstance{{
+		ID:             "owned",
+		RunnerName:     "owned",
+		RunnerPoolName: "vm-set",
+		State:          RunnerStateRunning,
+	}}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("List() instances = %#v, want %#v", instances, want)
+	}
+}
+
+func TestListFiltersRequestedPoolBeforeReadingDomainState(t *testing.T) {
+	commandRunner := &recordingCommandRunner{
+		outputs: []string{
+			"other-runner\n",
+			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>other</runnerfoundry:scale-set><runnerfoundry:name>other-runner</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+		},
+	}
+	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.List(context.Background(), "vm-set")
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("List() instances = %#v, want none", instances)
+	}
+	wantCommands := []Command{
+		{Args: []string{"-c", "qemu:///system", "list", "--all", "--name"}},
+		{Args: []string{"-c", "qemu:///system", "dumpxml", "other-runner"}},
+	}
+	if !reflect.DeepEqual(commandRunner.commands, wantCommands) {
+		t.Fatalf("commands = %#v, want %#v", commandRunner.commands, wantCommands)
+	}
+}
+
 func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
@@ -150,12 +224,12 @@ func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
 	}
 }
 
-func TestDestroyTerminalForceStopsPausedOrSuspendedDomain(t *testing.T) {
+func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	for _, state := range []string{"paused", "pmsuspended"} {
 		t.Run(state, func(t *testing.T) {
 			commandRunner := &recordingCommandRunner{}
 			provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
-			if err := provider.DestroyTerminal(context.Background(), RunnerInstance{
+			if err := provider.Destroy(context.Background(), RunnerInstance{
 				ID: "vm-set-1", RunnerName: "vm-set-1", State: libvirtState(state),
 			}); err != nil {
 				t.Fatal(err)
@@ -167,17 +241,10 @@ func TestDestroyTerminalForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	}
 }
 
-func TestDestroyTerminalReportsCommandFailure(t *testing.T) {
+func TestDestroyUnknownReportsCommandFailure(t *testing.T) {
 	provider := Provider{CommandRunner: failingCommandRunner{}}
-	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
-		t.Fatal("expected terminal destroy failure")
-	}
-}
-
-func TestDestroyTerminalAcceptsAlreadyInactiveDomain(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}}
-	if err := provider.DestroyTerminal(context.Background(), RunnerInstance{State: RunnerStateCompleted}); err != nil {
-		t.Fatal(err)
+	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
+		t.Fatal("expected unknown destroy failure")
 	}
 }
 
@@ -212,7 +279,7 @@ func TestStartRequiresTemplateReader(t *testing.T) {
 	}
 }
 
-func TestNewProviderProvidesProductionTemplateReader(t *testing.T) {
+func TestNewProviderRetainsConfigurationAndInitializesTemplateReader(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"})
 	if provider.CommandRunner != commandRunner || provider.readTemplate == nil || provider.Config.DomainXMLTemplate != "domain.xml" {

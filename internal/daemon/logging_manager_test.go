@@ -5,375 +5,228 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
-func TestLoggingStandaloneReloadActivatesPreparedDestination(t *testing.T) {
-	initialDestination := &recordingLogDestination{}
-	replacementDestination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, initialDestination, replacementDestination)
-	loadedConfig := mockedStandaloneLoggingConfig()
-	loadedConfig.Log = config.LogConfig{Format: "json", Level: "debug"}
-	active := testActiveConfiguration()
-	active.Config.State.Path = loadedConfig.State.Path
-	active.Logger = manager.Logger()
-	active.Logging = manager
+func TestLoggingManagerReplacesTargetsAndPreservesDecorators(t *testing.T) {
+	t.Parallel()
 
-	daemon := successfulReloadDaemon(loadedConfig)
-	daemon.loadCredentials = mockedLoggingCredentials
-	reloaded, err := reloadConfiguration(context.Background(), "config", daemon, active)
-	if err != nil {
-		t.Fatalf("reload standalone logging: %v", err)
-	}
-	reloaded.Logger.Debug("standalone replacement")
-	if !strings.Contains(replacementDestination.String(), `"msg":"standalone replacement"`) {
-		t.Fatalf("replacement destination = %q", replacementDestination.String())
-	}
-	if initialDestination.closeCalls != 1 || reloaded.Logging != manager {
-		t.Fatalf("initial closes=%d logging manager preserved=%t", initialDestination.closeCalls, reloaded.Logging == manager)
-	}
-}
-
-func TestLoggingClusterReloadActivatesPreparedDestination(t *testing.T) {
-	configured := mockedClusteredLoggingConfig()
-	loaded := configured
-	loaded.Log = config.LogConfig{Format: "json", Level: "debug"}
-	state := &fakeClusterState{}
-	daemon := clusteredDaemonForTest(state)
-	daemon.config = configured
-	daemon.credentials = config.GitHubAppCredentials{AppID: 1, PrivateKey: "mocked"}
-	daemon.loadConfig = func(string) (config.Config, error) { return loaded, nil }
-	daemon.loadCredentials = mockedLoggingCredentials
-	daemon.nodes = state
-	initialDestination := &recordingLogDestination{}
-	replacementDestination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, initialDestination, replacementDestination)
-	daemon.logger = manager.Logger()
-	daemon.logging = manager
-
-	if err := daemon.reload(context.Background(), "config.yaml"); err != nil {
-		t.Fatalf("reload clustered logging: %v", err)
-	}
-	daemon.logger.Debug("cluster replacement")
-	if !strings.Contains(replacementDestination.String(), `"msg":"cluster replacement"`) {
-		t.Fatalf("replacement destination = %q", replacementDestination.String())
-	}
-	if initialDestination.closeCalls != 1 {
-		t.Fatalf("initial destination close calls = %d", initialDestination.closeCalls)
-	}
-}
-
-func TestLoggingClusterReloadKeepsActiveDestinationWhenDirectoryCreationFails(t *testing.T) {
-	configured := mockedClusteredLoggingConfig()
-	state := &fakeClusterState{}
-	daemon := clusteredDaemonForTest(state)
-	daemon.config = configured
-	daemon.credentials = config.GitHubAppCredentials{AppID: 1, PrivateKey: "mocked"}
-	daemon.loadConfig = func(string) (config.Config, error) { return configured, nil }
-	daemon.loadCredentials = mockedLoggingCredentials
-	daemon.nodes = state
-	manager, activeDestination := newDirectoryFailingReloadManager(t)
-	daemon.logger = manager.Logger()
-	daemon.logging = manager
-
-	if err := daemon.reload(context.Background(), "config.yaml"); err == nil {
-		t.Fatal("expected reloaded log directory creation failure")
-	}
-	daemon.logger.Info("cluster remains active")
-	if !strings.Contains(activeDestination.String(), "cluster remains active") || activeDestination.closeCalls != 0 {
-		t.Fatalf("active destination = %q, closes=%d", activeDestination.String(), activeDestination.closeCalls)
-	}
-}
-
-func TestLoggingStandaloneShutdownClosesActiveDestination(t *testing.T) {
-	destination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, destination)
-	ctx, cancel := context.WithCancel(context.Background())
-	daemon := standaloneDaemon{
-		loadConfig:      func(string) (config.Config, error) { return mockedStandaloneLoggingConfig(), nil },
-		loadCredentials: mockedLoggingCredentials,
-		newDiscoverer: func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-			return staticDiscoverer{}, nil
-		},
-		newLogging: func(config.LogConfig) (*loggingManager, error) { return manager, nil },
-		notifier:   cancellingNotifier{cancel: cancel},
-	}
-	if err := runDaemon(ctx, Options{}, daemon); err != nil {
-		t.Fatalf("run mocked daemon lifecycle: %v", err)
-	}
-	if destination.closeCalls != 1 {
-		t.Fatalf("destination close calls = %d", destination.closeCalls)
-	}
-}
-
-func TestLoggingStandaloneReloadClosesUnactivatedCandidate(t *testing.T) {
-	initialDestination := &recordingLogDestination{}
-	candidateDestination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, initialDestination, candidateDestination)
-	loadedConfig := mockedStandaloneLoggingConfig()
-	active := testActiveConfiguration()
-	active.Config.State.Path = loadedConfig.State.Path
-	active.Logger = manager.Logger()
-	active.Logging = manager
-	daemon := successfulReloadDaemon(loadedConfig)
-	daemon.loadCredentials = mockedLoggingCredentials
-	daemon.newDiscoverer = func(config.GitHubAppCredentials) (repositoryDiscoverer, error) {
-		return nil, errors.New("candidate dependency failed")
-	}
-
-	if _, err := reloadConfiguration(context.Background(), "config", daemon, active); err == nil {
-		t.Fatal("expected replacement validation failure")
-	}
-	manager.Logger().Info("initial remains active")
-	if !strings.Contains(initialDestination.String(), "initial remains active") || initialDestination.closeCalls != 0 {
-		t.Fatalf("initial destination = %q, closes=%d", initialDestination.String(), initialDestination.closeCalls)
-	}
-	if candidateDestination.closeCalls != 1 {
-		t.Fatalf("candidate destination close calls = %d", candidateDestination.closeCalls)
-	}
-}
-
-func TestLoggingStandaloneReloadKeepsActiveDestinationWhenDirectoryCreationFails(t *testing.T) {
-	manager, activeDestination := newDirectoryFailingReloadManager(t)
-	loadedConfig := mockedStandaloneLoggingConfig()
-	active := testActiveConfiguration()
-	active.Config.State.Path = loadedConfig.State.Path
-	active.Logger = manager.Logger()
-	active.Logging = manager
-	daemon := successfulReloadDaemon(loadedConfig)
-	daemon.loadCredentials = mockedLoggingCredentials
-
-	if _, err := reloadConfiguration(context.Background(), "config", daemon, active); err == nil {
-		t.Fatal("expected reloaded log directory creation failure")
-	}
-	manager.Logger().Info("standalone remains active")
-	if !strings.Contains(activeDestination.String(), "standalone remains active") || activeDestination.closeCalls != 0 {
-		t.Fatalf("active destination = %q, closes=%d", activeDestination.String(), activeDestination.closeCalls)
-	}
-}
-
-func newDirectoryFailingReloadManager(t *testing.T) (*loggingManager, *recordingLogDestination) {
-	t.Helper()
-	activeDestination := &recordingLogDestination{}
-	openCalls := 0
-	manager, err := newLoggingManager(config.LogConfig{Format: "text", Level: "info"}, logDestinationFactoryFunc(
-		func(config.LogConfig) (io.WriteCloser, error) {
-			openCalls++
-			if openCalls == 1 {
-				return activeDestination, nil
-			}
-			return nil, errors.New("create log file directory: permission denied")
-		},
-	))
-	if err != nil {
-		t.Fatalf("create logging manager: %v", err)
-	}
-	return manager, activeDestination
-}
-
-func mockedStandaloneLoggingConfig() config.Config {
-	return config.Config{
-		GitHub: config.GitHubConfig{
-			App: config.GitHubAppConfig{AppID: 1, PrivateKeyFile: "mocked"}, DiscoveryInterval: "5m",
-		},
-		Log:   config.LogConfig{Format: "text", Level: "info"},
-		State: config.StateConfig{Path: "mocked-state"},
-		ScaleSets: []config.ScaleSetConfig{{
-			Name: "linux", RunnerGroup: "Default", MaxRunners: 1,
-			Docker: &config.DockerConfig{ComposeFile: "mocked-compose", Service: "runner"},
-		}},
-	}
-}
-
-func mockedClusteredLoggingConfig() config.Config {
-	configured := mockedStandaloneLoggingConfig()
-	configured.State.Postgres = &postgresconfig.Settings{DSN: "postgres://mocked", Role: "runnerfoundry"}
-	return configured
-}
-
-func mockedLoggingCredentials(config.GitHubConfig) (config.GitHubAppCredentials, error) {
-	return config.GitHubAppCredentials{AppID: 1, PrivateKey: "mocked"}, nil
-}
-
-func TestLoggingManagerHotReloadsExclusiveOutput(t *testing.T) {
-	initialDestination := &recordingLogDestination{}
-	replacementDestination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, initialDestination, replacementDestination)
-
-	logger := manager.Logger()
-	logger.Info("before reload")
+	initial := &memoryLogDestination{}
+	replacement := &memoryLogDestination{}
+	manager := memoryLoggingManager(t, initial, replacement)
+	logger := manager.Logger().With("component", "runner").WithGroup("request").With("id", 42)
+	logger.Debug("filtered")
 	prepared, err := manager.Prepare(config.LogConfig{Format: "json", Level: "debug"})
 	if err != nil {
-		t.Fatalf("prepare replacement logging: %v", err)
+		t.Fatalf("prepare logging: %v", err)
 	}
 	if err = prepared.Activate(); err != nil {
-		t.Fatalf("activate replacement logging: %v", err)
+		t.Fatalf("activate logging: %v", err)
 	}
-	logger.Debug("after reload")
-
-	if !strings.Contains(initialDestination.String(), "before reload") || strings.Contains(initialDestination.String(), "after reload") {
-		t.Fatalf("initial destination = %q", initialDestination.String())
-	}
-	if !strings.Contains(replacementDestination.String(), `"msg":"after reload"`) {
-		t.Fatalf("replacement destination = %q", replacementDestination.String())
-	}
-	if initialDestination.closeCalls != 1 {
-		t.Fatalf("initial destination close calls = %d", initialDestination.closeCalls)
+	logger.Debug("visible")
+	if !strings.Contains(replacement.String(), `"component":"runner"`) || !strings.Contains(replacement.String(), `"request":{"id":42`) {
+		t.Fatalf("replacement log = %q", replacement.String())
 	}
 }
 
-func TestLoggingManagerKeepsCurrentOutputWhenPreparationFails(t *testing.T) {
-	initialDestination := &recordingLogDestination{}
-	factoryCalls := 0
-	manager, err := newLoggingManager(config.LogConfig{Format: "text", Level: "info"}, logDestinationFactoryFunc(
-		func(config.LogConfig) (io.WriteCloser, error) {
-			factoryCalls++
-			if factoryCalls == 1 {
-				return initialDestination, nil
-			}
-			return nil, errors.New("open failed")
-		},
-	))
+func TestActivatedLoggingRejectsRepeatedActivationAndClosesManager(t *testing.T) {
+	t.Parallel()
+	manager := memoryLoggingManager(t, &memoryLogDestination{}, &memoryLogDestination{})
+	prepared, err := manager.Prepare(config.LogConfig{})
 	if err != nil {
-		t.Fatalf("create logging manager: %v", err)
+		t.Fatal(err)
 	}
-
-	if _, err = manager.Prepare(config.LogConfig{Format: "json", Level: "debug"}); err == nil {
-		t.Fatal("expected replacement preparation failure")
+	if err = prepared.Activate(); err != nil {
+		t.Fatal(err)
 	}
-	manager.Logger().Info("still active")
-	if !strings.Contains(initialDestination.String(), "still active") || initialDestination.closeCalls != 0 {
-		t.Fatalf("initial destination after failed prepare = %q, closes=%d", initialDestination.String(), initialDestination.closeCalls)
+	if err = prepared.Activate(); err == nil {
+		t.Fatal("prepared logging activated twice")
+	}
+	if err = prepared.Close(); err != nil {
+		t.Fatalf("close activated preparation: %v", err)
+	}
+	if err = manager.Close(); err != nil {
+		t.Fatalf("close manager: %v", err)
 	}
 }
 
-func TestLoggingManagerReportsReplacedDestinationCloseFailure(t *testing.T) {
-	initialDestination := &recordingLogDestination{closeErr: errors.New("close failed")}
-	replacementDestination := &recordingLogDestination{}
-	destinations := []io.WriteCloser{initialDestination, replacementDestination}
-	manager, err := newLoggingManager(config.LogConfig{Format: "text", Level: "info"}, logDestinationFactoryFunc(
-		func(config.LogConfig) (io.WriteCloser, error) {
-			destination := destinations[0]
-			destinations = destinations[1:]
-			return destination, nil
-		},
-	))
+func TestLoggingManagerSurfacesFactoryAndDestinationFailures(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("destination failed")
+	if _, err := newLoggingManager(config.LogConfig{}, testLogFactory(func(config.LogConfig) (io.WriteCloser, error) {
+		return nil, wantErr
+	})); !errors.Is(err, wantErr) {
+		t.Fatalf("manager error = %v", err)
+	}
+	calls := 0
+	manager, err := newLoggingManager(config.LogConfig{}, testLogFactory(func(config.LogConfig) (io.WriteCloser, error) {
+		calls++
+		if calls > 1 {
+			return nil, wantErr
+		}
+		return &memoryLogDestination{closeErr: wantErr}, nil
+	}))
 	if err != nil {
-		t.Fatalf("create logging manager: %v", err)
+		t.Fatal(err)
 	}
-	prepared, err := manager.Prepare(config.LogConfig{Format: "text", Level: "info"})
+	if _, err = manager.Prepare(config.LogConfig{}); !errors.Is(err, wantErr) {
+		t.Fatalf("prepare error = %v", err)
+	}
+	if err = manager.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("close error = %v", err)
+	}
+}
+
+func TestPreparedLoggingRetriesAbandonedTargetCleanupUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+
+	initial := &memoryLogDestination{}
+	candidate := &memoryLogDestination{closeErrors: []error{errors.New("close failed"), nil}}
+	manager := memoryLoggingManager(t, initial, candidate)
+	prepared, err := manager.Prepare(config.LogConfig{})
 	if err != nil {
-		t.Fatalf("prepare replacement logging: %v", err)
+		t.Fatal(err)
 	}
-	if err = prepared.Activate(); err == nil || !strings.Contains(err.Error(), "close failed") {
-		t.Fatalf("activation error = %v", err)
+	if err = prepared.Close(); err == nil {
+		t.Fatal("candidate close failure was ignored")
 	}
-	manager.Logger().Info("replacement remains active")
-	if !strings.Contains(replacementDestination.String(), "replacement remains active") {
-		t.Fatalf("replacement destination = %q", replacementDestination.String())
+	if err = prepared.Close(); err != nil || candidate.closes != 2 {
+		t.Fatalf("second close = %v, calls=%d", err, candidate.closes)
 	}
 }
 
-func TestLoggingManagerSerializesWritesBeforeDestinationClosure(t *testing.T) {
-	initialDestination := newBlockingLogDestination()
-	replacementDestination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, initialDestination, replacementDestination)
-	writeDone := make(chan struct{})
-	go func() {
-		manager.Logger().Info("in flight")
-		close(writeDone)
-	}()
-	<-initialDestination.writeStarted
-
-	prepared, err := manager.Prepare(config.LogConfig{Format: "text", Level: "info"})
+func TestPreparedLoggingClosesSuccessfulCandidate(t *testing.T) {
+	t.Parallel()
+	successful := &memoryLogDestination{}
+	manager := memoryLoggingManager(t, &memoryLogDestination{}, successful)
+	prepared, err := manager.Prepare(config.LogConfig{})
 	if err != nil {
-		t.Fatalf("prepare replacement logging: %v", err)
+		t.Fatal(err)
 	}
-	activationDone := make(chan error, 1)
-	go func() { activationDone <- prepared.Activate() }()
-	select {
-	case err = <-activationDone:
-		t.Fatalf("activation completed before in-flight write: %v", err)
-	default:
-	}
-	close(initialDestination.allowWrite)
-	<-writeDone
-	if err = <-activationDone; err != nil {
-		t.Fatalf("activate replacement logging: %v", err)
-	}
-	if initialDestination.closeCalls != 1 || initialDestination.closedBeforeWrite {
-		t.Fatalf("initial closes=%d closed before write=%t", initialDestination.closeCalls, initialDestination.closedBeforeWrite)
+	if err = prepared.Close(); err != nil || successful.closes != 1 {
+		t.Fatalf("successful candidate close = %v, calls=%d", err, successful.closes)
 	}
 }
 
-func TestLoggingManagerClosesActiveDestination(t *testing.T) {
-	destination := &recordingLogDestination{}
-	manager := newTestLoggingManager(t, destination)
-	if err := manager.Close(); err != nil {
-		t.Fatalf("close logging manager: %v", err)
+func TestCommittedLoggingRetriesFailedDestinationCleanupUntilItSucceeds(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("close failed")
+	initial := &memoryLogDestination{closeErrors: []error{wantErr, nil}}
+	replacement := &memoryLogDestination{}
+	manager := memoryLoggingManager(t, initial, replacement)
+	prepared, err := manager.Prepare(config.LogConfig{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if destination.closeCalls != 1 {
-		t.Fatalf("destination close calls = %d", destination.closeCalls)
+	if err = prepared.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if err = prepared.Commit(); err != nil {
+		t.Fatalf("commit replacement: %v", err)
+	}
+	if err = prepared.Close(); err != nil {
+		t.Fatalf("retry committed cleanup: %v", err)
+	}
+	if err = prepared.Close(); err != nil || initial.closes != 2 || replacement.closes != 0 {
+		t.Fatalf("idempotent close = %v, initial closes=%d replacement closes=%d", err, initial.closes, replacement.closes)
 	}
 }
 
-func newTestLoggingManager(t *testing.T, destinations ...io.WriteCloser) *loggingManager {
+func TestReloadableHandlerControlsEnabledAndHandleErrors(t *testing.T) {
+	t.Parallel()
+
+	handlerTarget := &controlledLogHandler{handleErr: errors.New("write failed")}
+	handler := newReloadableLogHandler(loggingTarget{
+		handler: handlerTarget, destination: noOpWriteCloser{writer: io.Discard},
+	})
+	record := slog.NewRecord(builderTime(), slog.LevelInfo, "message", 0)
+	if handler.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("disabled handler was enabled")
+	}
+	if err := handler.Handle(context.Background(), record); err != nil || handlerTarget.handles != 0 {
+		t.Fatalf("disabled handle = %v, calls=%d", err, handlerTarget.handles)
+	}
+	handlerTarget.enabled = true
+	if err := handler.Handle(context.Background(), record); err == nil {
+		t.Fatal("handler failure was ignored")
+	}
+	if handler.WithAttrs([]slog.Attr{slog.String("key", "value")}) == nil || handler.WithGroup("group") == nil {
+		t.Fatal("decorated handler is nil")
+	}
+}
+
+func TestNoOpWriteCloserDelegatesWrites(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	destination := noOpWriteCloser{writer: &output}
+	if _, err := destination.Write([]byte("log")); err != nil || output.String() != "log" {
+		t.Fatalf("write = %q, %v", output.String(), err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (noOpWriteCloser{writer: errorLogWriter{}}).Write([]byte("log")); err == nil {
+		t.Fatal("write failure was ignored")
+	}
+}
+
+type memoryLogDestination struct {
+	bytes.Buffer
+	closeErr    error
+	closeErrors []error
+	closes      int
+}
+
+func (destination *memoryLogDestination) Close() error {
+	destination.closes++
+	if destination.closes <= len(destination.closeErrors) {
+		return destination.closeErrors[destination.closes-1]
+	}
+	return destination.closeErr
+}
+
+type controlledLogHandler struct {
+	enabled   bool
+	handleErr error
+	handles   int
+}
+
+func (handler *controlledLogHandler) Enabled(context.Context, slog.Level) bool {
+	return handler.enabled
+}
+func (handler *controlledLogHandler) Handle(context.Context, slog.Record) error {
+	handler.handles++
+	return handler.handleErr
+}
+func (handler *controlledLogHandler) WithAttrs([]slog.Attr) slog.Handler { return handler }
+func (handler *controlledLogHandler) WithGroup(string) slog.Handler      { return handler }
+
+type errorLogWriter struct{}
+
+func (errorLogWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+type testLogFactory func(config.LogConfig) (io.WriteCloser, error)
+
+func (factory testLogFactory) Open(configured config.LogConfig) (io.WriteCloser, error) {
+	return factory(configured)
+}
+
+func memoryLoggingManager(t *testing.T, destinations ...io.WriteCloser) *loggingManager {
 	t.Helper()
-	manager, err := newLoggingManager(config.LogConfig{Format: "text", Level: "info"}, logDestinationFactoryFunc(
-		func(config.LogConfig) (io.WriteCloser, error) {
-			destination := destinations[0]
-			destinations = destinations[1:]
-			return destination, nil
-		},
-	))
+	manager, err := newLoggingManager(config.LogConfig{}, testLogFactory(func(config.LogConfig) (io.WriteCloser, error) {
+		destination := destinations[0]
+		destinations = destinations[1:]
+		return destination, nil
+	}))
 	if err != nil {
 		t.Fatalf("create logging manager: %v", err)
 	}
 	return manager
-}
-
-type recordingLogDestination struct {
-	bytes.Buffer
-	closeCalls int
-	closeErr   error
-}
-
-func (destination *recordingLogDestination) Close() error {
-	destination.closeCalls++
-	return destination.closeErr
-}
-
-type blockingLogDestination struct {
-	writeStarted      chan struct{}
-	allowWrite        chan struct{}
-	mutex             sync.Mutex
-	writeCompleted    bool
-	closedBeforeWrite bool
-	closeCalls        int
-}
-
-func newBlockingLogDestination() *blockingLogDestination {
-	return &blockingLogDestination{writeStarted: make(chan struct{}), allowWrite: make(chan struct{})}
-}
-
-func (destination *blockingLogDestination) Write(contents []byte) (int, error) {
-	close(destination.writeStarted)
-	<-destination.allowWrite
-	destination.mutex.Lock()
-	destination.writeCompleted = true
-	destination.mutex.Unlock()
-	return len(contents), nil
-}
-
-func (destination *blockingLogDestination) Close() error {
-	destination.mutex.Lock()
-	defer destination.mutex.Unlock()
-	destination.closeCalls++
-	destination.closedBeforeWrite = !destination.writeCompleted
-	return nil
 }

@@ -11,7 +11,31 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
-// Validate applies defaults and rejects unsafe startup state.
+// ProviderKind identifies the single execution backend configured for a
+// Runner Pool.
+type ProviderKind string
+
+const (
+	ProviderKindDocker  ProviderKind = "docker"
+	ProviderKindLibvirt ProviderKind = "libvirt"
+)
+
+// ProviderKind returns the configured backend or an error unless exactly one
+// of Docker and Libvirt is present.
+func (runnerPool RunnerPoolConfig) ProviderKind() (ProviderKind, error) {
+	if (runnerPool.Docker == nil) == (runnerPool.Libvirt == nil) {
+		return "", errors.New("exactly one of docker or libvirt is required")
+	}
+	if runnerPool.Docker != nil {
+		return ProviderKindDocker, nil
+	}
+	return ProviderKindLibvirt, nil
+}
+
+// Validate mutates Config only to apply documented defaults, then rejects
+// unsupported authentication, invalid backend combinations, unsafe log paths,
+// and incomplete Runner Pools. It validates credential paths but does not read
+// credential contents; AppCredentials owns that boundary.
 func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.GitHub.validate(); err != nil {
 		return err
@@ -36,7 +60,7 @@ func (loadedConfig *Config) Validate() error {
 	if err := loadedConfig.State.validate(); err != nil {
 		return err
 	}
-	return loadedConfig.validateScaleSets()
+	return loadedConfig.validateRunnerPools()
 }
 
 func (logConfig *LogConfig) validateFile() error {
@@ -112,89 +136,64 @@ func (githubConfig *GitHubConfig) validate() error {
 	return nil
 }
 
-func (loadedConfig *Config) validateScaleSets() error {
-	if len(loadedConfig.ScaleSets) == 0 {
-		return errors.New("at least one scale set is required")
+func (loadedConfig *Config) validateRunnerPools() error {
+	if len(loadedConfig.RunnerPools) == 0 {
+		return errors.New("at least one Runner Pool is required")
 	}
 	seenNames := map[string]bool{}
-	for scaleSetIndex := range loadedConfig.ScaleSets {
-		if err := loadedConfig.ScaleSets[scaleSetIndex].validate(seenNames); err != nil {
+	for runnerPoolIndex := range loadedConfig.RunnerPools {
+		if err := loadedConfig.RunnerPools[runnerPoolIndex].validate(seenNames); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (scaleSet *ScaleSetConfig) validate(seenNames map[string]bool) error {
-	if scaleSet.Name == "" {
+func (runnerPool *RunnerPoolConfig) validate(seenNames map[string]bool) error {
+	if runnerPool.Name == "" {
 		return errors.New("scale_sets[].name is required")
 	}
-	if seenNames[scaleSet.Name] {
-		return fmt.Errorf("duplicate scale set name %q", scaleSet.Name)
+	if seenNames[runnerPool.Name] {
+		return fmt.Errorf("duplicate Runner Pool name %q", runnerPool.Name)
 	}
-	seenNames[scaleSet.Name] = true
-	if scaleSet.RunnerGroup == "" {
-		scaleSet.RunnerGroup = "default"
+	seenNames[runnerPool.Name] = true
+	if runnerPool.RunnerGroup == "" {
+		runnerPool.RunnerGroup = "default"
 	}
-	if scaleSet.MaxRunners <= 0 {
-		return fmt.Errorf("scale set %q max_runners must be positive", scaleSet.Name)
+	if runnerPool.MaxRunners <= 0 {
+		return fmt.Errorf("runner pool %q max_runners must be positive", runnerPool.Name)
 	}
-	if scaleSet.JobStartTimeout == "" {
-		scaleSet.JobStartTimeout = defaultJobStartTimeout
-	}
-	jobStartTimeout, err := time.ParseDuration(scaleSet.JobStartTimeout)
-	if err != nil {
-		return fmt.Errorf("scale set %q job_start_timeout: %w", scaleSet.Name, err)
-	}
-	if jobStartTimeout <= 0 {
-		return fmt.Errorf("scale set %q job_start_timeout must be positive", scaleSet.Name)
-	}
-	if err := scaleSet.validateProvider(); err != nil {
-		return fmt.Errorf("scale set %q: %w", scaleSet.Name, err)
+	if err := runnerPool.validateProvider(); err != nil {
+		return fmt.Errorf("runner pool %q: %w", runnerPool.Name, err)
 	}
 	return nil
 }
 
-// JobStartDuration returns the validated maximum time a confirmed runner may
-// wait for JobStarted before it is replaced.
-func (scaleSet ScaleSetConfig) JobStartDuration() (time.Duration, error) {
-	configuredTimeout := scaleSet.JobStartTimeout
-	if configuredTimeout == "" {
-		configuredTimeout = defaultJobStartTimeout
-	}
-	jobStartTimeout, err := time.ParseDuration(configuredTimeout)
+func (runnerPool *RunnerPoolConfig) validateProvider() error {
+	kind, err := runnerPool.ProviderKind()
 	if err != nil {
-		return 0, fmt.Errorf("parse validated job start timeout: %w", err)
+		return err
 	}
-	if jobStartTimeout <= 0 {
-		return 0, errors.New("parse validated job start timeout: duration must be positive")
-	}
-	return jobStartTimeout, nil
-}
-
-func (scaleSet *ScaleSetConfig) validateProvider() error {
-	if (scaleSet.Docker == nil) == (scaleSet.Libvirt == nil) {
-		return errors.New("exactly one of docker or libvirt is required")
-	}
-	if scaleSet.Docker != nil {
-		if scaleSet.Docker.ComposeFile == "" {
+	if kind == ProviderKindDocker {
+		if runnerPool.Docker.ComposeFile == "" {
 			return errors.New("docker.compose_file is required")
 		}
-		if scaleSet.Docker.Service == "" {
+		if runnerPool.Docker.Service == "" {
 			return errors.New("docker.service is required")
 		}
 		return nil
 	}
-	if scaleSet.Libvirt.ConnectionURI == "" {
+	if runnerPool.Libvirt.ConnectionURI == "" {
 		return errors.New("libvirt.connection_uri is required")
 	}
-	if scaleSet.Libvirt.DomainXMLTemplate == "" {
+	if runnerPool.Libvirt.DomainXMLTemplate == "" {
 		return errors.New("libvirt.domain_xml_template is required")
 	}
 	return nil
 }
 
-// DiscoveryDuration returns the validated repository discovery interval.
+// DiscoveryDuration parses the configured discovery interval. Callers normally
+// invoke it only after Validate; malformed unvalidated values return an error.
 func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
 	discoveryInterval, err := time.ParseDuration(githubConfig.DiscoveryInterval)
 	if err != nil {

@@ -69,25 +69,25 @@ func TestExecuteMigrationReportsInvalidConfigurationContent(t *testing.T) {
 	}
 }
 
-func TestRunPostgreSQLMigrationUsesConfiguredDependencies(t *testing.T) {
-	originalDependencies := productionMigrationDependencies
-	t.Cleanup(func() { productionMigrationDependencies = originalDependencies })
+func TestExecuteMigrationUsesConfiguredStore(t *testing.T) {
 	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
-	productionMigrationDependencies = migrationDependencies{
+	dependencies := migrationDependencies{
 		readConfigFile: func(string) ([]byte, error) {
 			return []byte("state:\n  postgres:\n    role: runnerfoundry\n"), nil
 		},
 		newStore: func(postgresconfig.Settings) migrationStore { return store },
 		now:      func() time.Time { return time.Unix(1, 0) },
 	}
-	status, err := runPostgreSQLMigration(t.Context(), migrationRequest{action: migrationStatusAction})
+	status, err := (migrationCommandExecutor{dependencies}).run(
+		t.Context(), migrationRequest{action: migrationStatusAction},
+	)
 	if err != nil || status.Current != 1 {
 		t.Fatalf("migration status = %#v, %v", status, err)
 	}
 }
 
 func TestProductionMigrationStoreFactoryConstructsWithoutConnecting(t *testing.T) {
-	if store := productionMigrationDependencies.newStore(postgresconfig.Settings{Role: "runnerfoundry"}); store == nil {
+	if store := newProductionMigrationDependencies().newStore(postgresconfig.Settings{Role: "runnerfoundry"}); store == nil {
 		t.Fatal("expected migration store")
 	}
 }

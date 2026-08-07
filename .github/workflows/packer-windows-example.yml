@@ -76,6 +76,10 @@ jobs:
           echo "::add-mask::$password"
           echo "PKR_VAR_winrm_password=$password" >> "$GITHUB_ENV"
 
+      - name: Test JIT launcher
+        shell: pwsh
+        run: ./runnerfoundry-jit-launcher.Tests.ps1
+
       - name: Initialize Packer
         run: packer init .
 

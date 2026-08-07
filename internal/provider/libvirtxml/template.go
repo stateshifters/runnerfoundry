@@ -13,18 +13,31 @@ const (
 	JITOEMStringPrefix = contract.JITOEMStringPrefix
 )
 
+// DomainTemplate is immutable source XML used to render one transient runner
+// domain per request.
 type DomainTemplate struct {
-	XML string
+	xml     string
+	marshal func(*upstream.Domain) (string, error)
 }
 
+// NewDomainTemplate retains domainXML for later parsing by Render.
+func NewDomainTemplate(domainXML string) DomainTemplate {
+	return domainTemplateWithMarshaler(domainXML, func(domain *upstream.Domain) (string, error) { return domain.Marshal() })
+}
+
+func domainTemplateWithMarshaler(
+	domainXML string,
+	marshal func(*upstream.Domain) (string, error),
+) DomainTemplate {
+	return DomainTemplate{xml: domainXML, marshal: marshal}
+}
+
+// RenderRequest supplies source-neutral ownership metadata and opaque bootstrap
+// data for one domain.
 type RenderRequest struct {
-	ScaleSetName string
-	RunnerName   string
-	JITConfig    string
-}
-
-var marshalDomainXML = func(domain *upstream.Domain) (string, error) {
-	return domain.Marshal()
+	RunnerPoolName string
+	RunnerName     string
+	JITConfig      string
 }
 
 var xmlTextEscaper = strings.NewReplacer(
@@ -35,9 +48,11 @@ var xmlTextEscaper = strings.NewReplacer(
 	`'`, "&#39;",
 )
 
+// Render parses a fresh copy of the template, replaces RunnerFoundry-owned
+// metadata and JIT OEM data, and leaves the original template unchanged.
 func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	var domain upstream.Domain
-	if err := domain.Unmarshal(template.XML); err != nil {
+	if err := domain.Unmarshal(template.xml); err != nil {
 		return "", fmt.Errorf("parse domain xml: %w", err)
 	}
 	domain.Name = request.RunnerName
@@ -46,7 +61,7 @@ func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	domain.Metadata = &upstream.DomainMetadata{
 		XML: scalerMetadata(request),
 	}
-	renderedXML, err := marshalDomainXML(&domain)
+	renderedXML, err := template.marshal(&domain)
 	if err != nil {
 		return "", fmt.Errorf("marshal domain xml: %w", err)
 	}
@@ -93,9 +108,9 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 
 func scalerMetadata(request RenderRequest) string {
 	return fmt.Sprintf(
-		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:scale-set>%s</runnerfoundry:scale-set><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
+		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:runner-pool>%s</runnerfoundry:runner-pool><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
 		MetadataNamespace,
-		escapeXML(request.ScaleSetName),
+		escapeXML(request.RunnerPoolName),
 		escapeXML(request.RunnerName),
 	)
 }

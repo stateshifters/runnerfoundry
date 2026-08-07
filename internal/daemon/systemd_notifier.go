@@ -15,17 +15,8 @@ func newSystemdNotifier() systemdNotifier {
 	return systemdNotifier{notify: daemon.SdNotify}
 }
 
-type clusterServiceStatus string
-
-const (
-	clusterServiceStatusStandby           clusterServiceStatus = "standby"
-	clusterServiceStatusLeaderReconciling clusterServiceStatus = "leader reconciling"
-	clusterServiceStatusLeaderOperational clusterServiceStatus = "leader operational"
-	clusterServiceStatusLeaderDegraded    clusterServiceStatus = "leader degraded"
-)
-
 func (notifier systemdNotifier) Ready(ctx context.Context) error {
-	return notifySystemd(ctx, daemon.SdNotifyReady, notifier.notify)
+	return notifySystemd(ctx, daemon.SdNotifyReady+"\nSTATUS=operational leadership=unknown", notifier.notify)
 }
 
 func (notifier systemdNotifier) Reloading(ctx context.Context) error {
@@ -33,8 +24,8 @@ func (notifier systemdNotifier) Reloading(ctx context.Context) error {
 	return notifySystemd(ctx, state, notifier.notify)
 }
 
-func (notifier systemdNotifier) Status(ctx context.Context, status clusterServiceStatus) error {
-	return notifySystemd(ctx, "STATUS="+string(status), notifier.notify)
+func (notifier systemdNotifier) Status(ctx context.Context, status operationalStatus) error {
+	return notifySystemd(ctx, "STATUS="+string(status.health)+" leadership="+string(status.leadership), notifier.notify)
 }
 
 func notifySystemd(ctx context.Context, state string, notify func(bool, string) (bool, error)) error {

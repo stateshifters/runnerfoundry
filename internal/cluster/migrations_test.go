@@ -20,6 +20,35 @@ func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
 	}
 }
 
+func TestEmbeddedMigrationCatalogIncludesReversibleOwnershipMigration(t *testing.T) {
+	catalog, err := NewStore(postgresconfig.Settings{Role: "runnerfoundry"}).migrationCatalog()
+	if err != nil {
+		t.Fatalf("load embedded migrations: %v", err)
+	}
+	if target := migrationTarget(catalog); target != 2 {
+		t.Fatalf("embedded migration target = %d, want 2", target)
+	}
+	if len(catalog.Migrations) != 2 || strings.TrimSpace(catalog.Migrations[1].DownSQL) == "" {
+		t.Fatalf("embedded migration catalog = %#v, want two reversible migrations", catalog.Migrations)
+	}
+}
+
+func TestInitialMigrationRequiresRecoveryEvidence(t *testing.T) {
+	migration, err := fs.ReadFile(embeddedMigrations, "migrations/001_initial.sql")
+	if err != nil {
+		t.Fatalf("read initial migration: %v", err)
+	}
+	text := string(migration)
+	for _, required := range []string{
+		"claimed_at timestamptz NOT NULL",
+		"inventory_endpoint_id text NOT NULL CHECK (btrim(inventory_endpoint_id) <> '')",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("initial migration does not contain %q", required)
+		}
+	}
+}
+
 func TestRollbackTargetRejectsNegativeVersion(t *testing.T) {
 	if err := validateRollbackTarget(-1, 1); err == nil {
 		t.Fatal("expected negative rollback target rejection")
@@ -34,37 +63,6 @@ func TestMigrationConnectionCloseReportsFailure(t *testing.T) {
 	}
 	if !connection.closed {
 		t.Fatal("migration connection was not closed")
-	}
-}
-
-func TestMigrationCatalogLoadsWithoutDatabaseBootstrap(t *testing.T) {
-	store := NewStore(postgresconfig.Settings{Role: "runnerfoundry"})
-	catalog, err := store.migrationCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target := migrationTarget(catalog); target != 10 {
-		t.Fatalf("migration target = %d, want 10", target)
-	}
-}
-
-func TestRepositoryStateMigrationIsReversibleAndRelational(t *testing.T) {
-	migrationSQL, err := fs.ReadFile(embeddedMigrations, "migrations/004_persist_repository_state.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{
-		"CREATE TABLE scaler_repository_controls",
-		"CREATE TABLE scaler_installations",
-		"CREATE TABLE scaler_repositories",
-		"CREATE TABLE scaler_registrations",
-		"FOREIGN KEY (app_id, repository_url)",
-		"---- create above / drop below ----",
-		"DROP TABLE scaler_repository_controls",
-	} {
-		if !strings.Contains(string(migrationSQL), required) {
-			t.Fatalf("repository-state migration missing %q", required)
-		}
 	}
 }
 
@@ -89,9 +87,7 @@ func TestPostgreSQLMigrationErrorsRetainAllowedServerDiagnostics(t *testing.T) {
 		Routine:          "_bt_check_unique",
 	}
 	err := safePostgreSQLError("apply PostgreSQL migrations", fmt.Errorf("wrapped PostgreSQL error: %w", serverError))
-	expected := "apply PostgreSQL migrations: duplicate key value violates unique constraint (SQLSTATE 23505); " +
-		"detail: Key (name)=(runner) already exists.; hint: Choose another runner name.; " +
-		"table: scaler_assignments; constraint: scaler_assignments_name_key"
+	expected := "apply PostgreSQL migrations (SQLSTATE 23505)"
 	if err.Error() != expected {
 		t.Fatalf("migration error snapshot mismatch\nexpected: %q\nactual:   %q", expected, err)
 	}
@@ -100,7 +96,7 @@ func TestPostgreSQLMigrationErrorsRetainAllowedServerDiagnostics(t *testing.T) {
 func TestPostgreSQLMigrationErrorsOmitEmptyDiagnostics(t *testing.T) {
 	serverError := &pgconn.PgError{Code: "42601", Message: "syntax error at or near \"INVALID\""}
 	err := safePostgreSQLError("apply PostgreSQL migrations", serverError)
-	expected := "apply PostgreSQL migrations: syntax error at or near \"INVALID\" (SQLSTATE 42601)"
+	expected := "apply PostgreSQL migrations (SQLSTATE 42601)"
 	if err.Error() != expected {
 		t.Fatalf("migration error = %q, want %q", err, expected)
 	}
@@ -143,6 +139,15 @@ func TestPostgreSQLMigrationErrorsDiscardUnknownErrorDetails(t *testing.T) {
 	}
 	if errors.Is(err, sensitiveError) {
 		t.Fatal("migration error retained the sensitive underlying error")
+	}
+}
+
+func TestPostgreSQLMigrationErrorsPreserveContextIdentity(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		err := safePostgreSQLError("apply PostgreSQL migrations", fmt.Errorf("driver: %w", cause))
+		if !errors.Is(err, cause) {
+			t.Fatalf("migration error %v does not preserve %v", err, cause)
+		}
 	}
 }
 

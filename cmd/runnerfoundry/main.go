@@ -27,28 +27,35 @@ type processRuntime struct {
 	exit         func(int)
 }
 
-var productionProcess = processRuntime{
-	args:         os.Args[1:],
-	stdout:       os.Stdout,
-	stderr:       os.Stderr,
-	runDaemon:    daemon.Run,
-	runMigration: runPostgreSQLMigration,
-	lifecycle: processLifecycle{
-		notifyContext: signal.NotifyContext,
-		notifySignals: signal.Notify,
-		stopSignals:   signal.Stop,
-	},
-	exit: os.Exit,
+func main() {
+	runProcess(newProductionProcess())
 }
 
-func main() {
-	productionProcess.exit(runMain(
-		productionProcess.args,
-		productionProcess.stdout,
-		productionProcess.stderr,
-		productionProcess.runDaemon,
-		productionProcess.runMigration,
-		productionProcess.lifecycle,
+func newProductionProcess() processRuntime {
+	daemonApplication := daemon.NewApplication()
+	return processRuntime{
+		args:         os.Args[1:],
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
+		runDaemon:    daemonApplication.Run,
+		runMigration: migrationCommandExecutor{newProductionMigrationDependencies()}.run,
+		lifecycle: processLifecycle{
+			notifyContext: signal.NotifyContext,
+			notifySignals: signal.Notify,
+			stopSignals:   signal.Stop,
+		},
+		exit: os.Exit,
+	}
+}
+
+func runProcess(runtime processRuntime) {
+	runtime.exit(runMain(
+		runtime.args,
+		runtime.stdout,
+		runtime.stderr,
+		runtime.runDaemon,
+		runtime.runMigration,
+		runtime.lifecycle,
 	))
 }
 
@@ -60,6 +67,12 @@ func runMain(
 	runMigration migrationCommand,
 	lifecycle processLifecycle,
 ) int {
+	if isVersionRequest(args) {
+		if err := writeVersion(stdout); err != nil {
+			return 1
+		}
+		return 0
+	}
 	ctx, stop := lifecycle.notifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	reloadRequests, stopReloadRequests := reloadSignalRequests(lifecycle.notifySignals, lifecycle.stopSignals)

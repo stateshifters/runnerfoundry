@@ -102,9 +102,9 @@ function Invoke-RunnerFoundryProcess {
         [Parameter(Mandatory)][string]$JitConfiguration,
         [Parameter(Mandatory)][TimeSpan]$Timeout,
         [scriptblock]$StartProcess = {
-            param($Directory, $Jit)
-            Start-Process -FilePath (Join-Path $Directory 'run.cmd') -ArgumentList @('--jitconfig', $Jit) `
-                -WorkingDirectory $Directory -WindowStyle Hidden -PassThru
+            param($Directory)
+            Start-Process -FilePath (Join-Path $Directory 'run.cmd') -WorkingDirectory $Directory `
+                -WindowStyle Hidden -PassThru
         },
         [scriptblock]$KillProcessTree = {
             param($ProcessId)
@@ -113,7 +113,23 @@ function Invoke-RunnerFoundryProcess {
         }
     )
 
-    $process = & $StartProcess $RuntimeDirectory $JitConfiguration
+    $previousJitConfiguration = [Environment]::GetEnvironmentVariable(
+        'ACTIONS_RUNNER_INPUT_JITCONFIG',
+        [EnvironmentVariableTarget]::Process)
+    try {
+        [Environment]::SetEnvironmentVariable(
+            'ACTIONS_RUNNER_INPUT_JITCONFIG',
+            $JitConfiguration,
+            [EnvironmentVariableTarget]::Process)
+        $process = & $StartProcess $RuntimeDirectory
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            'ACTIONS_RUNNER_INPUT_JITCONFIG',
+            $previousJitConfiguration,
+            [EnvironmentVariableTarget]::Process)
+    }
+
     if (-not $process.WaitForExit([int]$Timeout.TotalMilliseconds)) {
         & $KillProcessTree $process.Id
         if (-not $process.WaitForExit(30000)) { throw 'The runner process tree did not exit.' }
@@ -152,9 +168,22 @@ function Invoke-RunnerFoundryJitLauncher {
         [string]$RuntimeDirectory = 'C:\RunnerFoundry\runtime',
         [TimeSpan]$JobTimeout = ([TimeSpan]::FromHours(6)),
         [scriptblock]$ReadOemStrings = { Get-RunnerFoundryOemStrings },
+        [scriptblock]$TemplateAvailable = {
+            param($Directory)
+            Test-Path -LiteralPath (Join-Path $Directory 'run.cmd')
+        },
+        [scriptblock]$PrepareRuntime = {
+            param($Template, $Runtime)
+            Remove-RunnerFoundryRuntime -RuntimeDirectory $Runtime
+            Copy-Item -LiteralPath $Template -Destination $Runtime -Recurse -Force
+        },
         [scriptblock]$RunRunner = {
             param($Directory, $Jit, $Timeout)
             Invoke-RunnerFoundryProcess -RuntimeDirectory $Directory -JitConfiguration $Jit -Timeout $Timeout
+        },
+        [scriptblock]$CleanupRuntime = {
+            param($Directory)
+            Remove-RunnerFoundryRuntime -RuntimeDirectory $Directory
         },
         [scriptblock]$PowerOff = { Invoke-RunnerFoundryPowerOff }
     )
@@ -162,16 +191,15 @@ function Invoke-RunnerFoundryJitLauncher {
     try {
         $jit = Find-RunnerFoundryJit -OemStrings @(& $ReadOemStrings)
         if ([string]::IsNullOrEmpty($jit)) { throw 'Runner JIT configuration is unavailable.' }
-        if (-not (Test-Path -LiteralPath (Join-Path $TemplateDirectory 'run.cmd'))) {
+        if (-not (& $TemplateAvailable $TemplateDirectory)) {
             throw 'The clean runner template is unavailable.'
         }
 
-        Remove-RunnerFoundryRuntime -RuntimeDirectory $RuntimeDirectory
-        Copy-Item -LiteralPath $TemplateDirectory -Destination $RuntimeDirectory -Recurse -Force
+        & $PrepareRuntime $TemplateDirectory $RuntimeDirectory
         & $RunRunner $RuntimeDirectory $jit $JobTimeout
     }
     finally {
-        try { Remove-RunnerFoundryRuntime -RuntimeDirectory $RuntimeDirectory }
+        try { & $CleanupRuntime $RuntimeDirectory }
         finally { & $PowerOff }
     }
 }

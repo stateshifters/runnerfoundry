@@ -9,12 +9,6 @@ import (
 	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 )
 
-var productionConnectionSettingResolver = operatingSystemConnectionSettingResolver()
-
-func primaryConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
-	return primaryConnectionConfigWithResolver(settings, productionConnectionSettingResolver)
-}
-
 func primaryConnectionConfigWithResolver(
 	settings postgresconfig.Settings,
 	resolver connectionSettingResolver,
@@ -31,10 +25,6 @@ func primaryConnectionConfigWithResolver(
 	}
 	delete(config.RuntimeParams, "role")
 	return config, nil
-}
-
-func directConnectionConfig(settings postgresconfig.Settings) (*pgx.ConnConfig, error) {
-	return directConnectionConfigWithResolver(settings, productionConnectionSettingResolver)
 }
 
 func directConnectionConfigWithResolver(

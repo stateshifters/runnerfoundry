@@ -29,16 +29,22 @@ type migrationDependencies struct {
 	now            func() time.Time
 }
 
-var productionMigrationDependencies = migrationDependencies{
-	readConfigFile: os.ReadFile,
-	newStore: func(postgresConfig postgresconfig.Settings) migrationStore {
-		return cluster.NewStore(postgresConfig)
-	},
-	now: time.Now,
+type migrationCommandExecutor struct {
+	dependencies migrationDependencies
 }
 
-func runPostgreSQLMigration(ctx context.Context, request migrationRequest) (migrationStatus, error) {
-	return executeMigration(ctx, request, productionMigrationDependencies)
+func newProductionMigrationDependencies() migrationDependencies {
+	return migrationDependencies{
+		readConfigFile: os.ReadFile,
+		newStore: func(postgresConfig postgresconfig.Settings) migrationStore {
+			return cluster.NewStore(postgresConfig)
+		},
+		now: time.Now,
+	}
+}
+
+func (executor migrationCommandExecutor) run(ctx context.Context, request migrationRequest) (migrationStatus, error) {
+	return executeMigration(ctx, request, executor.dependencies)
 }
 
 func executeMigration(

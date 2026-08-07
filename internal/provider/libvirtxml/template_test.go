@@ -9,13 +9,11 @@ import (
 )
 
 func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
-	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><devices></devices></domain>`,
-	}
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><devices></devices></domain>`)
 	renderedXML, err := template.Render(RenderRequest{
-		ScaleSetName: "linux-vm",
-		RunnerName:   "linux-vm-1",
-		JITConfig:    "secret",
+		RunnerPoolName: "linux-vm",
+		RunnerName:     "linux-vm-1",
+		JITConfig:      "secret",
 	})
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
@@ -27,7 +25,7 @@ func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
 		`<oemStrings>`,
 		`<entry>runnerfoundry.jit=secret</entry>`,
 		`xmlns:runnerfoundry="urn:runnerfoundry"`,
-		"runnerfoundry:scale-set",
+		"runnerfoundry:runner-pool",
 		"linux-vm",
 		"runnerfoundry:name",
 		"linux-vm-1",
@@ -42,21 +40,19 @@ func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
 }
 
 func TestDomainTemplateRejectsInvalidXML(t *testing.T) {
-	template := DomainTemplate{XML: `<domain><name>broken</domain>`}
+	template := NewDomainTemplate(`<domain><name>broken</domain>`)
 	if _, err := template.Render(RenderRequest{RunnerName: "runner"}); err == nil {
 		t.Fatal("expected invalid XML error")
 	}
 }
 
 func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
-	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><metadata><old>value</old></metadata></domain>`,
-	}
-	renderedXML, err := template.Render(RenderRequest{ScaleSetName: "set", RunnerName: "runner"})
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><metadata><old>value</old></metadata></domain>`)
+	renderedXML, err := template.Render(RenderRequest{RunnerPoolName: "set", RunnerName: "runner"})
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
 	}
-	if !strings.Contains(renderedXML, "runnerfoundry:scale-set") {
+	if !strings.Contains(renderedXML, "runnerfoundry:runner-pool") {
 		t.Fatalf("expected scaler metadata: %s", renderedXML)
 	}
 	if strings.Contains(renderedXML, "<old>value</old>") {
@@ -65,10 +61,8 @@ func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
 }
 
 func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
-	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type><smbios mode="host"/></os><sysinfo type="smbios"><oemStrings><entry>existing=value</entry><entry>runnerfoundry.jit=old</entry></oemStrings></sysinfo></domain>`,
-	}
-	renderedXML, err := template.Render(RenderRequest{ScaleSetName: "set", RunnerName: "runner", JITConfig: `jit<&"`})
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type><smbios mode="host"/></os><sysinfo type="smbios"><oemStrings><entry>existing=value</entry><entry>runnerfoundry.jit=old</entry></oemStrings></sysinfo></domain>`)
+	renderedXML, err := template.Render(RenderRequest{RunnerPoolName: "set", RunnerName: "runner", JITConfig: `jit<&"`})
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
 	}
@@ -87,10 +81,8 @@ func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
 }
 
 func TestDomainTemplateAddsOEMStringsToExistingSMBIOS(t *testing.T) {
-	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type></os><sysinfo type="smbios"><system><entry name="manufacturer">test</entry></system></sysinfo></domain>`,
-	}
-	renderedXML, err := template.Render(RenderRequest{ScaleSetName: "set", RunnerName: "runner", JITConfig: "secret"})
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><os><type arch="x86_64" machine="q35">hvm</type></os><sysinfo type="smbios"><system><entry name="manufacturer">test</entry></system></sysinfo></domain>`)
+	renderedXML, err := template.Render(RenderRequest{RunnerPoolName: "set", RunnerName: "runner", JITConfig: "secret"})
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
 	}
@@ -106,10 +98,8 @@ func TestDomainTemplateAddsOEMStringsToExistingSMBIOS(t *testing.T) {
 }
 
 func TestDomainTemplatePreservesNonSMBIOSSysInfo(t *testing.T) {
-	template := DomainTemplate{
-		XML: `<domain type="kvm"><name>template</name><sysinfo type="fwcfg"><entry name="opt/vendor/value">existing</entry></sysinfo></domain>`,
-	}
-	renderedXML, err := template.Render(RenderRequest{ScaleSetName: "set", RunnerName: "runner", JITConfig: "secret"})
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><sysinfo type="fwcfg"><entry name="opt/vendor/value">existing</entry></sysinfo></domain>`)
+	renderedXML, err := template.Render(RenderRequest{RunnerPoolName: "set", RunnerName: "runner", JITConfig: "secret"})
 	if err != nil {
 		t.Fatalf("expected render success, got %v", err)
 	}
@@ -126,14 +116,10 @@ func TestDomainTemplatePreservesNonSMBIOSSysInfo(t *testing.T) {
 }
 
 func TestDomainTemplateSurfacesMarshalFailures(t *testing.T) {
-	originalMarshal := marshalDomainXML
-	marshalDomainXML = func(domain *upstream.Domain) (string, error) {
-		return "", errors.New("marshal failed")
-	}
-	defer func() {
-		marshalDomainXML = originalMarshal
-	}()
-	template := DomainTemplate{XML: `<domain type="kvm"><name>template</name></domain>`}
+	wantErr := errors.New("marshal failed")
+	template := domainTemplateWithMarshaler(`<domain type="kvm"><name>template</name></domain>`, func(*upstream.Domain) (string, error) {
+		return "", wantErr
+	})
 	if _, err := template.Render(RenderRequest{RunnerName: "runner"}); err == nil {
 		t.Fatal("expected marshal failure")
 	}

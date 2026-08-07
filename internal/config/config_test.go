@@ -16,54 +16,17 @@ func TestLoadAcceptsGitHubAppSettings(t *testing.T) {
 	}
 }
 
+func TestLoadMapsExternalScaleSetsToRunnerPools(t *testing.T) {
+	loadedConfig := loadValidConfig(t)
+	if len(loadedConfig.RunnerPools) != 1 || loadedConfig.RunnerPools[0].Name != "docker-set" {
+		t.Fatalf("loaded Runner Pools = %#v", loadedConfig.RunnerPools)
+	}
+}
+
 func TestLoadAppliesGitHubDefaults(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
-	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.ScaleSets[0].RunnerGroup != "default" ||
-		loadedConfig.ScaleSets[0].JobStartTimeout != "10m" {
+	if loadedConfig.GitHub.DiscoveryInterval != "5m" || loadedConfig.RunnerPools[0].RunnerGroup != "default" {
 		t.Fatalf("loaded defaults = %#v", loadedConfig)
-	}
-}
-
-func TestLoadAcceptsAnyStrictlyPositiveJobStartTimeout(t *testing.T) {
-	privateKeyPath := writePrivateKey(t, "private-key")
-	configText := strings.Replace(validConfig(privateKeyPath), "    max_runners: 1\n", "    max_runners: 1\n    job_start_timeout: 1ns\n", 1)
-	loadedConfig, err := Load(strings.NewReader(configText))
-	if err != nil {
-		t.Fatalf("load positive job start timeout: %v", err)
-	}
-	timeout, err := loadedConfig.ScaleSets[0].JobStartDuration()
-	if err != nil || timeout != time.Nanosecond {
-		t.Fatalf("job start timeout = %s, %v", timeout, err)
-	}
-}
-
-func TestLoadRejectsNonPositiveOrMalformedJobStartTimeout(t *testing.T) {
-	privateKeyPath := writePrivateKey(t, "private-key")
-	for name, value := range map[string]string{
-		"zero":      "0s",
-		"negative":  "-1ns",
-		"malformed": "disabled",
-	} {
-		t.Run(name, func(t *testing.T) {
-			configText := strings.Replace(validConfig(privateKeyPath), "    max_runners: 1\n", "    max_runners: 1\n    job_start_timeout: "+value+"\n", 1)
-			if _, err := Load(strings.NewReader(configText)); err == nil {
-				t.Fatalf("job_start_timeout %q was accepted", value)
-			}
-		})
-	}
-}
-
-func TestJobStartDurationRejectsInvalidUnvalidatedValue(t *testing.T) {
-	if duration, err := (ScaleSetConfig{}).JobStartDuration(); err != nil || duration != 10*time.Minute {
-		t.Fatalf("default duration=%v err=%v", duration, err)
-	}
-	if _, err := (ScaleSetConfig{JobStartTimeout: "invalid"}).JobStartDuration(); err == nil {
-		t.Fatal("expected invalid job start timeout error")
-	}
-	for _, value := range []string{"0s", "-1ns"} {
-		if _, err := (ScaleSetConfig{JobStartTimeout: value}).JobStartDuration(); err == nil {
-			t.Fatalf("expected non-positive job start timeout %q error", value)
-		}
 	}
 }
 
@@ -330,26 +293,26 @@ func TestAppCredentialsRejectUnreadableOrEmptyPrivateKey(t *testing.T) {
 }
 
 func TestScaleSetValidationPreservesExplicitRunnerGroup(t *testing.T) {
-	scaleSet := ScaleSetConfig{
+	runnerPool := RunnerPoolConfig{
 		Name:        "linux",
 		RunnerGroup: "custom",
 		MaxRunners:  1,
 		Docker:      &DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 	}
-	if err := scaleSet.validate(map[string]bool{}); err != nil {
+	if err := runnerPool.validate(map[string]bool{}); err != nil {
 		t.Fatalf("expected scale set to validate, got %v", err)
 	}
-	if scaleSet.RunnerGroup != "custom" {
-		t.Fatalf("expected explicit runner group, got %q", scaleSet.RunnerGroup)
+	if runnerPool.RunnerGroup != "custom" {
+		t.Fatalf("expected explicit runner group, got %q", runnerPool.RunnerGroup)
 	}
 }
 
 func TestScaleSetValidationAcceptsCompleteLibvirtProvider(t *testing.T) {
-	scaleSet := ScaleSetConfig{
+	runnerPool := RunnerPoolConfig{
 		Name: "vm", MaxRunners: 1,
 		Libvirt: &LibvirtConfig{ConnectionURI: "qemu:///system", DomainXMLTemplate: "domain.xml"},
 	}
-	if err := scaleSet.validate(map[string]bool{}); err != nil {
+	if err := runnerPool.validate(map[string]bool{}); err != nil {
 		t.Fatalf("expected libvirt scale set, got %v", err)
 	}
 }
@@ -375,8 +338,8 @@ scale_sets:
 ` + validScaleSet("docker-set")
 }
 
-func baseConfig(privateKeyPath string, scaleSets string) string {
-	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + scaleSets
+func baseConfig(privateKeyPath string, runnerPools string) string {
+	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + runnerPools
 }
 
 func validScaleSet(name string) string {

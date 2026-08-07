@@ -78,7 +78,7 @@ build: export GOARCH := amd64
 build: export CGO_ENABLED := 0
 build:
 	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
-	go build -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
+	go build -ldflags "-X github.com/meza/RunnerFoundry/internal/buildinfo.version=$(VERSION)" -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
 
 notices:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
