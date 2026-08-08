@@ -37,10 +37,10 @@ func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
 	store := NewStore(successfulBehaviorExecutor())
 	ctx := context.Background()
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
-	if err := store.MarkRunnerStarted(ctx, source); err != nil {
+	if _, err := store.MarkRunnerStarted(ctx, core.JobIdentity{Source: source}); err != nil {
 		t.Fatalf("mark started: %v", err)
 	}
-	if err := store.TerminalizeSource(ctx, source); err != nil {
+	if _, err := store.Terminalize(ctx, core.JobIdentity{Source: source}); err != nil {
 		t.Fatalf("terminalize: %v", err)
 	}
 	if result, err := store.RemoveTerminal(ctx, testJobID); err != nil || result.Outcome != core.TerminalRemoved {

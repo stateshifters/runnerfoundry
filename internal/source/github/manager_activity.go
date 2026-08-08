@@ -24,6 +24,8 @@ type ManagerActivity struct {
 	Repository        string
 	RunnerPool        core.RunnerPool
 	SourceRequestID   int64
+	RunnerName        core.RunnerName
+	EventType         string
 	JobID             core.JobID
 	InstallationID    int64
 	RunnerGroupID     int64

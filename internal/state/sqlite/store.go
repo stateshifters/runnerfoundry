@@ -50,7 +50,7 @@ const deleteQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs WHERE job_id =
 const cancelQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs
 	WHERE source_name = ? AND source_reference = ?`
 const markProcessingStartedSQL = `UPDATE runnerfoundry_processing_jobs SET runner_started = 1
-	WHERE source_name = ? AND source_reference = ?
+	WHERE source_name = ? AND source_reference = ? AND runner_started = 0
 	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
 		WHERE source_name = ? AND source_reference = ?)`
 const tombstoneDelayedStartSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
@@ -69,51 +69,6 @@ type Store struct {
 
 var _ core.JobQueueStore = (*Store)(nil)
 var _ core.ProcessingJobStore = (*Store)(nil)
-
-func (store *Store) TerminalizeSource(ctx context.Context, source core.SourceReference) (resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin terminalize source: %w", err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err := transaction.Execute(ctx, insertTombstoneSQL, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("tombstone terminal source: %w", err)
-	}
-	if _, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("remove terminal queued job: %w", err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit source terminalization: %w", err)
-	}
-	open = false
-	return nil
-}
-
-func (store *Store) MarkRunnerStarted(ctx context.Context, source core.SourceReference) (resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin mark runner started: %w", err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err := transaction.Execute(ctx, markProcessingStartedSQL,
-		source.Adapter, source.ID, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("mark processing runner started: %w", err)
-	}
-	if _, err := transaction.Execute(ctx, tombstoneDelayedStartSQL,
-		source.Adapter, source.ID, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("tombstone delayed runner start: %w", err)
-	}
-	if _, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID); err != nil {
-		return fmt.Errorf("remove delayed-start queued job: %w", err)
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit runner start: %w", err)
-	}
-	open = false
-	return nil
-}
 
 func (store *Store) ProcessingByMember(
 	ctx context.Context,

@@ -13,8 +13,8 @@ import (
 )
 
 type githubPollResult struct {
-	messageReceived bool
-	err             error
+	poll githubsource.PollResult
+	err  error
 }
 
 type githubPollAttempt struct {
@@ -262,7 +262,7 @@ func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]
 			continue
 		}
 		delete(source.polls, adapter)
-		if result.messageReceived {
+		if result.poll.Handled {
 			changedPools[adapter.RunnerPool] = struct{}{}
 		}
 		if result.err != nil {
@@ -355,8 +355,8 @@ func (source *githubSourceRuntime) launchPoll(
 	results := make(chan githubPollResult, 1)
 	source.polls[adapter] = &githubPollAttempt{cancel: cancel, result: results}
 	go func() {
-		received, err := adapter.PollOnce(pollContext, capacity)
-		results <- githubPollResult{messageReceived: received, err: err}
+		pollResult, err := adapter.Poll(pollContext, capacity)
+		results <- githubPollResult{poll: pollResult, err: err}
 	}()
 }
 

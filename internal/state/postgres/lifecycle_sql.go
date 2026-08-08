@@ -1,5 +1,25 @@
 package postgres
 
+const sourceByJobIDSQL = `SELECT source_name, source_reference
+	FROM public.runnerfoundry_queued_jobs WHERE job_id = $1
+	UNION ALL
+	SELECT source_name, source_reference
+	FROM public.runnerfoundry_processing_jobs WHERE job_id = $1`
+const insertTombstoneSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
+	VALUES($1, $2) ON CONFLICT(source_name, source_reference) DO NOTHING`
+const markProcessingStartedSQL = `UPDATE public.runnerfoundry_processing_jobs SET runner_started = true
+	WHERE source_name = $1 AND source_reference = $2 AND NOT runner_started
+	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
+		WHERE source_name = $1 AND source_reference = $2)`
+const tombstoneDelayedStartSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
+	SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM public.runnerfoundry_queued_jobs
+		WHERE source_name = $1 AND source_reference = $2)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const runnerStartAlreadyAppliedSQL = `SELECT
+	EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones WHERE source_name = $1 AND source_reference = $2)
+	OR EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE source_name = $1 AND source_reference = $2 AND runner_started)`
+
 const processingByIDSQL = `SELECT ` + processingJobColumns + `
 	FROM public.runnerfoundry_processing_jobs WHERE job_id = $1`
 const processingByClaimIDSQL = `SELECT ` + claimedProcessingJobColumns + `

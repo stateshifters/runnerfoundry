@@ -62,18 +62,79 @@ func (handler *QueueHandler) Request(ctx context.Context, request core.JobReques
 // RunnerStarted durably records that the source assigned the job to a runner.
 // The store atomically resolves delayed start observations against queued work
 // so callers can safely redeliver the same source event.
-func (handler *QueueHandler) RunnerStarted(ctx context.Context, source core.SourceReference) error {
-	if err := handler.store.MarkRunnerStarted(ctx, source); err != nil {
-		return fmt.Errorf("mark source request %q runner started: %w", source.ID, err)
+func (handler *QueueHandler) RunnerStarted(
+	ctx context.Context,
+	observation core.RunnerObservation,
+) (core.ObservationResult, error) {
+	identity, unmatched, err := identityFromObservation(observation)
+	if err != nil {
+		return core.ObservationResult{}, err
 	}
-	return nil
+	if unmatched {
+		return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
+	}
+	result, err := handler.store.MarkRunnerStarted(ctx, identity)
+	if err != nil {
+		return result, handler.lifecycleError("mark_runner_started", observation, err)
+	}
+	return result, nil
 }
 
 // Terminalize durably ends source demand. Provider cleanup remains
 // owned by reconciliation, which retains processing until cleanup succeeds.
-func (handler *QueueHandler) Terminalize(ctx context.Context, source core.SourceReference) error {
-	if err := handler.store.TerminalizeSource(ctx, source); err != nil {
-		return fmt.Errorf("terminalize source request %q: %w", source.ID, err)
+func (handler *QueueHandler) Terminalize(
+	ctx context.Context,
+	observation core.RunnerObservation,
+) (core.ObservationResult, error) {
+	identity, unmatched, err := identityFromObservation(observation)
+	if err != nil {
+		return core.ObservationResult{}, err
 	}
-	return nil
+	if unmatched {
+		return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
+	}
+	result, err := handler.store.Terminalize(ctx, identity)
+	if err != nil {
+		return result, handler.lifecycleError("terminalize_job", observation, err)
+	}
+	return result, nil
+}
+
+func identityFromObservation(observation core.RunnerObservation) (core.JobIdentity, bool, error) {
+	identity := core.JobIdentity{Source: observation.Source}
+	if !observation.Source.IsEmpty() && !observation.Source.IsValid() {
+		return core.JobIdentity{}, false, core.ErrInvalidJobIdentity
+	}
+	jobID, legacy, err := observedJobID(observation.RunnerName)
+	if err != nil {
+		return core.JobIdentity{}, false, err
+	}
+	if legacy && observation.Source.IsEmpty() {
+		return core.JobIdentity{}, true, nil
+	}
+	identity.JobID = jobID
+	if err := identity.Validate(); err != nil {
+		return core.JobIdentity{}, false, fmt.Errorf("validate lifecycle job identity: %w", err)
+	}
+	return identity, false, nil
+}
+
+func observedJobID(name core.RunnerName) (core.JobID, bool, error) {
+	if name == "" {
+		return core.JobID{}, false, nil
+	}
+	jobID, canonical, err := jobIDFromRunnerName(name)
+	return jobID, !canonical, err
+}
+
+func (handler *QueueHandler) lifecycleError(
+	operation string,
+	observation core.RunnerObservation,
+	cause error,
+) error {
+	if handler.stateBackend != "" {
+		return DurableStateError{Backend: handler.stateBackend, Operation: operation, cause: cause}
+	}
+	return fmt.Errorf("%s source request %q runner %q: %w",
+		operation, observation.Source.ID, observation.RunnerName, cause)
 }

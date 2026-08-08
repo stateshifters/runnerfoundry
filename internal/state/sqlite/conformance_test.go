@@ -97,7 +97,7 @@ func exerciseSQLiteDelayedStartProtocol(t *testing.T) storetest.Observation {
 			return rowsFromValues([][]any{sqliteClaimedValues(processing, true, false)}), nil
 		}, commit: successfulCompletion, rollback: successfulCompletion}
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	if err := store.MarkRunnerStarted(context.Background(), processing.Job.Source); err != nil {
+	if _, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: processing.Job.Source}); err != nil {
 		t.Fatalf("mark started: %v", err)
 	}
 	current, err := store.ProcessingByPool(context.Background(), processing.Job.RunnerPool)

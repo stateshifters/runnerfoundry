@@ -142,8 +142,14 @@ func protocolFailureOperations(request core.JobRequest) []namedStoreOperation {
 			_, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
 			return err
 		}},
-		{name: "terminalize source", operation: func(store *Store) error { return store.TerminalizeSource(context.Background(), request.Source) }},
-		{name: "mark runner started", operation: func(store *Store) error { return store.MarkRunnerStarted(context.Background(), request.Source) }},
+		{name: "terminalize source", operation: func(store *Store) error {
+			_, err := store.Terminalize(context.Background(), core.JobIdentity{Source: request.Source})
+			return err
+		}},
+		{name: "mark runner started", operation: func(store *Store) error {
+			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: request.Source})
+			return err
+		}},
 		{name: "processing list", operation: func(store *Store) error {
 			_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
 			return err

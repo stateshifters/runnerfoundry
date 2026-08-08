@@ -79,6 +79,9 @@ func eventIdentityAttributes(event operationalEvent) []slog.Attr {
 	if event.runnerID != "" {
 		attributes = append(attributes, slog.String("runner_id", event.runnerID))
 	}
+	if event.runnerName != "" {
+		attributes = append(attributes, slog.String("runner_name", string(event.runnerName)))
+	}
 	if event.installationID != 0 {
 		attributes = append(attributes, slog.Int64("installation_id", event.installationID))
 	}
@@ -90,6 +93,9 @@ func eventIdentityAttributes(event operationalEvent) []slog.Attr {
 	}
 	if event.messageID != 0 {
 		attributes = append(attributes, slog.Int64("message_id", event.messageID))
+	}
+	if event.githubEventType != "" {
+		attributes = append(attributes, slog.String("github_event_type", event.githubEventType))
 	}
 	return attributes
 }

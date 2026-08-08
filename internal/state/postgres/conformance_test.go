@@ -85,7 +85,7 @@ func exercisePostgresDelayedStart(t *testing.T) storetest.Observation {
 		postgresClaimedOutcomeValues(storetest.ExpectedProcessing(), true, false),
 	})}
 	store := NewStore(protocol.executor())
-	if err := store.MarkRunnerStarted(context.Background(), job.Source); err != nil {
+	if _, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: job.Source}); err != nil {
 		t.Fatalf("mark started: %v", err)
 	}
 	processing, err := store.ProcessingByPool(context.Background(), job.RunnerPool)

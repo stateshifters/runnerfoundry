@@ -3,6 +3,7 @@ package github_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
@@ -22,6 +23,10 @@ func TestAdapterDoesNotHandleMessageReceivedByCancelledPoll(t *testing.T) {
 	}
 	handler := &cancellationEventHandler{}
 	adapter := newAdapter(client, handler)
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	resultReady := make(chan pollOutcome, 1)
 
@@ -39,6 +44,80 @@ func TestAdapterDoesNotHandleMessageReceivedByCancelledPoll(t *testing.T) {
 	if handler.requests != 0 || client.acknowledged != 0 {
 		t.Fatalf("late work: requests=%d acknowledgements=%d", handler.requests, client.acknowledged)
 	}
+	assertIntentionalCancellationActivity(t, activities, "handle_message")
+}
+
+func TestAdapterReportsCallerCancelledReceiveWithoutOperationalFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(&cancelledReceiveClient{}, &cancellationEventHandler{})
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+
+	if _, err := adapter.Poll(ctx, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Poll() error = %v, want context canceled", err)
+	}
+	assertIntentionalCancellationActivity(t, activities, "poll")
+}
+
+func TestAdapterReportsTransportCancellationWithLiveCallerAsFailure(t *testing.T) {
+	t.Parallel()
+
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(&transportCancelledReceiveClient{}, &cancellationEventHandler{})
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+
+	if _, err := adapter.Poll(context.Background(), 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Poll() error = %v, want transport context cancellation", err)
+	}
+	failure := findManagerActivity(activities, "poll", "failed")
+	if failure.Visibility != githubsource.ActivityDebug || !errors.Is(failure.Err, context.Canceled) {
+		t.Fatalf("transport cancellation activity = %#v", failure)
+	}
+}
+
+func assertIntentionalCancellationActivity(t *testing.T, activities []githubsource.ManagerActivity, stage string) {
+	t.Helper()
+	foundCanceled := false
+	for _, activity := range activities {
+		if activity.Outcome == "failed" {
+			t.Fatalf("caller cancellation reported as failure: %#v", activity)
+		}
+		if activity.Stage == stage && activity.Outcome == "canceled" &&
+			activity.Visibility == githubsource.ActivityDebug {
+			foundCanceled = true
+		}
+	}
+	if !foundCanceled {
+		t.Fatalf("activities = %#v, want %s canceled debug activity", activities, stage)
+	}
+}
+
+type cancelledReceiveClient struct{}
+
+func (*cancelledReceiveClient) GetMessage(ctx context.Context, _, _ int) (*upstream.RunnerScaleSetMessage, error) {
+	return nil, fmt.Errorf("receive canceled: %w", ctx.Err())
+}
+
+func (*cancelledReceiveClient) AcquireRequests(context.Context, []int64) ([]int64, error) {
+	return nil, nil
+}
+func (*cancelledReceiveClient) DeleteMessage(context.Context, int) error { return nil }
+
+type transportCancelledReceiveClient struct{ cancelledReceiveClient }
+
+func (*transportCancelledReceiveClient) GetMessage(
+	context.Context,
+	int,
+	int,
+) (*upstream.RunnerScaleSetMessage, error) {
+	return nil, context.Canceled
 }
 
 func TestAdapterDoesNotAcknowledgeMessageHandledByCancelledPoll(t *testing.T) {
@@ -68,6 +147,74 @@ func TestAdapterDoesNotAcknowledgeMessageHandledByCancelledPoll(t *testing.T) {
 	}
 }
 
+func TestAdapterReportsCancelledDurableHandlingWithoutOperationalFailure(t *testing.T) {
+	t.Parallel()
+
+	handling := make(chan struct{})
+	releaseHandling := make(chan struct{})
+	client := &cancellationMessageClient{message: assignedMessage(18, 42)}
+	handler := &cancellationEventHandler{
+		handling: handling, releaseHandling: releaseHandling, returnContextError: true,
+	}
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(client, handler)
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	resultReady := make(chan pollOutcome, 1)
+
+	go func() {
+		result, err := adapter.Poll(ctx, 1)
+		resultReady <- pollOutcome{result: result, err: err}
+	}()
+	<-handling
+	cancel()
+	close(releaseHandling)
+	outcome := <-resultReady
+
+	assertCanceledPoll(t, outcome, githubsource.PollResult{Received: true})
+	assertIntentionalCancellationActivity(t, activities, "handle_message")
+}
+
+func TestAdapterReportsCancelledLifecyclePersistenceWithoutOperationalFailure(t *testing.T) {
+	for _, message := range []*upstream.RunnerScaleSetMessage{
+		{MessageID: 19, JobStartedMessages: []*upstream.JobStarted{{RunnerName: "legacy-runner"}}},
+		{MessageID: 20, JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
+	} {
+		assertCanceledLifecyclePersistence(t, message)
+	}
+}
+
+func assertCanceledLifecyclePersistence(t *testing.T, message *upstream.RunnerScaleSetMessage) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &cancelingLifecycleEventHandler{cancel: cancel}
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(&cancellationMessageClient{message: message}, handler)
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+	result, err := adapter.Poll(ctx, 1)
+	assertCanceledPoll(t, pollOutcome{result: result, err: err}, githubsource.PollResult{Received: true})
+	assertIntentionalCancellationActivity(t, activities, "handle_message")
+}
+
+func TestAdapterReportsCancelledAcknowledgementWithoutOperationalFailure(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &cancellationMessageClient{message: assignedMessage(21, 43), cancelAcknowledgement: cancel}
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(client, &cancellationEventHandler{})
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+	result, err := adapter.Poll(ctx, 1)
+	assertCanceledPoll(t, pollOutcome{result: result, err: err},
+		githubsource.PollResult{Received: true, Handled: true})
+	assertIntentionalCancellationActivity(t, activities, "acknowledge_message")
+}
+
 type pollOutcome struct {
 	result githubsource.PollResult
 	err    error
@@ -84,10 +231,11 @@ func assertCanceledPoll(t *testing.T, outcome pollOutcome, expected githubsource
 }
 
 type cancellationMessageClient struct {
-	message        *upstream.RunnerScaleSetMessage
-	received       chan struct{}
-	releaseReceive chan struct{}
-	acknowledged   int
+	message               *upstream.RunnerScaleSetMessage
+	received              chan struct{}
+	releaseReceive        chan struct{}
+	acknowledged          int
+	cancelAcknowledgement context.CancelFunc
 }
 
 func (client *cancellationMessageClient) GetMessage(
@@ -108,18 +256,45 @@ func (*cancellationMessageClient) AcquireRequests(context.Context, []int64) ([]i
 	return nil, nil
 }
 
-func (client *cancellationMessageClient) DeleteMessage(context.Context, int) error {
+func (client *cancellationMessageClient) DeleteMessage(ctx context.Context, _ int) error {
+	if client.cancelAcknowledgement != nil {
+		client.cancelAcknowledgement()
+		return fmt.Errorf("acknowledgement canceled: %w", ctx.Err())
+	}
 	client.acknowledged++
 	return nil
 }
 
-type cancellationEventHandler struct {
-	requests        int
-	handling        chan struct{}
-	releaseHandling chan struct{}
+type cancelingLifecycleEventHandler struct{ cancel context.CancelFunc }
+
+func (*cancelingLifecycleEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+	return core.EnqueueResult{}, nil
 }
 
-func (handler *cancellationEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+func (handler *cancelingLifecycleEventHandler) RunnerStarted(
+	ctx context.Context,
+	_ core.RunnerObservation,
+) (core.ObservationResult, error) {
+	handler.cancel()
+	return core.ObservationResult{}, fmt.Errorf("runner start canceled: %w", ctx.Err())
+}
+
+func (handler *cancelingLifecycleEventHandler) Terminalize(
+	ctx context.Context,
+	_ core.RunnerObservation,
+) (core.ObservationResult, error) {
+	handler.cancel()
+	return core.ObservationResult{}, fmt.Errorf("terminal observation canceled: %w", ctx.Err())
+}
+
+type cancellationEventHandler struct {
+	requests           int
+	handling           chan struct{}
+	releaseHandling    chan struct{}
+	returnContextError bool
+}
+
+func (handler *cancellationEventHandler) Request(ctx context.Context, _ core.JobRequest) (core.EnqueueResult, error) {
 	if handler.handling != nil {
 		close(handler.handling)
 	}
@@ -127,14 +302,25 @@ func (handler *cancellationEventHandler) Request(context.Context, core.JobReques
 		<-handler.releaseHandling
 	}
 	handler.requests++
+	if handler.returnContextError {
+		return core.EnqueueResult{}, fmt.Errorf("persist request canceled: %w", ctx.Err())
+	}
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
 
-func (*cancellationEventHandler) RunnerStarted(context.Context, core.SourceReference) error {
-	return nil
+func (*cancellationEventHandler) RunnerStarted(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 }
 
-func (*cancellationEventHandler) Terminalize(context.Context, core.SourceReference) error { return nil }
+func (*cancellationEventHandler) Terminalize(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{Outcome: core.ObservationApplied}, nil
+}
 
 func assignedMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {
 	return &upstream.RunnerScaleSetMessage{

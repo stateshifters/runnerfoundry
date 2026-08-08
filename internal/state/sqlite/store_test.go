@@ -95,8 +95,8 @@ func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
-	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		TerminalizeSource(context.Background(), source); err != nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		Terminalize(context.Background(), core.JobIdentity{Source: source}); err != nil {
 		t.Fatalf("terminalize source: %v", err)
 	}
 	if len(statements) != 2 || !strings.Contains(statements[0], "source_tombstones") ||
@@ -112,9 +112,10 @@ func TestMarkRunnerStartedTombstonesAQueuedRetry(t *testing.T) {
 		statements = append(statements, statement)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
-	err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(context.Background(),
-		core.SourceReference{Adapter: "github", ID: "request-3"})
+	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(context.Background(),
+		core.JobIdentity{Source: core.SourceReference{Adapter: "github", ID: "request-3"}})
 	if err != nil || len(statements) != 3 || !strings.Contains(statements[0], "runner_started") ||
+		!strings.Contains(statements[0], "runner_started = 0") ||
 		!strings.Contains(statements[1], "source_tombstones") || !strings.Contains(statements[2], "queued_jobs") {
 		t.Fatalf("delayed start statements=%#v error=%v", statements, err)
 	}

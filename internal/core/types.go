@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,53 @@ type SourceReference struct {
 	Adapter SourceAdapter
 	ID      SourceIdentifier
 }
+
+func (source SourceReference) IsEmpty() bool { return source.Adapter == "" && source.ID == "" }
+func (source SourceReference) IsValid() bool { return source.Adapter != "" && source.ID != "" }
+
+// RunnerObservation identifies a source lifecycle observation by the source's
+// request reference, the runner name, or both when the source supplies both.
+type RunnerObservation struct {
+	Source     SourceReference
+	RunnerName RunnerName
+}
+
+// JobIdentity selects durable work by source reference, RunnerFoundry job ID,
+// or both. When both are present they must identify the same durable job.
+type JobIdentity struct {
+	Source SourceReference
+	JobID  JobID
+}
+
+func (identity JobIdentity) Validate() error {
+	if (!identity.Source.IsEmpty() && !identity.Source.IsValid()) ||
+		(identity.Source.IsEmpty() && identity.JobID == uuid.Nil) {
+		return ErrInvalidJobIdentity
+	}
+	return nil
+}
+
+var (
+	// ErrInvalidJobIdentity means the selector contains neither a complete
+	// source reference nor a job ID, or contains a partial source reference.
+	ErrInvalidJobIdentity = errors.New("invalid job identity")
+	// ErrJobIdentityMismatch means the supplied source and job ID identify
+	// different durable jobs.
+	ErrJobIdentityMismatch = errors.New("job identity source and job ID do not match")
+)
+
+// ObservationResult reports the durable effect of a lifecycle observation.
+type ObservationResult struct{ Outcome ObservationOutcome }
+
+// ObservationOutcome distinguishes a new transition from an idempotent
+// replay and a valid observation whose durable job no longer exists.
+type ObservationOutcome string
+
+const (
+	ObservationApplied        ObservationOutcome = "applied"
+	ObservationAlreadyApplied ObservationOutcome = "already_applied"
+	ObservationUnmatched      ObservationOutcome = "unmatched"
+)
 
 // JobRequest is source demand ready to enter a Runner Pool queue.
 type JobRequest struct {
@@ -139,12 +187,12 @@ type RunnerPoolCapacity struct {
 
 // JobQueueStore owns source demand and source lifecycle observations. Queue is
 // idempotent by source reference and preserves FIFO order by EnqueuedAt.
-// TerminalizeSource and MarkRunnerStarted are transactional tombstone-guarded
+// Terminalize and MarkRunnerStarted are transactional tombstone-guarded
 // observations: either may arrive before, during, or after a local claim.
 type JobQueueStore interface {
 	Queue(ctx context.Context, request JobRequest) (EnqueueResult, error)
-	TerminalizeSource(ctx context.Context, source SourceReference) error
-	MarkRunnerStarted(ctx context.Context, source SourceReference) error
+	Terminalize(ctx context.Context, identity JobIdentity) (ObservationResult, error)
+	MarkRunnerStarted(ctx context.Context, identity JobIdentity) (ObservationResult, error)
 }
 
 // ProcessingClaimer owns the atomic FIFO transition from queued to processing

@@ -36,6 +36,7 @@ type operationalEvent struct {
 	runnerPool        core.RunnerPool
 	jobID             core.JobID
 	runnerID          string
+	runnerName        core.RunnerName
 	repository        string
 	endpoint          string
 	diagnostic        string
@@ -44,6 +45,7 @@ type operationalEvent struct {
 	runnerGroupID     int64
 	scaleSetID        int64
 	messageID         int64
+	githubEventType   string
 	count             int
 	repositoryCount   int
 	installationCount int

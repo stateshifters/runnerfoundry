@@ -124,14 +124,22 @@ func assertPersistedRequests(t *testing.T, handler *recordingEventHandler, want 
 
 func assertStartedObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
 	t.Helper()
-	if !reflect.DeepEqual(handler.started, want) {
+	got := make([]core.SourceReference, 0, len(handler.started))
+	for _, observation := range handler.started {
+		got = append(got, observation.Source)
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("started = %#v, want %#v", handler.started, want)
 	}
 }
 
 func assertTerminalObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
 	t.Helper()
-	if !reflect.DeepEqual(handler.completed, want) {
+	got := make([]core.SourceReference, 0, len(handler.completed))
+	for _, observation := range handler.completed {
+		got = append(got, observation.Source)
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("completed = %#v, want %#v", handler.completed, want)
 	}
 }
@@ -397,48 +405,13 @@ func TestPollOnceTerminalizesEveryGitHubCompletionResult(t *testing.T) {
 		t.Fatalf("poll = (%t, %v), want received success", received, err)
 	}
 
-	wantCompleted := make([]core.SourceReference, len(message.JobCompletedMessages))
+	wantCompleted := make([]core.RunnerObservation, len(message.JobCompletedMessages))
 	for requestOffset := range wantCompleted {
-		wantCompleted[requestOffset] = sourceReference(t, int64(80+requestOffset))
+		wantCompleted[requestOffset] = core.RunnerObservation{Source: sourceReference(t, int64(80+requestOffset))}
 	}
 	if !reflect.DeepEqual(handler.completed, wantCompleted) {
 		t.Fatalf("completed = %#v, want %#v", handler.completed, wantCompleted)
 	}
-}
-
-type recordingEventHandler struct {
-	events       *[]string
-	requests     []core.JobRequest
-	started      []core.SourceReference
-	completed    []core.SourceReference
-	requestErr   error
-	startedErr   error
-	completedErr error
-}
-
-func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {
-	handler.requests = append(handler.requests, request)
-	if handler.events != nil {
-		*handler.events = append(*handler.events, "request:"+string(request.Source.ID))
-	}
-	return core.EnqueueResult{Job: core.Job{ID: core.JobID{1}, Source: request.Source, RunnerPool: request.RunnerPool},
-		Outcome: core.QueueQueued}, handler.requestErr
-}
-
-func (handler *recordingEventHandler) RunnerStarted(_ context.Context, source core.SourceReference) error {
-	handler.started = append(handler.started, source)
-	if handler.events != nil {
-		*handler.events = append(*handler.events, "started:"+string(source.ID))
-	}
-	return handler.startedErr
-}
-
-func (handler *recordingEventHandler) Terminalize(_ context.Context, source core.SourceReference) error {
-	handler.completed = append(handler.completed, source)
-	if handler.events != nil {
-		*handler.events = append(*handler.events, "completed:"+string(source.ID))
-	}
-	return handler.completedErr
 }
 
 type recordingClient struct {

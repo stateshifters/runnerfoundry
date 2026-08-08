@@ -103,20 +103,54 @@ func inventoryRefreshMessage(event operationalEvent) string {
 
 func githubJobObservationMessage(event operationalEvent) string {
 	if event.outcome == "failed" {
-		action := "recording runner state for"
+		action := "record runner start for"
 		if event.stage == "persist_terminal" {
-			action = "terminalizing"
+			action = "record terminal state for"
 		}
+		subject := githubObservationSubject(event)
 		if event.stateBackend != "" {
-			return fmt.Sprintf("%s transaction failed while %s GitHub runner request %d for %s in Runner Pool %s",
-				stateBackendDisplayName(event.stateBackend), action, event.sourceRequestID,
-				event.repository, event.runnerPool)
+			return fmt.Sprintf("%s transaction failed while attempting to %s %s for %s in Runner Pool %s",
+				stateBackendDisplayName(event.stateBackend), action, subject, event.repository, event.runnerPool)
 		}
-		return fmt.Sprintf("Failed while %s GitHub runner request %d for %s in Runner Pool %s",
-			action, event.sourceRequestID, event.repository, event.runnerPool)
+		return fmt.Sprintf("Failed to %s %s for %s in Runner Pool %s",
+			action, subject, event.repository, event.runnerPool)
+	}
+	if event.outcome == string(core.ObservationUnmatched) {
+		return fmt.Sprintf("Acknowledged unmatched %s for runner %s in %s and Runner Pool %s",
+			githubEventDisplayName(event.githubEventType), event.runnerName, event.repository, event.runnerPool)
+	}
+	if event.count == 0 {
+		subject := githubObservationSubject(event)
+		if subject == "" {
+			return fmt.Sprintf("Recorded %s in %s and Runner Pool %s",
+				githubEventDisplayName(event.githubEventType), event.repository, event.runnerPool)
+		}
+		return fmt.Sprintf("Recorded %s for %s in %s and Runner Pool %s",
+			githubEventDisplayName(event.githubEventType), subject,
+			event.repository, event.runnerPool)
 	}
 	return fmt.Sprintf("Recorded %d GitHub job observations for %s in Runner Pool %s",
 		event.count, event.repository, event.runnerPool)
+}
+
+func githubObservationSubject(event operationalEvent) string {
+	if event.sourceRequestID != 0 && event.runnerName != "" {
+		return fmt.Sprintf("GitHub request %d and runner %s", event.sourceRequestID, event.runnerName)
+	}
+	if event.sourceRequestID != 0 {
+		return fmt.Sprintf("GitHub request %d", event.sourceRequestID)
+	}
+	if event.runnerName != "" {
+		return fmt.Sprintf("GitHub runner %s", event.runnerName)
+	}
+	return ""
+}
+
+func githubEventDisplayName(eventType string) string {
+	if eventType == "" {
+		return "GitHub lifecycle observation"
+	}
+	return fmt.Sprintf("GitHub %s event", eventType)
 }
 
 func githubJobIngestionMessage(event operationalEvent) string {

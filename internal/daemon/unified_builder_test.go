@@ -255,8 +255,12 @@ func (*builderStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueRe
 func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.ClaimResult, error) {
 	return core.ClaimResult{Outcome: core.ClaimEmpty}, store.operationErr
 }
-func (*builderStoreFake) TerminalizeSource(context.Context, core.SourceReference) error { return nil }
-func (*builderStoreFake) MarkRunnerStarted(context.Context, core.SourceReference) error { return nil }
+func (*builderStoreFake) Terminalize(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
+}
+func (*builderStoreFake) MarkRunnerStarted(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
+}
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }

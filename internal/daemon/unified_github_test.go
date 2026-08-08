@@ -41,52 +41,6 @@ func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T)
 	}
 }
 
-func TestGitHubSourceRuntimeReportsAggregateCapacityOnlyWhenItChanges(t *testing.T) {
-	t.Parallel()
-
-	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: &capacityMessageClientFake{finished: make(chan struct{}, 2)}, Repository: "https://github.example/one", RunnerPool: "linux"},
-		{Client: &capacityMessageClientFake{finished: make(chan struct{}, 2)}, Repository: "https://github.example/two", RunnerPool: "linux"},
-	}}
-	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}},
-		"member", eventHandlerFake{}, githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
-	var events []progressEventEnvelope
-	source.report = func(err error) {
-		var event progressEventEnvelope
-		if errors.As(err, &event) {
-			events = append(events, event)
-		}
-	}
-	mustOpenGitHubSource(t, source)
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	mustCloseGitHubSource(t, source)
-
-	infoCount, debugCount, aggregate := capacityPublicationCounts(events)
-	if aggregate.runnerPool != "linux" || aggregate.capacity != 7 || aggregate.count != 2 {
-		t.Fatalf("aggregate capacity event = %#v", aggregate)
-	}
-	if infoCount != 1 || debugCount != 2 {
-		t.Fatalf("capacity events info=%d debug=%d, want 1 and 2", infoCount, debugCount)
-	}
-}
-
-func capacityPublicationCounts(events []progressEventEnvelope) (infoCount int, debugCount int, aggregate operationalEvent) {
-	for _, envelope := range events {
-		if envelope.event.operation != "capacity_publication" || envelope.event.outcome != "published" {
-			continue
-		}
-		if envelope.level == 0 {
-			infoCount++
-			aggregate = envelope.event
-		} else if envelope.level < 0 {
-			debugCount++
-		}
-	}
-	return infoCount, debugCount, aggregate
-}
-
 func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 	t.Parallel()
 
@@ -622,6 +576,39 @@ func (*messageThenBlockingClient) AcquireRequests(_ context.Context, requestIDs 
 	return requestIDs, nil
 }
 
+type invalidMessageThenBlockingClient struct {
+	started       chan int
+	firstReturned chan struct{}
+	calls         int
+}
+
+func newInvalidMessageThenBlockingClient() *invalidMessageThenBlockingClient {
+	return &invalidMessageThenBlockingClient{started: make(chan int, 1), firstReturned: make(chan struct{})}
+}
+
+func (client *invalidMessageThenBlockingClient) GetMessage(
+	ctx context.Context,
+	_ int,
+	maxCapacity int,
+) (*upstream.RunnerScaleSetMessage, error) {
+	client.started <- maxCapacity
+	client.calls++
+	if client.calls == 1 {
+		close(client.firstReturned)
+		return &upstream.RunnerScaleSetMessage{MessageID: 1, JobAvailableMessages: []*upstream.JobAvailable{{}}}, nil
+	}
+	<-ctx.Done()
+	return nil, fmt.Errorf("blocked GitHub poll: %w", ctx.Err())
+}
+
+func (*invalidMessageThenBlockingClient) DeleteMessage(context.Context, int) error { return nil }
+func (*invalidMessageThenBlockingClient) AcquireRequests(
+	_ context.Context,
+	requestIDs []int64,
+) ([]int64, error) {
+	return requestIDs, nil
+}
+
 type stubbornCapacityMessageClient struct {
 	started chan int
 	release chan struct{}
@@ -654,17 +641,25 @@ func (handler recordingQueueEventHandler) Request(_ context.Context, request cor
 	handler.queued <- request
 	return core.EnqueueResult{Outcome: core.QueueQueued, Job: core.Job{ID: core.JobID{1}}}, nil
 }
-func (recordingQueueEventHandler) RunnerStarted(context.Context, core.SourceReference) error {
-	return nil
+func (recordingQueueEventHandler) RunnerStarted(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
 }
-func (recordingQueueEventHandler) Terminalize(context.Context, core.SourceReference) error {
-	return nil
+func (recordingQueueEventHandler) Terminalize(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
 }
 
 func (eventHandlerFake) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
-func (eventHandlerFake) RunnerStarted(context.Context, core.SourceReference) error {
-	return nil
+func (eventHandlerFake) RunnerStarted(context.Context, core.RunnerObservation) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
 }
-func (eventHandlerFake) Terminalize(context.Context, core.SourceReference) error { return nil }
+func (eventHandlerFake) Terminalize(context.Context, core.RunnerObservation) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
+}

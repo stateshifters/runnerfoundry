@@ -73,6 +73,53 @@ func TestGitHubManagerObserverPublishesProgressAndFailureDetail(t *testing.T) {
 	})
 }
 
+func TestGitHubLifecycleFailureLoggingText(t *testing.T) {
+	output := githubLifecycleFailureLog(t, "text")
+	assertLogFragments(t, output, []string{
+		"SQLite transaction failed while attempting to record terminal state for GitHub runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"repository=https://github.com/example/project", "runner_pool=linux", "message_id=91",
+		"runner_name=runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"github_event_type=JobCompleted", "state_operation=terminalize_job",
+	})
+}
+
+func TestGitHubLifecycleFailureLoggingJSON(t *testing.T) {
+	var record map[string]any
+	if err := json.Unmarshal([]byte(githubLifecycleFailureLog(t, "json")), &record); err != nil {
+		t.Fatalf("decode lifecycle JSON log: %v", err)
+	}
+	assertJSONFields(t, record, map[string]any{
+		"msg": "SQLite transaction failed while attempting to record terminal state for GitHub runner " +
+			"runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8 for https://github.com/example/project in Runner Pool linux",
+		"repository": "https://github.com/example/project", "runner_pool": "linux", "message_id": float64(91),
+		"runner_name":       "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"github_event_type": "JobCompleted", "state_operation": "terminalize_job",
+	})
+}
+
+func githubLifecycleFailureLog(t *testing.T, format string) string {
+	t.Helper()
+	destination := &memoryLogDestination{}
+	reporter := newOperationalReporterFixture(t, format, destination)
+	observer := newGitHubManagerObserver(reporter.reportMaintenance, builderTime)
+	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
+		Operation: "job_observation", Stage: "persist_terminal", Outcome: "failed",
+		Repository: "https://github.com/example/project", RunnerPool: "linux", MessageID: 91,
+		RunnerName: "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8", EventType: "JobCompleted",
+		StateBackend: "sqlite", StateOperation: "terminalize_job", Err: errors.New("state operation failed"),
+	})
+	return strings.TrimSpace(destination.String())
+}
+
+func assertJSONFields(t *testing.T, record map[string]any, want map[string]any) {
+	t.Helper()
+	for key, value := range want {
+		if record[key] != value {
+			t.Fatalf("JSON field %q = %#v, want %#v in %#v", key, record[key], value, record)
+		}
+	}
+}
+
 func TestOperationalReporterPublishesProgressWithoutChangingHealth(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
@@ -211,7 +258,8 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 	reporter := newOperationalReporterFixture(t, "json", destination)
 	jobID := core.JobID{1}
 	reporter.Report(operationalEvent{operation: "runner_retry", outcome: "source_terminal",
-		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", installationID: 11, runnerGroupID: 12,
+		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", runnerName: "runnerfoundry-job",
+		githubEventType: "JobCompleted", installationID: 11, runnerGroupID: 12,
 		scaleSetID: 13, messageID: 14, count: 2, capacity: 3, provider: "docker", composeService: "runner",
 		stateBackend: "postgresql", stateOperation: "retry_unstarted"})
 
@@ -220,7 +268,8 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 		t.Fatalf("decode JSON log: %v", err)
 	}
 	want := map[string]any{"operation": "runner_retry", "member": "member-a", "outcome": "source_terminal",
-		"runner_pool": "linux", "job_id": jobID.String(), "runner_id": "runner-1", "installation_id": float64(11),
+		"runner_pool": "linux", "job_id": jobID.String(), "runner_id": "runner-1",
+		"runner_name": "runnerfoundry-job", "github_event_type": "JobCompleted", "installation_id": float64(11),
 		"runner_group_id": float64(12), "scale_set_id": float64(13), "message_id": float64(14),
 		"count": float64(2), "capacity": float64(3), "provider": "docker", "compose_service": "runner",
 		"state_backend": "postgresql", "state_operation": "retry_unstarted"}

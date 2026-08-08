@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
 )
@@ -299,19 +297,6 @@ func appendFailure(failures []error, err error) []error {
 		return failures
 	}
 	return append(failures, err)
-}
-
-func runnerName(jobID core.JobID) core.RunnerName {
-	return core.RunnerName("runnerfoundry-" + jobID.String())
-}
-
-func isRunnerFoundryName(stableRunnerName core.RunnerName) bool {
-	identifier, found := strings.CutPrefix(string(stableRunnerName), "runnerfoundry-")
-	if !found {
-		return false
-	}
-	jobID, err := uuid.Parse(identifier)
-	return err == nil && jobID != uuid.Nil
 }
 
 func instancesForPool(instances []execution.RunnerInstance, runnerPool core.RunnerPool) []execution.RunnerInstance {

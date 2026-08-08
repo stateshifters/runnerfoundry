@@ -13,7 +13,10 @@ func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
 	assertTransactionalMutationFailures(t, []string{"mark processing started", "tombstone delayed start", "remove queued retry"},
-		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), source) })
+		func(store *Store) error {
+			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			return err
+		})
 }
 
 func TestRetryUnstartedProcessingHandlesIneligibleTransition(t *testing.T) {

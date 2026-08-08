@@ -13,7 +13,109 @@ func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
 	assertTransactionalMutationFailures(t, []string{"serialize source", "mark processing started", "tombstone delayed start", "remove queued retry"},
-		func(store *Store) error { return store.MarkRunnerStarted(context.Background(), source) })
+		func(store *Store) error {
+			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			return err
+		})
+}
+
+func TestLifecycleObservationsRejectInvalidIdentityBeforeMutation(t *testing.T) {
+	t.Parallel()
+	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
+		"started": func(store *Store) (core.ObservationResult, error) {
+			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{})
+		},
+		"terminal": func(store *Store) (core.ObservationResult, error) {
+			return store.Terminalize(context.Background(), core.JobIdentity{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			protocol := &recordedTransaction{}
+			if _, err := operation(NewStore(protocol.executor())); !errors.Is(err, core.ErrInvalidJobIdentity) ||
+				protocol.commitCalls != 0 || len(protocol.statements) != 0 {
+				t.Fatalf("statements=%#v commits=%d error=%v", protocol.statements, protocol.commitCalls, err)
+			}
+		})
+	}
+}
+
+func TestJobIdentityDisappearingAfterSerializationIsUnmatched(t *testing.T) {
+	t.Parallel()
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	protocol := &recordedTransaction{rows: []Row{
+		rowFromValues([]any{string(source.Adapter), string(source.ID)}), noPostgresRow(),
+	}}
+	result, err := NewStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
+	if err != nil || result.Outcome != core.ObservationUnmatched || protocol.commitCalls != 1 || len(protocol.statements) != 3 {
+		t.Fatalf("result=%#v statements=%#v commits=%d error=%v", result, protocol.statements, protocol.commitCalls, err)
+	}
+}
+
+func TestJobIdentityChangingSourceAfterSerializationIsRejected(t *testing.T) {
+	t.Parallel()
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	changed := core.SourceReference{Adapter: "github", ID: "other"}
+	protocol := &recordedTransaction{rows: []Row{
+		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
+		rowFromValues([]any{string(changed.Adapter), string(changed.ID)}),
+	}}
+	result, err := NewStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
+	if !errors.Is(err, core.ErrJobIdentityMismatch) || result != (core.ObservationResult{}) ||
+		protocol.commitCalls != 0 || len(protocol.statements) != 3 {
+		t.Fatalf("result=%#v statements=%#v commits=%d error=%v", result, protocol.statements, protocol.commitCalls, err)
+	}
+}
+
+func TestLifecycleObservationReportsResolutionAndClassificationFailures(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	for name, test := range map[string]struct {
+		transaction Transaction
+		operation   func(*Store) (core.ObservationResult, error)
+	}{
+		"job resolution": {
+			transaction: transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil),
+			operation: func(store *Store) (core.ObservationResult, error) {
+				return store.Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
+			},
+		},
+		"started classification": {
+			transaction: postgresOutcomeTransaction([]Row{{scan: func(...any) error { return protocolErr }}}, 0, new(int)),
+			operation: func(store *Store) (core.ObservationResult, error) {
+				return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := test.operation(NewStore(Executor{begin: transactionBeginning(test.transaction)})); err == nil {
+				t.Fatal("expected protocol failure")
+			}
+		})
+	}
+}
+
+func TestLifecycleObservationReportsAffectedRowCountFailures(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
+		"started": func(store *Store) (core.ObservationResult, error) {
+			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+		},
+		"terminal": func(store *Store) (core.ObservationResult, error) {
+			return store.Terminalize(context.Background(), core.JobIdentity{Source: source})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transaction := Transaction{execute: func(context.Context, string, ...any) (Result, error) {
+				return Result{rowsAffected: func() (int64, error) { return 0, protocolErr }}, nil
+			}, rollback: successfulCompletion}
+			if _, err := operation(NewStore(Executor{begin: transactionBeginning(transaction)})); err == nil {
+				t.Fatal("expected affected-row failure")
+			}
+		})
+	}
 }
 
 func TestRetryUnstartedHandlesRejectedTransitions(t *testing.T) {

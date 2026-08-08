@@ -80,7 +80,10 @@ func TestTerminalizeSourceReportsTransactionalFailures(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
 	assertTransactionalMutationFailures(t, []string{"serialize source", "tombstone source", "remove queued job"},
-		func(store *Store) error { return store.TerminalizeSource(context.Background(), source) })
+		func(store *Store) error {
+			_, err := store.Terminalize(context.Background(), core.JobIdentity{Source: source})
+			return err
+		})
 }
 
 func assertTransactionalMutationFailures(t *testing.T, steps []string, operation func(*Store) error) {

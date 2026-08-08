@@ -64,6 +64,34 @@ func TestGitHubSourceRuntimeRefreshesPeerCapacityAfterMessage(t *testing.T) {
 	mustCloseGitHubSource(t, source)
 }
 
+func TestGitHubSourceRuntimeDoesNotRefreshPeerCapacityAfterUnhandledMessage(t *testing.T) {
+	t.Parallel()
+
+	failedClient := newInvalidMessageThenBlockingClient()
+	peerClient := newBlockingCapacityMessageClient()
+	adapters := []*githubsource.Adapter{
+		{Client: failedClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+	}
+	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}}
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
+	mustOpenGitHubSource(t, source)
+	mustPollGitHubSource(t, source, now.Add(-time.Minute))
+	assertPolledCapacity(t, failedClient.started, 7, "failed repository")
+	assertPolledCapacity(t, peerClient.started, 7, "peer repository")
+	<-failedClient.firstReturned
+	preserveCompletedPollResult(source, source.adapters[0])
+
+	capacities.capacities["linux"] = 6
+	if err := source.Poll(context.Background(), now.Add(-time.Minute)); err == nil {
+		t.Fatal("unhandled GitHub message error was not reported")
+	}
+	assertPolledCapacity(t, failedClient.started, 6, "retried failed repository")
+	assertNoPolledCapacity(t, peerClient.started, "peer repository")
+	mustCloseGitHubSource(t, source)
+}
+
 func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
 	t.Parallel()
 

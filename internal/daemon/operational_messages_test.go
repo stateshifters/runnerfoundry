@@ -41,8 +41,7 @@ func TestGitHubOperationalMessagesNameTheirSubjects(t *testing.T) {
 	})
 }
 
-func TestGitHubMessageLogsNameRepositoryPoolAndRequest(t *testing.T) {
-	failed := errors.New("failed")
+func TestGitHubPollMessagesNameRepositoryPoolAndMessage(t *testing.T) {
 	assertOperationalMessages(t, []operationalMessageCase{
 		{operationalEvent{operation: "source_poll", stage: "acknowledge_message", outcome: "failed",
 			messageID: 9, repository: "repo", runnerPool: "linux"}, "Failed to acknowledge GitHub message 9"},
@@ -52,17 +51,38 @@ func TestGitHubMessageLogsNameRepositoryPoolAndRequest(t *testing.T) {
 			"polling failed for repo"},
 		{operationalEvent{operation: "source_poll", outcome: "completed", repository: "repo", runnerPool: "linux"},
 			"polling completed for repo"},
+	})
+}
+
+func TestGitHubIngestionMessagesNameRepositoryPoolAndRequest(t *testing.T) {
+	assertOperationalMessages(t, []operationalMessageCase{
 		{operationalEvent{operation: "job_ingestion", outcome: "failed", repository: "repo", runnerPool: "linux",
 			sourceRequestID: 42}, "Failed to persist GitHub runner request 42"},
 		{operationalEvent{operation: "job_ingestion", outcome: string(core.QueueAlreadyQueued), repository: "repo",
 			runnerPool: "linux", sourceRequestID: 42}, "is already queued"},
 		{operationalEvent{operation: "job_ingestion", outcome: string(core.QueueQueued), repository: "repo",
 			runnerPool: "linux", sourceRequestID: 42}, "Queued GitHub runner request 42"},
+	})
+}
+
+func TestGitHubObservationMessagesNameRepositoryPoolAndIdentity(t *testing.T) {
+	failed := errors.New("failed")
+	assertOperationalMessages(t, []operationalMessageCase{
 		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_terminal",
 			stateBackend: "sqlite", repository: "repo", runnerPool: "linux", sourceRequestID: 42, err: failed},
-			"SQLite transaction failed while terminalizing"},
+			"SQLite transaction failed while attempting to record terminal state for GitHub request 42"},
 		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_runner_started",
-			repository: "repo", runnerPool: "linux", sourceRequestID: 42, err: failed}, "recording runner state"},
+			repository: "repo", runnerPool: "linux", runnerName: "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+			githubEventType: "JobStarted", err: failed}, "GitHub runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8"},
+		{operationalEvent{operation: "job_observation", outcome: string(core.ObservationUnmatched),
+			repository: "repo", runnerPool: "linux", runnerName: "legacy-runner", githubEventType: "JobCompleted"},
+			"Acknowledged unmatched GitHub JobCompleted event for runner legacy-runner"},
+		{operationalEvent{operation: "job_observation", outcome: string(core.ObservationApplied),
+			repository: "repo", runnerPool: "linux", sourceRequestID: 42, runnerName: "runner-name",
+			githubEventType: "JobStarted"}, "Recorded GitHub JobStarted event for GitHub request 42 and runner runner-name"},
+		{operationalEvent{operation: "job_observation", outcome: string(core.ObservationApplied),
+			repository: "repo", runnerPool: "linux"},
+			"Recorded GitHub lifecycle observation in repo and Runner Pool linux"},
 		{operationalEvent{operation: "job_observation", outcome: "completed", repository: "repo",
 			runnerPool: "linux", count: 2}, "Recorded 2 GitHub job observations"},
 	})

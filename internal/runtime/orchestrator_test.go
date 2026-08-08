@@ -61,8 +61,8 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 type jobStoreFake struct {
 	enqueue         func(context.Context, core.JobRequest) (core.Job, bool, error)
 	take            func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
-	terminalize     func(context.Context, core.SourceReference) error
-	started         func(context.Context, core.SourceReference) error
+	terminalize     func(context.Context, core.JobIdentity) (core.ObservationResult, error)
+	started         func(context.Context, core.JobIdentity) (core.ObservationResult, error)
 	list            func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
 	poolList        func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error)
 	retry           func(context.Context, core.JobID) (bool, error)
@@ -92,11 +92,11 @@ func (store *jobStoreFake) Queue(ctx context.Context, request core.JobRequest) (
 	}
 	return core.EnqueueResult{Job: job, Outcome: outcome}, err
 }
-func (store *jobStoreFake) TerminalizeSource(ctx context.Context, source core.SourceReference) error {
-	return store.terminalize(ctx, source)
+func (store *jobStoreFake) Terminalize(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
+	return store.terminalize(ctx, identity)
 }
-func (store *jobStoreFake) MarkRunnerStarted(ctx context.Context, source core.SourceReference) error {
-	return store.started(ctx, source)
+func (store *jobStoreFake) MarkRunnerStarted(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
+	return store.started(ctx, identity)
 }
 func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.MemberID, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	if store.list == nil {
