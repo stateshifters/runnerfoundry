@@ -290,7 +290,7 @@ func assertMessageRemainsAfterFailure(
 	}
 }
 
-func TestPollOnceValidatesRelevantEventsBeforeAcquisition(t *testing.T) {
+func TestPollOnceAcknowledgesNonActionableEvidenceWithoutAcquisition(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]*upstream.RunnerScaleSetMessage{
@@ -308,10 +308,10 @@ func TestPollOnceValidatesRelevantEventsBeforeAcquisition(t *testing.T) {
 			t.Parallel()
 			client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 			adapter := newAdapter(client, &recordingEventHandler{events: &client.events})
-			if _, err := adapter.PollOnce(context.Background(), 0); err == nil {
-				t.Fatal("PollOnce() error = nil, want invalid event failure")
+			if received, err := adapter.PollOnce(context.Background(), 0); err != nil || !received {
+				t.Fatalf("PollOnce() = (%t, %v), want received success", received, err)
 			}
-			if len(client.requested) != 0 || len(client.acknowledged) != 0 {
+			if len(client.requested) != 0 || !reflect.DeepEqual(client.acknowledged, []int{message.MessageID}) {
 				t.Fatalf("invalid event effects: acquisitions=%#v acknowledgements=%#v",
 					client.requested, client.acknowledged)
 			}

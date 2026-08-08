@@ -29,38 +29,43 @@ type operationalStatus struct {
 }
 
 type operationalEvent struct {
-	component         string
-	operation         string
-	stage             string
-	outcome           string
-	runnerPool        core.RunnerPool
-	jobID             core.JobID
-	runnerID          string
-	runnerName        core.RunnerName
-	repository        string
-	endpoint          string
-	diagnostic        string
-	sourceRequestID   int64
-	installationID    int64
-	runnerGroupID     int64
-	scaleSetID        int64
-	messageID         int64
-	githubEventType   string
-	count             int
-	repositoryCount   int
-	installationCount int
-	current           int
-	total             int
-	capacity          int
-	duration          time.Duration
-	leadership        operationalLeadership
-	err               error
-	errorCategory     string
-	provider          string
-	composeService    string
-	stateBackend      string
-	stateOperation    string
-	sourcePC          uintptr
+	component          string
+	operation          string
+	stage              string
+	outcome            string
+	runnerPool         core.RunnerPool
+	jobID              core.JobID
+	runnerID           string
+	runnerName         core.RunnerName
+	repository         string
+	endpoint           string
+	diagnostic         string
+	sourceRequestID    int64
+	sourceRequestIDSet bool
+	installationID     int64
+	runnerGroupID      int64
+	scaleSetID         int64
+	messageID          int64
+	githubEventType    string
+	githubJobID        string
+	workflowRunID      int64
+	githubRunnerID     int64
+	identityReason     string
+	count              int
+	repositoryCount    int
+	installationCount  int
+	current            int
+	total              int
+	capacity           int
+	duration           time.Duration
+	leadership         operationalLeadership
+	err                error
+	errorCategory      string
+	provider           string
+	composeService     string
+	stateBackend       string
+	stateOperation     string
+	sourcePC           uintptr
 }
 
 type operationalEventEnvelope struct {
@@ -219,6 +224,10 @@ func (reporter *productionRuntimeReporter) reportEvent(now time.Time, event oper
 	}
 	if event.outcome == "recovered" {
 		reporter.reportRecovery(now, event)
+		return
+	}
+	if event.outcome == "ignored" {
+		reporter.logEvent(slog.LevelWarn, event, nil)
 		return
 	}
 	if _, failed := reporter.failures[operationalFailureKey(event)]; failed {

@@ -69,7 +69,12 @@ var operationalDefaultStages = map[string]string{
 }
 
 func eventIdentityAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 7)
+	attributes := coreIdentityAttributes(event)
+	return append(attributes, githubIdentityAttributes(event)...)
+}
+
+func coreIdentityAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 4)
 	if event.runnerPool != "" {
 		attributes = append(attributes, slog.String("runner_pool", string(event.runnerPool)))
 	}
@@ -82,6 +87,11 @@ func eventIdentityAttributes(event operationalEvent) []slog.Attr {
 	if event.runnerName != "" {
 		attributes = append(attributes, slog.String("runner_name", string(event.runnerName)))
 	}
+	return attributes
+}
+
+func githubIdentityAttributes(event operationalEvent) []slog.Attr {
+	attributes := make([]slog.Attr, 0, 8)
 	if event.installationID != 0 {
 		attributes = append(attributes, slog.Int64("installation_id", event.installationID))
 	}
@@ -96,6 +106,15 @@ func eventIdentityAttributes(event operationalEvent) []slog.Attr {
 	}
 	if event.githubEventType != "" {
 		attributes = append(attributes, slog.String("github_event_type", event.githubEventType))
+	}
+	if event.githubJobID != "" {
+		attributes = append(attributes, slog.String("github_job_id", event.githubJobID))
+	}
+	if event.workflowRunID != 0 {
+		attributes = append(attributes, slog.Int64("workflow_run_id", event.workflowRunID))
+	}
+	if event.githubRunnerID != 0 {
+		attributes = append(attributes, slog.Int64("github_runner_id", event.githubRunnerID))
 	}
 	return attributes
 }
@@ -131,8 +150,11 @@ func eventContextAttributes(event operationalEvent) []slog.Attr {
 	if event.diagnostic != "" {
 		attributes = append(attributes, slog.String("error", event.diagnostic))
 	}
-	if event.sourceRequestID != 0 {
+	if event.sourceRequestID != 0 || event.sourceRequestIDSet {
 		attributes = append(attributes, slog.Int64("source_request_id", event.sourceRequestID))
+	}
+	if event.identityReason != "" {
+		attributes = append(attributes, slog.String("identity_reason", event.identityReason))
 	}
 	return attributes
 }

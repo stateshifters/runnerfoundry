@@ -16,12 +16,28 @@ import (
 func TestRunnerNameRedeliveryDoesNotBlockFollowingDurableDemand(t *testing.T) {
 	t.Parallel()
 	fixture := newRuntimeCompositionFixture()
-	fixture.pollSuccessfully(t, "lifecycle", 1)
-	fixture.pollSuccessfully(t, "demand", 1)
+	fixture.pollSuccessfully(t, "lifecycle")
+	fixture.pollSuccessfully(t, "demand")
 	fixture.assertQueuedDemand(t, sourceReference(t, 42))
 	fixture.assertJobProcessingWoken(t, "linux")
 	if !reflect.DeepEqual(fixture.client.acknowledged, []int{1, 2}) {
 		t.Fatalf("acknowledged messages = %#v, want [1 2]", fixture.client.acknowledged)
+	}
+}
+
+func TestNonActionableDemandEvidenceDoesNotBlockFollowingDurableDemand(t *testing.T) {
+	t.Parallel()
+	fixture := newRuntimeCompositionFixtureWithMessages([]*upstream.RunnerScaleSetMessage{
+		{MessageID: 3, JobAvailableMessages: []*upstream.JobAvailable{{}}},
+		availableMessage(4, 43),
+	})
+	fixture.client.acquired = []int64{43}
+	fixture.pollSuccessfully(t, "non-actionable evidence")
+	fixture.pollSuccessfully(t, "demand")
+	fixture.assertQueuedDemand(t, sourceReference(t, 43))
+	fixture.assertJobProcessingWoken(t, "linux")
+	if !reflect.DeepEqual(fixture.client.acknowledged, []int{3, 4}) {
+		t.Fatalf("acknowledged messages = %#v, want [3 4]", fixture.client.acknowledged)
 	}
 }
 
@@ -33,19 +49,23 @@ type runtimeCompositionFixture struct {
 }
 
 func newRuntimeCompositionFixture() runtimeCompositionFixture {
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{
+	return newRuntimeCompositionFixtureWithMessages([]*upstream.RunnerScaleSetMessage{
 		{MessageID: 1, JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
 		availableMessage(2, 42),
-	}, acquired: []int64{42}}
+	})
+}
+
+func newRuntimeCompositionFixtureWithMessages(messages []*upstream.RunnerScaleSetMessage) runtimeCompositionFixture {
+	client := &recordingClient{messages: messages, acquired: []int64{42}}
 	store := &runtimeCompositionStore{}
 	woken := make(chan core.RunnerPool, 1)
 	handler := runtimeengine.NewQueueHandlerWithWake(store, func(pool core.RunnerPool) { woken <- pool })
 	return runtimeCompositionFixture{client: client, store: store, woken: woken, adapter: newAdapter(client, handler)}
 }
 
-func (fixture runtimeCompositionFixture) pollSuccessfully(t *testing.T, label string, capacity int) {
+func (fixture runtimeCompositionFixture) pollSuccessfully(t *testing.T, label string) {
 	t.Helper()
-	if result, err := fixture.adapter.Poll(context.Background(), capacity); err != nil || !result.Acknowledged {
+	if result, err := fixture.adapter.Poll(context.Background(), 1); err != nil || !result.Acknowledged {
 		t.Fatalf("%s poll = %#v, %v", label, result, err)
 	}
 }
@@ -170,7 +190,7 @@ func TestPollAcknowledgesAndReportsUnmatchedRunnerNameObservation(t *testing.T) 
 	}
 }
 
-func TestPollLeavesUnidentifiedLifecycleObservationWithCompleteGitHubContext(t *testing.T) {
+func TestPollAcknowledgesUnidentifiedLifecycleEvidenceWithCompleteGitHubContext(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 215, JobStartedMessages: []*upstream.JobStarted{{}}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
@@ -180,16 +200,58 @@ func TestPollLeavesUnidentifiedLifecycleObservationWithCompleteGitHubContext(t *
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(context.Background(), 0)
-	if err == nil || result != (githubsource.PollResult{Received: true}) {
-		t.Fatalf("Poll() = (%#v, %v), want received unhandled failure", result, err)
+	if err != nil || !result.Acknowledged {
+		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
 	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("acknowledgements = %#v, want none", client.acknowledged)
+	ignored := ignoredActivities(activities)
+	if len(ignored) != 1 {
+		t.Fatalf("ignored activities = %#v, want one", ignored)
 	}
-	failure := findManagerActivity(activities, "validate_runner_started", "failed")
-	if failure.EventType != "JobStarted" || failure.MessageID != 215 || failure.Repository != "octo/repo" ||
-		failure.RunnerPool != "linux" {
-		t.Fatalf("identity failure activity = %#v", failure)
+	evidence := ignored[0]
+	if evidence.EventType != "JobStarted" || evidence.MessageID != 215 || evidence.Repository != "octo/repo" ||
+		evidence.RunnerPool != "linux" || evidence.IdentityReason != "missing_identity" {
+		t.Fatalf("ignored identity activity = %#v", evidence)
+	}
+}
+
+func TestPollIgnoresNonActionableLifecycleEvidenceAndAppliesValidSibling(t *testing.T) {
+	t.Parallel()
+
+	message := &upstream.RunnerScaleSetMessage{MessageID: 216, JobStartedMessages: []*upstream.JobStarted{
+		nil,
+		{RunnerName: "invalid-negative", RunnerID: 501, JobMessageBase: upstream.JobMessageBase{
+			RunnerRequestID: -1, JobID: "negative-job", WorkflowRunID: 901,
+		}},
+		{RunnerID: 502, JobMessageBase: upstream.JobMessageBase{JobID: "missing-job", WorkflowRunID: 902}},
+		{RunnerName: "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe", RunnerID: 503},
+	}}
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+	handler := &recordingEventHandler{}
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(client, handler)
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+
+	result, err := adapter.Poll(context.Background(), 0)
+	if err != nil || !result.Acknowledged {
+		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
+	}
+	if len(handler.started) != 1 || handler.started[0].RunnerName !=
+		"runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe" {
+		t.Fatalf("started observations = %#v", handler.started)
+	}
+	assertLifecycleEvidence(t, ignoredActivities(activities))
+}
+
+func assertLifecycleEvidence(t *testing.T, ignored []githubsource.ManagerActivity) {
+	t.Helper()
+	if len(ignored) != 3 || ignored[0].IdentityReason != "nil_event" ||
+		ignored[1].IdentityReason != "negative_request_id" || ignored[1].GitHubRunnerID != 501 ||
+		ignored[1].GitHubJobID != "negative-job" || ignored[1].WorkflowRunID != 901 ||
+		ignored[2].IdentityReason != "missing_identity" || ignored[2].GitHubRunnerID != 502 ||
+		ignored[2].EventType != "JobStarted" {
+		t.Fatalf("ignored lifecycle activities = %#v", ignored)
 	}
 }
 
@@ -207,15 +269,25 @@ func TestPollPreservesBothLifecycleIdentitiesInFailure(t *testing.T) {
 	}
 }
 
-func TestPollRejectsNegativeLifecycleRequestID(t *testing.T) {
+func TestPollAcknowledgesNegativeLifecycleRequestIDEvidence(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 217, JobCompletedMessages: []*upstream.JobCompleted{{
 		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: -1},
 	}}}
-	result, err := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}},
-		&recordingEventHandler{}).Poll(context.Background(), 0)
-	if err == nil || result != (githubsource.PollResult{Received: true}) {
-		t.Fatalf("Poll() = %#v, %v", result, err)
+	activities := make([]githubsource.ManagerActivity, 0)
+	adapter := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}},
+		&recordingEventHandler{})
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+	result, err := adapter.Poll(context.Background(), 0)
+	if err != nil || !result.Acknowledged {
+		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
+	}
+	ignored := ignoredActivities(activities)
+	if len(ignored) != 1 || ignored[0].IdentityReason != "negative_request_id" ||
+		ignored[0].SourceRequestID != -1 {
+		t.Fatalf("ignored activities = %#v", ignored)
 	}
 }
 

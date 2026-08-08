@@ -17,30 +17,35 @@ const (
 // ManagerActivity describes observable progress through GitHub-owned lifecycle work.
 // It never contains credentials, request headers, or message payloads.
 type ManagerActivity struct {
-	Visibility        ActivityVisibility
-	Operation         string
-	Stage             string
-	Outcome           string
-	Repository        string
-	RunnerPool        core.RunnerPool
-	SourceRequestID   int64
-	RunnerName        core.RunnerName
-	EventType         string
-	JobID             core.JobID
-	InstallationID    int64
-	RunnerGroupID     int64
-	ScaleSetID        int64
-	MessageID         int64
-	StateBackend      string
-	StateOperation    string
-	Current           int
-	Total             int
-	Count             int
-	RepositoryCount   int
-	InstallationCount int
-	Duration          time.Duration
-	Err               error
-	OriginPC          uintptr
+	Visibility         ActivityVisibility
+	Operation          string
+	Stage              string
+	Outcome            string
+	Repository         string
+	RunnerPool         core.RunnerPool
+	SourceRequestID    int64
+	SourceRequestIDSet bool
+	RunnerName         core.RunnerName
+	EventType          string
+	GitHubJobID        string
+	WorkflowRunID      int64
+	GitHubRunnerID     int64
+	IdentityReason     string
+	JobID              core.JobID
+	InstallationID     int64
+	RunnerGroupID      int64
+	ScaleSetID         int64
+	MessageID          int64
+	StateBackend       string
+	StateOperation     string
+	Current            int
+	Total              int
+	Count              int
+	RepositoryCount    int
+	InstallationCount  int
+	Duration           time.Duration
+	Err                error
+	OriginPC           uintptr
 }
 
 // ManagerObserver receives lifecycle observations serialized by Manager. Report

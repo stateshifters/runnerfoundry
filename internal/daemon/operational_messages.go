@@ -102,18 +102,11 @@ func inventoryRefreshMessage(event operationalEvent) string {
 }
 
 func githubJobObservationMessage(event operationalEvent) string {
+	if event.outcome == "ignored" {
+		return githubIgnoredLifecycleMessage(event)
+	}
 	if event.outcome == "failed" {
-		action := "record runner start for"
-		if event.stage == "persist_terminal" {
-			action = "record terminal state for"
-		}
-		subject := githubObservationSubject(event)
-		if event.stateBackend != "" {
-			return fmt.Sprintf("%s transaction failed while attempting to %s %s for %s in Runner Pool %s",
-				stateBackendDisplayName(event.stateBackend), action, subject, event.repository, event.runnerPool)
-		}
-		return fmt.Sprintf("Failed to %s %s for %s in Runner Pool %s",
-			action, subject, event.repository, event.runnerPool)
+		return githubJobObservationFailureMessage(event)
 	}
 	if event.outcome == string(core.ObservationUnmatched) {
 		return fmt.Sprintf("Acknowledged unmatched %s for runner %s in %s and Runner Pool %s",
@@ -131,6 +124,54 @@ func githubJobObservationMessage(event operationalEvent) string {
 	}
 	return fmt.Sprintf("Recorded %d GitHub job observations for %s in Runner Pool %s",
 		event.count, event.repository, event.runnerPool)
+}
+
+func githubJobObservationFailureMessage(event operationalEvent) string {
+	action := "record runner start for"
+	if event.stage == "persist_terminal" || event.stage == "validate_terminal" {
+		action = "record terminal state for"
+	}
+	subject := githubObservationSubject(event)
+	if event.stateBackend != "" {
+		return fmt.Sprintf("%s transaction failed while attempting to %s %s for %s in Runner Pool %s",
+			stateBackendDisplayName(event.stateBackend), action, subject, event.repository, event.runnerPool)
+	}
+	return fmt.Sprintf("Failed to %s %s for %s in Runner Pool %s",
+		action, subject, event.repository, event.runnerPool)
+}
+
+func githubIgnoredLifecycleMessage(event operationalEvent) string {
+	return fmt.Sprintf("%s GitHub %s event from message %d for %s in Runner Pool %s%s",
+		githubIgnoredLifecycleAction(event.stage), event.githubEventType, event.messageID,
+		event.repository, event.runnerPool, githubIgnoredIdentityReason(event.identityReason))
+}
+
+func githubIgnoredLifecycleAction(stage string) string {
+	switch stage {
+	case "validate_available":
+		return "Cannot acquire"
+	case "validate_assigned":
+		return "Cannot recover"
+	default:
+		return "Cannot correlate"
+	}
+}
+
+func githubIgnoredIdentityReason(reason string) string {
+	switch reason {
+	case "nil_event":
+		return " because the event entry is empty"
+	case "non_positive_request_id":
+		return " because it has no runner request ID"
+	case "negative_request_id":
+		return " because its runner request ID is negative"
+	case "missing_identity":
+		return " because it has neither a positive runner request ID nor a runner name"
+	case "":
+		return ""
+	default:
+		return " because its lifecycle identity is invalid"
+	}
 }
 
 func githubObservationSubject(event operationalEvent) string {
@@ -154,6 +195,9 @@ func githubEventDisplayName(eventType string) string {
 }
 
 func githubJobIngestionMessage(event operationalEvent) string {
+	if event.outcome == "ignored" {
+		return githubIgnoredLifecycleMessage(event)
+	}
 	if event.outcome == "failed" {
 		if event.stateBackend != "" {
 			return fmt.Sprintf("%s transaction failed while enqueuing GitHub runner request %d for %s in Runner Pool %s",

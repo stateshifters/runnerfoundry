@@ -149,6 +149,61 @@ func TestOperationalReporterPublishesProgressWithoutChangingHealth(t *testing.T)
 	}
 }
 
+func TestGitHubIgnoredLifecycleIsWarningEvidenceWithoutHealthFailure(t *testing.T) {
+	destination := &memoryLogDestination{}
+	reporter := newDebugRuntimeReporter(t, destination)
+	notifier := &recordingStatusNotifier{}
+	reporter.notifier = notifier
+	observer := newGitHubManagerObserver(reporter.reportMaintenance, builderTime)
+	reporter.Report(operationalEvent{operation: "job_observation", stage: "validate_terminal", outcome: "failed",
+		repository: "https://github.com/example/project", runnerPool: "linux", err: errors.New("prior failure")})
+
+	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
+		Operation: "job_observation", Stage: "validate_terminal", Outcome: "ignored",
+		Repository: "https://github.com/example/project", RunnerPool: "linux", MessageID: 91,
+		EventType: "JobCompleted", GitHubJobID: "github-job-17", WorkflowRunID: 81,
+		GitHubRunnerID: 72, IdentityReason: "missing_identity",
+	})
+
+	assertLogFragments(t, destination.String(), []string{
+		"level=WARN msg=\"Cannot correlate GitHub JobCompleted event from message 91 for https://github.com/example/project in Runner Pool linux because it has neither a positive runner request ID nor a runner name\"",
+		"type=operational_event component=github_messages operation=job_observation member=member-a stage=validate_terminal outcome=ignored",
+		"runner_pool=linux message_id=91 github_event_type=JobCompleted github_job_id=github-job-17 workflow_run_id=81 github_runner_id=72 repository=https://github.com/example/project identity_reason=missing_identity",
+	})
+	if len(reporter.failures) != 1 {
+		t.Fatalf("ignored lifecycle observation changed the prior active failure: %#v", reporter.failures)
+	}
+	if len(notifier.statuses) != 1 || notifier.statuses[0].health != healthDegraded {
+		t.Fatalf("ignored lifecycle observation changed health: %#v", notifier.statuses)
+	}
+}
+
+func TestGitHubIgnoredLifecycleJSONCarriesSourceMetadata(t *testing.T) {
+	destination := &memoryLogDestination{}
+	reporter := newOperationalReporterFixture(t, "json", destination)
+	observer := newGitHubManagerObserver(reporter.reportMaintenance, builderTime)
+	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
+		Operation: "job_ingestion", Stage: "validate_available", Outcome: "ignored",
+		Repository: "https://github.com/example/project", RunnerPool: "linux", MessageID: 92,
+		EventType: "JobAvailable", SourceRequestIDSet: true, GitHubJobID: "github-job-18", WorkflowRunID: 82,
+		IdentityReason: "non_positive_request_id",
+	})
+
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(destination.String())), &record); err != nil {
+		t.Fatalf("decode JSON log: %v", err)
+	}
+	assertJSONFields(t, record, map[string]any{
+		"level": "WARN", "msg": "Cannot acquire GitHub JobAvailable event from message 92 for https://github.com/example/project " +
+			"in Runner Pool linux because it has no runner request ID",
+		"type": "operational_event", "component": "github_messages", "operation": "job_ingestion",
+		"stage": "validate_available", "outcome": "ignored", "runner_pool": "linux",
+		"message_id": float64(92), "github_event_type": "JobAvailable", "github_job_id": "github-job-18",
+		"workflow_run_id": float64(82), "repository": "https://github.com/example/project",
+		"source_request_id": float64(0), "identity_reason": "non_positive_request_id",
+	})
+}
+
 func TestProviderObserverUsesDebugLoggingAfterProviderProtection(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)

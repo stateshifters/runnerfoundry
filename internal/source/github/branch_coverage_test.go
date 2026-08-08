@@ -38,7 +38,7 @@ func TestValidateAvailablePreservesFirstOccurrenceAndOrder(t *testing.T) {
 	}
 }
 
-func TestValidateAvailableRejectsInvalidEvents(t *testing.T) {
+func TestValidateAvailableSkipsNonActionableEvidence(t *testing.T) {
 	t.Parallel()
 
 	adapter := &Adapter{Repository: "octo/repo", RunnerPool: core.RunnerPool("linux")}
@@ -49,8 +49,8 @@ func TestValidateAvailableRejectsInvalidEvents(t *testing.T) {
 		t.Run(testName, func(t *testing.T) {
 			t.Parallel()
 			available, err := adapter.validateAvailable(events)
-			if err == nil || available != nil {
-				t.Fatalf("validateAvailable() = (%#v, %v), want nil and an error", available, err)
+			if err != nil || len(available) != 0 {
+				t.Fatalf("validateAvailable() = (%#v, %v), want empty success", available, err)
 			}
 		})
 	}

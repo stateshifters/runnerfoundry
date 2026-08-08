@@ -56,6 +56,12 @@ func TestGitHubPollMessagesNameRepositoryPoolAndMessage(t *testing.T) {
 
 func TestGitHubIngestionMessagesNameRepositoryPoolAndRequest(t *testing.T) {
 	assertOperationalMessages(t, []operationalMessageCase{
+		{operationalEvent{operation: "job_ingestion", stage: "validate_available", outcome: "ignored",
+			githubEventType: "JobAvailable", messageID: 7, repository: "repo", runnerPool: "linux"},
+			"Cannot acquire GitHub JobAvailable event from message 7"},
+		{operationalEvent{operation: "job_ingestion", stage: "validate_assigned", outcome: "ignored",
+			githubEventType: "JobAssigned", messageID: 8, repository: "repo", runnerPool: "linux"},
+			"Cannot recover GitHub JobAssigned event from message 8"},
 		{operationalEvent{operation: "job_ingestion", outcome: "failed", repository: "repo", runnerPool: "linux",
 			sourceRequestID: 42}, "Failed to persist GitHub runner request 42"},
 		{operationalEvent{operation: "job_ingestion", outcome: string(core.QueueAlreadyQueued), repository: "repo",
@@ -68,9 +74,18 @@ func TestGitHubIngestionMessagesNameRepositoryPoolAndRequest(t *testing.T) {
 func TestGitHubObservationMessagesNameRepositoryPoolAndIdentity(t *testing.T) {
 	failed := errors.New("failed")
 	assertOperationalMessages(t, []operationalMessageCase{
+		{operationalEvent{operation: "job_observation", stage: "validate_runner_started", outcome: "ignored",
+			githubEventType: "JobStarted", messageID: 9, repository: "repo", runnerPool: "linux"},
+			"Cannot correlate GitHub JobStarted event from message 9"},
+		{operationalEvent{operation: "job_observation", stage: "validate_terminal", outcome: "ignored",
+			githubEventType: "JobCompleted", messageID: 10, repository: "repo", runnerPool: "linux"},
+			"Cannot correlate GitHub JobCompleted event from message 10"},
 		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_terminal",
 			stateBackend: "sqlite", repository: "repo", runnerPool: "linux", sourceRequestID: 42, err: failed},
 			"SQLite transaction failed while attempting to record terminal state for GitHub request 42"},
+		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "validate_terminal",
+			repository: "repo", runnerPool: "linux", sourceRequestID: 42, err: failed},
+			"Failed to record terminal state for GitHub request 42"},
 		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_runner_started",
 			repository: "repo", runnerPool: "linux", runnerName: "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
 			githubEventType: "JobStarted", err: failed}, "GitHub runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8"},
@@ -85,6 +100,29 @@ func TestGitHubObservationMessagesNameRepositoryPoolAndIdentity(t *testing.T) {
 			"Recorded GitHub lifecycle observation in repo and Runner Pool linux"},
 		{operationalEvent{operation: "job_observation", outcome: "completed", repository: "repo",
 			runnerPool: "linux", count: 2}, "Recorded 2 GitHub job observations"},
+	})
+}
+
+func TestIgnoredGitHubMessagesExplainEveryIdentityFailure(t *testing.T) {
+	assertOperationalMessages(t, []operationalMessageCase{
+		{operationalEvent{operation: "job_observation", outcome: "ignored", stage: "validate_terminal",
+			githubEventType: "JobCompleted", messageID: 10, repository: "repo", runnerPool: "linux",
+			identityReason: "nil_event"}, "because the event entry is empty"},
+		{operationalEvent{operation: "job_ingestion", outcome: "ignored", stage: "validate_available",
+			githubEventType: "JobAvailable", messageID: 11, repository: "repo", runnerPool: "linux",
+			identityReason: "non_positive_request_id"}, "because it has no runner request ID"},
+		{operationalEvent{operation: "job_observation", outcome: "ignored", stage: "validate_runner_started",
+			githubEventType: "JobStarted", messageID: 12, repository: "repo", runnerPool: "linux",
+			identityReason: "negative_request_id"}, "because its runner request ID is negative"},
+		{operationalEvent{operation: "job_observation", outcome: "ignored", stage: "validate_terminal",
+			githubEventType: "JobCompleted", messageID: 13, repository: "repo", runnerPool: "linux",
+			identityReason: "missing_identity"}, "because it has neither a positive runner request ID nor a runner name"},
+		{operationalEvent{operation: "job_observation", outcome: "ignored", stage: "validate_terminal",
+			githubEventType: "JobCompleted", messageID: 14, repository: "repo", runnerPool: "linux"},
+			"Runner Pool linux"},
+		{operationalEvent{operation: "job_observation", outcome: "ignored", stage: "validate_terminal",
+			githubEventType: "JobCompleted", messageID: 15, repository: "repo", runnerPool: "linux",
+			identityReason: "unexpected"}, "because its lifecycle identity is invalid"},
 	})
 }
 

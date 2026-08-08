@@ -207,6 +207,7 @@ func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.Run
 	if err != nil {
 		return err
 	}
+	adapter.reportIgnoredEvidence(effects.Ignored)
 	acquired, err := adapter.acquireAvailable(ctx, effects)
 	if err != nil {
 		return err
@@ -227,6 +228,18 @@ func (adapter *Adapter) handleMessage(ctx context.Context, message *upstream.Run
 	}
 	adapter.reportMessageCount("job_observation", "terminalized", len(effects.Completed))
 	return nil
+}
+
+func (adapter *Adapter) reportIgnoredEvidence(evidence []ignoredEvidence) {
+	for _, ignored := range evidence {
+		adapter.Observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: ignored.Operation,
+			Stage: ignored.Stage, Outcome: "ignored", Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
+			InstallationID: adapter.InstallationID, RunnerGroupID: adapter.RunnerGroupID, ScaleSetID: adapter.ScaleSetID,
+			EventType: ignored.EventType, MessageID: ignored.MessageID, SourceRequestID: ignored.SourceRequestID,
+			SourceRequestIDSet: ignored.SourceRequestIDSet,
+			RunnerName:         ignored.RunnerName, GitHubJobID: ignored.GitHubJobID, WorkflowRunID: ignored.WorkflowRunID,
+			GitHubRunnerID: ignored.GitHubRunnerID, IdentityReason: ignored.IdentityReason})
+	}
 }
 
 func (adapter *Adapter) reportMessageCount(operation, stage string, count int) {
@@ -305,65 +318,163 @@ type messageEffects struct {
 	Assigned  []identifiedRequest
 	Started   []identifiedObservation
 	Completed []identifiedObservation
+	Ignored   []ignoredEvidence
+}
+
+type ignoredEvidence struct {
+	Operation          string
+	Stage              string
+	EventType          string
+	MessageID          int64
+	SourceRequestID    int64
+	SourceRequestIDSet bool
+	RunnerName         core.RunnerName
+	GitHubJobID        string
+	WorkflowRunID      int64
+	GitHubRunnerID     int64
+	IdentityReason     string
 }
 
 func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage) (messageEffects, error) {
-	available, err := adapter.validateAvailable(message.JobAvailableMessages)
+	available, ignoredAvailable, err := adapter.classifyAvailable(int64(message.MessageID), message.JobAvailableMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
-	assigned, err := adapter.validateAssigned(message.JobAssignedMessages)
+	assigned, ignoredAssigned, err := adapter.classifyAssigned(int64(message.MessageID), message.JobAssignedMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
-	started, err := adapter.validateStarted(int64(message.MessageID), message.JobStartedMessages)
+	started, ignoredStarted, err := adapter.validateStarted(int64(message.MessageID), message.JobStartedMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
-	completed, err := adapter.validateCompleted(int64(message.MessageID), message.JobCompletedMessages)
+	completed, ignoredCompleted, err := adapter.validateCompleted(int64(message.MessageID), message.JobCompletedMessages)
 	if err != nil {
 		return messageEffects{}, err
 	}
 	return messageEffects{
 		Available: available, Assigned: assigned, Started: started, Completed: completed,
+		Ignored: append(append(append(ignoredAvailable, ignoredAssigned...), ignoredStarted...), ignoredCompleted...),
 	}, nil
 }
 
 func (adapter *Adapter) validateAvailable(
 	events []*upstream.JobAvailable,
 ) ([]identifiedRequest, error) {
-	available := make([]identifiedRequest, 0, len(events))
-	seen := make(map[int64]struct{}, len(events))
-	for _, event := range events {
-		if event == nil {
-			return nil, errors.New("GitHub JobAvailable message is nil")
-		}
-		request, err := adapter.jobRequest(event.RunnerRequestID, event.QueueTime)
-		if err != nil {
-			return nil, err
-		}
-		if _, duplicate := seen[event.RunnerRequestID]; duplicate {
-			continue
-		}
-		seen[event.RunnerRequestID] = struct{}{}
-		available = append(available, identifiedRequest{SourceID: event.RunnerRequestID, JobRequest: request})
-	}
-	return available, nil
+	available, _, err := adapter.classifyAvailable(0, events)
+	return available, err
 }
 
-func (adapter *Adapter) validateAssigned(events []*upstream.JobAssigned) ([]identifiedRequest, error) {
-	assigned := make([]identifiedRequest, 0, len(events))
+func (adapter *Adapter) classifyAvailable(
+	messageID int64,
+	events []*upstream.JobAvailable,
+) ([]identifiedRequest, []ignoredEvidence, error) {
+	return classifyRequestEvents(adapter, messageID, "JobAvailable", "validate_available", events,
+		firstRequestOccurrence,
+		func(event *upstream.JobAvailable) *upstream.JobMessageBase { return &event.JobMessageBase })
+}
+
+func (adapter *Adapter) classifyAssigned(
+	messageID int64,
+	events []*upstream.JobAssigned,
+) ([]identifiedRequest, []ignoredEvidence, error) {
+	return classifyRequestEvents(adapter, messageID, "JobAssigned", "validate_assigned", events,
+		everyRequestOccurrence,
+		func(event *upstream.JobAssigned) *upstream.JobMessageBase { return &event.JobMessageBase })
+}
+
+type requestSelector func(map[int64]struct{}, int64) bool
+
+func firstRequestOccurrence(seen map[int64]struct{}, requestID int64) bool {
+	_, duplicate := seen[requestID]
+	return !duplicate
+}
+
+func everyRequestOccurrence(map[int64]struct{}, int64) bool { return true }
+
+func classifyRequestEvents[eventType any](
+	adapter *Adapter,
+	messageID int64,
+	githubEventType string,
+	stage string,
+	events []*eventType,
+	selectRequest requestSelector,
+	baseFor func(*eventType) *upstream.JobMessageBase,
+) ([]identifiedRequest, []ignoredEvidence, error) {
+	actionable := make([]identifiedRequest, 0, len(events))
+	ignored := make([]ignoredEvidence, 0)
+	seen := make(map[int64]struct{}, len(events))
 	for _, event := range events {
-		if event == nil {
-			return nil, errors.New("GitHub JobAssigned message is nil")
-		}
-		request, err := adapter.jobRequest(event.RunnerRequestID, event.QueueTime)
+		classified, err := classifyRequestEvent(adapter,
+			messageID, githubEventType, stage, event, seen, selectRequest, baseFor,
+		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		assigned = append(assigned, identifiedRequest{SourceID: event.RunnerRequestID, JobRequest: request})
+		if classified.Evidence != nil {
+			ignored = append(ignored, *classified.Evidence)
+		}
+		if !classified.Actionable {
+			continue
+		}
+		actionable = append(actionable, classified.Request)
 	}
-	return assigned, nil
+	return actionable, ignored, nil
+}
+
+type classifiedRequestEvent struct {
+	Request    identifiedRequest
+	Evidence   *ignoredEvidence
+	Actionable bool
+}
+
+func classifyRequestEvent[eventType any](
+	adapter *Adapter,
+	messageID int64,
+	githubEventType string,
+	stage string,
+	event *eventType,
+	seen map[int64]struct{},
+	selectRequest requestSelector,
+	baseFor func(*eventType) *upstream.JobMessageBase,
+) (classifiedRequestEvent, error) {
+	if event == nil {
+		evidence := requestEvidence(messageID, githubEventType, stage, nil, "nil_event")
+		return classifiedRequestEvent{Evidence: &evidence}, nil
+	}
+	base := baseFor(event)
+	if base.RunnerRequestID <= 0 {
+		evidence := requestEvidence(messageID, githubEventType, stage, base, "non_positive_request_id")
+		return classifiedRequestEvent{Evidence: &evidence}, nil
+	}
+	if !selectRequest(seen, base.RunnerRequestID) {
+		return classifiedRequestEvent{}, nil
+	}
+	request, err := adapter.jobRequest(base.RunnerRequestID, base.QueueTime)
+	if err != nil {
+		return classifiedRequestEvent{}, err
+	}
+	seen[base.RunnerRequestID] = struct{}{}
+	return classifiedRequestEvent{Request: identifiedRequest{SourceID: base.RunnerRequestID, JobRequest: request},
+		Actionable: true}, nil
+}
+
+func requestEvidence(
+	messageID int64,
+	eventType string,
+	stage string,
+	base *upstream.JobMessageBase,
+	reason string,
+) ignoredEvidence {
+	evidence := ignoredEvidence{Operation: "job_ingestion", Stage: stage, EventType: eventType,
+		MessageID: messageID, IdentityReason: reason}
+	if base != nil {
+		evidence.SourceRequestID = base.RunnerRequestID
+		evidence.SourceRequestIDSet = true
+		evidence.GitHubJobID = base.JobID
+		evidence.WorkflowRunID = base.WorkflowRunID
+	}
+	return evidence
 }
 
 func (adapter *Adapter) jobRequest(requestID int64, enqueuedAt time.Time) (core.JobRequest, error) {
@@ -377,7 +488,7 @@ func (adapter *Adapter) jobRequest(requestID int64, enqueuedAt time.Time) (core.
 func (adapter *Adapter) request(ctx context.Context, requestID int64, request core.JobRequest) error {
 	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
 		Stage: "persist_job", Outcome: "started", Repository: adapter.Repository,
-		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID})
+		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, SourceRequestIDSet: true})
 	result, err := adapter.Handler.Request(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -385,7 +496,7 @@ func (adapter *Adapter) request(ctx context.Context, requestID int64, request co
 		}
 		activity := ManagerActivity{Visibility: ActivityInfo, Operation: "job_ingestion",
 			Stage: "persist_job", Outcome: "failed", Repository: adapter.Repository,
-			RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, Err: err}
+			RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, SourceRequestIDSet: true, Err: err}
 		activity.StateBackend, activity.StateOperation = durableStateFailureContext(err)
 		adapter.Observer.report(activity)
 		return markManagerActivityReported(fmt.Errorf("durably handle GitHub request %d: %w", requestID, err))
@@ -396,7 +507,7 @@ func (adapter *Adapter) request(ctx context.Context, requestID int64, request co
 	}
 	adapter.Observer.report(ManagerActivity{Visibility: visibility, Operation: "job_ingestion",
 		Stage: "persist_job", Outcome: string(result.Outcome), Repository: adapter.Repository,
-		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, JobID: result.Job.ID})
+		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, SourceRequestIDSet: true, JobID: result.Job.ID})
 	return nil
 }
 

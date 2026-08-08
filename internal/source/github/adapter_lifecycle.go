@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	upstream "github.com/actions/scaleset"
@@ -10,10 +9,11 @@ import (
 )
 
 type identifiedObservation struct {
-	RequestID   int64
-	MessageID   int64
-	EventType   string
-	Observation core.RunnerObservation
+	RequestID    int64
+	RequestIDSet bool
+	MessageID    int64
+	EventType    string
+	Observation  core.RunnerObservation
 }
 
 func (observation identifiedObservation) identity() string {
@@ -61,8 +61,9 @@ func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identi
 func (adapter *Adapter) reportObservationFailure(stage string, observation identifiedObservation, err error) {
 	activity := ManagerActivity{Visibility: ActivityInfo, Operation: "job_observation", Stage: stage,
 		Outcome: "failed", Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
-		SourceRequestID: observation.RequestID, RunnerName: observation.Observation.RunnerName,
-		MessageID: observation.MessageID, EventType: observation.EventType, Err: err}
+		SourceRequestID: observation.RequestID, SourceRequestIDSet: observation.RequestIDSet,
+		RunnerName: observation.Observation.RunnerName,
+		MessageID:  observation.MessageID, EventType: observation.EventType, Err: err}
 	activity.StateBackend, activity.StateOperation = durableStateFailureContext(err)
 	adapter.Observer.report(activity)
 }
@@ -74,21 +75,35 @@ func (adapter *Adapter) reportObservationResult(stage string, observation identi
 	}
 	adapter.Observer.report(ManagerActivity{Visibility: visibility, Operation: "job_observation", Stage: stage,
 		Outcome: string(result.Outcome), Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
-		SourceRequestID: observation.RequestID, RunnerName: observation.Observation.RunnerName,
-		MessageID: observation.MessageID, EventType: observation.EventType})
+		SourceRequestID: observation.RequestID, SourceRequestIDSet: observation.RequestIDSet,
+		RunnerName: observation.Observation.RunnerName,
+		MessageID:  observation.MessageID, EventType: observation.EventType})
 }
 
-func (adapter *Adapter) validateStarted(messageID int64, events []*upstream.JobStarted) ([]identifiedObservation, error) {
+func (adapter *Adapter) validateStarted(
+	messageID int64,
+	events []*upstream.JobStarted,
+) ([]identifiedObservation, []ignoredEvidence, error) {
 	return validateLifecycleEvents(adapter, messageID, "JobStarted", "validate_runner_started", events,
-		func(event *upstream.JobStarted) (int64, string) { return event.RunnerRequestID, event.RunnerName })
+		func(event *upstream.JobStarted) lifecycleEventMetadata {
+			return lifecycleEventMetadata{Base: &event.JobMessageBase, RunnerName: event.RunnerName, RunnerID: event.RunnerID}
+		})
 }
 
 func (adapter *Adapter) validateCompleted(
 	messageID int64,
 	events []*upstream.JobCompleted,
-) ([]identifiedObservation, error) {
+) ([]identifiedObservation, []ignoredEvidence, error) {
 	return validateLifecycleEvents(adapter, messageID, "JobCompleted", "validate_terminal", events,
-		func(event *upstream.JobCompleted) (int64, string) { return event.RunnerRequestID, event.RunnerName })
+		func(event *upstream.JobCompleted) lifecycleEventMetadata {
+			return lifecycleEventMetadata{Base: &event.JobMessageBase, RunnerName: event.RunnerName, RunnerID: event.RunnerID}
+		})
+}
+
+type lifecycleEventMetadata struct {
+	Base       *upstream.JobMessageBase
+	RunnerName string
+	RunnerID   int
 }
 
 func validateLifecycleEvents[eventType any](
@@ -97,26 +112,90 @@ func validateLifecycleEvents[eventType any](
 	githubEventType string,
 	validationStage string,
 	events []*eventType,
-	identity func(*eventType) (int64, string),
-) ([]identifiedObservation, error) {
+	metadataFor func(*eventType) lifecycleEventMetadata,
+) ([]identifiedObservation, []ignoredEvidence, error) {
 	observations := make([]identifiedObservation, 0, len(events))
+	ignored := make([]ignoredEvidence, 0)
 	for _, event := range events {
-		if event == nil {
-			err := fmt.Errorf("GitHub %s message is nil", githubEventType)
-			return nil, adapter.reportInvalidObservation(validationStage,
-				identifiedObservation{MessageID: messageID, EventType: githubEventType}, err)
-		}
-		requestID, runnerName := identity(event)
-		observation, err := adapter.lifecycleObservation(requestID, runnerName)
-		identified := identifiedObservation{RequestID: requestID, MessageID: messageID,
-			EventType: githubEventType, Observation: core.RunnerObservation{RunnerName: core.RunnerName(runnerName)}}
+		classified, err := classifyLifecycleEvent(
+			adapter, messageID, githubEventType, validationStage, event, metadataFor,
+		)
 		if err != nil {
-			return nil, adapter.reportInvalidObservation(validationStage, identified, err)
+			return nil, nil, err
 		}
-		identified.Observation = observation
-		observations = append(observations, identified)
+		if classified.Evidence != nil {
+			ignored = append(ignored, *classified.Evidence)
+		}
+		if !classified.Actionable {
+			continue
+		}
+		observations = append(observations, classified.Observation)
 	}
-	return observations, nil
+	return observations, ignored, nil
+}
+
+type classifiedLifecycleEvent struct {
+	Observation identifiedObservation
+	Evidence    *ignoredEvidence
+	Actionable  bool
+}
+
+func classifyLifecycleEvent[eventType any](
+	adapter *Adapter,
+	messageID int64,
+	githubEventType string,
+	validationStage string,
+	event *eventType,
+	metadataFor func(*eventType) lifecycleEventMetadata,
+) (classifiedLifecycleEvent, error) {
+	if event == nil {
+		evidence := lifecycleEvidence(messageID, githubEventType, validationStage,
+			lifecycleEventMetadata{}, "nil_event")
+		return classifiedLifecycleEvent{Evidence: &evidence}, nil
+	}
+	metadata := metadataFor(event)
+	if reason := invalidLifecycleIdentityReason(metadata.Base.RunnerRequestID, metadata.RunnerName); reason != "" {
+		evidence := lifecycleEvidence(messageID, githubEventType, validationStage, metadata, reason)
+		return classifiedLifecycleEvent{Evidence: &evidence}, nil
+	}
+	observation, err := adapter.lifecycleObservation(metadata.Base.RunnerRequestID, metadata.RunnerName)
+	identified := identifiedObservation{RequestID: metadata.Base.RunnerRequestID, MessageID: messageID,
+		RequestIDSet: true, EventType: githubEventType,
+		Observation: core.RunnerObservation{RunnerName: core.RunnerName(metadata.RunnerName)}}
+	if err != nil {
+		return classifiedLifecycleEvent{}, adapter.reportInvalidObservation(validationStage, identified, err)
+	}
+	identified.Observation = observation
+	return classifiedLifecycleEvent{Observation: identified, Actionable: true}, nil
+}
+
+func invalidLifecycleIdentityReason(requestID int64, runnerName string) string {
+	if requestID < 0 {
+		return "negative_request_id"
+	}
+	if requestID == 0 && runnerName == "" {
+		return "missing_identity"
+	}
+	return ""
+}
+
+func lifecycleEvidence(
+	messageID int64,
+	eventType string,
+	stage string,
+	metadata lifecycleEventMetadata,
+	reason string,
+) ignoredEvidence {
+	evidence := ignoredEvidence{Operation: "job_observation", Stage: stage, EventType: eventType,
+		MessageID: messageID, RunnerName: core.RunnerName(metadata.RunnerName),
+		GitHubRunnerID: int64(metadata.RunnerID), IdentityReason: reason}
+	if metadata.Base != nil {
+		evidence.SourceRequestID = metadata.Base.RunnerRequestID
+		evidence.SourceRequestIDSet = true
+		evidence.GitHubJobID = metadata.Base.JobID
+		evidence.WorkflowRunID = metadata.Base.WorkflowRunID
+	}
+	return evidence
 }
 
 func (adapter *Adapter) reportInvalidObservation(stage string, observation identifiedObservation, err error) error {
@@ -125,12 +204,6 @@ func (adapter *Adapter) reportInvalidObservation(stage string, observation ident
 }
 
 func (adapter *Adapter) lifecycleObservation(requestID int64, runnerName string) (core.RunnerObservation, error) {
-	if requestID < 0 {
-		return core.RunnerObservation{}, fmt.Errorf("GitHub runner request ID must not be negative: %d", requestID)
-	}
-	if requestID == 0 && runnerName == "" {
-		return core.RunnerObservation{}, errors.New("GitHub lifecycle observation requires a positive request ID or runner name")
-	}
 	observation := core.RunnerObservation{RunnerName: core.RunnerName(runnerName)}
 	if requestID == 0 {
 		return observation, nil

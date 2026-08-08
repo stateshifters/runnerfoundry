@@ -523,12 +523,14 @@ func (*capacityMessageClientFake) AcquireRequests(_ context.Context, requestIDs 
 }
 
 type blockingCapacityMessageClient struct {
-	started  chan int
-	messages chan *upstream.RunnerScaleSetMessage
+	started      chan int
+	messages     chan *upstream.RunnerScaleSetMessage
+	acknowledged chan int
 }
 
 func newBlockingCapacityMessageClient() *blockingCapacityMessageClient {
-	return &blockingCapacityMessageClient{started: make(chan int, 1), messages: make(chan *upstream.RunnerScaleSetMessage, 1)}
+	return &blockingCapacityMessageClient{started: make(chan int, 1),
+		messages: make(chan *upstream.RunnerScaleSetMessage, 1), acknowledged: make(chan int, 4)}
 }
 
 func (client *blockingCapacityMessageClient) GetMessage(ctx context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
@@ -541,7 +543,10 @@ func (client *blockingCapacityMessageClient) GetMessage(ctx context.Context, _, 
 	}
 }
 
-func (*blockingCapacityMessageClient) DeleteMessage(context.Context, int) error { return nil }
+func (client *blockingCapacityMessageClient) DeleteMessage(_ context.Context, messageID int) error {
+	client.acknowledged <- messageID
+	return nil
+}
 func (*blockingCapacityMessageClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
 	return requestIDs, nil
 }
@@ -576,17 +581,17 @@ func (*messageThenBlockingClient) AcquireRequests(_ context.Context, requestIDs 
 	return requestIDs, nil
 }
 
-type invalidMessageThenBlockingClient struct {
+type unhandledMessageThenBlockingClient struct {
 	started       chan int
 	firstReturned chan struct{}
 	calls         int
 }
 
-func newInvalidMessageThenBlockingClient() *invalidMessageThenBlockingClient {
-	return &invalidMessageThenBlockingClient{started: make(chan int, 1), firstReturned: make(chan struct{})}
+func newUnhandledMessageThenBlockingClient() *unhandledMessageThenBlockingClient {
+	return &unhandledMessageThenBlockingClient{started: make(chan int, 1), firstReturned: make(chan struct{})}
 }
 
-func (client *invalidMessageThenBlockingClient) GetMessage(
+func (client *unhandledMessageThenBlockingClient) GetMessage(
 	ctx context.Context,
 	_ int,
 	maxCapacity int,
@@ -595,18 +600,66 @@ func (client *invalidMessageThenBlockingClient) GetMessage(
 	client.calls++
 	if client.calls == 1 {
 		close(client.firstReturned)
-		return &upstream.RunnerScaleSetMessage{MessageID: 1, JobAvailableMessages: []*upstream.JobAvailable{{}}}, nil
+		return &upstream.RunnerScaleSetMessage{MessageID: 1, JobAvailableMessages: []*upstream.JobAvailable{{
+			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
+		}}}, nil
 	}
 	<-ctx.Done()
 	return nil, fmt.Errorf("blocked GitHub poll: %w", ctx.Err())
 }
 
-func (*invalidMessageThenBlockingClient) DeleteMessage(context.Context, int) error { return nil }
-func (*invalidMessageThenBlockingClient) AcquireRequests(
+func (*unhandledMessageThenBlockingClient) DeleteMessage(context.Context, int) error { return nil }
+func (*unhandledMessageThenBlockingClient) AcquireRequests(
 	_ context.Context,
 	requestIDs []int64,
 ) ([]int64, error) {
 	return requestIDs, nil
+}
+
+type failingQueueEventHandler struct{ err error }
+
+func (handler failingQueueEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+	return core.EnqueueResult{}, handler.err
+}
+func (failingQueueEventHandler) RunnerStarted(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
+}
+func (failingQueueEventHandler) Terminalize(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, nil
+}
+
+type lifecycleThenQueueEventHandler struct {
+	queued        chan core.JobRequest
+	woken         chan core.RunnerPool
+	terminalCalls int
+}
+
+func (handler *lifecycleThenQueueEventHandler) Request(
+	_ context.Context,
+	request core.JobRequest,
+) (core.EnqueueResult, error) {
+	handler.queued <- request
+	handler.woken <- request.RunnerPool
+	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
+}
+func (*lifecycleThenQueueEventHandler) RunnerStarted(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
+}
+func (handler *lifecycleThenQueueEventHandler) Terminalize(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	handler.terminalCalls++
+	return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
 }
 
 type stubbornCapacityMessageClient struct {
