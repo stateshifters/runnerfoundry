@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestQueueHandlerPersistsAssignment(t *testing.T) {
 		},
 	}
 	handler := runtimeengine.NewQueueHandler(store)
-	if err := handler.Request(context.Background(), request); err != nil {
+	if _, err := handler.Request(context.Background(), request); err != nil {
 		t.Fatalf("Request() error = %v", err)
 	}
 }
@@ -52,7 +53,7 @@ func TestQueueHandlerWakesProcessingOnlyAfterDurableEnqueue(t *testing.T) {
 	handler := runtimeengine.NewQueueHandlerWithWake(store, func(runnerPool core.RunnerPool) { queued <- runnerPool })
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
 
-	if err := handler.Request(context.Background(), request); err != nil {
+	if _, err := handler.Request(context.Background(), request); err != nil {
 		t.Fatalf("queue request: %v", err)
 	}
 	select {
@@ -65,7 +66,7 @@ func TestQueueHandlerWakesProcessingOnlyAfterDurableEnqueue(t *testing.T) {
 	}
 
 	queueErr = errors.New("queue unavailable")
-	if err := handler.Request(context.Background(), request); err == nil {
+	if _, err := handler.Request(context.Background(), request); err == nil {
 		t.Fatal("failed enqueue unexpectedly succeeded")
 	}
 	select {
@@ -81,7 +82,7 @@ func TestQueueHandlerDoesNotWakeForDurableNonQueuedOutcome(t *testing.T) {
 		queueOutcomeStoreFake{outcome: core.QueueProcessing},
 		func(core.RunnerPool) { woken = true },
 	)
-	if err := handler.Request(context.Background(), core.JobRequest{RunnerPool: "linux"}); err != nil {
+	if _, err := handler.Request(context.Background(), core.JobRequest{RunnerPool: "linux"}); err != nil {
 		t.Fatalf("Request() error = %v", err)
 	}
 	if woken {
@@ -111,7 +112,7 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 		terminalize: func(context.Context, core.SourceReference) error { return wantErr },
 	}
 	handler := runtimeengine.NewQueueHandler(store)
-	if err := handler.Request(context.Background(), core.JobRequest{}); !errors.Is(err, wantErr) {
+	if _, err := handler.Request(context.Background(), core.JobRequest{}); !errors.Is(err, wantErr) {
 		t.Fatalf("Request() error = %v", err)
 	}
 	if err := handler.RunnerStarted(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
@@ -119,6 +120,30 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 	}
 	if err := handler.Terminalize(context.Background(), core.SourceReference{}); !errors.Is(err, wantErr) {
 		t.Fatalf("Terminalize() error = %v", err)
+	}
+}
+
+func TestQueueHandlerClassifiesBackendFailureWithoutExposingDriverDetail(t *testing.T) {
+	wantErr := errors.New("driver included a PostgreSQL DSN")
+	store := &jobStoreFake{enqueue: func(context.Context, core.JobRequest) (core.Job, bool, error) {
+		return core.Job{}, false, wantErr
+	}}
+	handler := runtimeengine.NewQueueHandlerWithWakeAndBackend(store, nil, "postgresql")
+
+	_, err := handler.Request(context.Background(), core.JobRequest{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Request() error = %v", err)
+	}
+	var stateFailure interface {
+		StateBackend() string
+		StateOperation() string
+	}
+	if !errors.As(err, &stateFailure) || stateFailure.StateBackend() != "postgresql" ||
+		stateFailure.StateOperation() != "enqueue_job" {
+		t.Fatalf("state failure context = %#v", stateFailure)
+	}
+	if strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("classified state error exposed driver detail: %q", err)
 	}
 }
 

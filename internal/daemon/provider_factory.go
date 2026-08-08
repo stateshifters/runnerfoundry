@@ -61,7 +61,10 @@ func configuredDockerProvider(
 			Service:     configured.Docker.Service,
 		}, execution.HostIdentity(dependencies.memberHostname),
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider, dependencies.providerObserver)}
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlinesAndMetadata(
+		provider, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
+			ComposeService: configured.Docker.Service}, dependencies.providerObserver,
+	)}
 }
 
 func configuredLibvirtProvider(
@@ -84,5 +87,7 @@ func configuredLibvirtProvider(
 		template,
 		execution.HostIdentity(dependencies.memberHostname),
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(provider, dependencies.providerObserver)}, nil
+	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(
+		provider, execution.ProviderName(config.ProviderKindLibvirt), dependencies.providerObserver,
+	)}, nil
 }

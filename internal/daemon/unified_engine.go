@@ -201,6 +201,19 @@ func (engine *UnifiedEngine) phaseCompleted(operation, stage string, runnerPool 
 		operation: operation, stage: stage, outcome: outcome, runnerPool: runnerPool,
 		duration: engine.currentTime().Sub(started),
 	})
+	if err != nil {
+		if operationalErrorWasReported(err) {
+			return
+		}
+		reportOperational(engine.report, operationalEvent{
+			operation: operation, stage: stage, outcome: "failed", runnerPool: runnerPool,
+			duration: engine.currentTime().Sub(started), err: err,
+		})
+		return
+	}
+	reportOperational(engine.report, operationalEvent{
+		operation: operation, stage: stage, outcome: "recovered", runnerPool: runnerPool,
+	})
 }
 
 func (engine *UnifiedEngine) refreshInventory(ctx context.Context) error {

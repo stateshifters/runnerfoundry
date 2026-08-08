@@ -1,6 +1,7 @@
 package github
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -23,6 +24,13 @@ type ManagerActivity struct {
 	Repository        string
 	RunnerPool        core.RunnerPool
 	SourceRequestID   int64
+	JobID             core.JobID
+	InstallationID    int64
+	RunnerGroupID     int64
+	ScaleSetID        int64
+	MessageID         int64
+	StateBackend      string
+	StateOperation    string
 	Current           int
 	Total             int
 	Count             int
@@ -30,6 +38,7 @@ type ManagerActivity struct {
 	InstallationCount int
 	Duration          time.Duration
 	Err               error
+	OriginPC          uintptr
 }
 
 // ManagerObserver receives lifecycle observations serialized by Manager. Report
@@ -42,6 +51,7 @@ type ManagerObserver struct {
 
 func (observer ManagerObserver) report(activity ManagerActivity) {
 	if observer.Report != nil {
+		captureManagerActivityOrigin(&activity, 1)
 		observer.Report(activity)
 	}
 }
@@ -54,9 +64,20 @@ func (observer ManagerObserver) currentTime() time.Time {
 }
 
 func (manager *Manager) report(activity ManagerActivity) {
+	captureManagerActivityOrigin(&activity, 1)
 	manager.activityMu.Lock()
 	defer manager.activityMu.Unlock()
 	manager.observer.report(activity)
+}
+
+func captureManagerActivityOrigin(activity *ManagerActivity, skip int) {
+	if activity.OriginPC != 0 {
+		return
+	}
+	programCounters := make([]uintptr, 1)
+	if runtime.Callers(skip+2, programCounters) != 0 {
+		activity.OriginPC = programCounters[0]
+	}
 }
 
 func shouldReportManagerProgress(current int, total int) bool {

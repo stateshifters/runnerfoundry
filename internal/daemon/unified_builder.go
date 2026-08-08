@@ -59,7 +59,9 @@ func buildUnifiedGeneration(
 			processor.Wake(runnerPool)
 		}
 	}
-	engine := buildConfiguredEngine(assembled, dependencies, discoveryInterval, jobGate, wakeJobs)
+	engine := buildConfiguredEngine(
+		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, stateBackendName(configured.State),
+	)
 	processor = newQueuedJobProcessor(engine, jobGate, dependencies.report)
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
 	generation := newMaintenanceGeneration(
@@ -76,10 +78,11 @@ func buildConfiguredEngine(
 	discoveryInterval time.Duration,
 	jobGate *queuedJobEligibilityGate,
 	wakeJobs func(core.RunnerPool),
+	stateBackend string,
 ) *UnifiedEngine {
 	source := newGitHubSourceRuntime(
 		dependencies.manager, dependencies.store, string(dependencies.member),
-		runtimeengine.NewQueueHandlerWithWake(dependencies.store, wakeJobs),
+		runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, wakeJobs, stateBackend),
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
 	source.report = dependencies.report
@@ -94,6 +97,13 @@ func buildConfiguredEngine(
 	})
 }
 
+func stateBackendName(configured config.StateConfig) string {
+	if configured.Postgres != nil {
+		return "postgresql"
+	}
+	return "sqlite"
+}
+
 func configuredClosers(dependencies unifiedBuilderDependencies) []runtimeCloser {
 	closers := append([]runtimeCloser(nil), dependencies.closers...)
 	if leadershipCloser, ok := dependencies.leadership.(runtimeCloser); ok {
@@ -104,6 +114,7 @@ func configuredClosers(dependencies unifiedBuilderDependencies) []runtimeCloser 
 
 type assembledRuntime struct {
 	managerConfig githubsource.ManagerConfig
+	stateBackend  string
 	localCapacity []core.RunnerPoolCapacity
 	pools         []RunnerPoolRuntime
 	finalizers    []runtimeFinalizer
@@ -115,6 +126,7 @@ func assembleConfiguredRuntime(
 ) (assembledRuntime, error) {
 	assembled := assembledRuntime{
 		managerConfig: githubsource.ManagerConfig{Prune: configured.Prune},
+		stateBackend:  stateBackendName(configured.State),
 		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
 		pools:         make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
 		finalizers:    make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
@@ -135,6 +147,10 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	dependencies unifiedBuilderDependencies,
 ) error {
 	runnerPool := core.RunnerPool(runnerPoolConfig.Name)
+	providerKind, err := configuredPoolProviderKind(runnerPoolConfig)
+	if err != nil {
+		return err
+	}
 	provider := dependencies.providers[runnerPool]
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
@@ -143,22 +159,45 @@ func (assembled *assembledRuntime) appendRunnerPool(
 		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
 		dependencies.currentTime,
 	)
-	assembled.localCapacity = append(assembled.localCapacity, core.RunnerPoolCapacity{
-		RunnerPool: runnerPool, Capacity: runnerPoolConfig.MaxRunners,
-	})
-	assembled.managerConfig.RunnerPools = append(assembled.managerConfig.RunnerPools, githubsource.RunnerPoolConfig{
-		RunnerPool: runnerPool, RunnerGroup: runnerPoolConfig.RunnerGroup,
-	})
-	pool := orchestrationPool{
-		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, runnerPoolConfig.MaxRunners), orchestrator: orchestrator,
-		runnerPool: runnerPool, report: dependencies.report,
-	}
-	assembled.pools = append(assembled.pools, RunnerPoolRuntime{
-		RunnerPool: runnerPool,
-		runtime:    pool,
-	})
+	assembled.appendPoolConfiguration(runnerPoolConfig)
+	pool := newOrchestrationPool(orchestrator, provider, providerKind, runnerPoolConfig, assembled.stateBackend,
+		dependencies.report)
+	assembled.pools = append(assembled.pools, RunnerPoolRuntime{RunnerPool: runnerPool, runtime: pool})
 	assembled.finalizers = append(assembled.finalizers, pool)
 	return nil
+}
+
+func configuredPoolProviderKind(configured config.RunnerPoolConfig) (config.ProviderKind, error) {
+	runnerPool := core.RunnerPool(configured.Name)
+	kind, err := configured.ProviderKind()
+	if err != nil {
+		return "", fmt.Errorf("identify execution provider for Runner Pool %q: %w", runnerPool, err)
+	}
+	return kind, nil
+}
+
+func (assembled *assembledRuntime) appendPoolConfiguration(configured config.RunnerPoolConfig) {
+	runnerPool := core.RunnerPool(configured.Name)
+	assembled.localCapacity = append(assembled.localCapacity,
+		core.RunnerPoolCapacity{RunnerPool: runnerPool, Capacity: configured.MaxRunners})
+	assembled.managerConfig.RunnerPools = append(assembled.managerConfig.RunnerPools,
+		githubsource.RunnerPoolConfig{RunnerPool: runnerPool, RunnerGroup: configured.RunnerGroup})
+}
+
+func newOrchestrationPool(
+	orchestrator *runtimeengine.Orchestrator,
+	provider execution.ExecutionProvider,
+	providerKind config.ProviderKind,
+	configured config.RunnerPoolConfig,
+	stateBackend string,
+	report func(error),
+) orchestrationPool {
+	runnerPool := core.RunnerPool(configured.Name)
+	return orchestrationPool{
+		worker: runtimeengine.NewPoolWorker(orchestrator, runnerPool, configured.MaxRunners), orchestrator: orchestrator,
+		runnerPool: runnerPool, provider: string(providerKind), endpoint: string(provider.EndpointID()),
+		stateBackend: stateBackend, report: report,
+	}
 }
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
@@ -177,6 +216,9 @@ type orchestrationPool struct {
 	worker       *runtimeengine.PoolWorker
 	orchestrator *runtimeengine.Orchestrator
 	runnerPool   core.RunnerPool
+	provider     string
+	endpoint     string
+	stateBackend string
 	report       func(error)
 }
 
@@ -185,25 +227,77 @@ func (pool orchestrationPool) RequestWork(
 	_ core.RunnerPool,
 ) (runtimeengine.ProcessResult, error) {
 	result, err := pool.worker.RequestWork(ctx)
-	reportProcessOutcome(pool.report, pool.runnerPool, result, err)
+	reportProcessOutcome(pool.report, pool.runnerPool, pool.provider, pool.endpoint, pool.stateBackend, result, err)
 	if err != nil {
-		return result, fmt.Errorf("request pool work: %w", err)
+		return result, markOperationallyReported(fmt.Errorf("request pool work: %w", err))
 	}
 	return result, nil
 }
 
-func reportProcessOutcome(report func(error), runnerPool core.RunnerPool, result runtimeengine.ProcessResult, err error) {
-	if result.JobID != (core.JobID{}) {
-		reportOperational(report, operationalEvent{operation: "claim", outcome: "claimed",
-			runnerPool: runnerPool, jobID: result.JobID})
+func reportProcessOutcome(
+	report func(error),
+	runnerPool core.RunnerPool,
+	provider string,
+	endpoint string,
+	stateBackend string,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	job := processResultJob(result, runnerPool)
+	base := operationalEvent{runnerPool: runnerPool, jobID: job.ID, provider: provider, endpoint: endpoint}
+	if err != nil && job.ID == (core.JobID{}) {
+		reportClaimFailure(report, base, stateBackend, err)
+		return
+	}
+	base = addGitHubJobContext(report, base, job)
+	reportProcessEvents(report, base, result, err)
+}
+
+func processResultJob(result runtimeengine.ProcessResult, runnerPool core.RunnerPool) core.Job {
+	job := result.Job
+	if job.ID == (core.JobID{}) {
+		job.ID = result.JobID
+		job.RunnerPool = runnerPool
+	}
+	return job
+}
+
+func reportClaimFailure(report func(error), base operationalEvent, stateBackend string, err error) {
+	failure := base
+	failure.operation = "claim"
+	failure.stage = "claim_oldest"
+	failure.outcome = "failed"
+	failure.stateBackend = stateBackend
+	failure.stateOperation = "claim_oldest"
+	failure.err = err
+	reportOperational(report, failure)
+}
+
+func reportProcessEvents(
+	report func(error),
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	if base.jobID != (core.JobID{}) {
+		claimed := base
+		claimed.operation = "claim"
+		claimed.outcome = "claimed"
+		reportOperational(report, claimed)
 	}
 	if result.Outcome == runtimeengine.ProcessRunnerStarted {
-		reportOperational(report, operationalEvent{operation: "runner_start", outcome: "started",
-			runnerPool: runnerPool, jobID: result.JobID})
+		started := base
+		started.operation = "runner_start"
+		started.stage = "start_runner"
+		started.outcome = "started"
+		reportOperational(report, started)
 	}
 	if result.Outcome == runtimeengine.ProcessRetry {
-		event := operationalEvent{operation: "runner_retry", outcome: string(result.RetryOutcome),
-			runnerPool: runnerPool, jobID: result.JobID, err: err}
+		event := base
+		event.operation = "runner_retry"
+		event.stage = result.FailedStage
+		event.outcome = string(result.RetryOutcome)
+		event.err = err
 		reportOperational(report, event)
 	}
 }

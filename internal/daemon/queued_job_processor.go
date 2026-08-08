@@ -168,9 +168,11 @@ func (processor *queuedJobProcessor) reportProcessingFailure(
 	if ctx.Err() != nil {
 		return
 	}
-	reportOperational(processor.report, operationalEvent{
-		operation: "job_processing", outcome: "failed", runnerPool: runnerPool, err: err,
-	})
+	if !operationalErrorWasReported(err) {
+		reportOperational(processor.report, operationalEvent{
+			operation: "job_processing", outcome: "failed", runnerPool: runnerPool, err: err,
+		})
+	}
 	processor.failed = true
 	if shouldContinueQueuedJobPass(result) {
 		processor.enqueue(runnerPool)

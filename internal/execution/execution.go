@@ -69,11 +69,16 @@ func NewBootstrap(content []byte) Bootstrap {
 // StartRequest binds a runner to exactly one configured Runner Pool and
 // inventory endpoint. Bootstrap remains opaque to the execution provider.
 type StartRequest struct {
+	JobID      core.JobID
 	RunnerPool core.RunnerPool
 	EndpointID InventoryEndpointID
 	RunnerName core.RunnerName
 	Bootstrap  Bootstrap
 }
+
+// ProviderName identifies the configured execution implementation in operator
+// diagnostics without relying on reflection or endpoint parsing.
+type ProviderName string
 
 // RunnerState is the provider-neutral lifecycle observation used by recovery.
 type RunnerState string

@@ -19,7 +19,7 @@ func newGitHubManagerObserver(report func(error), currentTime func() time.Time) 
 func reportGitHubManagerActivity(report func(error), activity githubsource.ManagerActivity) {
 	event := githubActivityEvent(activity)
 	if activity.Err != nil {
-		reportGitHubActivityFailure(report, activity.Visibility, event)
+		reportGitHubActivityFailure(report, event)
 		return
 	}
 	level := slog.LevelInfo
@@ -40,6 +40,14 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 		runnerPool:        activity.RunnerPool,
 		repository:        activity.Repository,
 		sourceRequestID:   activity.SourceRequestID,
+		jobID:             activity.JobID,
+		installationID:    activity.InstallationID,
+		runnerGroupID:     activity.RunnerGroupID,
+		scaleSetID:        activity.ScaleSetID,
+		messageID:         activity.MessageID,
+		stateBackend:      activity.StateBackend,
+		stateOperation:    activity.StateOperation,
+		sourcePC:          activity.OriginPC,
 		count:             activity.Count,
 		repositoryCount:   activity.RepositoryCount,
 		installationCount: activity.InstallationCount,
@@ -50,15 +58,10 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 	}
 }
 
-func reportGitHubActivityFailure(report func(error), visibility githubsource.ActivityVisibility, event operationalEvent) {
+func reportGitHubActivityFailure(report func(error), event operationalEvent) {
 	err := event.err
-	event.err = nil
-	event.diagnostic = err.Error()
-	reportProgress(report, slog.LevelDebug, event)
-	if visibility != githubsource.ActivityInfo {
-		return
+	if event.stateBackend == "" {
+		event.diagnostic = err.Error()
 	}
-	event.diagnostic = ""
-	event.err = err
 	reportOperational(report, event)
 }

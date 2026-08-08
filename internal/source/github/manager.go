@@ -16,8 +16,9 @@ import (
 const repositoryConcurrency = 4
 
 type repositoryRegistrationResult struct {
-	records []Registration
-	err     error
+	repository string
+	records    []Registration
+	err        error
 }
 
 type RunnerPoolConfig struct {
@@ -175,10 +176,11 @@ func (manager *Manager) RegistrationSnapshot(ctx context.Context) (RegistrationS
 	if err != nil {
 		return RegistrationSnapshot{}, fmt.Errorf("load GitHub registration snapshot: %w", err)
 	}
-	return RegistrationSnapshot{
-		Active: append([]Registration(nil), snapshot.Active...),
-		Owned:  append([]Registration(nil), snapshot.Owned...),
-	}, nil
+	canonical, err := canonicalRegistrationSnapshot(snapshot)
+	if err != nil {
+		return RegistrationSnapshot{}, fmt.Errorf("validate GitHub registration snapshot: %w", err)
+	}
+	return canonical, nil
 }
 
 // Reconcile discovers repositories, ensures every configured Runner Pool,
@@ -201,7 +203,7 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) (
 		}
 		manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
 			Stage: "reconciliation", Outcome: outcome,
-			Duration: manager.observer.currentTime().Sub(reconciliationStarted), Err: resultErr})
+			Duration: manager.observer.currentTime().Sub(reconciliationStarted)})
 	}()
 	if err := validateManagerConfig(config); err != nil {
 		return RegistrationSnapshot{}, err
@@ -295,8 +297,11 @@ func (manager *Manager) persistRegistrationSnapshot(
 	started := manager.observer.currentTime()
 	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
 		Stage: "persist_registrations", Outcome: "started", Total: len(active)})
-	snapshot := RegistrationSnapshot{Active: active, Owned: owned}
-	err := manager.replaceRegistrations(ctx, snapshot)
+	snapshot, err := canonicalRegistrationSnapshot(RegistrationSnapshot{Active: active, Owned: owned})
+	if err != nil {
+		return RegistrationSnapshot{}, err
+	}
+	err = manager.replaceRegistrations(ctx, snapshot)
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
@@ -339,6 +344,7 @@ func (manager *Manager) ensureRepositoriesConcurrently(
 	group.SetLimit(repositoryConcurrency)
 	for index, repository := range repositories {
 		manager.reportRepositoryProgress(index+1, len(repositories))
+		results[index].repository = repository.URL
 		group.Go(func() error {
 			current := index + 1
 			results[index].records, results[index].err = manager.ensureRepositoryWithActivity(
@@ -360,7 +366,8 @@ func (manager *Manager) collectRepositoryResults(
 	for index, result := range results {
 		if result.err != nil {
 			manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
-				Stage: "configure_repositories", Outcome: "failed", Current: index + 1, Total: total, Err: result.err})
+				Stage: "configure_repositories", Outcome: "failed", Repository: result.repository,
+				Current: index + 1, Total: total})
 			joined = errors.Join(joined, result.err)
 			continue
 		}
@@ -392,7 +399,7 @@ func (manager *Manager) ensureRepositoryWithActivity(ctx context.Context, reposi
 	}
 	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
 		Stage: "configure_repository", Outcome: outcome, Repository: repository.URL, Current: current, Total: total,
-		Count: len(records), Duration: manager.observer.currentTime().Sub(started), Err: err})
+		Count: len(records), Duration: manager.observer.currentTime().Sub(started)})
 	return records, err
 }
 
@@ -417,6 +424,8 @@ func (manager *Manager) ensureRepository(
 	}
 	client, err := manager.factory(ctx, repository)
 	if err != nil {
+		manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
+			Stage: "create_repository_client", Outcome: "failed", Repository: repository.URL, Err: err})
 		return nil, fmt.Errorf("create GitHub client for repository %q: %w", repository.URL, err)
 	}
 	records := make([]Registration, 0, len(config.RunnerPools))
@@ -434,13 +443,15 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 	runnerPool RunnerPoolConfig, current, total int,
 ) (Registration, error) {
 	started := manager.observer.currentTime()
-	manager.reportRunnerPoolActivity(repository.URL, runnerPool.RunnerPool, current, total, "started", started, nil)
+	manager.reportRunnerPoolActivity(repository, runnerPool.RunnerPool, transport.Registration{},
+		current, total, "started", started, nil)
 	registration, err := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
 	}
-	manager.reportRunnerPoolActivity(repository.URL, runnerPool.RunnerPool, current, total, outcome, started, err)
+	manager.reportRunnerPoolActivity(repository, runnerPool.RunnerPool, registration,
+		current, total, outcome, started, err)
 	if err != nil {
 		return Registration{}, fmt.Errorf("ensure Runner Pool %q for repository %q: %w", runnerPool.RunnerPool, repository.URL, err)
 	}
@@ -448,16 +459,18 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 		InstallationID: repository.InstallationID, RunnerGroupID: registration.RunnerGroupID, ScaleSetID: registration.ID}, nil
 }
 
-func (manager *Manager) reportRunnerPoolActivity(repository string, runnerPool core.RunnerPool, current, total int,
-	outcome string, started time.Time, err error,
+func (manager *Manager) reportRunnerPoolActivity(repository transport.Repository, runnerPool core.RunnerPool,
+	registration transport.Registration, current, total int, outcome string, started time.Time, err error,
 ) {
 	duration := time.Duration(0)
 	if outcome != "started" {
 		duration = manager.observer.currentTime().Sub(started)
 	}
 	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
-		Stage: "configure_runner_pool", Outcome: outcome, Repository: repository, RunnerPool: runnerPool,
-		Current: current, Total: total, Duration: duration, Err: err})
+		Stage: "configure_runner_pool", Outcome: outcome, Repository: repository.URL, RunnerPool: runnerPool,
+		InstallationID: int64(repository.InstallationID), RunnerGroupID: int64(registration.RunnerGroupID),
+		ScaleSetID: int64(registration.ID),
+		Current:    current, Total: total, Duration: duration, Err: err})
 }
 
 func (manager *Manager) replaceRegistrations(ctx context.Context, snapshot RegistrationSnapshot) error {

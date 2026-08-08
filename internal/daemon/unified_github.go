@@ -393,6 +393,9 @@ func groupActiveRegistrations(records []githubsource.Registration) map[string][]
 	for _, record := range records {
 		groups[record.RepositoryURL] = append(groups[record.RepositoryURL], record)
 	}
+	for repository, registrations := range groups {
+		groups[repository] = canonicalRegistrations(registrations)
+	}
 	return groups
 }
 
@@ -417,5 +420,27 @@ func sortedGenerationRepositories(
 }
 
 func sameRegistrations(first, second []githubsource.Registration) bool {
-	return slices.Equal(first, second)
+	return slices.Equal(canonicalRegistrations(first), canonicalRegistrations(second))
+}
+
+func canonicalRegistrations(records []githubsource.Registration) []githubsource.Registration {
+	canonical := append([]githubsource.Registration(nil), records...)
+	sort.Slice(canonical, func(firstIndex, secondIndex int) bool {
+		first := canonical[firstIndex]
+		second := canonical[secondIndex]
+		if first.RepositoryURL != second.RepositoryURL {
+			return first.RepositoryURL < second.RepositoryURL
+		}
+		if first.RunnerPool != second.RunnerPool {
+			return first.RunnerPool < second.RunnerPool
+		}
+		if first.InstallationID != second.InstallationID {
+			return first.InstallationID < second.InstallationID
+		}
+		if first.RunnerGroupID != second.RunnerGroupID {
+			return first.RunnerGroupID < second.RunnerGroupID
+		}
+		return first.ScaleSetID < second.ScaleSetID
+	})
+	return canonical
 }

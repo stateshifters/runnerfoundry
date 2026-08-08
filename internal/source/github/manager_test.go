@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
@@ -153,6 +154,93 @@ func TestManagerReturnsDefensiveCommittedRegistrationSnapshot(t *testing.T) {
 	snapshot.Active[0] = githubsource.Registration{}
 	if repository.snapshot.Active[0] != record {
 		t.Fatal("RegistrationSnapshot() exposed repository-owned state")
+	}
+}
+
+func TestManagerReturnsCommittedRegistrationsInCanonicalOrder(t *testing.T) {
+	t.Parallel()
+
+	first := managerRecord("https://github.com/octo/first", 17)
+	second := managerRecord("https://github.com/octo/second", 18)
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{
+		Active: []githubsource.Registration{second, first},
+		Owned:  []githubsource.Registration{second, first},
+	}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+
+	snapshot, err := manager.RegistrationSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("RegistrationSnapshot() error = %v", err)
+	}
+	want := []githubsource.Registration{first, second}
+	if !reflect.DeepEqual(snapshot.Active, want) || !reflect.DeepEqual(snapshot.Owned, want) {
+		t.Fatalf("RegistrationSnapshot() = %#v, want canonical %#v", snapshot, want)
+	}
+}
+
+func TestManagerRejectsDuplicateRepositoryRunnerPoolRegistrations(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repository", 17)
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{
+		Active: []githubsource.Registration{record, record},
+	}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+
+	_, err := manager.RegistrationSnapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "duplicate GitHub registration") {
+		t.Fatalf("RegistrationSnapshot() error = %v, want duplicate registration rejection", err)
+	}
+}
+
+func TestManagerCanonicalizesOwnedRegistrationsByAllOwnershipFacts(t *testing.T) {
+	t.Parallel()
+
+	base := managerRecord("https://github.com/octo/repository", 17)
+	byScaleSet := base
+	byScaleSet.ScaleSetID++
+	byPool := base
+	byPool.RunnerPool = "windows"
+	byInstallation := base
+	byInstallation.InstallationID++
+	byRunnerGroup := base
+	byRunnerGroup.RunnerGroupID++
+	byRepository := base
+	byRepository.RepositoryURL += "-second"
+	repository := &snapshotRepositoryFake{snapshot: githubsource.RegistrationSnapshot{Owned: []githubsource.Registration{
+		byRepository, byRunnerGroup, byInstallation, byPool, byScaleSet, base,
+	}}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+
+	snapshot, err := manager.RegistrationSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []githubsource.Registration{base, byRunnerGroup, byInstallation, byPool, byScaleSet, byRepository}
+	if !reflect.DeepEqual(snapshot.Owned, want) {
+		t.Fatalf("owned registrations = %#v, want %#v", snapshot.Owned, want)
+	}
+}
+
+func TestManagerRejectsDuplicateDiscoveredRepositoryBeforePersistence(t *testing.T) {
+	t.Parallel()
+
+	repository := transport.Repository{InstallationID: 1, URL: "https://github.com/octo/repository"}
+	manager := newManagerFixture(t,
+		&managerDiscovererFake{repositories: []transport.Repository{repository, repository}},
+		func(context.Context, transport.Repository) (githubsource.ManagerClient, error) {
+			return githubsource.ManagerClient{EnsureRunnerPool: func(
+				context.Context, string, string,
+			) (transport.Registration, error) {
+				return transport.Registration{ID: 17, RunnerGroupID: 11}, nil
+			}}, nil
+		}, &registrationRepositoryFake{})
+
+	_, err := manager.Reconcile(context.Background(), githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
+		RunnerPool: "linux", RunnerGroup: "default",
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "duplicate GitHub registration") {
+		t.Fatalf("Reconcile() error = %v, want duplicate registration rejection", err)
 	}
 }
 

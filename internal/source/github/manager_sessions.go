@@ -153,7 +153,9 @@ func (manager *Manager) reportSessionActivity(record Registration, current, tota
 	}
 	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
 		Stage: "open_session", Outcome: outcome, Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
-		Current: current, Total: total, Duration: duration, Err: err})
+		InstallationID: int64(record.InstallationID), RunnerGroupID: int64(record.RunnerGroupID),
+		ScaleSetID: int64(record.ScaleSetID),
+		Current:    current, Total: total, Duration: duration, Err: err})
 }
 
 func (manager *Manager) retireRepositorySession(
@@ -194,7 +196,8 @@ func (manager *Manager) openLeaderRecordWithClient(
 		return openedLeader{}, errors.New("GitHub client returned nil message session")
 	}
 	return openedLeader{session: session, adapter: &Adapter{Client: session, Handler: handler, Observer: manager.observer,
-		Repository: record.RepositoryURL, RunnerPool: record.RunnerPool}}, nil
+		Repository: record.RepositoryURL, RunnerPool: record.RunnerPool, InstallationID: int64(record.InstallationID),
+		RunnerGroupID: int64(record.RunnerGroupID), ScaleSetID: int64(record.ScaleSetID)}}, nil
 }
 
 func repositoryFromRegistration(record Registration) transport.Repository {

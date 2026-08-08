@@ -10,6 +10,7 @@ import (
 	"github.com/meza/RunnerFoundry/internal/config"
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
+	"github.com/meza/RunnerFoundry/internal/postgresconfig"
 	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
@@ -164,7 +165,22 @@ func builderConfig() config.Config {
 		GitHub: config.GitHubConfig{DiscoveryInterval: "1m"},
 		RunnerPools: []config.RunnerPoolConfig{{
 			Name: "linux", RunnerGroup: "default", MaxRunners: 1,
+			Docker: &config.DockerConfig{ComposeFile: "compose.yaml", Service: "runner"},
 		}},
+	}
+}
+
+func TestUnifiedBuilderIdentifiesStateAndRejectsMissingProviderSelection(t *testing.T) {
+	if got := stateBackendName(config.StateConfig{Postgres: &postgresconfig.Settings{}}); got != "postgresql" {
+		t.Fatalf("state backend = %q", got)
+	}
+	invalid := config.RunnerPoolConfig{Name: "linux"}
+	if _, err := configuredPoolProviderKind(invalid); err == nil {
+		t.Fatal("missing provider selection was accepted")
+	}
+	assembled := assembledRuntime{}
+	if err := assembled.appendRunnerPool(invalid, unifiedBuilderDependencies{}); err == nil {
+		t.Fatal("invalid Runner Pool was appended")
 	}
 }
 

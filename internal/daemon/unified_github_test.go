@@ -113,6 +113,72 @@ func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 	mustCloseGitHubSource(t, source)
 }
 
+func TestGitHubSourceRuntimePreservesPollsForReorderedEquivalentRegistrations(t *testing.T) {
+	t.Parallel()
+	fixture := newReorderedRegistrationFixture()
+
+	mustOpenGitHubSource(t, fixture.source)
+	awaitInstalledGitHubAdapters(t, fixture.source, len(fixture.clients))
+	awaitGitHubDiscovery(t, fixture.source)
+	mustPollGitHubSource(t, fixture.source, time.Time{})
+	for index, client := range fixture.clients {
+		assertPolledCapacity(t, client.started, 1, fmt.Sprintf("repository session %d", index+1))
+	}
+	fixture.manager.setReconcileSnapshot(fixture.reordered)
+	fixture.now = fixture.now.Add(time.Minute)
+	mustPollGitHubSource(t, fixture.source, time.Time{})
+	awaitGitHubDiscovery(t, fixture.source)
+
+	if len(fixture.source.opening) != 0 || fixture.manager.opens != 2 {
+		t.Fatalf("equivalent discovery scheduled replacements: opening=%d opens=%d",
+			len(fixture.source.opening), fixture.manager.opens)
+	}
+	if len(fixture.source.polls) != len(fixture.clients) {
+		t.Fatalf("active polls = %d, want %d preserved", len(fixture.source.polls), len(fixture.clients))
+	}
+	fixture.clients[0].messages <- &upstream.RunnerScaleSetMessage{MessageID: 9,
+		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42}}}}
+	request := <-fixture.queued
+	if request.RunnerPool != "linux" {
+		t.Fatalf("preserved poll queued work for Runner Pool %q", request.RunnerPool)
+	}
+	mustCloseGitHubSource(t, fixture.source)
+}
+
+type reorderedRegistrationFixture struct {
+	source    *githubSourceRuntime
+	manager   *githubManagerFake
+	clients   []*blockingCapacityMessageClient
+	reordered githubsource.RegistrationSnapshot
+	queued    chan core.JobRequest
+	now       time.Time
+}
+
+func newReorderedRegistrationFixture() *reorderedRegistrationFixture {
+	fixture := &reorderedRegistrationFixture{
+		now: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC), queued: make(chan core.JobRequest, 1),
+	}
+	fixture.clients = []*blockingCapacityMessageClient{
+		newBlockingCapacityMessageClient(), newBlockingCapacityMessageClient(),
+		newBlockingCapacityMessageClient(), newBlockingCapacityMessageClient(),
+	}
+	fixture.manager = &githubManagerFake{adapters: []*githubsource.Adapter{
+		{Client: fixture.clients[0], Repository: "https://github.example/one", RunnerPool: "linux"},
+		{Client: fixture.clients[1], Repository: "https://github.example/one", RunnerPool: "windows"},
+		{Client: fixture.clients[2], Repository: "https://github.example/two", RunnerPool: "linux"},
+		{Client: fixture.clients[3], Repository: "https://github.example/two", RunnerPool: "windows"},
+	}}
+	facts := fixture.manager.snapshotFacts()
+	fixture.reordered = githubsource.RegistrationSnapshot{Active: []githubsource.Registration{
+		facts.Active[3], facts.Active[2], facts.Active[1], facts.Active[0],
+	}}
+	fixture.source = newGitHubSourceRuntime(fixture.manager,
+		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1, "windows": 1}},
+		"member-1", recordingQueueEventHandler{queued: fixture.queued}, githubsource.ManagerConfig{}, time.Minute,
+		func() time.Time { return fixture.now })
+	return fixture
+}
+
 func TestGitHubSourceRuntimeRefreshesMemberRoutesAtDiscoveryCadence(t *testing.T) {
 	t.Parallel()
 
@@ -298,16 +364,17 @@ func TestGitHubSourceRuntimeReportsCapacityAndCloseFailures(t *testing.T) {
 }
 
 type githubManagerFake struct {
-	mu           sync.Mutex
-	adapters     []*githubsource.Adapter
-	reconciles   int
-	opens        int
-	openErr      error
-	reconcileErr error
-	refreshErr   error
-	snapshotErr  error
-	closeErr     error
-	events       []string
+	mu                sync.Mutex
+	adapters          []*githubsource.Adapter
+	reconciles        int
+	opens             int
+	openErr           error
+	reconcileErr      error
+	reconcileSnapshot githubsource.RegistrationSnapshot
+	refreshErr        error
+	snapshotErr       error
+	closeErr          error
+	events            []string
 }
 
 func (fake *githubManagerFake) setRepositoryOpen(adapters []*githubsource.Adapter, openErr error) {
@@ -335,6 +402,12 @@ func (fake *githubManagerFake) setSnapshotError(snapshotErr error) {
 	fake.snapshotErr = snapshotErr
 }
 
+func (fake *githubManagerFake) setReconcileSnapshot(snapshot githubsource.RegistrationSnapshot) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.reconcileSnapshot = snapshot
+}
+
 func (fake *githubManagerFake) RegistrationSnapshot(context.Context) (githubsource.RegistrationSnapshot, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -343,10 +416,15 @@ func (fake *githubManagerFake) RegistrationSnapshot(context.Context) (githubsour
 
 func (fake *githubManagerFake) Reconcile(context.Context, githubsource.ManagerConfig) (githubsource.RegistrationSnapshot, error) {
 	fake.mu.Lock()
-	defer fake.mu.Unlock()
 	fake.reconciles++
 	fake.events = append(fake.events, "reconcile")
-	return fake.snapshotFacts(), fake.reconcileErr
+	snapshot := fake.snapshotFacts()
+	if fake.reconcileSnapshot.Active != nil || fake.reconcileSnapshot.Owned != nil {
+		snapshot = fake.reconcileSnapshot
+	}
+	reconcileErr := fake.reconcileErr
+	fake.mu.Unlock()
+	return snapshot, reconcileErr
 }
 func (fake *githubManagerFake) RefreshMembers(context.Context) error {
 	fake.mu.Lock()
@@ -491,17 +569,22 @@ func (*capacityMessageClientFake) AcquireRequests(_ context.Context, requestIDs 
 }
 
 type blockingCapacityMessageClient struct {
-	started chan int
+	started  chan int
+	messages chan *upstream.RunnerScaleSetMessage
 }
 
 func newBlockingCapacityMessageClient() *blockingCapacityMessageClient {
-	return &blockingCapacityMessageClient{started: make(chan int, 1)}
+	return &blockingCapacityMessageClient{started: make(chan int, 1), messages: make(chan *upstream.RunnerScaleSetMessage, 1)}
 }
 
 func (client *blockingCapacityMessageClient) GetMessage(ctx context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
 	client.started <- maxCapacity
-	<-ctx.Done()
-	return nil, fmt.Errorf("blocked GitHub poll: %w", ctx.Err())
+	select {
+	case message := <-client.messages:
+		return message, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("blocked GitHub poll: %w", ctx.Err())
+	}
 }
 
 func (*blockingCapacityMessageClient) DeleteMessage(context.Context, int) error { return nil }
@@ -565,7 +648,22 @@ func (*stubbornCapacityMessageClient) AcquireRequests(_ context.Context, request
 
 type eventHandlerFake struct{}
 
-func (eventHandlerFake) Request(context.Context, core.JobRequest) error { return nil }
+type recordingQueueEventHandler struct{ queued chan core.JobRequest }
+
+func (handler recordingQueueEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+	handler.queued <- request
+	return core.EnqueueResult{Outcome: core.QueueQueued, Job: core.Job{ID: core.JobID{1}}}, nil
+}
+func (recordingQueueEventHandler) RunnerStarted(context.Context, core.SourceReference) error {
+	return nil
+}
+func (recordingQueueEventHandler) Terminalize(context.Context, core.SourceReference) error {
+	return nil
+}
+
+func (eventHandlerFake) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
+}
 func (eventHandlerFake) RunnerStarted(context.Context, core.SourceReference) error {
 	return nil
 }

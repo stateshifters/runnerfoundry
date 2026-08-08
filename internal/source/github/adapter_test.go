@@ -74,7 +74,7 @@ func adapterActivityResults(activities []githubsource.ManagerActivity) ([]string
 		if activity.Visibility == githubsource.ActivityInfo && activity.Outcome == "completed" {
 			infoOutcomes = append(infoOutcomes, activity.Operation+":"+activity.Stage+":"+strconv.Itoa(activity.Count))
 		}
-		if activity.Visibility == githubsource.ActivityDebug && activity.Stage == "persist_job" && activity.Outcome == "completed" {
+		if activity.Stage == "persist_job" && activity.Outcome == string(core.QueueQueued) {
 			debugRequests = append(debugRequests, activity.SourceRequestID)
 		}
 	}
@@ -188,6 +188,38 @@ func TestPollOnceLeavesMessageWhenAcquiredRequestCannotBePersisted(t *testing.T)
 		&recordingEventHandler{requestErr: errors.New("persist failed")},
 	)
 }
+
+func TestAdapterReportsDurableStateFailureContextAtJobBoundary(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("driver detail")
+	stateErr := adapterStateError{cause: wantErr}
+	activities := make([]githubsource.ManagerActivity, 0)
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{availableMessage(20, 62)}, acquired: []int64{62}}
+	adapter := newAdapter(client, &recordingEventHandler{requestErr: stateErr})
+	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+		activities = append(activities, activity)
+	}}
+
+	_, err := adapter.Poll(context.Background(), 1)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if err.Error() == "" {
+		t.Fatal("Poll() returned an undescribed state failure")
+	}
+	failure := findManagerActivity(activities, "persist_job", "failed")
+	if failure.StateBackend != "postgresql" || failure.StateOperation != "enqueue_job" {
+		t.Fatalf("state failure activity = %#v", failure)
+	}
+}
+
+type adapterStateError struct{ cause error }
+
+func (stateError adapterStateError) Error() string { return "classified state failure" }
+func (stateError adapterStateError) Unwrap() error { return stateError.cause }
+func (adapterStateError) StateBackend() string     { return "postgresql" }
+func (adapterStateError) StateOperation() string   { return "enqueue_job" }
 
 func TestPollOnceLeavesMessageWhenAssignedRequestCannotBePersisted(t *testing.T) {
 	t.Parallel()
@@ -384,12 +416,13 @@ type recordingEventHandler struct {
 	completedErr error
 }
 
-func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) error {
+func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {
 	handler.requests = append(handler.requests, request)
 	if handler.events != nil {
 		*handler.events = append(*handler.events, "request:"+string(request.Source.ID))
 	}
-	return handler.requestErr
+	return core.EnqueueResult{Job: core.Job{ID: core.JobID{1}, Source: request.Source, RunnerPool: request.RunnerPool},
+		Outcome: core.QueueQueued}, handler.requestErr
 }
 
 func (handler *recordingEventHandler) RunnerStarted(_ context.Context, source core.SourceReference) error {

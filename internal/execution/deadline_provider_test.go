@@ -62,7 +62,7 @@ func TestDeadlineProviderReportsProviderOperations(t *testing.T) {
 
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
 	var activities []ProviderActivity
-	wrapped := WithOperationDeadlines(provider, func(activity ProviderActivity) {
+	wrapped := WithOperationDeadlines(provider, "test", func(activity ProviderActivity) {
 		activities = append(activities, activity)
 	})
 	if err := wrapped.Start(context.Background(), StartRequest{RunnerPool: "linux", EndpointID: "endpoint-a"}); err != nil {
@@ -84,7 +84,7 @@ func TestDeadlineProviderReportsProviderOperations(t *testing.T) {
 
 func newDeadlineTestProvider() (*deadlineRecordingProvider, OperationDeadlineProvider) {
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
-	return provider, WithOperationDeadlines(provider)
+	return provider, WithOperationDeadlines(provider, "test")
 }
 
 func assertRecordedDeadline(t *testing.T, provider *deadlineRecordingProvider, operation string, want time.Duration) {
@@ -97,7 +97,7 @@ func assertRecordedDeadline(t *testing.T, provider *deadlineRecordingProvider, o
 
 func TestDeadlineProviderPreservesEarlierCallerDeadlineAndAddsContext(t *testing.T) {
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", err: context.DeadlineExceeded, remaining: make(map[string]time.Duration)}
-	wrapped := WithOperationDeadlines(provider)
+	wrapped := WithOperationDeadlines(provider, "test")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := wrapped.Start(ctx, StartRequest{EndpointID: "endpoint-a"})

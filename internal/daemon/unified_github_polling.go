@@ -98,7 +98,7 @@ func (source *githubSourceRuntime) installRepositoryGeneration(
 		return source.closeRepositoryGeneration(ctx, result.generation, "discard stale GitHub repository sessions")
 	}
 	if result.err != nil {
-		return source.handleRepositoryOpenFailure(ctx, term, result)
+		return markOperationallyReported(source.handleRepositoryOpenFailure(ctx, term, result))
 	}
 	if result.generation == nil {
 		return fmt.Errorf("open GitHub repository sessions for %q: manager returned nil generation", result.repository)
@@ -180,14 +180,16 @@ func (source *githubSourceRuntime) harvestDiscovery(
 			return nil
 		}
 		if result.err != nil {
-			return []error{fmt.Errorf("reconcile GitHub registrations: %w", result.err)}
+			return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
 		}
 		source.desired = groupActiveRegistrations(result.snapshot.Active)
 		resultErrors := make([]error, 0)
 		source.beginSessionActivation()
 		source.scheduleRequiredRepositoryGenerations(ctx, term)
 		if err := source.manager.RefreshMembers(ctx); err != nil {
-			resultErrors = append(resultErrors, fmt.Errorf("refresh GitHub member routes: %w", err))
+			resultErrors = append(resultErrors, markOperationallyReported(
+				fmt.Errorf("refresh GitHub member routes: %w", err),
+			))
 		} else {
 			source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
 		}
@@ -264,7 +266,7 @@ func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]
 			changedPools[adapter.RunnerPool] = struct{}{}
 		}
 		if result.err != nil {
-			pollErrors = append(pollErrors, describeGitHubPollError(adapter, result.err))
+			pollErrors = append(pollErrors, markOperationallyReported(describeGitHubPollError(adapter, result.err)))
 		}
 	}
 	return pollErrors, changedPools
@@ -319,7 +321,9 @@ func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapte
 	if err != nil {
 		reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
 			runnerPool: adapter.RunnerPool, err: err})
-		return 0, fmt.Errorf("read Runner Pool %q available capacity: %w", adapter.RunnerPool, err)
+		return 0, markOperationallyReported(fmt.Errorf(
+			"read Runner Pool %q available capacity: %w", adapter.RunnerPool, err,
+		))
 	}
 	reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
 		outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository, capacity: capacity})

@@ -247,7 +247,7 @@ func (generation *maintenanceGeneration) reportCycle(err error) {
 		generation.report(nil)
 		return
 	}
-	generation.report(fmt.Errorf("runtime maintenance cycle: %w", err))
+	generation.report(maintenanceCycleResult{cause: err})
 }
 
 func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {

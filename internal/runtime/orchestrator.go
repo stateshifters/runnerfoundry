@@ -41,6 +41,8 @@ type ProcessResult struct {
 	Outcome      ProcessOutcome
 	RetryOutcome core.RetryOutcome
 	JobID        core.JobID
+	Job          core.Job
+	FailedStage  string
 }
 
 func NewOrchestrator(
@@ -66,34 +68,68 @@ func (orchestrator *Orchestrator) ProcessOne(ctx context.Context, runnerPool cor
 }
 
 func (orchestrator *Orchestrator) Process(ctx context.Context, runnerPool core.RunnerPool) (ProcessResult, error) {
+	processing, empty, err := orchestrator.claimOldest(ctx, runnerPool)
+	if err != nil {
+		return ProcessResult{}, err
+	}
+	if empty {
+		return ProcessResult{Outcome: ProcessNoWork}, nil
+	}
+	return orchestrator.provisionClaimed(ctx, runnerPool, processing)
+}
+
+func (orchestrator *Orchestrator) claimOldest(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+) (core.ProcessingJob, bool, error) {
 	take, err := orchestrator.store.ClaimOldest(ctx, runnerPool, core.ProcessingClaim{
 		MemberID: orchestrator.member, ClaimedAt: orchestrator.currentTime(),
 		InventoryEndpointID: orchestrator.launcher.EndpointID(),
 	})
 	if err != nil {
-		return ProcessResult{}, fmt.Errorf("take queued work for Runner Pool %q: %w", runnerPool, err)
+		return core.ProcessingJob{}, false, fmt.Errorf("take queued work for Runner Pool %q: %w", runnerPool, err)
 	}
 	if take.Outcome == core.ClaimEmpty {
-		return ProcessResult{Outcome: ProcessNoWork}, nil
+		return core.ProcessingJob{}, true, nil
 	}
-	processing := take.Processing
+	return take.Processing, false, nil
+}
+
+func (orchestrator *Orchestrator) provisionClaimed(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+	processing core.ProcessingJob,
+) (ProcessResult, error) {
 	runnerName := runnerName(processing.Job.ID)
 	bootstrap, err := orchestrator.bootstrapper.GenerateBootstrap(ctx, processing.Job, runnerName)
 	if err != nil {
-		retryOutcome, retryErr := orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
-		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome, JobID: processing.Job.ID}, errors.Join(
-			fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err),
-			retryErr,
-		)
+		return orchestrator.retryClaim(ctx, processing, "generate_bootstrap",
+			fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err))
 	}
 	if err = orchestrator.launcher.Start(ctx, execution.StartRequest{
-		RunnerPool: runnerPool, EndpointID: orchestrator.launcher.EndpointID(), RunnerName: runnerName, Bootstrap: bootstrap,
+		JobID: processing.Job.ID, RunnerPool: runnerPool, EndpointID: orchestrator.launcher.EndpointID(),
+		RunnerName: runnerName, Bootstrap: bootstrap,
 	}); err != nil {
 		startErr := fmt.Errorf("start runner for job %s: %w", processing.Job.ID, err)
 		retryOutcome, cleanupErr := orchestrator.cleanupFailedStart(ctx, processing)
-		return ProcessResult{Outcome: ProcessRetry, RetryOutcome: retryOutcome, JobID: processing.Job.ID}, errors.Join(startErr, cleanupErr)
+		return retryProcessResult(processing.Job, retryOutcome, "start_runner"), errors.Join(startErr, cleanupErr)
 	}
-	return ProcessResult{Outcome: ProcessRunnerStarted, JobID: processing.Job.ID}, nil
+	return ProcessResult{Outcome: ProcessRunnerStarted, JobID: processing.Job.ID, Job: processing.Job}, nil
+}
+
+func (orchestrator *Orchestrator) retryClaim(
+	ctx context.Context,
+	processing core.ProcessingJob,
+	failedStage string,
+	cause error,
+) (ProcessResult, error) {
+	retryOutcome, retryErr := orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
+	return retryProcessResult(processing.Job, retryOutcome, failedStage), errors.Join(cause, retryErr)
+}
+
+func retryProcessResult(job core.Job, outcome core.RetryOutcome, failedStage string) ProcessResult {
+	return ProcessResult{Outcome: ProcessRetry, RetryOutcome: outcome, JobID: job.ID,
+		Job: job, FailedStage: failedStage}
 }
 
 func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, processing core.ProcessingJob) (core.RetryOutcome, error) {

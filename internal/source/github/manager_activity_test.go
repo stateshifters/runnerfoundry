@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -11,6 +12,35 @@ import (
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
+
+func TestManagerReportsRunnerPoolFailureOnceWithRepositoryContext(t *testing.T) {
+	repository := transport.Repository{InstallationID: 1, URL: "https://github.com/octo/repository"}
+	factory := newManagerFactoryFake([]transport.Repository{repository})
+	factory.clients[repository.URL].ensureErr = errors.New("GitHub rejected runner scale set")
+	manager, activities := newObservedManager(t, &managerDiscovererFake{repositories: []transport.Repository{repository}},
+		factory.Client, &registrationRepositoryFake{})
+
+	_, reconcileErr := manager.Reconcile(context.Background(), githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
+		RunnerPool: "linux", RunnerGroup: "default",
+	}}})
+	if reconcileErr == nil {
+		t.Fatal("Reconcile() succeeded despite the configured runner scale-set failure")
+	}
+
+	failures := make([]githubsource.ManagerActivity, 0)
+	for _, activity := range *activities {
+		if activity.Err != nil {
+			failures = append(failures, activity)
+		}
+	}
+	if len(failures) != 1 {
+		t.Fatalf("reported failures = %#v, want one owning-boundary failure", failures)
+	}
+	failure := failures[0]
+	if failure.Stage != "configure_runner_pool" || failure.Repository != repository.URL || failure.RunnerPool != "linux" {
+		t.Fatalf("failure context = %#v", failure)
+	}
+}
 
 func managerRepositories(count int) []transport.Repository {
 	repositories := make([]transport.Repository, count)

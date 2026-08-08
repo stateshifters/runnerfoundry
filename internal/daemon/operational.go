@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
@@ -28,15 +29,21 @@ type operationalStatus struct {
 }
 
 type operationalEvent struct {
+	component         string
 	operation         string
 	stage             string
 	outcome           string
 	runnerPool        core.RunnerPool
 	jobID             core.JobID
+	runnerID          string
 	repository        string
 	endpoint          string
 	diagnostic        string
 	sourceRequestID   int64
+	installationID    int64
+	runnerGroupID     int64
+	scaleSetID        int64
+	messageID         int64
 	count             int
 	repositoryCount   int
 	installationCount int
@@ -47,6 +54,11 @@ type operationalEvent struct {
 	leadership        operationalLeadership
 	err               error
 	errorCategory     string
+	provider          string
+	composeService    string
+	stateBackend      string
+	stateOperation    string
+	sourcePC          uintptr
 }
 
 type operationalEventEnvelope struct {
@@ -57,6 +69,43 @@ type operationalEventEnvelope struct {
 type progressEventEnvelope struct {
 	level slog.Level
 	event operationalEvent
+}
+
+type maintenanceCycleResult struct{ cause error }
+
+func (result maintenanceCycleResult) Error() string {
+	return "maintenance cycle contained reported failures"
+}
+func (result maintenanceCycleResult) Unwrap() error { return result.cause }
+
+type reportedOperationalError struct{ cause error }
+
+func (reported reportedOperationalError) Error() string { return reported.cause.Error() }
+func (reported reportedOperationalError) Unwrap() error { return reported.cause }
+
+func markOperationallyReported(err error) error {
+	if err == nil {
+		return nil
+	}
+	return reportedOperationalError{cause: err}
+}
+
+func operationalErrorWasReported(err error) bool {
+	var joined interface{ Unwrap() []error }
+	if errors.As(err, &joined) {
+		return everyOperationalErrorWasReported(joined.Unwrap())
+	}
+	var reported reportedOperationalError
+	return errors.As(err, &reported)
+}
+
+func everyOperationalErrorWasReported(errs []error) bool {
+	for _, err := range errs {
+		if !operationalErrorWasReported(err) {
+			return false
+		}
+	}
+	return true
 }
 
 func (envelope progressEventEnvelope) Error() string {
@@ -70,27 +119,38 @@ func (envelope operationalEventEnvelope) Unwrap() error { return envelope.cause 
 
 func reportOperational(report func(error), event operationalEvent) {
 	if report != nil {
+		event.captureSource(1)
 		report(operationalEventEnvelope{event: event, cause: event.err})
 	}
 }
 
 func reportOperationalError(report func(error), event operationalEvent, cause error) {
 	if report != nil {
+		event.captureSource(1)
 		report(operationalEventEnvelope{event: event, cause: cause})
 	}
 }
 
 func reportProgress(report func(error), level slog.Level, event operationalEvent) {
 	if report != nil {
+		event.captureSource(1)
 		report(progressEventEnvelope{level: level, event: event})
 	}
 }
 
+func (event *operationalEvent) captureSource(skip int) {
+	if event.sourcePC != 0 {
+		return
+	}
+	programCounters := make([]uintptr, 1)
+	if runtime.Callers(skip+2, programCounters) != 0 {
+		event.sourcePC = programCounters[0]
+	}
+}
+
 type operationFailure struct {
-	fingerprint string
-	first       time.Time
-	lastLog     time.Time
-	count       int
+	first time.Time
+	event operationalEvent
 }
 
 type productionRuntimeReporter struct {
@@ -114,6 +174,10 @@ func newProductionRuntimeReporter(
 }
 
 func (reporter *productionRuntimeReporter) reportMaintenance(err error) {
+	var cycleResult maintenanceCycleResult
+	if errors.As(err, &cycleResult) {
+		return
+	}
 	var progress progressEventEnvelope
 	if errors.As(err, &progress) {
 		reporter.ReportProgress(progress.level, progress.event)
@@ -143,7 +207,7 @@ func (reporter *productionRuntimeReporter) Report(event operationalEvent) {
 }
 
 func (reporter *productionRuntimeReporter) ReportProgress(level slog.Level, event operationalEvent) {
-	reporter.writeEvent(level, "RunnerFoundry progress event", event, nil)
+	reporter.writeEvent(level, "progress_event", event, nil)
 }
 
 func (reporter *productionRuntimeReporter) reportEvent(now time.Time, event operationalEvent) {
@@ -155,8 +219,12 @@ func (reporter *productionRuntimeReporter) reportEvent(now time.Time, event oper
 		reporter.reportRecovery(now, event)
 		return
 	}
-	if _, failed := reporter.failures[event.operation]; failed {
-		reporter.reportRecovery(now, operationalEvent{operation: event.operation, outcome: "recovered"})
+	if _, failed := reporter.failures[operationalFailureKey(event)]; failed {
+		recovery := event
+		recovery.outcome = "recovered"
+		recovery.err = nil
+		recovery.diagnostic = ""
+		reporter.reportRecovery(now, recovery)
 	}
 	level := slog.LevelInfo
 	if event.outcome == "rejected" {
@@ -166,139 +234,49 @@ func (reporter *productionRuntimeReporter) reportEvent(now time.Time, event oper
 }
 
 func (reporter *productionRuntimeReporter) reportFailure(now time.Time, event operationalEvent) {
-	fingerprint := fmt.Sprintf("%T:%s", event.err, event.err.Error())
-	failure, exists := reporter.failures[event.operation]
-	changed := !exists || failure.fingerprint != fingerprint
-	if changed {
-		failure = operationFailure{fingerprint: fingerprint, first: now}
+	key := operationalFailureKey(event)
+	if _, exists := reporter.failures[key]; !exists {
+		reporter.failures[key] = operationFailure{first: now, event: event}
 	}
-	failure.count++
-	shouldLog := changed || now.Sub(failure.lastLog) >= 5*time.Minute
-	if shouldLog {
-		failure.lastLog = now
-		extra := []slog.Attr{slog.Int("recurrence_count", failure.count)}
-		reporter.logEvent(slog.LevelError, event, extra)
-	}
-	reporter.failures[event.operation] = failure
+	reporter.logEvent(slog.LevelError, event, nil)
 }
 
 func (reporter *productionRuntimeReporter) reportRecovery(now time.Time, event operationalEvent) {
-	failure, exists := reporter.failures[event.operation]
+	key := operationalFailureKey(event)
+	failure, exists := reporter.failures[key]
 	if !exists {
+		if event.stage == "" && event.repository == "" && event.runnerPool == "" && event.endpoint == "" {
+			reporter.recoverOperation(now, event)
+		}
 		return
 	}
-	delete(reporter.failures, event.operation)
-	extra := []slog.Attr{slog.Int("recurrence_count", failure.count),
-		slog.Duration("failure_duration", now.Sub(failure.first))}
+	delete(reporter.failures, key)
+	extra := []slog.Attr{slog.Duration("failure_duration", now.Sub(failure.first))}
 	reporter.logEvent(slog.LevelInfo, event, extra)
 }
 
+func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event operationalEvent) {
+	for key, failure := range reporter.failures {
+		if failure.event.operation != event.operation {
+			continue
+		}
+		delete(reporter.failures, key)
+		recovery := failure.event
+		recovery.err = nil
+		recovery.diagnostic = ""
+		recovery.outcome = "recovered"
+		reporter.logEvent(slog.LevelInfo, recovery,
+			[]slog.Attr{slog.Duration("failure_duration", now.Sub(failure.first))})
+	}
+}
+
+func operationalFailureKey(event operationalEvent) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s", event.component, event.operation, event.stage,
+		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation)
+}
+
 func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event operationalEvent, extra []slog.Attr) {
-	reporter.writeEvent(level, "RunnerFoundry operational event", event, extra)
-}
-
-func (reporter *productionRuntimeReporter) writeEvent(
-	level slog.Level,
-	message string,
-	event operationalEvent,
-	extra []slog.Attr,
-) {
-	attributes := make([]slog.Attr, 0, len(extra)+20)
-	attributes = append(attributes, slog.String("operation", event.operation), slog.String("member", string(reporter.member)))
-	attributes = append(attributes, eventStageAttributes(event)...)
-	attributes = append(attributes, eventIdentityAttributes(event)...)
-	attributes = append(attributes, eventCountAttributes(event)...)
-	attributes = append(attributes, eventContextAttributes(event)...)
-	attributes = append(attributes, eventResultAttributes(event)...)
-	attributes = append(attributes, extra...)
-	reporter.logging.Logger().LogAttrs(context.Background(), level, message, attributes...)
-}
-
-func eventStageAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 2)
-	if event.stage != "" {
-		attributes = append(attributes, slog.String("stage", event.stage))
-	}
-	attributes = append(attributes, slog.String("outcome", event.outcome))
-	return attributes
-}
-
-func eventIdentityAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 2)
-	if event.runnerPool != "" {
-		attributes = append(attributes, slog.String("runner_pool", string(event.runnerPool)))
-	}
-	if event.jobID != (core.JobID{}) {
-		attributes = append(attributes, slog.String("job_id", event.jobID.String()))
-	}
-	return attributes
-}
-
-func eventCountAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 5)
-	if event.count != 0 {
-		attributes = append(attributes, slog.Int("count", event.count))
-	}
-	if event.repositoryCount != 0 {
-		attributes = append(attributes, slog.Int("repository_count", event.repositoryCount))
-	}
-	if event.installationCount != 0 {
-		attributes = append(attributes, slog.Int("installation_count", event.installationCount))
-	}
-	if event.current != 0 {
-		attributes = append(attributes, slog.Int("current", event.current))
-	}
-	if event.total != 0 {
-		attributes = append(attributes, slog.Int("total", event.total))
-	}
-	return attributes
-}
-
-func eventContextAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 4)
-	if event.repository != "" {
-		attributes = append(attributes, slog.String("repository", event.repository))
-	}
-	if event.endpoint != "" {
-		attributes = append(attributes, slog.String("endpoint", event.endpoint))
-	}
-	if event.diagnostic != "" {
-		attributes = append(attributes, slog.String("diagnostic", event.diagnostic))
-	}
-	if event.sourceRequestID != 0 {
-		attributes = append(attributes, slog.Int64("source_request_id", event.sourceRequestID))
-	}
-	return attributes
-}
-
-func eventResultAttributes(event operationalEvent) []slog.Attr {
-	attributes := make([]slog.Attr, 0, 4)
-	if event.capacity != 0 {
-		attributes = append(attributes, slog.Int("capacity", event.capacity))
-	}
-	if event.duration != 0 {
-		attributes = append(attributes, slog.Int64("duration_ms", event.duration.Milliseconds()))
-	}
-	if event.leadership != "" {
-		attributes = append(attributes, slog.String("leadership", string(event.leadership)))
-	}
-	if event.err != nil {
-		attributes = append(attributes, slog.String("error_category", classifyOperationalError(event)))
-	}
-	return attributes
-}
-
-func classifyOperationalError(event operationalEvent) string {
-	if event.errorCategory != "" {
-		return event.errorCategory
-	}
-	if errors.Is(event.err, context.Canceled) {
-		return "canceled"
-	}
-	if errors.Is(event.err, context.DeadlineExceeded) {
-		return "deadline"
-	}
-	return "operation"
+	reporter.writeEvent(level, "operational_event", event, extra)
 }
 
 func (reporter *productionRuntimeReporter) publishStatus() {

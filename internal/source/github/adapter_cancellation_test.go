@@ -119,7 +119,7 @@ type cancellationEventHandler struct {
 	releaseHandling chan struct{}
 }
 
-func (handler *cancellationEventHandler) Request(context.Context, core.JobRequest) error {
+func (handler *cancellationEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	if handler.handling != nil {
 		close(handler.handling)
 	}
@@ -127,7 +127,7 @@ func (handler *cancellationEventHandler) Request(context.Context, core.JobReques
 		<-handler.releaseHandling
 	}
 	handler.requests++
-	return nil
+	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
 
 func (*cancellationEventHandler) RunnerStarted(context.Context, core.SourceReference) error {

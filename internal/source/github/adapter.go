@@ -35,7 +35,7 @@ type MessageClient interface {
 // invoked for that message succeeds. Implementations must handle redelivery
 // idempotently because acknowledgement can fail after durable handling.
 type EventHandler interface {
-	Request(ctx context.Context, request core.JobRequest) error
+	Request(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error)
 	RunnerStarted(ctx context.Context, source core.SourceReference) error
 	Terminalize(ctx context.Context, source core.SourceReference) error
 }
@@ -48,12 +48,15 @@ type EventHandler interface {
 // acknowledgement cursor is mutable. A failed handler or acknowledgement
 // leaves LastMessageID unchanged so GitHub can redeliver the message.
 type Adapter struct {
-	Client        MessageClient
-	Handler       EventHandler
-	Observer      ManagerObserver
-	Repository    string
-	RunnerPool    core.RunnerPool
-	LastMessageID int
+	Client         MessageClient
+	Handler        EventHandler
+	Observer       ManagerObserver
+	Repository     string
+	RunnerPool     core.RunnerPool
+	InstallationID int64
+	RunnerGroupID  int64
+	ScaleSetID     int64
+	LastMessageID  int
 }
 
 // PollResult distinguishes receipt, durable handling, and acknowledgement.
@@ -77,8 +80,9 @@ func (adapter *Adapter) PollOnce(ctx context.Context, maxCapacity int) (bool, er
 // that protocol step succeeds. Calls on one Adapter must be serialized.
 func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, error) {
 	pollStarted := adapter.Observer.currentTime()
-	adapter.reportPoll("poll", "started", pollStarted, nil)
+	adapter.reportPoll("poll", "started", 0, pollStarted, nil)
 	if err := adapter.validatePollBoundaries(); err != nil {
+		adapter.reportPoll("poll_configuration", "failed", 0, pollStarted, err)
 		return PollResult{}, err
 	}
 	message, empty, err := adapter.receiveMessage(ctx, maxCapacity, pollStarted)
@@ -88,11 +92,22 @@ func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, 
 	if empty {
 		return PollResult{}, nil
 	}
+	return adapter.handleReceivedMessage(ctx, message, pollStarted)
+}
+
+func (adapter *Adapter) handleReceivedMessage(
+	ctx context.Context,
+	message *upstream.RunnerScaleSetMessage,
+	pollStarted time.Time,
+) (PollResult, error) {
 	result := PollResult{Received: true}
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("GitHub poll canceled before message handling: %w", err)
 	}
 	if err := adapter.handleMessage(ctx, message); err != nil {
+		if !managerActivityWasReported(err) {
+			adapter.reportPoll("handle_message", "failed", int64(message.MessageID), pollStarted, err)
+		}
 		return result, err
 	}
 	result.Handled = true
@@ -104,7 +119,7 @@ func (adapter *Adapter) Poll(ctx context.Context, maxCapacity int) (PollResult, 
 	}
 	adapter.LastMessageID = message.MessageID
 	result.Acknowledged = true
-	adapter.reportPoll("poll", "completed", pollStarted, nil)
+	adapter.reportPoll("poll", "completed", 0, pollStarted, nil)
 	return result, nil
 }
 
@@ -121,11 +136,11 @@ func (adapter *Adapter) validatePollBoundaries() error {
 func (adapter *Adapter) receiveMessage(ctx context.Context, maxCapacity int, started time.Time) (*upstream.RunnerScaleSetMessage, bool, error) {
 	message, err := adapter.Client.GetMessage(ctx, adapter.LastMessageID, maxCapacity)
 	if errors.Is(err, ErrNoMessage) {
-		adapter.reportPoll("poll", "empty", started, nil)
+		adapter.reportPoll("poll", "empty", 0, started, nil)
 		return nil, true, nil
 	}
 	if err != nil {
-		adapter.reportPoll("poll", "failed", started, err)
+		adapter.reportPoll("poll", "failed", 0, started, err)
 		return nil, false, fmt.Errorf("receive GitHub scale-set message: %w", err)
 	}
 	if message == nil {
@@ -136,16 +151,17 @@ func (adapter *Adapter) receiveMessage(ctx context.Context, maxCapacity int, sta
 
 func (adapter *Adapter) acknowledgeMessage(ctx context.Context, messageID int, started time.Time) error {
 	if err := adapter.Client.DeleteMessage(ctx, messageID); err != nil {
-		adapter.reportPoll("acknowledge_message", "failed", started, err)
+		adapter.reportPoll("acknowledge_message", "failed", int64(messageID), started, err)
 		return fmt.Errorf("acknowledge GitHub scale-set message %d: %w", messageID, err)
 	}
-	adapter.reportPoll("acknowledge_message", "completed", started, nil)
+	adapter.reportPoll("acknowledge_message", "completed", int64(messageID), started, nil)
 	return nil
 }
 
-func (adapter *Adapter) reportPoll(stage, outcome string, started time.Time, err error) {
+func (adapter *Adapter) reportPoll(stage, outcome string, messageID int64, started time.Time, err error) {
 	activity := ManagerActivity{Visibility: ActivityDebug, Operation: "source_poll", Stage: stage, Outcome: outcome,
-		Repository: adapter.Repository, RunnerPool: adapter.RunnerPool, Err: err}
+		Repository: adapter.Repository, RunnerPool: adapter.RunnerPool, InstallationID: adapter.InstallationID,
+		RunnerGroupID: adapter.RunnerGroupID, ScaleSetID: adapter.ScaleSetID, MessageID: messageID, Err: err}
 	if outcome != "started" {
 		activity.Duration = adapter.Observer.currentTime().Sub(started)
 	}
@@ -225,7 +241,9 @@ func (adapter *Adapter) persistRequests(ctx context.Context, requests []identifi
 func (adapter *Adapter) persistStarted(ctx context.Context, started []identifiedObservation) error {
 	for _, observation := range started {
 		if err := adapter.Handler.RunnerStarted(ctx, observation.Source); err != nil {
-			return fmt.Errorf("durably record GitHub request %d started: %w", observation.RequestID, err)
+			wrapped := fmt.Errorf("durably record GitHub request %d started: %w", observation.RequestID, err)
+			adapter.reportObservationFailure("persist_runner_started", observation.RequestID, wrapped)
+			return markManagerActivityReported(wrapped)
 		}
 	}
 	return nil
@@ -234,10 +252,44 @@ func (adapter *Adapter) persistStarted(ctx context.Context, started []identified
 func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identifiedObservation) error {
 	for _, observation := range completed {
 		if err := adapter.Handler.Terminalize(ctx, observation.Source); err != nil {
-			return fmt.Errorf("durably terminalize GitHub request %d: %w", observation.RequestID, err)
+			wrapped := fmt.Errorf("durably terminalize GitHub request %d: %w", observation.RequestID, err)
+			adapter.reportObservationFailure("persist_terminal", observation.RequestID, wrapped)
+			return markManagerActivityReported(wrapped)
 		}
 	}
 	return nil
+}
+
+func (adapter *Adapter) reportObservationFailure(stage string, requestID int64, err error) {
+	activity := ManagerActivity{Visibility: ActivityInfo, Operation: "job_observation", Stage: stage,
+		Outcome: "failed", Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
+		SourceRequestID: requestID, Err: err}
+	activity.StateBackend, activity.StateOperation = durableStateFailureContext(err)
+	adapter.Observer.report(activity)
+}
+
+type managerActivityReportedError struct{ cause error }
+
+func (reported managerActivityReportedError) Error() string   { return reported.cause.Error() }
+func (reported managerActivityReportedError) Unwrap() error   { return reported.cause }
+func (managerActivityReportedError) ManagerActivityReported() {}
+
+func markManagerActivityReported(err error) error { return managerActivityReportedError{cause: err} }
+
+func managerActivityWasReported(err error) bool {
+	var reported interface{ ManagerActivityReported() }
+	return errors.As(err, &reported)
+}
+
+func durableStateFailureContext(err error) (backend string, operation string) {
+	var stateFailure interface {
+		StateBackend() string
+		StateOperation() string
+	}
+	if !errors.As(err, &stateFailure) {
+		return "", ""
+	}
+	return stateFailure.StateBackend(), stateFailure.StateOperation()
 }
 
 type identifiedRequest struct {
@@ -360,15 +412,22 @@ func (adapter *Adapter) request(ctx context.Context, requestID int64, request co
 	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
 		Stage: "persist_job", Outcome: "started", Repository: adapter.Repository,
 		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID})
-	if err := adapter.Handler.Request(ctx, request); err != nil {
-		adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
+	result, err := adapter.Handler.Request(ctx, request)
+	if err != nil {
+		activity := ManagerActivity{Visibility: ActivityInfo, Operation: "job_ingestion",
 			Stage: "persist_job", Outcome: "failed", Repository: adapter.Repository,
-			RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, Err: err})
-		return fmt.Errorf("durably handle GitHub request %d: %w", requestID, err)
+			RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, Err: err}
+		activity.StateBackend, activity.StateOperation = durableStateFailureContext(err)
+		adapter.Observer.report(activity)
+		return markManagerActivityReported(fmt.Errorf("durably handle GitHub request %d: %w", requestID, err))
 	}
-	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
-		Stage: "persist_job", Outcome: "completed", Repository: adapter.Repository,
-		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID})
+	visibility := ActivityDebug
+	if result.Outcome == core.QueueQueued {
+		visibility = ActivityInfo
+	}
+	adapter.Observer.report(ManagerActivity{Visibility: visibility, Operation: "job_ingestion",
+		Stage: "persist_job", Outcome: string(result.Outcome), Repository: adapter.Repository,
+		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, JobID: result.Job.ID})
 	return nil
 }
 
