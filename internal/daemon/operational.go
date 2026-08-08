@@ -52,6 +52,18 @@ type operationalEvent struct {
 	githubRunnerID     int64
 	identityReason     string
 	count              int
+	desiredJobs        int
+	availableJobs      int
+	acquiredJobs       int
+	runningJobs        int
+	registeredRunners  int
+	busyRunners        int
+	idleRunners        int
+	activeJobs         int
+	queuedJobs         int
+	processingJobs     int
+	jobsAdded          int
+	jobsRemoved        int
 	repositoryCount    int
 	installationCount  int
 	current            int

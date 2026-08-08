@@ -20,6 +20,7 @@ const claimedProcessingJobColumns = `job_id, source_name, source_reference, runn
 
 const serializeRunnerPoolClaimSQL = `SELECT pg_advisory_xact_lock(1, hashtext($1))`
 const serializeSourceSQL = `SELECT pg_advisory_xact_lock(2, hashtext($1 || chr(0) || $2))`
+const serializeDemandScopeSQL = `SELECT pg_advisory_xact_lock(3, hashtext($1 || chr(0) || $2))`
 
 const insertQueuedJobSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	(source_name, source_reference, runner_pool, enqueued_at)

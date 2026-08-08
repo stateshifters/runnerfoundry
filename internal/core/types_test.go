@@ -21,6 +21,18 @@ func TestSourceReferenceValidity(t *testing.T) {
 	}
 }
 
+func TestDemandScopeValidity(t *testing.T) {
+	valid := DemandScope{Adapter: "github", ID: "repository-pool"}
+	if !valid.IsValid() {
+		t.Fatal("complete demand scope is invalid")
+	}
+	for _, invalid := range []DemandScope{{}, {Adapter: "github"}, {ID: "repository-pool"}} {
+		if invalid.IsValid() {
+			t.Fatalf("DemandScope %#v is valid", invalid)
+		}
+	}
+}
+
 func TestJobIdentityValidation(t *testing.T) {
 	if err := (JobIdentity{Source: SourceReference{Adapter: "github", ID: "request"}}).Validate(); err != nil {
 		t.Fatalf("source identity validation: %v", err)

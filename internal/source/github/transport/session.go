@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/google/uuid"
 )
 
 var ErrNoMessage = errors.New("no GitHub scale-set message")
@@ -18,8 +19,10 @@ type SessionKey struct {
 // Session owns one GitHub runner scale-set message session. Close must be
 // called when polling ends.
 type Session struct {
-	messageAPI messageSessionAPI
-	key        SessionKey
+	messageAPI        messageSessionAPI
+	key               SessionKey
+	sessionID         uuid.UUID
+	initialStatistics *upstream.RunnerScaleSetStatistic
 }
 
 // OpenSession creates the message session used to poll one registered Runner Pool.
@@ -35,9 +38,12 @@ func (client *Client) OpenSession(
 	if err != nil {
 		return nil, fmt.Errorf("open message session for runner scale set %d: %w", registration.ID, err)
 	}
+	sessionID, initialStatistics := initialSessionDetails(messageAPI)
 	return &Session{
-		messageAPI: messageAPI,
-		key:        SessionKey{Repository: client.repositoryURL, RunnerPool: registration.Name},
+		messageAPI:        messageAPI,
+		key:               SessionKey{Repository: client.repositoryURL, RunnerPool: registration.Name},
+		sessionID:         sessionID,
+		initialStatistics: copyStatistics(initialStatistics),
 	}, nil
 }
 
@@ -45,20 +51,53 @@ func (session *Session) Key() SessionKey {
 	return session.key
 }
 
+func (session *Session) SessionID() uuid.UUID { return session.sessionID }
+
+func (session *Session) InitialStatistics() *upstream.RunnerScaleSetStatistic {
+	return copyStatistics(session.initialStatistics)
+}
+
 type upstreamMessageSession struct {
-	getMessage    func(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error)
-	deleteMessage func(context.Context, int) error
-	acquireJobs   func(context.Context, []int64) ([]int64, error)
-	closeSession  func(context.Context) error
+	getMessage        func(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error)
+	deleteMessage     func(context.Context, int) error
+	acquireJobs       func(context.Context, []int64) ([]int64, error)
+	closeSession      func(context.Context) error
+	sessionID         uuid.UUID
+	initialStatistics *upstream.RunnerScaleSetStatistic
 }
 
 func adaptUpstreamMessageSession(client *upstream.MessageSessionClient) upstreamMessageSession {
+	initialSession := client.Session()
 	return upstreamMessageSession{
-		getMessage:    client.GetMessage,
-		deleteMessage: client.DeleteMessage,
-		acquireJobs:   client.AcquireJobs,
-		closeSession:  client.Close,
+		getMessage:        client.GetMessage,
+		deleteMessage:     client.DeleteMessage,
+		acquireJobs:       client.AcquireJobs,
+		closeSession:      client.Close,
+		sessionID:         initialSession.SessionID,
+		initialStatistics: copyStatistics(initialSession.Statistics),
 	}
+}
+
+func (session upstreamMessageSession) initialSessionDetails() (uuid.UUID, *upstream.RunnerScaleSetStatistic) {
+	return session.sessionID, copyStatistics(session.initialStatistics)
+}
+
+func initialSessionDetails(messageAPI messageSessionAPI) (uuid.UUID, *upstream.RunnerScaleSetStatistic) {
+	details, available := messageAPI.(interface {
+		initialSessionDetails() (uuid.UUID, *upstream.RunnerScaleSetStatistic)
+	})
+	if !available {
+		return uuid.Nil, nil
+	}
+	return details.initialSessionDetails()
+}
+
+func copyStatistics(statistics *upstream.RunnerScaleSetStatistic) *upstream.RunnerScaleSetStatistic {
+	if statistics == nil {
+		return nil
+	}
+	copied := *statistics
+	return &copied
 }
 
 func (session upstreamMessageSession) GetMessage(

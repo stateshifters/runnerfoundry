@@ -143,6 +143,7 @@ func (fixture *ignoredLifecyclePollingFixture) open(t *testing.T) {
 func (fixture *ignoredLifecyclePollingFixture) processIgnoredLifecycle(t *testing.T) {
 	t.Helper()
 	fixture.lifecycleClient.messages <- &upstream.RunnerScaleSetMessage{MessageID: 1,
+		Statistics: &upstream.RunnerScaleSetStatistic{},
 		JobCompletedMessages: []*upstream.JobCompleted{{RunnerID: 502,
 			JobMessageBase: upstream.JobMessageBase{JobID: "poison-job", WorkflowRunID: 902}}}}
 	if messageID := <-fixture.lifecycleClient.acknowledged; messageID != 1 {
@@ -160,6 +161,7 @@ func (fixture *ignoredLifecyclePollingFixture) processIgnoredLifecycle(t *testin
 func (fixture *ignoredLifecyclePollingFixture) processValidDemand(t *testing.T) {
 	t.Helper()
 	fixture.demandClient.messages <- &upstream.RunnerScaleSetMessage{MessageID: 2,
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
 		JobAvailableMessages: []*upstream.JobAvailable{{
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 42},
 		}}}

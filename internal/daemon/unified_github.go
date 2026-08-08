@@ -37,9 +37,10 @@ type githubRepositoryOpenResult struct {
 }
 
 type githubDiscoveryResult struct {
-	epoch    uint64
-	snapshot githubsource.RegistrationSnapshot
-	err      error
+	epoch       uint64
+	completedAt time.Time
+	snapshot    githubsource.RegistrationSnapshot
+	err         error
 }
 
 type githubLeadershipTerm struct {
@@ -135,7 +136,6 @@ func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
 	source.beginSessionActivation()
 	source.scheduleRequiredRepositoryGenerations(ctx, term)
 	source.startDiscovery(ctx, term)
-	source.nextDiscovery = source.currentTime().Add(source.discoveryInterval)
 	return nil
 }
 
@@ -150,7 +150,7 @@ func (source *githubSourceRuntime) startDiscovery(ctx context.Context, term *git
 		defer term.background.Done()
 		defer term.finishOperation(operationID)
 		snapshot, err := source.manager.Reconcile(operationContext, source.config)
-		result := githubDiscoveryResult{epoch: term.epoch, snapshot: snapshot, err: err}
+		result := githubDiscoveryResult{epoch: term.epoch, completedAt: source.currentTime(), snapshot: snapshot, err: err}
 		select {
 		case term.discoveryResult <- result:
 		case <-operationContext.Done():

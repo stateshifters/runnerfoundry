@@ -31,6 +31,19 @@ func TestQueueHandlerPersistsAssignment(t *testing.T) {
 	}
 }
 
+func TestDurableStateErrorPreservesCauseAndSafeContext(t *testing.T) {
+	cause := errors.New("driver detail")
+	err := runtimeengine.NewDurableStateError("postgresql", "reconcile_assigned_demand", cause)
+	var stateErr runtimeengine.DurableStateError
+	if !errors.As(err, &stateErr) || !errors.Is(err, cause) ||
+		stateErr.StateBackend() != "postgresql" || stateErr.StateOperation() != "reconcile_assigned_demand" {
+		t.Fatalf("durable state error = %v", err)
+	}
+	if strings.Contains(err.Error(), cause.Error()) {
+		t.Fatalf("durable state error disclosed driver detail: %v", err)
+	}
+}
+
 func TestQueueHandlerPersistsLifecycleEventsBySource(t *testing.T) {
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
 	want := core.JobIdentity{Source: source}

@@ -73,6 +73,33 @@ func TestGitHubManagerObserverPublishesProgressAndFailureDetail(t *testing.T) {
 	})
 }
 
+func TestGitHubAssignedDemandLoggingNamesChangeAndCarriesCounts(t *testing.T) {
+	destination := &memoryLogDestination{}
+	reporter := newDebugRuntimeReporter(t, destination)
+	observer := newGitHubManagerObserver(reporter.reportMaintenance, builderTime)
+
+	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
+		Operation: "assigned_demand", Stage: "reconcile", Outcome: "completed",
+		Repository: "https://github.com/example/project", RunnerPool: "linux",
+		InstallationID: 17, ScaleSetID: 23, DesiredJobs: 12, ActiveJobs: 7,
+		AvailableJobs: 2, AcquiredJobs: 3, RunningJobs: 4, RegisteredRunners: 6,
+		BusyRunners: 4, IdleRunners: 2, QueuedJobs: 4, ProcessingJobs: 3, JobsAdded: 5})
+	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityDebug,
+		Operation: "assigned_demand", Stage: "reconcile", Outcome: "failed",
+		Repository: "https://github.com/example/project", RunnerPool: "linux",
+		InstallationID: 17, ScaleSetID: 23, DesiredJobs: 12,
+		Err: errors.New("state operation failed")})
+
+	assertLogFragments(t, destination.String(), []string{
+		"Recovered 5 assigned GitHub jobs for https://github.com/example/project in Runner Pool linux",
+		"component=github_messages operation=assigned_demand", "installation_id=17", "scale_set_id=23",
+		"desired_jobs=12", "active_jobs=7", "queued_jobs=4", "processing_jobs=3", "jobs_added=5",
+		"available_jobs=2", "acquired_jobs=3", "running_jobs=4", "registered_runners=6",
+		"busy_runners=4", "idle_runners=2",
+		"Failed to reconcile assigned GitHub demand for https://github.com/example/project in Runner Pool linux",
+	})
+}
+
 func TestGitHubLifecycleFailureLoggingText(t *testing.T) {
 	output := githubLifecycleFailureLog(t, "text")
 	assertLogFragments(t, output, []string{

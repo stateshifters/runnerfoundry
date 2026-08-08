@@ -24,7 +24,7 @@ func TestPollIgnoresNonActionableAvailableEvidenceAndQueuesValidSibling(t *testi
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, handler)
 	adapter.InstallationID, adapter.RunnerGroupID, adapter.ScaleSetID = 701, 702, 703
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
@@ -70,7 +70,7 @@ func TestPollReportsIgnoredEvidenceForEachFailedHandlingAttempt(t *testing.T) {
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, &recordingEventHandler{requestErr: errors.New("state unavailable")})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 

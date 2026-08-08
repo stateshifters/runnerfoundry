@@ -40,6 +40,15 @@ type SourceReference struct {
 func (source SourceReference) IsEmpty() bool { return source.Adapter == "" && source.ID == "" }
 func (source SourceReference) IsValid() bool { return source.Adapter != "" && source.ID != "" }
 
+// DemandScope is an opaque source-owned key that serializes demand mutations
+// belonging to one upstream queue. It is not durable job identity.
+type DemandScope struct {
+	Adapter SourceAdapter
+	ID      SourceIdentifier
+}
+
+func (scope DemandScope) IsValid() bool { return scope.Adapter != "" && scope.ID != "" }
+
 // RunnerObservation identifies a source lifecycle observation by the source's
 // request reference, the runner name, or both when the source supplies both.
 type RunnerObservation struct {
@@ -87,6 +96,7 @@ const (
 // JobRequest is source demand ready to enter a Runner Pool queue.
 type JobRequest struct {
 	Source     SourceReference
+	Scope      DemandScope
 	RunnerPool RunnerPool
 	EnqueuedAt time.Time
 }

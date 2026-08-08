@@ -130,7 +130,7 @@ func deterministicCredentials(t *testing.T) Credentials {
 func TestClientFromUpstreamBuildsAndReportsMessageSessions(t *testing.T) {
 	t.Parallel()
 
-	api := &upstreamAPIFake{}
+	api := &upstreamAPIFake{session: &upstream.MessageSessionClient{}}
 	client := clientFromUpstream("https://github.com/acme/widgets", api)
 	if _, err := client.OpenSession(context.Background(), Registration{ID: 17}, "owner"); err != nil {
 		t.Fatalf("open adapted session: %v", err)
@@ -178,6 +178,7 @@ type upstreamAPIFake struct {
 	actionsAPIFake
 	jitAPIFake
 	sessionErr        error
+	session           *upstream.MessageSessionClient
 	registryScaleSets []upstream.RunnerScaleSet
 	deletedScaleSets  []int
 }
@@ -197,7 +198,7 @@ func (api *upstreamAPIFake) MessageSessionClient(
 	string,
 	...upstream.HTTPOption,
 ) (*upstream.MessageSessionClient, error) {
-	return nil, api.sessionErr
+	return api.session, api.sessionErr
 }
 
 func (api *actionsAPIFake) GetRunnerGroupByName(context.Context, string) (*upstream.RunnerGroup, error) {

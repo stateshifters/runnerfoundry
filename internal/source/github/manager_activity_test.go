@@ -103,6 +103,118 @@ func TestManagerReportsBoundedRepositoryReconciliationProgress(t *testing.T) {
 	}
 }
 
+func TestManagerReportsRepositoryProgressOnlyAfterAttemptsComplete(t *testing.T) {
+	fixture := newRepositoryProgressFixture(t)
+	fixture.awaitAllStarted()
+	assertNoRepositoryProgress(t, fixture.activities)
+	fixture.completeInOrder([]int{2, 0, 3, 1})
+	fixture.assertExpectedFailure()
+}
+
+type repositoryProgressFixture struct {
+	t            *testing.T
+	repositories []transport.Repository
+	wantErr      error
+	started      chan string
+	releases     map[string]chan struct{}
+	activities   chan githubsource.ManagerActivity
+	reconciled   <-chan reconcileResult
+}
+
+func newRepositoryProgressFixture(t *testing.T) *repositoryProgressFixture {
+	t.Helper()
+	fixture := &repositoryProgressFixture{
+		t: t, repositories: managerRepositories(4), wantErr: errors.New("repository reconciliation failed"),
+		started: make(chan string, 4), releases: make(map[string]chan struct{}, 4),
+		activities: make(chan githubsource.ManagerActivity, 100),
+	}
+	for _, repository := range fixture.repositories {
+		fixture.releases[repository.URL] = make(chan struct{})
+	}
+	manager, err := githubsource.NewManager(
+		&managerDiscovererFake{repositories: fixture.repositories}, fixture.client,
+		&registrationRepositoryFake{}, githubsource.ManagerObserver{Report: fixture.report},
+	)
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	fixture.reconciled = startManagerReconciliation(manager)
+	return fixture
+}
+
+func (fixture *repositoryProgressFixture) client(
+	_ context.Context,
+	repository transport.Repository,
+) (githubsource.ManagerClient, error) {
+	return githubsource.ManagerClient{EnsureRunnerPool: func(
+		context.Context,
+		string,
+		string,
+	) (transport.Registration, error) {
+		fixture.started <- repository.URL
+		<-fixture.releases[repository.URL]
+		if repository.URL == fixture.repositories[3].URL {
+			return transport.Registration{}, fixture.wantErr
+		}
+		return transport.Registration{ID: transport.ScaleSetID(repository.InstallationID), RunnerGroupID: 1}, nil
+	}}, nil
+}
+
+func (fixture *repositoryProgressFixture) report(activity githubsource.ManagerActivity) {
+	fixture.activities <- activity
+}
+
+func (fixture *repositoryProgressFixture) awaitAllStarted() {
+	for range fixture.repositories {
+		<-fixture.started
+	}
+}
+
+func (fixture *repositoryProgressFixture) completeInOrder(repositoryIndexes []int) {
+	fixture.t.Helper()
+	for completed, repositoryIndex := range repositoryIndexes {
+		repository := fixture.repositories[repositoryIndex]
+		close(fixture.releases[repository.URL])
+		if current := awaitRepositoryProgress(fixture.t, fixture.activities); current != completed+1 {
+			fixture.t.Fatalf("completed repository progress = %d, want %d", current, completed+1)
+		}
+	}
+}
+
+func (fixture *repositoryProgressFixture) assertExpectedFailure() {
+	fixture.t.Helper()
+	if result := <-fixture.reconciled; !errors.Is(result.err, fixture.wantErr) {
+		fixture.t.Fatalf("reconcile repositories error = %v, want %v", result.err, fixture.wantErr)
+	}
+}
+
+func assertNoRepositoryProgress(t *testing.T, activities <-chan githubsource.ManagerActivity) {
+	t.Helper()
+	for {
+		select {
+		case activity := <-activities:
+			if activity.Visibility == githubsource.ActivityInfo && activity.Stage == "configure_repositories" &&
+				activity.Outcome == "progress" {
+				t.Fatalf("repository progress reported before completion: %#v", activity)
+			}
+		default:
+			return
+		}
+	}
+}
+
+func awaitRepositoryProgress(t *testing.T, activities <-chan githubsource.ManagerActivity) int {
+	t.Helper()
+	for activity := range activities {
+		if activity.Visibility == githubsource.ActivityInfo && activity.Stage == "configure_repositories" &&
+			activity.Outcome == "progress" {
+			return activity.Current
+		}
+	}
+	t.Fatal("manager activity stream closed before repository progress")
+	return 0
+}
+
 func TestManagerReportsCompletedReconciliationStages(t *testing.T) {
 	repositories := []transport.Repository{{InstallationID: 1, URL: "https://github.com/octo/repository"}}
 	factory := newManagerFactoryFake(repositories)

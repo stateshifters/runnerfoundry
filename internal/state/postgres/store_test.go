@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +23,34 @@ func TestEnqueueCreatesQueuedJob(t *testing.T) {
 	if err != nil || result.Outcome != core.QueueQueued || result.Job.ID != testJobID1 || protocol.commitCalls != 1 {
 		t.Fatalf("queue = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
 	}
-	if len(protocol.statements) != 2 || !strings.Contains(protocol.statements[0], "pg_advisory_xact_lock") ||
+	if len(protocol.statements) != 2 || protocol.statements[0] != serializeSourceSQL ||
 		!strings.Contains(protocol.statements[1], "runnerfoundry_queued_jobs") || len(protocol.arguments[1]) != 4 {
 		t.Fatalf("enqueue protocol = %#v %#v", protocol.statements, protocol.arguments)
+	}
+}
+
+func TestScopedEnqueueSerializesOnlyMatchingDemandScope(t *testing.T) {
+	t.Parallel()
+	firstScope := core.DemandScope{Adapter: "github", ID: "repository-linux"}
+	otherScope := core.DemandScope{Adapter: "github", ID: "other-linux"}
+	requests := []core.JobRequest{
+		{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, Scope: firstScope, RunnerPool: "linux"},
+		{Source: core.SourceReference{Adapter: "github", ID: "request-2"}, Scope: firstScope, RunnerPool: "linux"},
+		{Source: core.SourceReference{Adapter: "github", ID: "request-3"}, Scope: otherScope, RunnerPool: "linux"},
+	}
+	lockArguments := make([][]any, 0, len(requests))
+	for index, request := range requests {
+		protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(assignedDemandJobID(index+1), request))}}
+		if _, err := NewStore(protocol.executor()).Queue(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+		if protocol.statements[0] != serializeDemandScopeSQL || protocol.statements[1] != serializeSourceSQL {
+			t.Fatalf("scoped enqueue protocol = %#v", protocol.statements)
+		}
+		lockArguments = append(lockArguments, protocol.arguments[0])
+	}
+	if !reflect.DeepEqual(lockArguments[0], lockArguments[1]) || reflect.DeepEqual(lockArguments[0], lockArguments[2]) {
+		t.Fatalf("demand-scope lock arguments = %#v", lockArguments)
 	}
 }
 

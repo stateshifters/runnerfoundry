@@ -341,15 +341,20 @@ func (manager *Manager) ensureRepositoriesConcurrently(
 	results []repositoryRegistrationResult,
 ) error {
 	var group errgroup.Group
+	var completionMutex sync.Mutex
+	completed := 0
 	group.SetLimit(repositoryConcurrency)
 	for index, repository := range repositories {
-		manager.reportRepositoryProgress(index+1, len(repositories))
 		results[index].repository = repository.URL
 		group.Go(func() error {
 			current := index + 1
 			results[index].records, results[index].err = manager.ensureRepositoryWithActivity(
 				ctx, repository, config, current, len(repositories),
 			)
+			completionMutex.Lock()
+			completed++
+			manager.reportRepositoryProgress(completed, len(repositories))
+			completionMutex.Unlock()
 			return nil
 		})
 	}

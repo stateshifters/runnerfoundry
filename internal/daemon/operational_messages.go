@@ -23,7 +23,8 @@ func operationalEventComponent(event operationalEvent) string {
 var operationalComponents = map[string]string{
 	"source_reconciliation": "github_registration", "source_sessions": "github_sessions",
 	"source_poll": "github_messages", "job_ingestion": "github_messages", "job_observation": "github_messages",
-	"source_routes": "github_routes", "capacity_publication": "github_capacity",
+	"assigned_demand": "github_messages",
+	"source_routes":   "github_routes", "capacity_publication": "github_capacity",
 	"claim": "job_queue", "job_processing": "job_queue", "runner_retry": "job_queue",
 	"runner_start": "runner_provisioning", "cleanup": "runner_cleanup", "leadership": "github_leadership",
 	"heartbeat": "cluster_membership", "refresh_member_routes": "github_control", "leader_work": "github_control",
@@ -48,6 +49,7 @@ var operationalMessageBuilders = map[string]func(operationalEvent) string{
 	"job_ingestion":         githubJobIngestionMessage,
 	"job_observation":       githubJobObservationMessage,
 	"source_poll":           githubPollMessage,
+	"assigned_demand":       githubAssignedDemandMessage,
 	"capacity_publication": func(event operationalEvent) string {
 		return fmt.Sprintf("Published GitHub capacity %d for Runner Pool %s", event.capacity, event.runnerPool)
 	},

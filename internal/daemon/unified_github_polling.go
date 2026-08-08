@@ -49,7 +49,6 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 	}
 	if !source.currentTime().Before(source.nextDiscovery) && !term.discoveryActive {
 		source.startDiscovery(ctx, term)
-		source.nextDiscovery = source.currentTime().Add(source.discoveryInterval)
 	}
 	pollErrors = append(pollErrors, source.launchIdlePolls(ctx, liveMemberCutoff)...)
 	return errors.Join(pollErrors...)
@@ -179,6 +178,7 @@ func (source *githubSourceRuntime) harvestDiscovery(
 		if result.epoch != term.epoch || source.term != term || !source.leaderInstalled {
 			return nil
 		}
+		source.nextDiscovery = result.completedAt.Add(source.discoveryInterval)
 		if result.err != nil {
 			return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
 		}
@@ -262,7 +262,7 @@ func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]
 			continue
 		}
 		delete(source.polls, adapter)
-		if result.poll.Handled {
+		if result.poll.Handled || result.poll.DemandChanged {
 			changedPools[adapter.RunnerPool] = struct{}{}
 		}
 		if result.err != nil {

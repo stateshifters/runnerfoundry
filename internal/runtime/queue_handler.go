@@ -23,6 +23,12 @@ type DurableStateError struct {
 	cause     error
 }
 
+// NewDurableStateError preserves a state failure for control flow while its
+// Error method keeps driver-supplied connection details out of logs.
+func NewDurableStateError(backend string, operation string, cause error) error {
+	return DurableStateError{Backend: backend, Operation: operation, cause: cause}
+}
+
 func (stateError DurableStateError) Error() string {
 	return fmt.Sprintf("%s durable state %s failed", stateError.Backend, stateError.Operation)
 }

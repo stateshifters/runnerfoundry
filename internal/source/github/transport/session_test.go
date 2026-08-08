@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/google/uuid"
 )
 
 func TestSessionAcquireRequestsReturnsAcquiredSubset(t *testing.T) {
@@ -59,6 +60,32 @@ func TestOpenSessionExposesRepositoryAndRunnerPoolRoutingKey(t *testing.T) {
 	}
 	if session.Key() != (SessionKey{Repository: "https://github.com/acme/widgets", RunnerPool: "linux"}) {
 		t.Fatalf("session key = %#v", session.Key())
+	}
+}
+
+func TestOpenSessionCopiesInitialStatisticsAndSessionIdentity(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.MustParse("1d2da680-4390-4c6f-9f04-2f12c518ac34")
+	upstreamStatistics := &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 3}
+	client := &Client{
+		openSession: func(context.Context, int, string) (messageSessionAPI, error) {
+			return upstreamMessageSession{sessionID: sessionID, initialStatistics: upstreamStatistics}, nil
+		},
+	}
+	session, err := client.OpenSession(context.Background(), Registration{ID: 17}, "member-1")
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	upstreamStatistics.TotalAssignedJobs = 8
+	statistics := session.InitialStatistics()
+	if session.SessionID() != sessionID || statistics == nil || statistics.TotalAssignedJobs != 3 {
+		t.Fatalf("initial session = (%s, %#v), want (%s, 3 assigned)",
+			session.SessionID(), statistics, sessionID)
+	}
+	statistics.TotalAssignedJobs = 12
+	if session.InitialStatistics().TotalAssignedJobs != 3 {
+		t.Fatal("caller mutated retained initial statistics")
 	}
 }
 

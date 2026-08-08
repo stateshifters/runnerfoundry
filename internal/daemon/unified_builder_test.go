@@ -27,7 +27,7 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	manager := newBuilderManager(t, store)
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
-		store: store, manager: manager, member: daemonTestID(1),
+		store: store, demandStore: store, manager: manager, member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
@@ -76,7 +76,7 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 	t.Helper()
 	store := newBuilderStoreFake()
 	return unifiedBuilderDependencies{
-		store: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
+		store: store, demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
@@ -251,6 +251,12 @@ func newBuilderStoreFake() *builderStoreFake {
 
 func (*builderStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, nil
+}
+func (*builderStoreFake) ReconcileAssignedDemand(
+	context.Context,
+	githubsource.AssignedDemand,
+) (githubsource.AssignedDemandResult, error) {
+	return githubsource.AssignedDemandResult{}, nil
 }
 func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool, _ core.ProcessingClaim) (core.ClaimResult, error) {
 	return core.ClaimResult{Outcome: core.ClaimEmpty}, store.operationErr

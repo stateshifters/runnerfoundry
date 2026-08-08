@@ -163,7 +163,7 @@ func buildTimedProductionGeneration(
 	operatingSystemTicker := dependencies.newTicker(runtimeCycleInterval)
 	ticker := productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{
-		store: state.store, manager: components.manager, member: components.member,
+		store: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
 		ticker: ticker, report: report,
@@ -188,6 +188,7 @@ func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {
 
 type productionState struct {
 	store         unifiedStore
+	demandStore   githubsource.AssignedDemandRepository
 	member        core.MemberID
 	newLeadership func() leadershipRuntime
 	closers       []runtimeCloser
@@ -241,7 +242,7 @@ func openProductionSQLiteStateWithDependencies(
 	}
 	closer := contextCloserFunc(func(context.Context) error { return dependencies.closeSQLite(store) })
 	return &productionState{
-		store: store, newLeadership: func() leadershipRuntime { return permanentLeadership{} },
+		store: store, demandStore: store, newLeadership: func() leadershipRuntime { return permanentLeadership{} },
 		closers: []runtimeCloser{closer},
 	}, nil
 }
@@ -262,7 +263,7 @@ func openProductionPostgreSQLStateWithDependencies(
 	store := dependencies.newPGStore(dependencies.newPGConnection(pool))
 	closer := contextCloserFunc(func(context.Context) error { dependencies.closePool(pool); return nil })
 	return &productionState{
-		store: store,
+		store: store, demandStore: store,
 		newLeadership: func() leadershipRuntime {
 			return newExclusiveLeadership(cluster.ErrNotLeader, func(leaderContext context.Context) (leaderLease, error) {
 				return dependencies.tryLeader(clusterStore, leaderContext)

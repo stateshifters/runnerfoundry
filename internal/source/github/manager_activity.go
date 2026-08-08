@@ -41,6 +41,18 @@ type ManagerActivity struct {
 	Current            int
 	Total              int
 	Count              int
+	DesiredJobs        int
+	AvailableJobs      int
+	AcquiredJobs       int
+	RunningJobs        int
+	RegisteredRunners  int
+	BusyRunners        int
+	IdleRunners        int
+	ActiveJobs         int
+	QueuedJobs         int
+	ProcessingJobs     int
+	JobsAdded          int
+	JobsRemoved        int
 	RepositoryCount    int
 	InstallationCount  int
 	Duration           time.Duration

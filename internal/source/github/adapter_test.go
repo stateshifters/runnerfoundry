@@ -205,7 +205,7 @@ func TestAdapterReportsDurableStateFailureContextAtJobBoundary(t *testing.T) {
 	activities := make([]githubsource.ManagerActivity, 0)
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{availableMessage(20, 62)}, acquired: []int64{62}}
 	adapter := newAdapter(client, &recordingEventHandler{requestErr: stateErr})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
@@ -415,18 +415,21 @@ func TestPollOnceTerminalizesEveryGitHubCompletionResult(t *testing.T) {
 }
 
 type recordingClient struct {
-	messages     []*upstream.RunnerScaleSetMessage
-	acquired     []int64
-	requested    [][]int64
-	acknowledged []int
-	events       []string
-	receiveErr   error
-	acquireErr   error
-	deleteErr    error
-	maxCapacity  int
+	messages               []*upstream.RunnerScaleSetMessage
+	acquired               []int64
+	requested              [][]int64
+	acknowledged           []int
+	events                 []string
+	receiveErr             error
+	acquireErr             error
+	deleteErr              error
+	maxCapacity            int
+	receives               int
+	allowMissingStatistics bool
 }
 
 func (client *recordingClient) GetMessage(_ context.Context, _, maxCapacity int) (*upstream.RunnerScaleSetMessage, error) {
+	client.receives++
 	client.maxCapacity = maxCapacity
 	if client.receiveErr != nil {
 		return nil, client.receiveErr
@@ -436,6 +439,9 @@ func (client *recordingClient) GetMessage(_ context.Context, _, maxCapacity int)
 	}
 	message := client.messages[0]
 	client.messages = client.messages[1:]
+	if message.Statistics == nil && !client.allowMissingStatistics {
+		message.Statistics = &upstream.RunnerScaleSetStatistic{}
+	}
 	return message, nil
 }
 
@@ -470,12 +476,23 @@ func availableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMe
 func newAdapter(client githubsource.MessageClient, handler githubsource.EventHandler) *githubsource.Adapter {
 	return &githubsource.Adapter{
 		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
+		Observer: githubsource.ManagerObserver{CurrentTime: func() time.Time {
+			return time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+		}},
 	}
 }
 
 func jobRequest(t *testing.T, requestID int64, enqueuedAt time.Time) core.JobRequest {
 	t.Helper()
-	return core.JobRequest{Source: sourceReference(t, requestID), RunnerPool: core.RunnerPool("linux"), EnqueuedAt: enqueuedAt}
+	identity := githubsource.SourceIdentity{
+		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"), RequestID: requestID,
+	}
+	scope, err := githubsource.DemandScope(identity)
+	if err != nil {
+		t.Fatalf("encode demand scope: %v", err)
+	}
+	return core.JobRequest{Source: sourceReference(t, requestID), Scope: scope,
+		RunnerPool: core.RunnerPool("linux"), EnqueuedAt: enqueuedAt}
 }
 
 func sourceReference(t *testing.T, requestID int64) core.SourceReference {

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	upstream "github.com/actions/scaleset"
+	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
@@ -195,9 +197,28 @@ func (manager *Manager) openLeaderRecordWithClient(
 	if session == nil {
 		return openedLeader{}, errors.New("GitHub client returned nil message session")
 	}
+	sessionID, initialStatistics, initialStatisticsPending := managerSessionInitialObservation(session)
 	return openedLeader{session: session, adapter: &Adapter{Client: session, Handler: handler, Observer: manager.observer,
 		Repository: record.RepositoryURL, RunnerPool: record.RunnerPool, InstallationID: int64(record.InstallationID),
-		RunnerGroupID: int64(record.RunnerGroupID), ScaleSetID: int64(record.ScaleSetID)}}, nil
+		RunnerGroupID: int64(record.RunnerGroupID), ScaleSetID: int64(record.ScaleSetID),
+		InitialSessionID: sessionID, InitialStatistics: initialStatistics,
+		InitialStatisticsPending: initialStatisticsPending}}, nil
+}
+
+func managerSessionInitialObservation(session ManagedSession) (uuid.UUID, *upstream.RunnerScaleSetStatistic, bool) {
+	initial, available := session.(interface {
+		SessionID() uuid.UUID
+		InitialStatistics() *upstream.RunnerScaleSetStatistic
+	})
+	if !available {
+		return uuid.Nil, nil, false
+	}
+	statistics := initial.InitialStatistics()
+	if statistics == nil {
+		return initial.SessionID(), nil, true
+	}
+	copied := *statistics
+	return initial.SessionID(), &copied, true
 }
 
 func repositoryFromRegistration(record Registration) transport.Repository {

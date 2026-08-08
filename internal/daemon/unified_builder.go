@@ -24,6 +24,7 @@ type unifiedStore interface {
 
 type unifiedBuilderDependencies struct {
 	store       unifiedStore
+	demandStore githubsource.AssignedDemandRepository
 	manager     *githubsource.Manager
 	member      core.MemberID
 	providers   map[core.RunnerPool]execution.ExecutionProvider
@@ -80,9 +81,11 @@ func buildConfiguredEngine(
 	wakeJobs func(core.RunnerPool),
 	stateBackend string,
 ) *UnifiedEngine {
+	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, wakeJobs, stateBackend)
+	handler := newGitHubDemandHandler(queue, dependencies.demandStore, wakeJobs, stateBackend)
 	source := newGitHubSourceRuntime(
 		dependencies.manager, dependencies.store, string(dependencies.member),
-		runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, wakeJobs, stateBackend),
+		handler,
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
 	source.report = dependencies.report
@@ -201,7 +204,7 @@ func newOrchestrationPool(
 }
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
-	if dependencies.store == nil || dependencies.manager == nil || dependencies.member == "" ||
+	if dependencies.store == nil || dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
 		dependencies.leadership == nil || dependencies.currentTime == nil || dependencies.ticker == nil ||
 		dependencies.processGate == nil || dependencies.inventory == nil {
 		return errors.New("state, GitHub manager, member, leadership, clock, ticker, and process gate are required")

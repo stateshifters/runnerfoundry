@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,8 +60,19 @@ func newRuntimeCompositionFixtureWithMessages(messages []*upstream.RunnerScaleSe
 	client := &recordingClient{messages: messages, acquired: []int64{42}}
 	store := &runtimeCompositionStore{}
 	woken := make(chan core.RunnerPool, 1)
-	handler := runtimeengine.NewQueueHandlerWithWake(store, func(pool core.RunnerPool) { woken <- pool })
+	handler := runtimeQueueDemandHandler{QueueHandler: runtimeengine.NewQueueHandlerWithWake(
+		store, func(pool core.RunnerPool) { woken <- pool },
+	)}
 	return runtimeCompositionFixture{client: client, store: store, woken: woken, adapter: newAdapter(client, handler)}
+}
+
+type runtimeQueueDemandHandler struct{ *runtimeengine.QueueHandler }
+
+func (runtimeQueueDemandHandler) ReconcileAssignedDemand(
+	context.Context,
+	githubsource.AssignedDemand,
+) (githubsource.AssignedDemandResult, error) {
+	return githubsource.AssignedDemandResult{}, nil
 }
 
 func (fixture runtimeCompositionFixture) pollSuccessfully(t *testing.T, label string) {
@@ -175,7 +187,7 @@ func TestPollAcknowledgesAndReportsUnmatchedRunnerNameObservation(t *testing.T) 
 	handler := &recordingEventHandler{completedOutcome: core.ObservationUnmatched}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, handler)
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(context.Background(), 0)
@@ -196,7 +208,7 @@ func TestPollAcknowledgesUnidentifiedLifecycleEvidenceWithCompleteGitHubContext(
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, &recordingEventHandler{})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(context.Background(), 0)
@@ -229,7 +241,7 @@ func TestPollIgnoresNonActionableLifecycleEvidenceAndAppliesValidSibling(t *test
 	handler := &recordingEventHandler{}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, handler)
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
@@ -277,7 +289,7 @@ func TestPollAcknowledgesNegativeLifecycleRequestIDEvidence(t *testing.T) {
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}},
 		&recordingEventHandler{})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(context.Background(), 0)
@@ -315,6 +327,24 @@ type recordingEventHandler struct {
 	completedErr     error
 	startedOutcome   core.ObservationOutcome
 	completedOutcome core.ObservationOutcome
+	demands          []githubsource.AssignedDemand
+	demandResult     githubsource.AssignedDemandResult
+	demandErr        error
+}
+
+func (handler *recordingEventHandler) ReconcileAssignedDemand(
+	_ context.Context,
+	demand githubsource.AssignedDemand,
+) (githubsource.AssignedDemandResult, error) {
+	handler.demands = append(handler.demands, demand)
+	if handler.events != nil && demand.DesiredJobs != 0 {
+		*handler.events = append(*handler.events, "demand:"+strconv.Itoa(demand.DesiredJobs))
+	}
+	result := handler.demandResult
+	if result == (githubsource.AssignedDemandResult{}) && demand.DesiredJobs > 0 {
+		result.JobsAdded = demand.DesiredJobs
+	}
+	return result, handler.demandErr
 }
 
 func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {

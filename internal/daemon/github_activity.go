@@ -37,7 +37,7 @@ func reportGitHubManagerActivity(report func(error), activity githubsource.Manag
 }
 
 func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent {
-	return operationalEvent{
+	event := operationalEvent{
 		operation:          activity.Operation,
 		stage:              activity.Stage,
 		outcome:            activity.Outcome,
@@ -67,6 +67,23 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 		duration:           activity.Duration,
 		err:                activity.Err,
 	}
+	setGitHubStatistics(&event, activity)
+	return event
+}
+
+func setGitHubStatistics(event *operationalEvent, activity githubsource.ManagerActivity) {
+	event.desiredJobs = activity.DesiredJobs
+	event.availableJobs = activity.AvailableJobs
+	event.acquiredJobs = activity.AcquiredJobs
+	event.runningJobs = activity.RunningJobs
+	event.registeredRunners = activity.RegisteredRunners
+	event.busyRunners = activity.BusyRunners
+	event.idleRunners = activity.IdleRunners
+	event.activeJobs = activity.ActiveJobs
+	event.queuedJobs = activity.QueuedJobs
+	event.processingJobs = activity.ProcessingJobs
+	event.jobsAdded = activity.JobsAdded
+	event.jobsRemoved = activity.JobsRemoved
 }
 
 func reportGitHubActivityFailure(report func(error), event operationalEvent) {

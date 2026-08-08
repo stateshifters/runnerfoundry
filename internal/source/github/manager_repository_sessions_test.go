@@ -6,9 +6,68 @@ import (
 	"reflect"
 	"testing"
 
+	upstream "github.com/actions/scaleset"
+	"github.com/google/uuid"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
+
+func TestManagerCopiesInitialSessionObservationToAdapter(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.MustParse("51d707c7-e6fa-4339-99cd-a21b29313811")
+	statistics := &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 4}
+	session := &sessionWithInitialStatistics{
+		managerSessionFake: &managerSessionFake{}, sessionID: sessionID, statistics: statistics,
+	}
+	records := repositorySessionRecords()[:1]
+	manager := newManagerFixture(t, &managerDiscovererFake{},
+		repositorySessionFactory([]githubsource.ManagedSession{session}, 0, nil), &registrationRepositoryFake{})
+	generation, err := manager.OpenRepositorySessions(
+		context.Background(), records, "member-1", &recordingEventHandler{},
+	)
+	if err != nil {
+		t.Fatalf("OpenRepositorySessions(): %v", err)
+	}
+	statistics.TotalAssignedJobs = 9
+	adapter := generation.Adapters()[0]
+	if adapter.InitialSessionID != sessionID || adapter.InitialStatistics == nil ||
+		adapter.InitialStatistics.TotalAssignedJobs != 4 {
+		t.Fatalf("adapter initial observation = (%s, %#v), want (%s, 4 assigned)",
+			adapter.InitialSessionID, adapter.InitialStatistics, sessionID)
+	}
+}
+
+func TestManagerRetainsMissingInitialStatisticsAsPendingProtocolState(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.MustParse("61d707c7-e6fa-4339-99cd-a21b29313812")
+	session := &sessionWithInitialStatistics{managerSessionFake: &managerSessionFake{}, sessionID: sessionID}
+	manager := newManagerFixture(t, &managerDiscovererFake{},
+		repositorySessionFactory([]githubsource.ManagedSession{session}, 0, nil), &registrationRepositoryFake{})
+	generation, err := manager.OpenRepositorySessions(context.Background(), repositorySessionRecords()[:1],
+		"member-1", &recordingEventHandler{})
+	if err != nil {
+		t.Fatalf("OpenRepositorySessions(): %v", err)
+	}
+	adapter := generation.Adapters()[0]
+	if adapter.InitialSessionID != sessionID || adapter.InitialStatistics != nil || !adapter.InitialStatisticsPending {
+		t.Fatalf("adapter initial protocol state = (%s, %#v, %t)",
+			adapter.InitialSessionID, adapter.InitialStatistics, adapter.InitialStatisticsPending)
+	}
+}
+
+type sessionWithInitialStatistics struct {
+	*managerSessionFake
+	sessionID  uuid.UUID
+	statistics *upstream.RunnerScaleSetStatistic
+}
+
+func (session *sessionWithInitialStatistics) SessionID() uuid.UUID { return session.sessionID }
+
+func (session *sessionWithInitialStatistics) InitialStatistics() *upstream.RunnerScaleSetStatistic {
+	return session.statistics
+}
 
 func TestManagerOpensRepositorySessionsAsAtomicGeneration(t *testing.T) {
 	records := repositorySessionRecords()

@@ -274,7 +274,8 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
 	dependencies.currentTime = builderTime
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
+	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildTimedProductionGeneration(
 		builderConfig(), state, &localLeadershipGate{}, nil,
 		productionGenerationComponents{
@@ -293,7 +294,8 @@ func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) 
 	dependencies := newProductionDependencies()
 	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{} }
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
+	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	if _, err := buildTimedProductionGeneration(
 		config.Config{}, state, &localLeadershipGate{}, nil,
 		productionGenerationComponents{manager: newBuilderManager(t, store), member: daemonTestID(1)}, dependencies,
@@ -308,7 +310,8 @@ func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
 	dependencies := productionGenerationDependencies(manager)
 	configured := builderConfig()
 	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
-	state := &productionState{store: store, member: daemonTestID(1), newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
+	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildProductionGenerationWithDependencies(
 		context.Background(), configured, state, &localLeadershipGate{}, func(error) {}, dependencies,
 	)

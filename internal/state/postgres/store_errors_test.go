@@ -12,10 +12,12 @@ import (
 func TestEnqueueReportsTransactionalFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
+	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request"},
+		Scope: core.DemandScope{Adapter: "github", ID: "repository-linux"}, RunnerPool: "linux"}
 	tests := []namedTransaction{
-		{name: "insert", transaction: transactionFailingAtExecute(1, protocolErr)},
-		{name: "existing job scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil)},
+		{name: "demand scope lock", transaction: transactionFailingAtExecute(1, protocolErr)},
+		{name: "source lock", transaction: transactionFailingAtExecute(2, protocolErr)},
+		{name: "insert scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return protocolErr }}}, nil)},
 		{name: "outcome scan", transaction: transactionWithRows([]Row{{scan: func(...any) error { return sql.ErrNoRows }},
 			{scan: func(...any) error { return protocolErr }}}, nil)},
 		{name: "commit", transaction: transactionWithRows([]Row{rowFromValues(queuedJobValues(testJobID1, request))}, protocolErr)},

@@ -38,6 +38,14 @@ func TestGitHubOperationalMessagesNameTheirSubjects(t *testing.T) {
 		{operationalEvent{operation: "source_sessions", outcome: "progress", current: 1, total: 2}, "sessions: 1/2"},
 		{operationalEvent{operation: "source_sessions", outcome: "failed", repository: "repo"}, "sessions for repo"},
 		{operationalEvent{operation: "source_sessions", outcome: "completed"}, "sessions completed"},
+		{operationalEvent{operation: "assigned_demand", outcome: "completed", repository: "repo",
+			runnerPool: "linux", jobsAdded: 12}, "Recovered 12 assigned GitHub jobs for repo in Runner Pool linux"},
+		{operationalEvent{operation: "assigned_demand", outcome: "failed", repository: "repo",
+			runnerPool: "linux"}, "Failed to reconcile assigned GitHub demand for repo in Runner Pool linux"},
+		{operationalEvent{operation: "assigned_demand", outcome: "completed", repository: "repo",
+			runnerPool: "linux", jobsRemoved: 3}, "Removed 3 excess assigned GitHub jobs for repo in Runner Pool linux"},
+		{operationalEvent{operation: "assigned_demand", outcome: "completed", repository: "repo",
+			runnerPool: "linux"}, "Reconciled assigned GitHub demand for repo in Runner Pool linux"},
 	})
 }
 

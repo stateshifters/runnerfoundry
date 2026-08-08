@@ -36,6 +36,28 @@ func TestSourceRoutesBootstrapByRepositoryAndRunnerPool(t *testing.T) {
 	}
 }
 
+func TestSourceRoutesAggregateDemandThroughTheOrdinaryBootstrapPath(t *testing.T) {
+	t.Parallel()
+
+	client := &bootstrapClientFake{content: []byte("opaque-jit")}
+	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", client)})
+	reference, err := githubsource.AggregateDemandSource(githubsource.AssignedDemand{
+		Repository: "octo/repo", RunnerPool: "linux", ObservationID: "message:17", DesiredJobs: 1,
+	}, 1)
+	if err != nil {
+		t.Fatalf("identify aggregate demand: %v", err)
+	}
+	job := core.Job{ID: core.JobID{1}, Source: reference, RunnerPool: "linux"}
+	bootstrap, err := source.GenerateBootstrap(context.Background(), job, "runnerfoundry-job")
+	if err != nil {
+		t.Fatalf("generate aggregate-demand bootstrap: %v", err)
+	}
+	if client.calls != 1 || client.runnerName != "runnerfoundry-job" ||
+		!reflect.DeepEqual(bootstrap, execution.NewBootstrap([]byte("opaque-jit"))) {
+		t.Fatalf("aggregate bootstrap = %#v, calls %d, runner %q", bootstrap, client.calls, client.runnerName)
+	}
+}
+
 func TestSourceRejectsInvalidRoutes(t *testing.T) {
 	t.Parallel()
 

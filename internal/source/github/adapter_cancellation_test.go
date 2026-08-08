@@ -24,7 +24,7 @@ func TestAdapterDoesNotHandleMessageReceivedByCancelledPoll(t *testing.T) {
 	handler := &cancellationEventHandler{}
 	adapter := newAdapter(client, handler)
 	activities := make([]githubsource.ManagerActivity, 0)
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,7 +54,7 @@ func TestAdapterReportsCallerCancelledReceiveWithoutOperationalFailure(t *testin
 	cancel()
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(&cancelledReceiveClient{}, &cancellationEventHandler{})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
@@ -69,7 +69,7 @@ func TestAdapterReportsTransportCancellationWithLiveCallerAsFailure(t *testing.T
 
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(&transportCancelledReceiveClient{}, &cancellationEventHandler{})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
@@ -158,7 +158,7 @@ func TestAdapterReportsCancelledDurableHandlingWithoutOperationalFailure(t *test
 	}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, handler)
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,8 +179,10 @@ func TestAdapterReportsCancelledDurableHandlingWithoutOperationalFailure(t *test
 
 func TestAdapterReportsCancelledLifecyclePersistenceWithoutOperationalFailure(t *testing.T) {
 	for _, message := range []*upstream.RunnerScaleSetMessage{
-		{MessageID: 19, JobStartedMessages: []*upstream.JobStarted{{RunnerName: "legacy-runner"}}},
-		{MessageID: 20, JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
+		{MessageID: 19, Statistics: &upstream.RunnerScaleSetStatistic{},
+			JobStartedMessages: []*upstream.JobStarted{{RunnerName: "legacy-runner"}}},
+		{MessageID: 20, Statistics: &upstream.RunnerScaleSetStatistic{},
+			JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
 	} {
 		assertCanceledLifecyclePersistence(t, message)
 	}
@@ -192,7 +194,7 @@ func assertCanceledLifecyclePersistence(t *testing.T, message *upstream.RunnerSc
 	handler := &cancelingLifecycleEventHandler{cancel: cancel}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(&cancellationMessageClient{message: message}, handler)
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(ctx, 1)
@@ -206,7 +208,7 @@ func TestAdapterReportsCancelledAcknowledgementWithoutOperationalFailure(t *test
 	client := &cancellationMessageClient{message: assignedMessage(21, 43), cancelAcknowledgement: cancel}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, &cancellationEventHandler{})
-	adapter.Observer = githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) {
+	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 	result, err := adapter.Poll(ctx, 1)
@@ -287,6 +289,13 @@ func (handler *cancelingLifecycleEventHandler) Terminalize(
 	return core.ObservationResult{}, fmt.Errorf("terminal observation canceled: %w", ctx.Err())
 }
 
+func (*cancelingLifecycleEventHandler) ReconcileAssignedDemand(
+	context.Context,
+	githubsource.AssignedDemand,
+) (githubsource.AssignedDemandResult, error) {
+	return githubsource.AssignedDemandResult{}, nil
+}
+
 type cancellationEventHandler struct {
 	requests           int
 	handling           chan struct{}
@@ -322,9 +331,16 @@ func (*cancellationEventHandler) Terminalize(
 	return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 }
 
+func (*cancellationEventHandler) ReconcileAssignedDemand(
+	context.Context,
+	githubsource.AssignedDemand,
+) (githubsource.AssignedDemandResult, error) {
+	return githubsource.AssignedDemandResult{}, nil
+}
+
 func assignedMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {
 	return &upstream.RunnerScaleSetMessage{
-		MessageID: messageID,
+		MessageID: messageID, Statistics: &upstream.RunnerScaleSetStatistic{},
 		JobAssignedMessages: []*upstream.JobAssigned{{
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: requestID},
 		}},

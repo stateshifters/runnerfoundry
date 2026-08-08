@@ -120,6 +120,14 @@ func githubIdentityAttributes(event operationalEvent) []slog.Attr {
 }
 
 func eventCountAttributes(event operationalEvent) []slog.Attr {
+	attributes := generalCountAttributes(event)
+	if event.operation == "assigned_demand" {
+		attributes = append(attributes, assignedDemandAttributes(event)...)
+	}
+	return attributes
+}
+
+func generalCountAttributes(event operationalEvent) []slog.Attr {
 	attributes := make([]slog.Attr, 0, 5)
 	if event.count != 0 {
 		attributes = append(attributes, slog.Int("count", event.count))
@@ -137,6 +145,23 @@ func eventCountAttributes(event operationalEvent) []slog.Attr {
 		attributes = append(attributes, slog.Int("total", event.total))
 	}
 	return attributes
+}
+
+func assignedDemandAttributes(event operationalEvent) []slog.Attr {
+	return []slog.Attr{
+		slog.Int("desired_jobs", event.desiredJobs),
+		slog.Int("available_jobs", event.availableJobs),
+		slog.Int("acquired_jobs", event.acquiredJobs),
+		slog.Int("running_jobs", event.runningJobs),
+		slog.Int("registered_runners", event.registeredRunners),
+		slog.Int("busy_runners", event.busyRunners),
+		slog.Int("idle_runners", event.idleRunners),
+		slog.Int("active_jobs", event.activeJobs),
+		slog.Int("queued_jobs", event.queuedJobs),
+		slog.Int("processing_jobs", event.processingJobs),
+		slog.Int("jobs_added", event.jobsAdded),
+		slog.Int("jobs_removed", event.jobsRemoved),
+	}
 }
 
 func eventContextAttributes(event operationalEvent) []slog.Attr {
