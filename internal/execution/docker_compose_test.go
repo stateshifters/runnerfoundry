@@ -148,9 +148,9 @@ func TestDockerComposeDestroyPreservesTransportFailure(t *testing.T) {
 
 func TestDockerComposeEndpointOperationsAreExplicit(t *testing.T) {
 	provider := NewDockerComposeProvider(&recordingDockerTransport{}, providerdockerTestConfig(), "member-a")
-	endpointID := InventoryEndpointID("docker-compose:member-a?compose=compose.yaml&service=runner")
+	endpointID := InventoryEndpointID("docker:member-a")
 	if provider.EndpointID() != endpointID || !provider.KnowsEndpoint(endpointID) ||
-		provider.KnowsEndpoint("docker-compose:member-b?compose=compose.yaml&service=runner") {
+		provider.KnowsEndpoint("docker:member-b") {
 		t.Fatalf("endpoint identity = %q", provider.EndpointID())
 	}
 	if !provider.CanInspectEndpointForMember(endpointID, "member-a") ||
@@ -163,18 +163,26 @@ func TestDockerComposeEndpointOperationsAreExplicit(t *testing.T) {
 	if _, err := provider.InspectEndpoint(context.Background(), endpointID); err != nil {
 		t.Fatalf("inspect endpoint: %v", err)
 	}
-	if _, err := provider.InspectEndpoint(context.Background(), "docker-compose:member-b?compose=compose.yaml&service=runner"); err == nil {
+	if _, err := provider.InspectEndpoint(context.Background(), "docker:member-b"); err == nil {
 		t.Fatal("unknown endpoint accepted")
 	}
 }
 
-func TestDockerComposeEndpointDistinguishesMechanismsOnOneMember(t *testing.T) {
+func TestDockerComposeEndpointRepresentsOneHostInventory(t *testing.T) {
 	first := NewDockerComposeProvider(&recordingDockerTransport{}, providerdockerTestConfig(), " MEMBER-A ")
 	secondConfig := providerdockerTestConfig()
 	secondConfig.Service = "gpu-runner"
 	second := NewDockerComposeProvider(&recordingDockerTransport{}, secondConfig, "member-a")
-	if first.EndpointID() == second.EndpointID() {
-		t.Fatalf("distinct Docker mechanisms share endpoint %q", first.EndpointID())
+	if first.EndpointID() != second.EndpointID() {
+		t.Fatalf("one Docker host has distinct inventory endpoints %q and %q", first.EndpointID(), second.EndpointID())
+	}
+}
+
+func TestDockerComposeEndpointRecognizesLegacyProcessingIdentity(t *testing.T) {
+	provider := NewDockerComposeProvider(&recordingDockerTransport{}, providerdockerTestConfig(), "member-a")
+	legacyEndpoint := InventoryEndpointID("docker-compose:member-a?compose=compose.yaml&service=runner")
+	if !provider.KnowsEndpoint(legacyEndpoint) || !provider.CanInspectEndpointForMember(legacyEndpoint, "member-a") {
+		t.Fatalf("legacy endpoint %q is not inspectable", legacyEndpoint)
 	}
 }
 

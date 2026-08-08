@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -19,15 +18,32 @@ type DockerComposeProvider struct {
 }
 
 func (provider DockerComposeProvider) EndpointID() InventoryEndpointID {
-	config := provider.provider.Config
-	return InventoryEndpointID(fmt.Sprintf("docker-compose:%s?compose=%s&service=%s",
-		url.QueryEscape(strings.ToLower(strings.TrimSpace(string(provider.hostname)))),
-		url.QueryEscape(filepath.Clean(strings.TrimSpace(config.ComposeFile))),
-		url.QueryEscape(strings.TrimSpace(config.Service))))
+	return InventoryEndpointID("docker:" + url.QueryEscape(normalizedDockerHostname(provider.hostname)))
 }
 
 func (provider DockerComposeProvider) KnowsEndpoint(endpointID InventoryEndpointID) bool {
-	return provider.EndpointID() == endpointID
+	if provider.EndpointID() == endpointID {
+		return true
+	}
+	hostname, legacy := legacyDockerComposeEndpointHostname(endpointID)
+	return legacy && hostname == normalizedDockerHostname(provider.hostname)
+}
+
+func normalizedDockerHostname(hostname HostIdentity) string {
+	return strings.ToLower(strings.TrimSpace(string(hostname)))
+}
+
+func legacyDockerComposeEndpointHostname(endpointID InventoryEndpointID) (string, bool) {
+	legacyEndpoint, legacy := strings.CutPrefix(string(endpointID), "docker-compose:")
+	if !legacy {
+		return "", false
+	}
+	escapedHostname, _, hasConfiguration := strings.Cut(legacyEndpoint, "?")
+	if !hasConfiguration {
+		return "", false
+	}
+	hostname, err := url.QueryUnescape(escapedHostname)
+	return normalizedDockerHostname(HostIdentity(hostname)), err == nil
 }
 
 func (provider DockerComposeProvider) CanInspectEndpointForMember(

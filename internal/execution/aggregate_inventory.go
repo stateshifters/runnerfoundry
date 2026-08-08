@@ -107,7 +107,7 @@ func (inventory AggregateRunnerInventory) EndpointID() InventoryEndpointID { ret
 // KnowsEndpoint reports whether an active child inventory owns endpointID.
 func (inventory AggregateRunnerInventory) KnowsEndpoint(endpointID InventoryEndpointID) bool {
 	for _, backend := range inventory.inventories {
-		if backend.EndpointID() == endpointID {
+		if backend.KnowsEndpoint(endpointID) {
 			return true
 		}
 	}
@@ -133,7 +133,7 @@ func (inventory AggregateRunnerInventory) InspectEndpoint(
 	endpointID InventoryEndpointID,
 ) ([]RunnerInstance, error) {
 	for _, backend := range inventory.inventories {
-		if backend.EndpointID() != endpointID {
+		if !backend.KnowsEndpoint(endpointID) {
 			continue
 		}
 		instances, err := backend.Inspect(ctx)
