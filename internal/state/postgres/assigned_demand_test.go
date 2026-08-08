@@ -75,7 +75,9 @@ func TestReconcileAssignedDemandRemovesNewestAggregateQueuedJobsOnly(t *testing.
 		!strings.Contains(protocol.statements[3], "DELETE FROM public.runnerfoundry_queued_jobs") ||
 		protocol.arguments[3][0] != assignedDemandJobID(5) || protocol.statements[4] != serializeSourceSQL ||
 		protocol.arguments[5][0] != assignedDemandJobID(3) ||
-		!reflect.DeepEqual(protocol.arguments[2], []any{newestSource.Adapter, newestSource.ID}) ||
+		!reflect.DeepEqual(protocol.arguments[2], []any{advisoryLockIdentity(
+			string(newestSource.Adapter), string(newestSource.ID),
+		)}) ||
 		!reflect.DeepEqual(protocol.arguments[3], []any{assignedDemandJobID(5), newestSource.Adapter, newestSource.ID}) {
 		t.Fatalf("surplus removal protocol = %#v %#v", protocol.statements, protocol.arguments)
 	}
@@ -160,7 +162,9 @@ func assertAssignedDemandScopeLock(
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArguments := []any{aggregateRequest.Scope.Adapter, aggregateRequest.Scope.ID}
+	wantArguments := []any{advisoryLockIdentity(
+		string(aggregateRequest.Scope.Adapter), string(aggregateRequest.Scope.ID),
+	)}
 	if protocol.statements[0] != serializeDemandScopeSQL || !reflect.DeepEqual(protocol.arguments[0], wantArguments) {
 		t.Fatalf("reconciliation scope lock = %#v %#v", protocol.statements[0], protocol.arguments[0])
 	}

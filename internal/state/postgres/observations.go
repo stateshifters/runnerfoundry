@@ -82,7 +82,8 @@ func resolveAndSerializeObservation(
 	if err != nil || !matched {
 		return core.SourceReference{}, matched, err
 	}
-	if _, err = transaction.Execute(ctx, serializeSourceSQL, source.Adapter, source.ID); err != nil {
+	if _, err = transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(source.Adapter), string(source.ID))); err != nil {
 		return core.SourceReference{}, false, fmt.Errorf("serialize job observation: %w", err)
 	}
 	if identity.JobID == uuid.Nil {

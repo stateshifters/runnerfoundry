@@ -17,11 +17,13 @@ func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
 	if request.Scope.IsValid() {
-		if _, lockErr := transaction.Execute(ctx, serializeDemandScopeSQL, request.Scope.Adapter, request.Scope.ID); lockErr != nil {
+		if _, lockErr := transaction.Execute(ctx, serializeDemandScopeSQL, advisoryLockIdentity(
+			string(request.Scope.Adapter), string(request.Scope.ID))); lockErr != nil {
 			return core.EnqueueResult{}, fmt.Errorf("serialize demand-scope enqueue: %w", lockErr)
 		}
 	}
-	if _, lockErr := transaction.Execute(ctx, serializeSourceSQL, request.Source.Adapter, request.Source.ID); lockErr != nil {
+	if _, lockErr := transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(request.Source.Adapter), string(request.Source.ID))); lockErr != nil {
 		return core.EnqueueResult{}, fmt.Errorf("serialize source enqueue: %w", lockErr)
 	}
 	job, outcome, err := enqueueInTransaction(ctx, transaction, request)

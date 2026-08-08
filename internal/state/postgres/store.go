@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/meza/RunnerFoundry/internal/core"
 )
@@ -19,8 +20,12 @@ const claimedProcessingJobColumns = `job_id, source_name, source_reference, runn
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 
 const serializeRunnerPoolClaimSQL = `SELECT pg_advisory_xact_lock(1, hashtext($1))`
-const serializeSourceSQL = `SELECT pg_advisory_xact_lock(2, hashtext($1 || chr(0) || $2))`
-const serializeDemandScopeSQL = `SELECT pg_advisory_xact_lock(3, hashtext($1 || chr(0) || $2))`
+const serializeSourceSQL = `SELECT pg_advisory_xact_lock(2, hashtext($1))`
+const serializeDemandScopeSQL = `SELECT pg_advisory_xact_lock(3, hashtext($1))`
+
+func advisoryLockIdentity(firstComponent, secondComponent string) string {
+	return strconv.Itoa(len(firstComponent)) + ":" + firstComponent + secondComponent
+}
 
 const insertQueuedJobSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	(source_name, source_reference, runner_pool, enqueued_at)
@@ -146,8 +151,8 @@ func (store *Store) RecoverUnstartedProcessing(
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, serializeSourceSQL,
-		processing.Job.Source.Adapter, processing.Job.Source.ID); err != nil {
+	if _, err = transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(processing.Job.Source.Adapter), string(processing.Job.Source.ID))); err != nil {
 		return core.RetryResult{}, fmt.Errorf("serialize processing recovery: %w", err)
 	}
 	outcome, err := recoverProcessingClaim(ctx, transaction, processing)

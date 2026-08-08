@@ -100,7 +100,8 @@ func loadProcessingRetryCandidate(
 }
 
 func serializeProcessingRetry(ctx context.Context, transaction Transaction, source core.SourceReference) error {
-	if _, err := transaction.Execute(ctx, serializeSourceSQL, source.Adapter, source.ID); err != nil {
+	if _, err := transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(source.Adapter), string(source.ID))); err != nil {
 		return fmt.Errorf("serialize processing retry: %w", err)
 	}
 	return nil

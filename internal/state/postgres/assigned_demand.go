@@ -63,7 +63,8 @@ func (store *Store) reconcileValidAssignedDemand(
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, serializeDemandScopeSQL, scope.Adapter, scope.ID); err != nil {
+	if _, err = transaction.Execute(ctx, serializeDemandScopeSQL, advisoryLockIdentity(
+		string(scope.Adapter), string(scope.ID))); err != nil {
 		return githubsource.AssignedDemandResult{}, fmt.Errorf("serialize assigned demand reconciliation: %w", err)
 	}
 	result, err := reconcileAssignedDemandInTransaction(ctx, transaction, demand)
@@ -187,7 +188,8 @@ func newestAggregateQueuedJobs(jobs []activeDemandJob) []activeDemandJob {
 }
 
 func removeAggregateDemandJob(ctx context.Context, transaction Transaction, candidate activeDemandJob) (bool, error) {
-	if _, err := transaction.Execute(ctx, serializeSourceSQL, candidate.source.Adapter, candidate.source.ID); err != nil {
+	if _, err := transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(candidate.source.Adapter), string(candidate.source.ID))); err != nil {
 		return false, fmt.Errorf("serialize aggregate demand removal: %w", err)
 	}
 	removed, err := transaction.Execute(ctx, deleteAggregateQueuedJobSQL,
@@ -224,7 +226,8 @@ func addAggregateDemandJob(
 	if err != nil {
 		return false, fmt.Errorf("identify aggregate demand job: %w", err)
 	}
-	if _, err = transaction.Execute(ctx, serializeSourceSQL, request.Source.Adapter, request.Source.ID); err != nil {
+	if _, err = transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(request.Source.Adapter), string(request.Source.ID))); err != nil {
 		return false, fmt.Errorf("serialize aggregate demand enqueue: %w", err)
 	}
 	_, outcome, err := enqueueInTransaction(ctx, transaction, request)

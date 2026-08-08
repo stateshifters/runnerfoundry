@@ -50,8 +50,8 @@ func selectOldestQueuedJob(
 }
 
 func takeQueuedJob(ctx context.Context, transaction Transaction, candidate core.Job) (core.Job, bool, error) {
-	if _, err := transaction.Execute(ctx, serializeSourceSQL,
-		candidate.Source.Adapter, candidate.Source.ID); err != nil {
+	if _, err := transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
+		string(candidate.Source.Adapter), string(candidate.Source.ID))); err != nil {
 		return core.Job{}, false, fmt.Errorf("serialize source pickup: %w", err)
 	}
 	job, err := scanQueuedJob(transaction.QueryRow(ctx, takeQueuedJobSQL, candidate.ID))
