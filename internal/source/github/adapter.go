@@ -112,11 +112,9 @@ func (adapter *Adapter) applyMessageEffects(ctx context.Context, effects message
 	if err := adapter.persistStarted(ctx, effects.Started); err != nil {
 		return err
 	}
-	adapter.reportMessageCount("job_observation", "runner_started", len(effects.Started))
 	if err := adapter.persistCompleted(ctx, effects.Completed); err != nil {
 		return err
 	}
-	adapter.reportMessageCount("job_observation", "terminalized", len(effects.Completed))
 	return nil
 }
 

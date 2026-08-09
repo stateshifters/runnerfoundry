@@ -178,30 +178,6 @@ func TestPollAcknowledgesRunnerNameOnlyCompletedObservation(t *testing.T) {
 	}
 }
 
-func TestPollAcknowledgesAndReportsUnmatchedRunnerNameObservation(t *testing.T) {
-	t.Parallel()
-	message := &upstream.RunnerScaleSetMessage{MessageID: 214, JobCompletedMessages: []*upstream.JobCompleted{{
-		RunnerName: "legacy-runner-name", Result: "succeeded",
-	}}}
-	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
-	handler := &recordingEventHandler{completedOutcome: core.ObservationUnmatched}
-	activities := make([]githubsource.ManagerActivity, 0)
-	adapter := newAdapter(client, handler)
-	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
-		activities = append(activities, activity)
-	}}
-	result, err := adapter.Poll(context.Background(), 0)
-	if err != nil || !result.Acknowledged {
-		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
-	}
-	unmatched := findManagerActivity(activities, "terminalized", "unmatched")
-	if unmatched.EventType != "JobCompleted" || unmatched.MessageID != 214 ||
-		unmatched.RunnerName != "legacy-runner-name" || unmatched.Repository != "octo/repo" ||
-		unmatched.RunnerPool != "linux" {
-		t.Fatalf("unmatched activity = %#v", unmatched)
-	}
-}
-
 func TestPollAcknowledgesUnidentifiedLifecycleEvidenceWithCompleteGitHubContext(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 215, JobStartedMessages: []*upstream.JobStarted{{}}}

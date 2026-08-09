@@ -26,7 +26,7 @@ var operationalComponents = map[string]string{
 	"assigned_demand": "github_messages",
 	"source_routes":   "github_routes", "capacity_publication": "github_capacity",
 	"claim": "job_queue", "job_processing": "job_queue", "runner_retry": "job_queue",
-	"runner_start": "runner_provisioning", "cleanup": "runner_cleanup", "leadership": "github_leadership",
+	"runner_start": "runner_provisioning", "leadership": "github_leadership",
 	"heartbeat": "cluster_membership", "refresh_member_routes": "github_control", "leader_work": "github_control",
 	"refresh_inventory": "runner_inventory", "recover_foreign": "runner_recovery",
 	"reconcile_runner_pool": "runner_reconciliation", "generation": "runtime", "maintenance": "runtime",
@@ -56,10 +56,7 @@ var operationalMessageBuilders = map[string]func(operationalEvent) string{
 	"claim":        claimMessage,
 	"runner_start": runnerStartMessage,
 	"runner_retry": runnerRetryMessage,
-	"cleanup": func(event operationalEvent) string {
-		return fmt.Sprintf("Removed %d runner resources from Runner Pool %s", event.count, event.runnerPool)
-	},
-	"leadership": func(event operationalEvent) string { return fmt.Sprintf("GitHub leadership is %s", event.leadership) },
+	"leadership":   func(event operationalEvent) string { return fmt.Sprintf("GitHub leadership is %s", event.leadership) },
 	"job_processing": func(event operationalEvent) string {
 		return fmt.Sprintf("Queued-job processing %s for Runner Pool %s", event.outcome, event.runnerPool)
 	},
@@ -110,22 +107,8 @@ func githubJobObservationMessage(event operationalEvent) string {
 	if event.outcome == "failed" {
 		return githubJobObservationFailureMessage(event)
 	}
-	if event.outcome == string(core.ObservationUnmatched) {
-		return fmt.Sprintf("Acknowledged unmatched %s for runner %s in %s and Runner Pool %s",
-			githubEventDisplayName(event.githubEventType), event.runnerName, event.repository, event.runnerPool)
-	}
-	if event.count == 0 {
-		subject := githubObservationSubject(event)
-		if subject == "" {
-			return fmt.Sprintf("Recorded %s in %s and Runner Pool %s",
-				githubEventDisplayName(event.githubEventType), event.repository, event.runnerPool)
-		}
-		return fmt.Sprintf("Recorded %s for %s in %s and Runner Pool %s",
-			githubEventDisplayName(event.githubEventType), subject,
-			event.repository, event.runnerPool)
-	}
-	return fmt.Sprintf("Recorded %d GitHub job observations for %s in Runner Pool %s",
-		event.count, event.repository, event.runnerPool)
+	return fmt.Sprintf("Acknowledged unmatched %s for runner %s in %s and Runner Pool %s",
+		githubEventDisplayName(event.githubEventType), event.runnerName, event.repository, event.runnerPool)
 }
 
 func githubJobObservationFailureMessage(event operationalEvent) string {
@@ -190,9 +173,6 @@ func githubObservationSubject(event operationalEvent) string {
 }
 
 func githubEventDisplayName(eventType string) string {
-	if eventType == "" {
-		return "GitHub lifecycle observation"
-	}
 	return fmt.Sprintf("GitHub %s event", eventType)
 }
 

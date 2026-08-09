@@ -306,8 +306,7 @@ func reportProcessEvents(
 }
 
 func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.RunnerPool) error {
-	result, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
-	reportCleanup(pool.report, runnerPool, result)
+	_, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
 	if err != nil {
 		return fmt.Errorf("reconcile pool work: %w", err)
 	}
@@ -315,8 +314,7 @@ func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.Run
 }
 
 func (pool orchestrationPool) RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error {
-	result, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
-	reportCleanup(pool.report, runnerPool, result)
+	_, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
 	if err != nil {
 		return fmt.Errorf("recover foreign pool work: %w", err)
 	}
@@ -327,16 +325,8 @@ func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerP
 
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
 	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
-	reportCleanup(pool.report, pool.runnerPool, result)
 	if err != nil {
 		return result.RemainingProcessing, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
 	return result.RemainingProcessing, nil
-}
-
-func reportCleanup(report func(error), runnerPool core.RunnerPool, result runtimeengine.PoolReconciliation) {
-	if result.RemovedRunners != 0 || result.RemovedProcessing != 0 {
-		reportOperational(report, operationalEvent{operation: "cleanup", outcome: "removed",
-			runnerPool: runnerPool, count: result.RemovedRunners + result.RemovedProcessing})
-	}
 }

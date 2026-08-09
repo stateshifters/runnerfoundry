@@ -37,7 +37,9 @@ func (adapter *Adapter) persistStarted(ctx context.Context, started []identified
 			adapter.reportObservationFailure("persist_runner_started", observation, wrapped)
 			return markManagerActivityReported(wrapped)
 		}
-		adapter.reportObservationResult("runner_started", observation, result)
+		if result.Outcome == core.ObservationUnmatched {
+			adapter.reportUnmatchedObservation("runner_started", observation)
+		}
 	}
 	return nil
 }
@@ -53,7 +55,9 @@ func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identi
 			adapter.reportObservationFailure("persist_terminal", observation, wrapped)
 			return markManagerActivityReported(wrapped)
 		}
-		adapter.reportObservationResult("terminalized", observation, result)
+		if result.Outcome == core.ObservationUnmatched {
+			adapter.reportUnmatchedObservation("terminalized", observation)
+		}
 	}
 	return nil
 }
@@ -68,13 +72,9 @@ func (adapter *Adapter) reportObservationFailure(stage string, observation ident
 	adapter.Observer.report(activity)
 }
 
-func (adapter *Adapter) reportObservationResult(stage string, observation identifiedObservation, result core.ObservationResult) {
-	visibility := ActivityDebug
-	if result.Outcome == core.ObservationUnmatched {
-		visibility = ActivityInfo
-	}
-	adapter.Observer.report(ManagerActivity{Visibility: visibility, Operation: "job_observation", Stage: stage,
-		Outcome: string(result.Outcome), Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
+func (adapter *Adapter) reportUnmatchedObservation(stage string, observation identifiedObservation) {
+	adapter.Observer.report(ManagerActivity{Visibility: ActivityInfo, Operation: "job_observation", Stage: stage,
+		Outcome: string(core.ObservationUnmatched), Repository: adapter.Repository, RunnerPool: adapter.RunnerPool,
 		SourceRequestID: observation.RequestID, SourceRequestIDSet: observation.RequestIDSet,
 		RunnerName: observation.Observation.RunnerName,
 		MessageID:  observation.MessageID, EventType: observation.EventType})

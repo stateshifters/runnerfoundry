@@ -57,11 +57,7 @@ func TestAdapterReportsPollAndDurableMessageActivities(t *testing.T) {
 	}
 
 	infoOutcomes, debugRequests := adapterActivityResults(activities)
-	wantInfo := []string{
-		"job_ingestion:enqueue_jobs:2",
-		"job_observation:runner_started:1",
-		"job_observation:terminalized:2",
-	}
+	wantInfo := []string{"job_ingestion:enqueue_jobs:2"}
 	if !reflect.DeepEqual(infoOutcomes, wantInfo) || !reflect.DeepEqual(debugRequests, []int64{42, 43}) {
 		t.Fatalf("info outcomes=%#v debug requests=%#v", infoOutcomes, debugRequests)
 	}

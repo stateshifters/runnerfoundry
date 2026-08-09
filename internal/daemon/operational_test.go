@@ -417,7 +417,7 @@ func TestOperationalErrorWrappersDescribeAndPreserveTheirCause(t *testing.T) {
 	}
 }
 
-func TestPoolOperationalEventsDescribeOutcomesAndCleanup(t *testing.T) {
+func TestPoolOperationalEventsDescribeProcessingOutcomes(t *testing.T) {
 	events := make([]operationalEvent, 0)
 	report := func(err error) {
 		var envelope operationalEventEnvelope
@@ -433,10 +433,8 @@ func TestPoolOperationalEventsDescribeOutcomesAndCleanup(t *testing.T) {
 		RetryOutcome: core.RetrySourceTerminal, JobID: jobID}, errors.New("retry"))
 	reportProcessOutcome(report, "linux", "docker", "docker:test", "sqlite",
 		runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}, nil)
-	reportCleanup(report, "linux", runtimeengine.PoolReconciliation{})
-	reportCleanup(report, "linux", runtimeengine.PoolReconciliation{RemovedRunners: 1, RemovedProcessing: 1})
-	if len(events) != 5 || events[0].operation != "claim" || events[1].operation != "runner_start" ||
-		events[2].operation != "claim" || events[3].operation != "runner_retry" || events[4].operation != "cleanup" {
+	if len(events) != 4 || events[0].operation != "claim" || events[1].operation != "runner_start" ||
+		events[2].operation != "claim" || events[3].operation != "runner_retry" {
 		t.Fatalf("events = %#v", events)
 	}
 }
