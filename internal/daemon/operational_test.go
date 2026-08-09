@@ -467,6 +467,28 @@ func TestProvisioningFailureIdentifiesGitHubJobPoolProviderAndEndpoint(t *testin
 	})
 }
 
+type safeDiagnosticTestError struct{ diagnostic string }
+
+func (failure safeDiagnosticTestError) Error() string                 { return "bootstrap failed" }
+func (failure safeDiagnosticTestError) OperationalDiagnostic() string { return failure.diagnostic }
+
+func TestProvisioningFailureIncludesOnlyOptInSafeDiagnostic(t *testing.T) {
+	events := make([]operationalEvent, 0, 2)
+	report := func(err error) {
+		var envelope operationalEventEnvelope
+		if errors.As(err, &envelope) {
+			events = append(events, envelope.event)
+		}
+	}
+	result := runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRequeued,
+		JobID: core.JobID{1}, FailedStage: "generate_bootstrap"}
+	reportProcessOutcome(report, "linux", "docker", "docker:test", "sqlite", result,
+		safeDiagnosticTestError{diagnostic: "GitHub conflict: runner exists"})
+	if len(events) != 2 || events[1].diagnostic != "GitHub conflict: runner exists" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestGitHubJobContextRejectsInvalidOrMismatchedDurableIdentity(t *testing.T) {
 	reported := make([]error, 0)
 	report := func(err error) { reported = append(reported, err) }

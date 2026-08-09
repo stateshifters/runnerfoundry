@@ -80,11 +80,14 @@ func TestQueueHandlerResolvesCanonicalRunnerNameToJobID(t *testing.T) {
 	}}
 	handler := runtimeengine.NewQueueHandler(store)
 
-	result, err := handler.RunnerStarted(context.Background(), core.RunnerObservation{
-		RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()),
-	})
-	if err != nil || result.Outcome != core.ObservationApplied {
-		t.Fatalf("RunnerStarted() = %#v, %v", result, err)
+	for _, name := range []core.RunnerName{
+		core.RunnerName("runnerfoundry-" + jobID.String()),
+		core.AttemptRunnerName(jobID, uuid.New()),
+	} {
+		result, err := handler.RunnerStarted(context.Background(), core.RunnerObservation{RunnerName: name})
+		if err != nil || result.Outcome != core.ObservationApplied {
+			t.Fatalf("RunnerStarted(%q) = %#v, %v", name, result, err)
+		}
 	}
 }
 
@@ -122,9 +125,17 @@ func TestQueueHandlerAcknowledgesLegacyRunnerNameAsUnmatched(t *testing.T) {
 
 func TestQueueHandlerRejectsMalformedCanonicalRunnerName(t *testing.T) {
 	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
-	_, err := handler.Terminalize(context.Background(), core.RunnerObservation{RunnerName: "runnerfoundry-not-a-uuid"})
-	if !errors.Is(err, core.ErrInvalidJobIdentity) {
-		t.Fatalf("Terminalize() error = %v", err)
+	for _, name := range []core.RunnerName{
+		"runnerfoundry-not-a-uuid",
+		"runnerfoundry-v2-short",
+		"runnerfoundry-v2-!!!!!!!!!!!!!!!!!!!!!!-AAAAAAAAAAAAAAAAAAAAAA",
+		"runnerfoundry-v2-AAAAAAAAAAAAAAAAAAAAAA-AAAAAAAAAAAAAAAAAAAAAA",
+		"runnerfoundry-v2-AAAAAAAAAAAAAAAAAAAAAQ-!!!!!!!!!!!!!!!!!!!!!!",
+	} {
+		_, err := handler.Terminalize(context.Background(), core.RunnerObservation{RunnerName: name})
+		if !errors.Is(err, core.ErrInvalidJobIdentity) {
+			t.Fatalf("Terminalize(%q) error = %v", name, err)
+		}
 	}
 }
 

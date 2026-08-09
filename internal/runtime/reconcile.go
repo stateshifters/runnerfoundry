@@ -122,7 +122,7 @@ func (orchestrator *Orchestrator) reconcileForeignProcessing(
 		if !orchestrator.inventory.CanInspectEndpointForMember(job.InventoryEndpointID, job.MemberID) {
 			continue
 		}
-		instance, present := instancesByName[runnerName(job.Job.ID)]
+		instance, present := instancesByName[processingRunnerName(job)]
 		var instanceReference *execution.RunnerInstance
 		if present && (instance.EndpointID == "" || instance.EndpointID == job.InventoryEndpointID) {
 			instanceReference = &instance
@@ -153,7 +153,7 @@ func (orchestrator *Orchestrator) reconcileOwnedProcessing(
 	result := PoolReconciliation{RemainingProcessing: len(processing)}
 	failures := make([]error, 0)
 	for _, job := range processing {
-		name := runnerName(job.Job.ID)
+		name := processingRunnerName(job)
 		instance, present := instancesByName[name]
 		var instanceReference *execution.RunnerInstance
 		if present {
@@ -175,7 +175,7 @@ func (orchestrator *Orchestrator) cleanupOrphanedRunners(
 ) (int, error) {
 	processingByName := make(map[core.RunnerName]struct{}, len(processing))
 	for _, job := range processing {
-		processingByName[runnerName(job.Job.ID)] = struct{}{}
+		processingByName[processingRunnerName(job)] = struct{}{}
 	}
 	removed := 0
 	failures := make([]error, 0)
@@ -236,6 +236,9 @@ func (orchestrator *Orchestrator) recoverExpiredProcessing(
 		}
 		change.removedRunners = 1
 	}
+	if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+		return change, err
+	}
 	processing.Job.EnqueuedAt = orchestrator.currentTime()
 	transition, err := orchestrator.store.RecoverUnstartedProcessing(ctx, processing)
 	if err != nil {
@@ -262,6 +265,11 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 		}
 		change.removedRunners = 1
 	}
+	if !processing.RunnerStarted {
+		if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+			return change, err
+		}
+	}
 	transition, err := orchestrator.store.RemoveTerminal(ctx, processing.Job.ID)
 	if err != nil {
 		return change, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
@@ -278,6 +286,9 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 func (orchestrator *Orchestrator) retryIfUnstarted(ctx context.Context, processing core.ProcessingJob) (removed, gone int, resultErr error) {
 	if processing.RunnerStarted {
 		return 0, 0, nil
+	}
+	if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+		return 0, 0, err
 	}
 	transition, err := orchestrator.store.RetryUnstarted(ctx, processing.Job.ID)
 	if err != nil {

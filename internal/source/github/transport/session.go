@@ -202,3 +202,22 @@ func (client *Client) GenerateBootstrap(
 	}
 	return []byte(jitConfig.EncodedJITConfig), nil
 }
+
+// CleanupRunner removes the exact JIT registration owned by one provisioning
+// attempt. Absence is success so crash recovery can repeat cleanup safely.
+func (client *Client) CleanupRunner(ctx context.Context, runnerName string) error {
+	if client == nil || client.jit == nil {
+		return errors.New("GitHub JIT API is required")
+	}
+	runner, err := client.jit.GetRunnerByName(ctx, runnerName)
+	if err != nil {
+		return fmt.Errorf("find JIT runner %q: %w", runnerName, err)
+	}
+	if runner == nil {
+		return nil
+	}
+	if err = client.jit.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, upstream.NotFoundError) {
+		return fmt.Errorf("remove JIT runner %q: %w", runnerName, err)
+	}
+	return nil
+}

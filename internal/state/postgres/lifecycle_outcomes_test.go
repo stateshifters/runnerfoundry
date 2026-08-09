@@ -168,13 +168,14 @@ func postgresOutcomeTransaction(rows []Row, affected int64, commits *int) Transa
 
 func postgresProcessingOutcomeValues(job core.Job, started, terminal bool) []any {
 	values := processingJobValues(job, testMemberIDA)
-	values[5], values[6] = started, terminal
+	values[6], values[7] = started, terminal
 	return values
 }
 
 func postgresClaimedOutcomeValues(processing core.ProcessingJob, started, terminal bool) []any {
 	return []any{processing.Job.ID, string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
-		string(processing.Job.RunnerPool), testMemberIDA, processing.ClaimedAt, processing.InventoryEndpointID, started, terminal}
+		string(processing.Job.RunnerPool), testMemberIDA, string(processing.RunnerName), processing.ClaimedAt,
+		processing.InventoryEndpointID, started, terminal}
 }
 
 func noPostgresRow() Row { return Row{scan: func(...any) error { return sql.ErrNoRows }} }

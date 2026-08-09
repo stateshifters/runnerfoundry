@@ -10,11 +10,11 @@ import (
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`
 const processingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
-	runner_started, EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
+	runner_name, runner_started, EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 const claimedProcessingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
-	claimed_at, inventory_endpoint_id, runner_started,
+	runner_name, claimed_at, inventory_endpoint_id, runner_started,
 	EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
@@ -54,8 +54,8 @@ const selectOldestQueuedJobSQL = `SELECT ` + queuedJobColumns + `
 const takeQueuedJobSQL = `DELETE FROM public.runnerfoundry_queued_jobs WHERE job_id = $1
 	RETURNING ` + queuedJobColumns
 const insertClaimedProcessingJobSQL = `INSERT INTO public.runnerfoundry_processing_jobs
-	(job_id, source_name, source_reference, runner_pool, member_id, claimed_at, inventory_endpoint_id)
-	VALUES($1, $2, $3, $4, $5, $6, $7)`
+	(job_id, source_name, source_reference, runner_pool, member_id, runner_name, claimed_at, inventory_endpoint_id)
+	VALUES($1, $2, $3, $4, $5, $6, $7, $8)`
 const deleteQueuedJobBySourceSQL = `DELETE FROM public.runnerfoundry_queued_jobs
 	WHERE source_name = $1 AND source_reference = $2`
 const processingByMemberSQL = `SELECT ` + claimedProcessingJobColumns + `

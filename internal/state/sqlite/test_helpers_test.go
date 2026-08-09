@@ -16,7 +16,7 @@ func successfulExecute(context.Context, string, ...any) (Result, error) {
 
 func unstartedProcessingValues() []any {
 	values := processingJobValues()
-	values[5], values[6] = false, false
+	values[6], values[7] = false, false
 	return values
 }
 

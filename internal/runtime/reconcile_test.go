@@ -93,6 +93,50 @@ func TestReconcilePoolRetainsExpiredProcessingWhenRunnerCleanupFails(t *testing.
 	}
 }
 
+func TestReconcilePoolRetainsUnstartedProcessingUntilJITCleanupSucceeds(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	t.Run("expired", func(t *testing.T) {
+		assertJITCleanupRetainsProcessing(t, now, core.ProcessingJob{
+			Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, ClaimedAt: now.Add(-5 * time.Minute),
+			InventoryEndpointID: "test:endpoint",
+		})
+	})
+	t.Run("terminal", func(t *testing.T) {
+		assertJITCleanupRetainsProcessing(t, now, core.ProcessingJob{
+			Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, SourceTerminal: true,
+		})
+	})
+	t.Run("ordinary", func(t *testing.T) {
+		assertJITCleanupRetainsProcessing(t, now, core.ProcessingJob{Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}})
+	})
+}
+
+func assertJITCleanupRetainsProcessing(t *testing.T, now time.Time, processing core.ProcessingJob) {
+	t.Helper()
+	cleanupErr := errors.New("JIT cleanup failed")
+	transitioned := false
+	store := &jobStoreFake{
+		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+			return []core.ProcessingJob{processing}, nil
+		},
+		retry: func(context.Context, core.JobID) (bool, error) { transitioned = true; return true, nil },
+		recover: func(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+			transitioned = true
+			return core.RetryResult{Outcome: core.RetryRequeued}, nil
+		},
+		remove: func(context.Context, core.JobID) error { transitioned = true; return nil },
+	}
+	bootstrapper := &bootstrapGeneratorFake{cleanup: func(context.Context, core.Job, core.RunnerName) error {
+		return cleanupErr
+	}}
+	provider := &providerFake{}
+	result, err := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member",
+		func() time.Time { return now }).ReconcilePool(context.Background(), "linux")
+	if !errors.Is(err, cleanupErr) || transitioned || result.RemainingProcessing != 1 {
+		t.Fatalf("ReconcilePool() = (%#v, %v), transitioned=%v", result, err, transitioned)
+	}
+}
+
 func TestReconcilePoolReportsExpiredProcessingRecoveryFailureAfterCleanup(t *testing.T) {
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	jobID := uuid.New()

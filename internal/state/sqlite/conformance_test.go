@@ -210,12 +210,12 @@ func sqliteQueuedValues(job core.Job) []any {
 
 func sqliteProcessingValues(job core.Job, started, terminal bool) []any {
 	return []any{job.ID.String(), string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool),
-		"member-a", started, terminal}
+		"member-a", string(core.AttemptRunnerName(job.ID, core.JobID{})), started, terminal}
 }
 
 func sqliteClaimedValues(processing core.ProcessingJob, started, terminal bool) []any {
 	return []any{processing.Job.ID.String(), string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
-		string(processing.Job.RunnerPool), string(processing.MemberID), processing.ClaimedAt.UnixNano(),
+		string(processing.Job.RunnerPool), string(processing.MemberID), string(processing.RunnerName), processing.ClaimedAt.UnixNano(),
 		string(processing.InventoryEndpointID), started, terminal}
 }
 

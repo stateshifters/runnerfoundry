@@ -4,7 +4,9 @@ RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runn
 
 GitHub Actions is the only supported Git source. RunnerFoundry is designed for personal GitHub accounts that need to share self-hosted capacity across repositories without organization-level runners. Docker Compose and libvirt are the supported execution providers.
 
-The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the system boundaries without defining another lifecycle.
+RunnerFoundry publishes supported pre-1.0 releases. PostgreSQL state advances through forward migrations. SQLite state may require recreation when release notes identify a schema change; recreation discards the existing durable state.
+
+The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the source-neutral system boundaries, and the [GitHub adapter](docs/github-adapter.md) owns GitHub-specific protocol behavior.
 
 [Quick start](#quick-start) | [Installation](#installation) | [Configuration](#configuration) | [PostgreSQL](#use-postgresql) | [Providers](#prepare-runner-capacity) | [Operations](#operations) | [Contributing](CONTRIBUTING.md) | [MIT license](LICENSE)
 
@@ -159,10 +161,17 @@ Package upgrades and `apt remove` preserve packaged state. `apt purge runnerfoun
 
 ### Source-built executable
 
-Install the executable and create a dedicated account with access to the selected execution provider:
+Build the Linux AMD64 executable with Go 1.26.5 and GNU Make:
 
 ```sh
-sudo install -m 0755 runnerfoundry /usr/local/bin/runnerfoundry
+make build
+./build/linux/amd64/runnerfoundry --version
+```
+
+`make build` sets `GOOS=linux`, `GOARCH=amd64`, and `CGO_ENABLED=0`. A successful version command prints `runnerfoundry <version>`. Install that executable and create a dedicated account with access to the selected execution provider:
+
+```sh
+sudo install -m 0755 build/linux/amd64/runnerfoundry /usr/local/bin/runnerfoundry
 sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin runnerfoundry
 sudo install -d -m 0750 -o root -g runnerfoundry /etc/runnerfoundry
 sudo install -d -m 0750 -o runnerfoundry -g runnerfoundry /var/lib/runnerfoundry
@@ -234,8 +243,15 @@ RunnerFoundry requires PostgreSQL 17 or later. Create a stable non-login role an
 CREATE ROLE runnerfoundry
   NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 
+CREATE ROLE runnerfoundry_login
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+GRANT runnerfoundry TO runnerfoundry_login;
+
 CREATE DATABASE runnerfoundry OWNER runnerfoundry;
 ```
+
+Configure authentication for `runnerfoundry_login` through the PostgreSQL mechanism used by the deployment. The primary and direct endpoints may use different login identities, but every identity must be a member of `runnerfoundry` so RunnerFoundry can execute `SET ROLE runnerfoundry`. Store login names and passwords in protected environment or file references rather than the YAML document.
 
 Configure the backend:
 
@@ -257,23 +273,32 @@ Connection values may be literals, `env://VARIABLE` references, or absolute `fil
 
 Every member in a cluster uses the same GitHub and PostgreSQL configuration. Members may contribute different local providers and capacity under the same Runner Pool name.
 
-Inspect or apply migrations with the deployed executable:
+### Migrate PostgreSQL
+
+Every daemon startup acquires the migration lock and applies all known forward migrations before opening the runtime connection pool. Use the migration commands to inspect or apply the same migrations explicitly during a controlled maintenance window:
 
 ```sh
 runnerfoundry migrate status --config /etc/runnerfoundry/config.yaml
 runnerfoundry migrate up --config /etc/runnerfoundry/config.yaml
 ```
 
-For a rollback, stop every member before running:
+For an upgrade, back up PostgreSQL, stop every member, install the new executable or package on every host, and run `migrate status` followed by `migrate up` from one host before restarting the members. Starting a member before the explicit `migrate up` applies the same forward migrations automatically.
+
+For a rollback, back up PostgreSQL, stop every member, and wait more than 30 seconds for the last published heartbeat to expire. Inspect the current and known versions before selecting the rollback target:
 
 ```sh
+runnerfoundry migrate status --config /etc/runnerfoundry/config.yaml
 runnerfoundry migrate down --to <version> \
   --config /etc/runnerfoundry/config.yaml
 ```
 
+After the rollback, install the older executable whose target schema matches `<version>`, run its `migrate status`, and only then restart the members. Restarting the newer executable would apply its forward migrations again. Rollback refuses to run while a leader lease is active or a member heartbeat is still live.
+
 Operate PostgreSQL availability, backups, transport security, and database restoration separately from RunnerFoundry.
 
 ## Prepare runner capacity
+
+Runner starts are bounded by five minutes. Provider validation, inventory refresh, inspection, and destruction are each bounded by 30 seconds. An earlier caller deadline is preserved. A start deadline is one failed provisioning attempt; after cleanup, the job follows the lifecycle's unlimited retry rule. The per-call deadlines do not add a retry count, backoff, or overall lifecycle timeout.
 
 ### Prepare Docker Compose capacity
 
@@ -361,7 +386,7 @@ Runner reconciliation is provider-agnostic. Docker inventory endpoint identity i
 
 GitHub discovery replaces its complete persisted registration snapshot in one transaction. When `prune` is enabled, RunnerFoundry deletes only scale-set IDs from its previous committed snapshot after the current ID, name, and runner group still match. Similar labels or update settings do not establish ownership.
 
-The source leader uses that committed snapshot as its reconnect fast path. On leadership acquisition it opens fresh repository sessions from durable registrations while discovery runs independently. A blocked or failed repository does not delay other repositories, and an inconclusive discovery failure retains the last committed registrations and usable sessions. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
+The source leader uses that committed snapshot as its reconnect fast path. On leadership acquisition it opens fresh repository sessions from durable registrations while discovery runs independently. Repositories reconcile independently with at most four operations in flight, and a pass commits only after every repository succeeds. An inconclusive discovery failure retains the last committed registrations and usable sessions. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
 
 Durable queue processing is member-local and does not depend on source leadership. Every active member starts its queue processor with the runtime generation. Claims begin only after that member has refreshed inventory and reconciled the affected Runner Pool successfully. A locally ingested job wakes its pool after the enqueue is durable; maintenance wakes also find jobs that existed before startup or were ingested by another member.
 
@@ -371,7 +396,11 @@ On graceful shutdown, `leave` withdraws capacity and preserves all active runner
 
 ### Upgrade
 
-Review the release notes, stop the affected member or cluster, install the package on every affected host, and start the members again. This unreleased schema has no upgrade path: after a schema change, recreate the selected SQLite database or PostgreSQL schema before starting RunnerFoundry. Do not attempt to migrate or reuse state created by an earlier development revision.
+Review the release notes and back up the selected state backend before installing a new pre-1.0 release.
+
+For PostgreSQL, follow the [migration procedure](#migrate-postgresql). Forward migrations preserve supported PostgreSQL state; do not recreate the PostgreSQL schema for an ordinary upgrade.
+
+For SQLite, stop the member before installing the package. Reuse the existing database unless the release notes explicitly require recreation for that schema change. Recreation is destructive: it discards queued jobs, processing ownership, source tombstones, member capacity, and GitHub adapter registration and ownership state. Preserve a backup and accept or resolve that state loss before starting with a new database.
 
 ### Troubleshooting
 
@@ -393,7 +422,8 @@ Never commit or publish GitHub App keys, PostgreSQL credentials, JIT configurati
 ## Documentation
 
 - [Product contract](docs/PRD.md): normative behavior and terminology.
-- [Architecture](docs/architecture.md): component and adapter boundaries.
+- [Architecture](docs/architecture.md): source-neutral component and adapter boundaries.
+- [GitHub adapter](docs/github-adapter.md): GitHub protocol, discovery, session, and persistence behavior.
 - [Contributing](CONTRIBUTING.md): development and verification workflow.
 - [Releases](https://github.com/meza/RunnerFoundry/releases): packages and release notes.
 

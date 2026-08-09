@@ -44,8 +44,9 @@ func claimOldestInTransaction(
 	if err != nil {
 		return core.ClaimResult{}, fmt.Errorf("select oldest queued job: %w", err)
 	}
+	runnerName := core.AttemptRunnerName(job.ID, claim.AttemptID)
 	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID.String(), job.Source.Adapter,
-		job.Source.ID, string(job.RunnerPool), string(claim.MemberID), claim.ClaimedAt.UnixNano(),
+		job.Source.ID, string(job.RunnerPool), string(claim.MemberID), runnerName, claim.ClaimedAt.UnixNano(),
 		string(claim.InventoryEndpointID)); err != nil {
 		return core.ClaimResult{}, fmt.Errorf("insert processing claim: %w", err)
 	}
@@ -53,5 +54,6 @@ func claimOldestInTransaction(
 		return core.ClaimResult{}, fmt.Errorf("remove claimed job from queue: %w", err)
 	}
 	return core.ClaimResult{Processing: core.ProcessingJob{Job: job, MemberID: claim.MemberID,
-		ClaimedAt: claim.ClaimedAt, InventoryEndpointID: claim.InventoryEndpointID}, Outcome: core.ClaimClaimed}, nil
+		RunnerName: runnerName, ClaimedAt: claim.ClaimedAt,
+		InventoryEndpointID: claim.InventoryEndpointID}, Outcome: core.ClaimClaimed}, nil
 }

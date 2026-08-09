@@ -21,6 +21,7 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 		func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 			return transport.PruneResult{}, nil
 		},
+		func(context.Context, string) error { return nil },
 	)
 	assertTransportClientSuccess(t, success, registration, session)
 
@@ -33,9 +34,16 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 		func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
 			return transport.PruneResult{}, wantErr
 		},
+		func(context.Context, string) error { return wantErr },
 	)
 	assertTransportClientFailure(t, failure, registration, wantErr)
 	_ = NewTransportManagerClient((*transport.Client)(nil))
+}
+
+func TestManagedBootstrapClientRequiresCleanupBoundary(t *testing.T) {
+	if err := (managedBootstrapClient{}).CleanupRunner(context.Background(), "runner"); err == nil {
+		t.Fatal("missing cleanup boundary was accepted")
+	}
 }
 
 func assertTransportClientSuccess(
@@ -57,6 +65,9 @@ func assertTransportClientSuccess(
 	if _, err := client.PruneRunnerPools(context.Background(), 1, nil, nil); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
+	if err := client.CleanupRunner(context.Background(), "runner"); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
 }
 
 func assertTransportClientFailure(
@@ -77,5 +88,8 @@ func assertTransportClientFailure(
 	}
 	if _, err := client.PruneRunnerPools(context.Background(), 1, nil, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("prune error = %v", err)
+	}
+	if err := client.CleanupRunner(context.Background(), "runner"); !errors.Is(err, wantErr) {
+		t.Fatalf("cleanup error = %v", err)
 	}
 }

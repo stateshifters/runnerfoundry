@@ -25,6 +25,28 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 	}
 }
 
+func TestProvisioningAttemptsForSameJobUseDifferentRunnerNames(t *testing.T) {
+	job := core.Job{ID: uuid.New(), RunnerPool: "linux"}
+	names := make([]core.RunnerName, 0, 2)
+	store := &jobStoreFake{persistAttempt: true, take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
+		return core.ProcessingJob{Job: job}, true, nil
+	}}
+	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, _ core.Job, name core.RunnerName) (execution.Bootstrap, error) {
+		names = append(names, name)
+		return execution.NewBootstrap([]byte("opaque")), nil
+	}}
+	provider := &providerFake{}
+	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member", testCurrentTime)
+	for range 2 {
+		if _, err := orchestrator.Process(context.Background(), "linux"); err != nil {
+			t.Fatalf("Process() error = %v", err)
+		}
+	}
+	if len(names) != 2 || names[0] == names[1] {
+		t.Fatalf("attempt runner names = %#v", names)
+	}
+}
+
 type processOneEvidence struct {
 	orchestrator *runtimeengine.Orchestrator
 	claimCalls   int
@@ -37,19 +59,21 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 	memberID := core.MemberID("member-2")
 	job := core.Job{ID: jobID, RunnerPool: "linux", EnqueuedAt: time.Unix(1, 0)}
 	evidence := &processOneEvidence{}
-	store := &jobStoreFake{take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
+	var claimedRunnerName core.RunnerName
+	store := &jobStoreFake{persistAttempt: true, take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 		evidence.claimCalls++
 		return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
 	}}
 	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName core.RunnerName) (execution.Bootstrap, error) {
-		if actual.ID != jobID || runnerName != core.RunnerName("runnerfoundry-"+jobID.String()) {
+		claimedRunnerName = core.AttemptRunnerName(jobID, store.lastClaim.AttemptID)
+		if actual.ID != jobID || runnerName == "" || runnerName != claimedRunnerName {
 			t.Fatalf("bootstrap job = %#v, runner = %q", actual, runnerName)
 		}
 		return execution.NewBootstrap([]byte("opaque")), nil
 	}}
 	provider := &providerFake{start: func(_ context.Context, request execution.StartRequest) error {
 		evidence.startCalls++
-		if request.RunnerPool != "linux" || request.RunnerName != core.RunnerName("runnerfoundry-"+jobID.String()) {
+		if request.RunnerPool != "linux" || request.RunnerName != claimedRunnerName {
 			t.Fatalf("start request = %#v", request)
 		}
 		return nil
@@ -59,6 +83,8 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 }
 
 type jobStoreFake struct {
+	lastClaim       core.ProcessingClaim
+	persistAttempt  bool
 	enqueue         func(context.Context, core.JobRequest) (core.Job, bool, error)
 	take            func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
 	terminalize     func(context.Context, core.JobIdentity) (core.ObservationResult, error)
@@ -74,9 +100,13 @@ type jobStoreFake struct {
 }
 
 func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool, claim core.ProcessingClaim) (core.ClaimResult, error) {
+	store.lastClaim = claim
 	job, taken, err := store.take(ctx, pool, claim.MemberID)
 	job.ClaimedAt = claim.ClaimedAt
 	job.InventoryEndpointID = claim.InventoryEndpointID
+	if store.persistAttempt {
+		job.RunnerName = core.AttemptRunnerName(job.Job.ID, claim.AttemptID)
+	}
 	outcome := core.ClaimEmpty
 	if taken {
 		outcome = core.ClaimClaimed
@@ -150,6 +180,7 @@ func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID)
 
 type bootstrapGeneratorFake struct {
 	generate func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error)
+	cleanup  func(context.Context, core.Job, core.RunnerName) error
 }
 
 type launcherFake struct{}
@@ -162,6 +193,13 @@ func (launcherFake) Start(context.Context, execution.StartRequest) error {
 
 func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name core.RunnerName) (execution.Bootstrap, error) {
 	return generator.generate(ctx, job, name)
+}
+
+func (generator *bootstrapGeneratorFake) CleanupBootstrap(ctx context.Context, job core.Job, name core.RunnerName) error {
+	if generator.cleanup == nil {
+		return nil
+	}
+	return generator.cleanup(ctx, job, name)
 }
 
 func testCurrentTime() time.Time { return time.Unix(1, 0).UTC() }

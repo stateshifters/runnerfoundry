@@ -202,6 +202,49 @@ type jitAPIFake struct {
 	err              error
 	runnerName       string
 	runnerScaleSetID int
+	runner           *upstream.RunnerReference
+	removedRunnerID  int64
+	lookupErr        error
+	removeErr        error
+}
+
+func (api *jitAPIFake) GetRunnerByName(context.Context, string) (*upstream.RunnerReference, error) {
+	return api.runner, api.lookupErr
+}
+
+func (api *jitAPIFake) RemoveRunner(_ context.Context, runnerID int64) error {
+	api.removedRunnerID = runnerID
+	return api.removeErr
+}
+
+func TestCleanupRunnerRegistrationIsIdempotent(t *testing.T) {
+	t.Parallel()
+	if err := (*Client)(nil).CleanupRunner(context.Background(), "runner"); err == nil {
+		t.Fatal("nil client cleanup was accepted")
+	}
+	api := &jitAPIFake{runner: &upstream.RunnerReference{ID: 42}}
+	client := &Client{jit: api}
+	if err := client.CleanupRunner(context.Background(), "runner-attempt"); err != nil || api.removedRunnerID != 42 {
+		t.Fatalf("cleanup = %v, removed runner = %d", err, api.removedRunnerID)
+	}
+	api.runner = nil
+	if err := client.CleanupRunner(context.Background(), "missing"); err != nil {
+		t.Fatalf("missing cleanup = %v", err)
+	}
+	api.runner = &upstream.RunnerReference{ID: 43}
+	api.removeErr = upstream.NotFoundError
+	if err := client.CleanupRunner(context.Background(), "raced"); err != nil {
+		t.Fatalf("raced cleanup = %v", err)
+	}
+	wantErr := errors.New("upstream failed")
+	api.lookupErr, api.removeErr = wantErr, nil
+	if err := client.CleanupRunner(context.Background(), "lookup-failed"); !errors.Is(err, wantErr) {
+		t.Fatalf("lookup error = %v", err)
+	}
+	api.lookupErr, api.removeErr = nil, wantErr
+	if err := client.CleanupRunner(context.Background(), "remove-failed"); !errors.Is(err, wantErr) {
+		t.Fatalf("remove error = %v", err)
+	}
 }
 
 func (api *jitAPIFake) GenerateJitRunnerConfig(

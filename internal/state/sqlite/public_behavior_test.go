@@ -132,12 +132,13 @@ func successfulBehaviorExecutor() Executor {
 }
 
 func processingJobValues() []any {
-	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText, true, true}
+	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText,
+		string(core.AttemptRunnerName(testJobID, core.JobID{})), true, true}
 }
 
 func claimedProcessingJobValues() []any {
 	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText,
-		fixedTime().UnixNano(), "test:endpoint", true, true}
+		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(), "test:endpoint", true, true}
 }
 
 func rowFromValues(values []any) Row {

@@ -33,7 +33,7 @@ func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", claim)
 	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.InventoryEndpointID != claim.InventoryEndpointID || commits != 1 ||
-		!strings.Contains(statements[1], "claimed_at, inventory_endpoint_id") || len(arguments[1]) != 7 {
+		!strings.Contains(statements[1], "runner_name, claimed_at, inventory_endpoint_id") || len(arguments[1]) != 8 {
 		t.Fatalf("claim = (%#v, %v), statements=%#v args=%#v", result, err, statements, arguments)
 	}
 }
@@ -52,7 +52,8 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 
 func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	values := []any{testJobIDText, "github", "request-3", "linux", string(testMemberID),
-		fixedTime().UnixNano(), "docker:member-a", false, false}
+		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(),
+		"docker:member-a", false, false}
 	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
 		return rowsFromValues([][]any{values}), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}

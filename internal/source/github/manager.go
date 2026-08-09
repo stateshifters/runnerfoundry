@@ -44,6 +44,7 @@ type ManagerClient struct {
 	EnsureRunnerPool  func(context.Context, string, string) (transport.Registration, error)
 	OpenSession       func(context.Context, transport.Registration, string) (ManagedSession, error)
 	GenerateBootstrap func(context.Context, transport.Registration, string) ([]byte, error)
+	CleanupRunner     func(context.Context, string) error
 	PruneRunnerPools  func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
@@ -57,6 +58,13 @@ func (client managedBootstrapClient) GenerateBootstrap(
 	return client.client.GenerateBootstrap(ctx, registration, string(runnerName))
 }
 
+func (client managedBootstrapClient) CleanupRunner(ctx context.Context, runnerName core.RunnerName) error {
+	if client.client.CleanupRunner == nil {
+		return errors.New("GitHub runner cleanup is required")
+	}
+	return client.client.CleanupRunner(ctx, string(runnerName))
+}
+
 type ManagerClientFactoryFunc func(context.Context, transport.Repository) (ManagerClient, error)
 
 // TransportManagerClient adapts the concrete actions/scaleset transport client
@@ -67,6 +75,7 @@ func NewTransportManagerClient(client *transport.Client) ManagerClient {
 		client.OpenSession,
 		client.GenerateBootstrap,
 		client.PruneRunnerPools,
+		client.CleanupRunner,
 	)
 }
 
@@ -75,12 +84,14 @@ func composeTransportManagerClient(
 	open func(context.Context, transport.Registration, string) (*transport.Session, error),
 	generate func(context.Context, transport.Registration, string) ([]byte, error),
 	prune func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
+	cleanup func(context.Context, string) error,
 ) ManagerClient {
 	return ManagerClient{
 		EnsureRunnerPool:  wrapTransportEnsure(ensure),
 		OpenSession:       wrapTransportOpen(open),
 		GenerateBootstrap: wrapTransportGenerate(generate),
 		PruneRunnerPools:  wrapTransportPrune(prune),
+		CleanupRunner:     cleanup,
 	}
 }
 

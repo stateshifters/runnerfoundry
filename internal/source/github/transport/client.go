@@ -37,6 +37,8 @@ type jitAPI interface {
 		setting *upstream.RunnerScaleSetJitRunnerSetting,
 		runnerScaleSetID int,
 	) (*upstream.RunnerScaleSetJitRunnerConfig, error)
+	GetRunnerByName(ctx context.Context, runnerName string) (*upstream.RunnerReference, error)
+	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
 type upstreamClientAPI interface {

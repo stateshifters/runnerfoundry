@@ -35,18 +35,84 @@ func TestProcessOneRetriesFailedBootstrapAtQueueTail(t *testing.T) {
 	jobID := uuid.New()
 	wantErr := errors.New("bootstrap failed")
 	retried := false
+	cleaned := false
 	store := processingStore(jobID, func(_ context.Context, actual core.JobID) (bool, error) {
 		retried = actual == jobID
 		return true, nil
 	})
 	bootstrapper := &bootstrapGeneratorFake{generate: func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error) {
 		return execution.Bootstrap{}, wantErr
+	}, cleanup: func(context.Context, core.Job, core.RunnerName) error {
+		cleaned = true
+		return nil
 	}}
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member", testCurrentTime)
 	processed, err := orchestrator.ProcessOne(context.Background(), "linux")
-	if !processed || !errors.Is(err, wantErr) || !retried {
-		t.Fatalf("ProcessOne() = (%v, %v), retried=%v", processed, err, retried)
+	if !processed || !errors.Is(err, wantErr) || !cleaned || !retried {
+		t.Fatalf("ProcessOne() = (%v, %v), cleaned=%v retried=%v", processed, err, cleaned, retried)
+	}
+}
+
+func TestProcessOneRetainsFailedBootstrapUntilJITCleanupSucceeds(t *testing.T) {
+	jobID := uuid.New()
+	cleanupErr := errors.New("cleanup failed")
+	retried := false
+	store := processingStore(jobID, func(context.Context, core.JobID) (bool, error) {
+		retried = true
+		return true, nil
+	})
+	bootstrapper := &bootstrapGeneratorFake{
+		generate: func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error) {
+			return execution.Bootstrap{}, errors.New("bootstrap failed")
+		},
+		cleanup: func(context.Context, core.Job, core.RunnerName) error { return cleanupErr },
+	}
+	provider := &providerFake{}
+	result, err := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider,
+		"member", testCurrentTime).Process(context.Background(), "linux")
+	if !errors.Is(err, cleanupErr) || retried || result.RetryOutcome != core.RetryCleanupPending {
+		t.Fatalf("Process() = (%#v, %v), retried=%v", result, err, retried)
+	}
+}
+
+func TestProcessOneRetainsFailedStartUntilJITCleanupSucceeds(t *testing.T) {
+	t.Run("absent instance", func(t *testing.T) { assertFailedStartCleanupPending(t, nil) })
+	t.Run("destroyed instance", func(t *testing.T) {
+		assertFailedStartCleanupPending(t, func(context.Context) ([]execution.RunnerInstance, error) {
+			return []execution.RunnerInstance{{}}, nil
+		})
+	})
+}
+
+func assertFailedStartCleanupPending(
+	t *testing.T,
+	inspect func(context.Context) ([]execution.RunnerInstance, error),
+) {
+	t.Helper()
+	jobID := uuid.New()
+	cleanupErr := errors.New("cleanup failed")
+	retried := false
+	store := processingStore(jobID, func(context.Context, core.JobID) (bool, error) {
+		retried = true
+		return true, nil
+	})
+	provider := &providerFake{start: func(context.Context, execution.StartRequest) error {
+		return errors.New("start failed")
+	}}
+	if inspect != nil {
+		provider.inspect = func(ctx context.Context) ([]execution.RunnerInstance, error) {
+			instances, err := inspect(ctx)
+			instances[0].RunnerName = core.RunnerName("runnerfoundry-" + jobID.String())
+			return instances, err
+		}
+	}
+	bootstrapper := successfulBootstrapper()
+	bootstrapper.cleanup = func(context.Context, core.Job, core.RunnerName) error { return cleanupErr }
+	result, err := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider,
+		"member", testCurrentTime).Process(context.Background(), "linux")
+	if !errors.Is(err, cleanupErr) || retried || result.RetryOutcome != core.RetryCleanupPending {
+		t.Fatalf("Process() = (%#v, %v), retried=%v", result, err, retried)
 	}
 }
 

@@ -122,7 +122,7 @@ func TestRetryUnstartedHandlesRejectedTransitions(t *testing.T) {
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
 	terminalValues := processingJobValues(job, testMemberIDA)
-	terminalValues[6] = true
+	terminalValues[7] = true
 	terminal := rowFromValues(terminalValues)
 	noRow := Row{scan: func(...any) error { return sql.ErrNoRows }}
 	for name, transaction := range map[string]Transaction{

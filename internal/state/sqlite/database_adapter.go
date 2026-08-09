@@ -107,6 +107,7 @@ func sqliteJobSchemaStatements() []string {
 		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
 		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
 		member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id),
+		runner_name TEXT NOT NULL CHECK(length(trim(runner_name)) > 0),
 		claimed_at INTEGER NOT NULL,
 		inventory_endpoint_id TEXT NOT NULL CHECK(length(trim(inventory_endpoint_id)) > 0),
 		runner_started INTEGER NOT NULL DEFAULT 0 CHECK(runner_started IN (0, 1)),
@@ -151,8 +152,8 @@ func sqliteCapacitySchemaStatements() []string {
 	}
 }
 
-const sqliteSchemaVersion = 105
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 105"
+const sqliteSchemaVersion = 106
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 106"
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)
@@ -173,6 +174,9 @@ func validateSQLiteSchema(ctx context.Context, database *sql.DB) (bool, error) {
 	if version == sqliteSchemaVersion {
 		return false, nil
 	}
+	if version == 105 {
+		return false, migrateSQLite105(ctx, database)
+	}
 	if version != 0 {
 		return false, fmt.Errorf("SQLite job schema version %d requires database recreation", version)
 	}
@@ -185,6 +189,35 @@ func validateSQLiteSchema(ctx context.Context, database *sql.DB) (bool, error) {
 		return false, errors.New("unversioned SQLite database contains application tables and requires recreation")
 	}
 	return true, nil
+}
+
+func migrateSQLite105(ctx context.Context, database *sql.DB) (resultErr error) {
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin SQLite job schema upgrade: %w", err)
+	}
+	open := true
+	defer func() {
+		if open {
+			resultErr = errors.Join(resultErr, transaction.Rollback())
+		}
+	}()
+	if _, err = transaction.ExecContext(ctx,
+		`ALTER TABLE runnerfoundry_processing_jobs ADD COLUMN runner_name TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add SQLite runner attempt identity: %w", err)
+	}
+	if _, err = transaction.ExecContext(ctx,
+		`UPDATE runnerfoundry_processing_jobs SET runner_name = 'runnerfoundry-' || job_id`); err != nil {
+		return fmt.Errorf("backfill SQLite runner attempt identity: %w", err)
+	}
+	if _, err = transaction.ExecContext(ctx, sqliteSchemaVersionSQL); err != nil {
+		return fmt.Errorf("record SQLite job schema upgrade: %w", err)
+	}
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit SQLite job schema upgrade: %w", err)
+	}
+	open = false
+	return nil
 }
 
 func createSQLiteSchema(ctx context.Context, database *sql.DB) (resultErr error) {

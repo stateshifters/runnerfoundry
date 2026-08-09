@@ -159,13 +159,14 @@ func TestRecoveryRollsBackWhenProcessingOwnershipWasNotDeleted(t *testing.T) {
 
 func processingOutcomeValues(started, terminal bool) []any {
 	values := processingJobValues()
-	values[5], values[6] = started, terminal
+	values[6], values[7] = started, terminal
 	return values
 }
 
 func claimedOutcomeValues(started, terminal bool) []any {
 	return []any{testJobIDText, "github", "request-3", "linux", string(testMemberID),
-		fixedTime().UnixNano(), "docker:member-a", started, terminal}
+		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(),
+		"docker:member-a", started, terminal}
 }
 
 func outcomeExecute(rows int64) func(context.Context, string, ...any) (Result, error) {

@@ -134,6 +134,42 @@ func TestSourcePropagatesBootstrapFailures(t *testing.T) {
 	}
 }
 
+func TestSourceBootstrapClientFailureExposesSafeDiagnostic(t *testing.T) {
+	t.Parallel()
+	client := &bootstrapClientFake{err: errors.New("bootstrap failed")}
+	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", client)})
+	_, err := source.GenerateBootstrap(
+		context.Background(), sourceJob(t, "octo/repo", core.RunnerPool("linux"), 46), "runner",
+	)
+	var diagnostic interface{ OperationalDiagnostic() string }
+	if !errors.As(err, &diagnostic) || diagnostic.OperationalDiagnostic() == "" ||
+		err.Error() == "" || !errors.Is(err, client.err) {
+		t.Fatalf("bootstrap diagnostic error = %v", err)
+	}
+}
+
+func TestSourceCleansExactAttemptRegistration(t *testing.T) {
+	t.Parallel()
+	client := &bootstrapClientFake{}
+	source := newSourceWithMemberRoutes(t, []githubsource.MemberRoute{memberRoute("octo/repo", client)})
+	job := sourceJob(t, "octo/repo", "linux", 46)
+	if err := source.CleanupBootstrap(context.Background(), job, "runner-attempt"); err != nil ||
+		client.cleanedName != "runner-attempt" {
+		t.Fatalf("cleanup = %v, runner = %q", err, client.cleanedName)
+	}
+	client.cleanupErr = errors.New("cleanup failed")
+	if err := source.CleanupBootstrap(context.Background(), job, "runner-attempt"); !errors.Is(err, client.cleanupErr) {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	if err := source.CleanupBootstrap(context.Background(), core.Job{}, "runner-attempt"); err == nil {
+		t.Fatal("invalid cleanup job was accepted")
+	}
+	missingJob := sourceJob(t, "octo/missing", "linux", 47)
+	if err := source.CleanupBootstrap(context.Background(), missingJob, "runner-attempt"); err == nil {
+		t.Fatal("missing cleanup route was accepted")
+	}
+}
+
 func TestSourceReplaceRoutesIsAtomic(t *testing.T) {
 	t.Parallel()
 
@@ -194,6 +230,8 @@ type bootstrapClientFake struct {
 	calls        int
 	registration transport.Registration
 	runnerName   core.RunnerName
+	cleanupErr   error
+	cleanedName  core.RunnerName
 }
 
 func (client *bootstrapClientFake) GenerateBootstrap(
@@ -205,4 +243,9 @@ func (client *bootstrapClientFake) GenerateBootstrap(
 	client.registration = registration
 	client.runnerName = runnerName
 	return client.content, client.err
+}
+
+func (client *bootstrapClientFake) CleanupRunner(_ context.Context, runnerName core.RunnerName) error {
+	client.cleanedName = runnerName
+	return client.cleanupErr
 }

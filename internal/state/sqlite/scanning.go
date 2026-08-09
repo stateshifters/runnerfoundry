@@ -30,9 +30,9 @@ func scanJob(row scanner) (core.Job, error) {
 
 func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID string
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName string
 	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
-		&runnerPool, &memberID, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
+		&runnerPool, &memberID, &runnerName, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
 	}
 	parsedJobID, err := uuid.Parse(jobID)
@@ -43,15 +43,16 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.MemberID = core.MemberID(memberID)
+	processing.RunnerName = core.RunnerName(runnerName)
 	return processing, nil
 }
 
 func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, endpointID string
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName, endpointID string
 	var claimedAt int64
 	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
-		&runnerPool, &memberID, &claimedAt, &endpointID, &processing.RunnerStarted,
+		&runnerPool, &memberID, &runnerName, &claimedAt, &endpointID, &processing.RunnerStarted,
 		&processing.SourceTerminal); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
 	}
@@ -63,6 +64,7 @@ func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.MemberID = core.MemberID(memberID)
+	processing.RunnerName = core.RunnerName(runnerName)
 	processing.ClaimedAt = time.Unix(0, claimedAt).UTC()
 	processing.InventoryEndpointID = core.InventoryEndpointID(endpointID)
 	return processing, nil

@@ -136,6 +136,9 @@ func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	if _, err := manager.Source().GenerateBootstrap(context.Background(), job, "runner-61"); err != nil {
 		t.Fatalf("generate bootstrap: %v", err)
 	}
+	if err := manager.Source().CleanupBootstrap(context.Background(), job, "runner-61"); err != nil {
+		t.Fatalf("cleanup bootstrap: %v", err)
+	}
 }
 
 func TestManagerReturnsDefensiveCommittedRegistrationSnapshot(t *testing.T) {
@@ -417,6 +420,7 @@ func (factory *managerFactoryFake) Client(
 			return client.session, client.openErr
 		},
 		GenerateBootstrap: client.GenerateBootstrap,
+		CleanupRunner:     func(context.Context, string) error { return nil },
 		PruneRunnerPools:  client.PruneRunnerPools,
 	}, nil
 }

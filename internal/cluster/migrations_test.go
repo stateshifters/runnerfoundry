@@ -20,16 +20,17 @@ func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
 	}
 }
 
-func TestEmbeddedMigrationCatalogIncludesReversibleOwnershipMigration(t *testing.T) {
+func TestEmbeddedMigrationCatalogIncludesReversibleAttemptIdentityMigration(t *testing.T) {
 	catalog, err := NewStore(postgresconfig.Settings{Role: "runnerfoundry"}).migrationCatalog()
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if target := migrationTarget(catalog); target != 2 {
-		t.Fatalf("embedded migration target = %d, want 2", target)
+	if target := migrationTarget(catalog); target != 3 {
+		t.Fatalf("embedded migration target = %d, want 3", target)
 	}
-	if len(catalog.Migrations) != 2 || strings.TrimSpace(catalog.Migrations[1].DownSQL) == "" {
-		t.Fatalf("embedded migration catalog = %#v, want two reversible migrations", catalog.Migrations)
+	if len(catalog.Migrations) != 3 || strings.TrimSpace(catalog.Migrations[2].DownSQL) == "" ||
+		!strings.Contains(catalog.Migrations[2].UpSQL, "runner_name") {
+		t.Fatalf("embedded migration catalog = %#v, want three reversible migrations", catalog.Migrations)
 	}
 }
 

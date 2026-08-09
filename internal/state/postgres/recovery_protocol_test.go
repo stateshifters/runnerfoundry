@@ -24,8 +24,8 @@ func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 		t.Fatalf("claim = (%#v, %v), commits=%d", result, err, protocol.commitCalls)
 	}
 	last := len(protocol.statements) - 1
-	if !strings.Contains(protocol.statements[last], "claimed_at, inventory_endpoint_id") ||
-		len(protocol.arguments[last]) != 7 {
+	if !strings.Contains(protocol.statements[last], "runner_name, claimed_at, inventory_endpoint_id") ||
+		len(protocol.arguments[last]) != 8 {
 		t.Fatalf("claim statement = %q %#v", protocol.statements[last], protocol.arguments[last])
 	}
 }
@@ -146,7 +146,8 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
 	values := []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), "linux", testMemberIDA,
-		fixedTime(), core.InventoryEndpointID("docker:member-a"), false, false}
+		string(core.AttemptRunnerName(job.ID, core.JobID{})), fixedTime(),
+		core.InventoryEndpointID("docker:member-a"), false, false}
 	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{values})}
 	processing, err := NewStore(protocol.executor()).ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].ClaimedAt != fixedTime() ||

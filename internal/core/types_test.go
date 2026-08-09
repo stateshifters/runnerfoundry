@@ -21,6 +21,15 @@ func TestSourceReferenceValidity(t *testing.T) {
 	}
 }
 
+func TestAttemptRunnerNameIncludesBothUniqueIdentities(t *testing.T) {
+	jobID := uuid.New()
+	first := AttemptRunnerName(jobID, uuid.New())
+	second := AttemptRunnerName(jobID, uuid.New())
+	if first == second || len(first) != 62 {
+		t.Fatalf("attempt names = %q and %q", first, second)
+	}
+}
+
 func TestDemandScopeValidity(t *testing.T) {
 	valid := DemandScope{Adapter: "github", ID: "repository-pool"}
 	if !valid.IsValid() {

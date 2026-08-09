@@ -125,7 +125,7 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 	t.Parallel()
 	statements := make([]string, 0, 2)
 	processingValues := processingJobValues()
-	processingValues[5], processingValues[6] = false, false
+	processingValues[6], processingValues[7] = false, false
 	transaction := Transaction{
 		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(processingValues) },
 		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {

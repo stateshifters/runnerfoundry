@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"time"
 
@@ -113,6 +114,7 @@ type Job struct {
 // source observations needed for retry and terminal cleanup decisions.
 type ProcessingJob struct {
 	Job                 Job
+	RunnerName          RunnerName
 	MemberID            MemberID
 	ClaimedAt           time.Time
 	InventoryEndpointID InventoryEndpointID
@@ -124,8 +126,17 @@ type ProcessingJob struct {
 // become durable together when a queued Job is claimed.
 type ProcessingClaim struct {
 	MemberID            MemberID
+	AttemptID           JobID
 	ClaimedAt           time.Time
 	InventoryEndpointID InventoryEndpointID
+}
+
+// AttemptRunnerName encodes durable job and attempt identities without
+// exceeding the practical runner-name limits of supported providers.
+func AttemptRunnerName(jobID JobID, attemptID JobID) RunnerName {
+	jobToken := base64.RawURLEncoding.EncodeToString(jobID[:])
+	attemptToken := base64.RawURLEncoding.EncodeToString(attemptID[:])
+	return RunnerName("runnerfoundry-v2-" + jobToken + "-" + attemptToken)
 }
 
 // EnqueueResult reports both the durable Job, when one exists, and the exact
@@ -173,6 +184,7 @@ const (
 	RetryRunnerStarted  RetryOutcome = "runner_started"
 	RetrySourceTerminal RetryOutcome = "source_terminal"
 	RetryClaimChanged   RetryOutcome = "claim_changed"
+	RetryCleanupPending RetryOutcome = "cleanup_pending"
 )
 
 // TerminalRemovalResult reports the exact guarded terminal-removal transition.

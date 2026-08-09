@@ -301,6 +301,10 @@ func reportProcessEvents(
 		event.stage = result.FailedStage
 		event.outcome = string(result.RetryOutcome)
 		event.err = err
+		var diagnostic interface{ OperationalDiagnostic() string }
+		if errors.As(err, &diagnostic) {
+			event.diagnostic = diagnostic.OperationalDiagnostic()
+		}
 		reportOperational(report, event)
 	}
 }

@@ -98,7 +98,9 @@ func OldestJob() core.Job {
 }
 
 func ExpectedProcessing() core.ProcessingJob {
-	return core.ProcessingJob{Job: OldestJob(), MemberID: "member-a", ClaimedAt: FixedTime(),
+	job := OldestJob()
+	return core.ProcessingJob{Job: job, RunnerName: core.AttemptRunnerName(job.ID, core.JobID{}),
+		MemberID: "member-a", ClaimedAt: FixedTime(),
 		InventoryEndpointID: "docker:member-a"}
 }
 

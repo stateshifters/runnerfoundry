@@ -19,6 +19,27 @@ type BootstrapClient interface {
 		registration transport.Registration,
 		runnerName core.RunnerName,
 	) ([]byte, error)
+	CleanupRunner(ctx context.Context, runnerName core.RunnerName) error
+}
+
+// CleanupBootstrap removes the exact JIT registration owned by an unstarted
+// provisioning attempt.
+func (source *Source) CleanupBootstrap(ctx context.Context, job core.Job, runnerName core.RunnerName) error {
+	key, err := sourceIdentityForJob(job)
+	if err != nil {
+		return err
+	}
+	source.routesMu.RLock()
+	route, found := source.routes[key]
+	source.routesMu.RUnlock()
+	if !found {
+		return fmt.Errorf("GitHub member route for repository %q and Runner Pool %q was not found", key.repository, key.runnerPool)
+	}
+	if err = route.client.CleanupRunner(ctx, runnerName); err != nil {
+		return fmt.Errorf("cleanup GitHub runner %q for repository %q and Runner Pool %q: %w",
+			runnerName, key.repository, key.runnerPool, err)
+	}
+	return nil
 }
 
 // MemberRoute identifies the ordinary repository client and runner scale-set
@@ -47,6 +68,12 @@ type Source struct {
 	routesMu sync.RWMutex
 	routes   map[routeKey]memberRoute
 }
+
+type bootstrapDiagnosticError struct{ cause error }
+
+func (failure bootstrapDiagnosticError) Error() string                 { return failure.cause.Error() }
+func (failure bootstrapDiagnosticError) Unwrap() error                 { return failure.cause }
+func (failure bootstrapDiagnosticError) OperationalDiagnostic() string { return failure.cause.Error() }
 
 // NewSource builds the GitHub bootstrap router. Duplicate or incomplete routes
 // are rejected rather than resolved by registration order.
@@ -101,7 +128,7 @@ func (source *Source) GenerateBootstrap(
 	job core.Job,
 	runnerName core.RunnerName,
 ) (execution.Bootstrap, error) {
-	_, key, err := sourceIdentityForJob(job)
+	key, err := sourceIdentityForJob(job)
 	if err != nil {
 		return execution.Bootstrap{}, err
 	}
@@ -115,9 +142,8 @@ func (source *Source) GenerateBootstrap(
 	}
 	content, err := route.client.GenerateBootstrap(ctx, route.registration, runnerName)
 	if err != nil {
-		return execution.Bootstrap{}, fmt.Errorf(
-			"generate GitHub bootstrap for repository %q and Runner Pool %q: %w", key.repository, key.runnerPool, err,
-		)
+		return execution.Bootstrap{}, bootstrapDiagnosticError{cause: fmt.Errorf(
+			"generate GitHub bootstrap for repository %q and Runner Pool %q: %w", key.repository, key.runnerPool, err)}
 	}
 	if len(content) == 0 {
 		return execution.Bootstrap{}, errors.New("GitHub bootstrap content is empty")
@@ -125,18 +151,18 @@ func (source *Source) GenerateBootstrap(
 	return execution.NewBootstrap(content), nil
 }
 
-func sourceIdentityForJob(job core.Job) (SourceIdentity, routeKey, error) {
+func sourceIdentityForJob(job core.Job) (routeKey, error) {
 	if job.Source.Adapter != AdapterName {
-		return SourceIdentity{}, routeKey{}, fmt.Errorf("job source adapter %q is not GitHub", job.Source.Adapter)
+		return routeKey{}, fmt.Errorf("job source adapter %q is not GitHub", job.Source.Adapter)
 	}
 	identity, err := DecodeSourceID(job.Source.ID)
 	if err != nil {
-		return SourceIdentity{}, routeKey{}, fmt.Errorf("decode source identity for job %s: %w", job.ID, err)
+		return routeKey{}, fmt.Errorf("decode source identity for job %s: %w", job.ID, err)
 	}
 	if identity.RunnerPool != job.RunnerPool {
-		return SourceIdentity{}, routeKey{}, fmt.Errorf(
+		return routeKey{}, fmt.Errorf(
 			"job Runner Pool %q does not match encoded GitHub Runner Pool %q", job.RunnerPool, identity.RunnerPool,
 		)
 	}
-	return identity, routeKey{repository: identity.Repository, runnerPool: identity.RunnerPool}, nil
+	return routeKey{repository: identity.Repository, runnerPool: identity.RunnerPool}, nil
 }

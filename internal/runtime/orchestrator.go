@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/execution"
 )
 
 type BootstrapGenerator interface {
 	GenerateBootstrap(ctx context.Context, job core.Job, runnerName core.RunnerName) (execution.Bootstrap, error)
+	CleanupBootstrap(ctx context.Context, job core.Job, runnerName core.RunnerName) error
 }
 
 // Orchestrator owns member-local processing from queue pickup through provider
@@ -84,6 +86,7 @@ func (orchestrator *Orchestrator) claimOldest(
 ) (core.ProcessingJob, bool, error) {
 	take, err := orchestrator.store.ClaimOldest(ctx, runnerPool, core.ProcessingClaim{
 		MemberID: orchestrator.member, ClaimedAt: orchestrator.currentTime(),
+		AttemptID:           uuid.New(),
 		InventoryEndpointID: orchestrator.launcher.EndpointID(),
 	})
 	if err != nil {
@@ -100,11 +103,15 @@ func (orchestrator *Orchestrator) provisionClaimed(
 	runnerPool core.RunnerPool,
 	processing core.ProcessingJob,
 ) (ProcessResult, error) {
-	runnerName := runnerName(processing.Job.ID)
+	runnerName := processingRunnerName(processing)
 	bootstrap, err := orchestrator.bootstrapper.GenerateBootstrap(ctx, processing.Job, runnerName)
 	if err != nil {
-		return orchestrator.retryClaim(ctx, processing, "generate_bootstrap",
-			fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err))
+		bootstrapErr := fmt.Errorf("generate bootstrap for job %s: %w", processing.Job.ID, err)
+		if cleanupErr := orchestrator.cleanupBootstrap(ctx, processing); cleanupErr != nil {
+			return retryProcessResult(processing.Job, core.RetryCleanupPending, "generate_bootstrap"),
+				errors.Join(bootstrapErr, cleanupErr)
+		}
+		return orchestrator.retryClaim(ctx, processing, "generate_bootstrap", bootstrapErr)
 	}
 	if err = orchestrator.launcher.Start(ctx, execution.StartRequest{
 		JobID: processing.Job.ID, RunnerPool: runnerPool, EndpointID: orchestrator.launcher.EndpointID(),
@@ -137,7 +144,7 @@ func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, proces
 	if err != nil {
 		return "", fmt.Errorf("inspect partial runner for job %s: %w", processing.Job.ID, err)
 	}
-	name := runnerName(processing.Job.ID)
+	name := processingRunnerName(processing)
 	for _, instance := range instances {
 		if instance.RunnerName != name {
 			continue
@@ -145,9 +152,22 @@ func (orchestrator *Orchestrator) cleanupFailedStart(ctx context.Context, proces
 		if err = orchestrator.inventory.Destroy(ctx, instance); err != nil {
 			return "", fmt.Errorf("destroy partial runner %q: %w", instance.ID, err)
 		}
+		if err = orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+			return core.RetryCleanupPending, err
+		}
 		return orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
 	}
+	if err = orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+		return core.RetryCleanupPending, err
+	}
 	return orchestrator.retryUnstartedProcessing(ctx, processing.Job.ID)
+}
+
+func (orchestrator *Orchestrator) cleanupBootstrap(ctx context.Context, processing core.ProcessingJob) error {
+	if err := orchestrator.bootstrapper.CleanupBootstrap(ctx, processing.Job, processingRunnerName(processing)); err != nil {
+		return fmt.Errorf("cleanup bootstrap for job %s: %w", processing.Job.ID, err)
+	}
+	return nil
 }
 
 func (orchestrator *Orchestrator) retryUnstartedProcessing(ctx context.Context, jobID core.JobID) (core.RetryOutcome, error) {

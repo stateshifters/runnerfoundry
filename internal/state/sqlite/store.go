@@ -11,11 +11,11 @@ import (
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`
 const processingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
-	runner_started, EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+	runner_name, runner_started, EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 const claimedProcessingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
-	claimed_at, inventory_endpoint_id, runner_started,
+	runner_name, claimed_at, inventory_endpoint_id, runner_started,
 	EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
 		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
@@ -42,8 +42,8 @@ const classifyQueueSourceSQL = `SELECT CASE
 const oldestQueuedJobSQL = `SELECT ` + queuedJobColumns + ` FROM runnerfoundry_queued_jobs
 	WHERE runner_pool = ? ORDER BY enqueued_at LIMIT 1`
 const insertClaimedProcessingJobSQL = `INSERT INTO runnerfoundry_processing_jobs
-	(job_id, source_name, source_reference, runner_pool, member_id, claimed_at, inventory_endpoint_id)
-	VALUES (?, ?, ?, ?, ?, ?, ?)`
+	(job_id, source_name, source_reference, runner_pool, member_id, runner_name, claimed_at, inventory_endpoint_id)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 const insertTombstoneSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
 	VALUES (?, ?) ON CONFLICT(source_name, source_reference) DO NOTHING`
 const deleteQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs WHERE job_id = ?`
