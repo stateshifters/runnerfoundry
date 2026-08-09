@@ -9,7 +9,7 @@ maintainer: Meza <meza@users.noreply.github.com>
 description: Runner Foundry shared control plane for self-hosted ephemeral CI runners
 vendor: meza
 homepage: https://github.com/meza/RunnerFoundry
-license: MIT
+license: AGPL-3.0-or-later
 
 contents:
   - src: build/linux/amd64/runnerfoundry
@@ -31,6 +31,18 @@ contents:
       mode: 0644
   - src: build/metadata/runnerfoundry-sbom.json
     dst: /usr/share/doc/runnerfoundry/runnerfoundry-sbom.json
+    file_info:
+      mode: 0644
+  - src: build/metadata/SOURCE.txt
+    dst: /usr/share/doc/runnerfoundry/SOURCE.txt
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/runnerfoundry/LICENSE
+    file_info:
+      mode: 0644
+  - src: COPYRIGHT
+    dst: /usr/share/doc/runnerfoundry/COPYRIGHT
     file_info:
       mode: 0644
 

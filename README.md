@@ -8,7 +8,7 @@ RunnerFoundry publishes supported pre-1.0 releases. PostgreSQL state advances th
 
 The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the source-neutral system boundaries, and the [GitHub adapter](docs/github-adapter.md) owns GitHub-specific protocol behavior.
 
-[Quick start](#quick-start) | [Installation](#installation) | [Configuration](#configuration) | [PostgreSQL](#use-postgresql) | [Providers](#prepare-runner-capacity) | [Operations](#operations) | [Contributing](CONTRIBUTING.md) | [MIT license](LICENSE)
+[Quick start](#quick-start) | [Installation](#installation) | [Configuration](#configuration) | [PostgreSQL](#use-postgresql) | [Providers](#prepare-runner-capacity) | [Operations](#operations) | [Contributing](CONTRIBUTING.md) | [Licensing](LICENSING.md)
 
 ## How it works
 
@@ -424,7 +424,9 @@ Never commit or publish GitHub App keys, PostgreSQL credentials, JIT configurati
 - [Product contract](docs/PRD.md): normative behavior and terminology.
 - [Architecture](docs/architecture.md): source-neutral component and adapter boundaries.
 - [GitHub adapter](docs/github-adapter.md): GitHub protocol, discovery, session, and persistence behavior.
-- [Contributing](CONTRIBUTING.md): development and verification workflow.
+- [Contributing](CONTRIBUTING.md): development, verification, and contributor licensing terms.
+- [Licensing](LICENSING.md): public, commercial, and source-availability terms.
+- [Trademark policy](TRADEMARKS.md): permitted uses of the RunnerFoundry name and branding.
 - [Releases](https://github.com/meza/RunnerFoundry/releases): packages and release notes.
 
 ## Support
@@ -433,4 +435,10 @@ Use [GitHub Issues](https://github.com/meza/RunnerFoundry/issues) for reproducib
 
 ## License
 
-RunnerFoundry is available under the [MIT License](LICENSE).
+RunnerFoundry is free and open-source software licensed under
+[AGPL-3.0-or-later](LICENSE). Personal, internal, and commercial use, including managed services, is
+welcome. If you improve RunnerFoundry, contributing those improvements upstream helps maintain one strong implementation.
+Contributions, attribution, and sponsorship are appreciated but not required.
+
+See [Licensing](LICENSING.md) for source-availability obligations, commercial licensing, custom work, voluntary attribution,
+and sponsorship.

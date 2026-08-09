@@ -5,6 +5,30 @@ discussions, or any other method with the owners of this repository before makin
 
 Please note we have a code of conduct, please follow it in all your interactions with the project.
 
+## Contributor terms
+
+A contribution is any code, documentation, design, or other material intentionally submitted for inclusion in RunnerFoundry.
+Material conspicuously marked "Not a Contribution" is excluded.
+
+By submitting a contribution, you confirm that you created it or otherwise have authority to grant these rights. You grant the
+RunnerFoundry copyright holder identified in [COPYRIGHT](COPYRIGHT), and its successors and assigns, a perpetual, worldwide,
+non-exclusive, royalty-free, irrevocable, transferable, and sublicensable license to use, reproduce, modify, prepare derivative
+works of, publicly display, publicly perform, distribute, sublicense, and relicense the contribution, in whole or in part, under
+`AGPL-3.0-or-later` or other terms. You also grant a perpetual, worldwide, non-exclusive, royalty-free, irrevocable,
+transferable, and sublicensable license under patent claims you control that are necessarily infringed by the contribution to
+make, have made, use, offer to sell, sell, import, and otherwise transfer the contribution, alone or in combination with
+RunnerFoundry as submitted.
+
+You retain copyright ownership of your contribution. If it is accepted, it remains available as part of the public
+`AGPL-3.0-or-later` edition. Submission does not create any entitlement to compensation, royalties, revenue sharing, ownership
+of RunnerFoundry, employment, partnership, or governance authority. You are not required to maintain or support an accepted
+contribution.
+
+These terms are accepted by intentionally submitting a contribution. No separate signature or contributor license agreement
+check is required. If an employer or another legal entity owns the contribution, you confirm that you are authorized to grant
+these rights on its behalf. Do not submit a contribution if you do not agree to these terms or do not have the required
+authority.
+
 The [product contract](docs/PRD.md) is the sole authority for product behavior and terminology. Read it before changing job
 ingestion, queueing, execution, result reporting, capacity publication, persistence, or deployment behavior. The
 [architecture overview](docs/architecture.md) explains the boundaries that preserve that contract.

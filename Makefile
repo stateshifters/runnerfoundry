@@ -5,6 +5,7 @@ DIST_DIR := dist
 METADATA_DIR := $(BUILD_DIR)/metadata
 NOTICES_FILE := $(METADATA_DIR)/THIRD_PARTY_NOTICES.txt
 SBOM_FILE := $(METADATA_DIR)/runnerfoundry-sbom.json
+SOURCE_INFO_FILE := $(METADATA_DIR)/SOURCE.txt
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN = go$(shell go list -m -f '{{.GoVersion}}')
@@ -23,7 +24,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom sbom-license source-info package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -82,14 +83,29 @@ build:
 
 notices:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
-	go run github.com/google/go-licenses@v1.6.0 report ./... > "$(NOTICES_FILE)"
+	go run github.com/google/go-licenses@v1.6.0 report --ignore github.com/meza/RunnerFoundry ./... > "$(NOTICES_FILE)"
 
 sbom:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
 	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -licenses -json -output "$(SBOM_FILE)"
 
+sbom-license: sbom
+ifeq ($(OSFAMILY),Windows)
+	@$$bom = Get-Content -Raw "$(SBOM_FILE)" | ConvertFrom-Json; $$choice = [pscustomobject]@{ license = [pscustomobject]@{ id = 'AGPL-3.0-or-later' } }; $$bom.metadata.component | Add-Member -Force -NotePropertyName licenses -NotePropertyValue @($$choice); $$bom | ConvertTo-Json -Depth 100 | Set-Content "$(SBOM_FILE)"
+else
+	@awk 'BEGIN { added = 0 } !added && /^    "component": \{$$/ { print; print "      \"licenses\": [{\"license\": {\"id\": \"AGPL-3.0-or-later\"}}],"; added = 1; next } { print } END { if (!added) exit 1 }' "$(SBOM_FILE)" > "$(SBOM_FILE).tmp" && mv "$(SBOM_FILE).tmp" "$(SBOM_FILE)"
+endif
+
+source-info:
+	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
+ifeq ($(OSFAMILY),Windows)
+	@$$content = "RunnerFoundry $(VERSION)`nCorresponding source: https://github.com/meza/RunnerFoundry/tree/v$(VERSION)`n"; Set-Content -NoNewline -Path "$(SOURCE_INFO_FILE)" -Value $$content
+else
+	@printf 'RunnerFoundry %s\nCorresponding source: https://github.com/meza/RunnerFoundry/tree/v%s\n' "$(VERSION)" "$(VERSION)" > "$(SOURCE_INFO_FILE)"
+endif
+
 package-deb: export VERSION := $(VERSION)
-package-deb: build notices sbom
+package-deb: build notices sbom-license source-info
 	@$(REMOVE_DIR) "$(DIST_DIR)"
 	@$(MKDIR) "$(DIST_DIR)" > /dev/null
 	$(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
