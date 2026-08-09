@@ -271,6 +271,8 @@ state:
 
 Connection values may be literals, `env://VARIABLE` references, or absolute `file:///path` references. `dsn` may replace structured primary fields. Use `direct` for a session-affine endpoint when the primary endpoint cannot preserve sessions.
 
+Session pooling on the primary endpoint is recommended for the best job-pickup performance. In PostgreSQL deployments, each member attempts to reserve one primary pooled connection for `LISTEN`, while queue inserts publish best-effort `NOTIFY` wakes so members can compete for newly queued work immediately. Deployments where `LISTEN` is unavailable remain supported; members discover the same durable work during the next maintenance cycle. Do not configure or use `state.postgres.direct` merely to enable queue notifications. The direct endpoint is reserved for operations that cannot work through the primary pool.
+
 Every member in a cluster uses the same GitHub and PostgreSQL configuration. Members may contribute different local providers and capacity under the same Runner Pool name.
 
 ### Migrate PostgreSQL
@@ -388,7 +390,7 @@ GitHub discovery replaces its complete persisted registration snapshot in one tr
 
 The source leader uses that committed snapshot as its reconnect fast path. On leadership acquisition it opens fresh repository sessions from durable registrations while discovery runs independently. Repositories reconcile independently with at most four operations in flight, and a pass commits only after every repository succeeds. An inconclusive discovery failure retains the last committed registrations and usable sessions. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
 
-Durable queue processing is member-local and does not depend on source leadership. Every active member starts its queue processor with the runtime generation. Claims begin only after that member has refreshed inventory and reconciled the affected Runner Pool successfully. A locally ingested job wakes its pool after the enqueue is durable; maintenance wakes also find jobs that existed before startup or were ingested by another member.
+Durable queue processing is member-local and does not depend on source leadership. Every active member starts its queue processor with the runtime generation. Claims begin only after that member has refreshed inventory and reconciled the affected Runner Pool successfully. SQLite wakes the local pool after an enqueue is durable. PostgreSQL broadcasts a best-effort wake after commit so every listening member can enter the claim race; maintenance still discovers jobs when a notification is unavailable or missed.
 
 For a removed Runner Pool or one changed between Docker and libvirt, `leave` applies the replacement without destroying its active runners. Processing recorded against a removed or unavailable endpoint is retained; invisibility is not absence proof. With `terminate`, RunnerFoundry uses the old provider after replacement activation commits to destroy affected resources, requeues cleaned-up unstarted jobs, and leaves started jobs awaiting `JobCompleted`. Cleanup failures retain processing without rejecting the otherwise-valid replacement.
 

@@ -63,6 +63,32 @@ func TestBuildUnifiedGenerationRejectsInvalidComposition(t *testing.T) {
 	assertBuildRejected(t, invalidDiscovery, valid)
 }
 
+func TestBuildUnifiedGenerationAttachesPostgreSQLQueueNotifications(t *testing.T) {
+	configured := builderConfig()
+	configured.State.Postgres = &postgresconfig.Settings{Role: "runnerfoundry"}
+	dependencies := validBuilderDependencies(t)
+	reported := make(chan error, 1)
+	dependencies.report = func(err error) { reported <- err }
+	notificationPool := queueNotificationPool{maxConnections: 2}
+	dependencies.queueNotifications = &notificationPool
+	generation, err := buildUnifiedGeneration(configured, dependencies)
+	if err != nil {
+		t.Fatalf("build PostgreSQL generation: %v", err)
+	}
+	if generation.notifications == nil {
+		t.Fatal("PostgreSQL generation has no queue notification listener")
+	}
+	listener, ok := generation.notifications.(*postgreSQLQueueNotificationListener)
+	if !ok {
+		t.Fatalf("notification runtime = %T, want PostgreSQL listener", generation.notifications)
+	}
+	listener.report(errors.New("listener failed"))
+	var envelope operationalEventEnvelope
+	if err := <-reported; !errors.As(err, &envelope) || envelope.event.operation != "queue_notifications" {
+		t.Fatalf("listener report = %v, want queue notification operational event", err)
+	}
+}
+
 func TestBuildUnifiedGenerationRejectsInvalidRunnerPools(t *testing.T) {
 	t.Parallel()
 	valid := validBuilderDependencies(t)
@@ -181,6 +207,47 @@ func TestUnifiedBuilderIdentifiesStateAndRejectsMissingProviderSelection(t *test
 	assembled := assembledRuntime{}
 	if err := assembled.appendRunnerPool(invalid, unifiedBuilderDependencies{}); err == nil {
 		t.Fatal("invalid Runner Pool was appended")
+	}
+}
+
+func TestConfiguredEnqueueWakeKeepsPostgreSQLMembersOnTheSharedWakePath(t *testing.T) {
+	wakes := 0
+	wake := func(core.RunnerPool) { wakes++ }
+
+	if configuredEnqueueWake("postgresql", wake) != nil {
+		t.Fatal("PostgreSQL configured a process-local enqueue wake")
+	}
+	sqliteWake := configuredEnqueueWake("sqlite", wake)
+	if sqliteWake == nil {
+		t.Fatal("SQLite did not configure its process-local enqueue wake")
+	}
+	sqliteWake("linux")
+	if wakes != 1 {
+		t.Fatalf("SQLite enqueue wakes = %d, want 1", wakes)
+	}
+}
+
+func TestQueueNotificationReportingUsesAnIndependentOperationalStatus(t *testing.T) {
+	wantCause := errors.New("listener failed")
+	reported := make(chan error, 2)
+	reportQueueNotificationStatus(func(err error) { reported <- err }, wantCause)
+
+	var failure operationalEventEnvelope
+	if err := <-reported; !errors.As(err, &failure) || !errors.Is(err, wantCause) {
+		t.Fatalf("failure report = %v, want operational envelope containing %v", err, wantCause)
+	}
+	if failure.event.operation != "queue_notifications" || failure.event.outcome != "failed" ||
+		failure.event.stateBackend != "postgresql" || failure.event.stateOperation != "listen" {
+		t.Fatalf("failure event = %+v", failure.event)
+	}
+	if failure.event.err == nil || errors.Is(failure.event.err, wantCause) {
+		t.Fatalf("operator error = %v, want sanitized notification failure", failure.event.err)
+	}
+
+	reportQueueNotificationStatus(func(err error) { reported <- err }, nil)
+	var recovery operationalEventEnvelope
+	if err := <-reported; !errors.As(err, &recovery) || recovery.event.outcome != "recovered" {
+		t.Fatalf("recovery report = %v, want recovered operational envelope", err)
 	}
 }
 

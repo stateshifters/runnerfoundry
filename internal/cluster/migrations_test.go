@@ -20,17 +20,19 @@ func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
 	}
 }
 
-func TestEmbeddedMigrationCatalogIncludesReversibleAttemptIdentityMigration(t *testing.T) {
+func TestEmbeddedMigrationCatalogIncludesReversibleQueueNotificationMigration(t *testing.T) {
 	catalog, err := NewStore(postgresconfig.Settings{Role: "runnerfoundry"}).migrationCatalog()
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if target := migrationTarget(catalog); target != 3 {
-		t.Fatalf("embedded migration target = %d, want 3", target)
+	if target := migrationTarget(catalog); target != 4 {
+		t.Fatalf("embedded migration target = %d, want 4", target)
 	}
-	if len(catalog.Migrations) != 3 || strings.TrimSpace(catalog.Migrations[2].DownSQL) == "" ||
-		!strings.Contains(catalog.Migrations[2].UpSQL, "runner_name") {
-		t.Fatalf("embedded migration catalog = %#v, want three reversible migrations", catalog.Migrations)
+	queueNotifications := catalog.Migrations[3]
+	if len(catalog.Migrations) != 4 || strings.TrimSpace(queueNotifications.DownSQL) == "" ||
+		!strings.Contains(queueNotifications.UpSQL, "pg_notify('runnerfoundry_queued_jobs', NEW.runner_pool)") ||
+		!strings.Contains(queueNotifications.UpSQL, "AFTER INSERT ON public.runnerfoundry_queued_jobs") {
+		t.Fatalf("embedded migration catalog = %#v, want reversible queue notifications", catalog.Migrations)
 	}
 }
 

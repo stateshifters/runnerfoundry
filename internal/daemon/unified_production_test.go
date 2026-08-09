@@ -158,6 +158,9 @@ func testProductionStateDependencies() productionDependencies {
 	dependencies.openClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
 	dependencies.newPGConnection = func(*pgxpool.Pool) postgresstate.Connection { return postgresstate.Connection{} }
 	dependencies.newPGStore = func(postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
+	dependencies.newQueueNotificationPool = func(*pgxpool.Pool) queueNotificationPool {
+		return queueNotificationPool{maxConnections: 2}
+	}
 	dependencies.closePool = func(*pgxpool.Pool) {}
 	dependencies.tryLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
 		return &cluster.LeaderLease{}, nil

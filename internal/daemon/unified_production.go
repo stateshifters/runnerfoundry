@@ -41,28 +41,29 @@ type contextCloserFunc func(context.Context) error
 func (closer contextCloserFunc) Close(ctx context.Context) error { return closer(ctx) }
 
 type productionDependencies struct {
-	readFile              config.ReadFile
-	httpTransport         http.RoundTripper
-	newDiscoverer         func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
-	newClient             func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
-	newManager            func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
-	newTicker             func(time.Duration) *time.Ticker
-	currentTime           func() time.Time
-	openSQLite            func(context.Context, string) (*sqlitestate.Store, error)
-	closeSQLite           func(*sqlitestate.Store) error
-	newClusterStore       func(postgresconfig.Settings) *cluster.Store
-	migrateCluster        func(*cluster.Store, context.Context) error
-	openClusterPool       func(*cluster.Store, context.Context) (*pgxpool.Pool, error)
-	newPGConnection       func(*pgxpool.Pool) postgresstate.Connection
-	newPGStore            func(postgresstate.Connection) *postgresstate.Store
-	closePool             func(*pgxpool.Pool)
-	tryLeader             func(*cluster.Store, context.Context) (*cluster.LeaderLease, error)
-	buildProviderSet      func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
-	readHostname          func() (string, error)
-	logDestinationFactory logDestinationFactory
-	providerObserver      func(execution.ProviderActivity)
-	openState             func(context.Context, config.Config, productionDependencies) (*productionState, error)
-	buildGeneration       func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error)
+	readFile                 config.ReadFile
+	httpTransport            http.RoundTripper
+	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
+	newClient                func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
+	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
+	newTicker                func(time.Duration) *time.Ticker
+	currentTime              func() time.Time
+	openSQLite               func(context.Context, string) (*sqlitestate.Store, error)
+	closeSQLite              func(*sqlitestate.Store) error
+	newClusterStore          func(postgresconfig.Settings) *cluster.Store
+	migrateCluster           func(*cluster.Store, context.Context) error
+	openClusterPool          func(*cluster.Store, context.Context) (*pgxpool.Pool, error)
+	newPGConnection          func(*pgxpool.Pool) postgresstate.Connection
+	newPGStore               func(postgresstate.Connection) *postgresstate.Store
+	newQueueNotificationPool func(*pgxpool.Pool) queueNotificationPool
+	closePool                func(*pgxpool.Pool)
+	tryLeader                func(*cluster.Store, context.Context) (*cluster.LeaderLease, error)
+	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
+	readHostname             func() (string, error)
+	logDestinationFactory    logDestinationFactory
+	providerObserver         func(execution.ProviderActivity)
+	openState                func(context.Context, config.Config, productionDependencies) (*productionState, error)
+	buildGeneration          func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error)
 }
 
 func newProductionDependencies() productionDependencies {
@@ -73,7 +74,8 @@ func newProductionDependencies() productionDependencies {
 		openSQLite: sqlitestate.Open, closeSQLite: (*sqlitestate.Store).Close,
 		newClusterStore: cluster.NewStore, migrateCluster: (*cluster.Store).Migrate,
 		openClusterPool: (*cluster.Store).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
-		newPGStore: postgresstate.NewConnectionStore, closePool: (*pgxpool.Pool).Close,
+		newPGStore: postgresstate.NewConnectionStore, newQueueNotificationPool: newPGXQueueNotificationPool,
+		closePool: (*pgxpool.Pool).Close,
 		tryLeader: (*cluster.Store).TryLeader, buildProviderSet: buildProductionProvidersWithDependencies,
 		readHostname: os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
 		openState: openProductionStateWithDependencies, buildGeneration: buildProductionGenerationWithDependencies,
@@ -167,7 +169,7 @@ func buildTimedProductionGeneration(
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
 		ticker: ticker, report: report,
-		processGate: processGate,
+		processGate: processGate, queueNotifications: state.queueNotifications,
 	})
 	if err != nil {
 		ticker.Stop()
@@ -187,11 +189,12 @@ func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {
 }
 
 type productionState struct {
-	store         unifiedStore
-	demandStore   githubsource.AssignedDemandRepository
-	member        core.MemberID
-	newLeadership func() leadershipRuntime
-	closers       []runtimeCloser
+	store              unifiedStore
+	demandStore        githubsource.AssignedDemandRepository
+	member             core.MemberID
+	newLeadership      func() leadershipRuntime
+	closers            []runtimeCloser
+	queueNotifications *queueNotificationPool
 }
 
 func openProductionStateWithDependencies(
@@ -262,8 +265,10 @@ func openProductionPostgreSQLStateWithDependencies(
 	}
 	store := dependencies.newPGStore(dependencies.newPGConnection(pool))
 	closer := contextCloserFunc(func(context.Context) error { dependencies.closePool(pool); return nil })
+	queueNotifications := dependencies.newQueueNotificationPool(pool)
 	return &productionState{
 		store: store, demandStore: store,
+		queueNotifications: &queueNotifications,
 		newLeadership: func() leadershipRuntime {
 			return newExclusiveLeadership(cluster.ErrNotLeader, func(leaderContext context.Context) (leaderLease, error) {
 				return dependencies.tryLeader(clusterStore, leaderContext)

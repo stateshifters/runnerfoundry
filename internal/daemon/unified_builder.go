@@ -23,19 +23,20 @@ type unifiedStore interface {
 }
 
 type unifiedBuilderDependencies struct {
-	store       unifiedStore
-	demandStore githubsource.AssignedDemandRepository
-	manager     *githubsource.Manager
-	member      core.MemberID
-	providers   map[core.RunnerPool]execution.ExecutionProvider
-	inventory   execution.RunnerInventory
-	leadership  leadershipRuntime
-	currentTime func() time.Time
-	memberTTL   time.Duration
-	ticker      cycleTicker
-	report      func(error)
-	closers     []runtimeCloser
-	processGate *localLeadershipGate
+	store              unifiedStore
+	demandStore        githubsource.AssignedDemandRepository
+	manager            *githubsource.Manager
+	member             core.MemberID
+	providers          map[core.RunnerPool]execution.ExecutionProvider
+	inventory          execution.RunnerInventory
+	leadership         leadershipRuntime
+	currentTime        func() time.Time
+	memberTTL          time.Duration
+	ticker             cycleTicker
+	report             func(error)
+	closers            []runtimeCloser
+	processGate        *localLeadershipGate
+	queueNotifications *queueNotificationPool
 }
 
 func buildUnifiedGeneration(
@@ -45,6 +46,13 @@ func buildUnifiedGeneration(
 	if err := validateUnifiedDependencies(dependencies); err != nil {
 		return nil, err
 	}
+	return buildValidatedUnifiedGeneration(configured, dependencies)
+}
+
+func buildValidatedUnifiedGeneration(
+	configured config.Config,
+	dependencies unifiedBuilderDependencies,
+) (*maintenanceGeneration, error) {
 	discoveryInterval, err := configured.GitHub.DiscoveryDuration()
 	if err != nil {
 		return nil, fmt.Errorf("read GitHub discovery interval: %w", err)
@@ -60,8 +68,9 @@ func buildUnifiedGeneration(
 			processor.Wake(runnerPool)
 		}
 	}
+	enqueueWake := configuredEnqueueWake(stateBackendName(configured.State), wakeJobs)
 	engine := buildConfiguredEngine(
-		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, stateBackendName(configured.State),
+		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, enqueueWake, stateBackendName(configured.State),
 	)
 	processor = newQueuedJobProcessor(engine, jobGate, dependencies.report)
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
@@ -70,7 +79,37 @@ func buildUnifiedGeneration(
 		assembled.finalizers,
 	)
 	generation.processor = processor
+	if notifications := configuredQueueNotifications(dependencies, wakeJobs); notifications != nil {
+		generation.notifications = notifications
+	}
 	return generation, nil
+}
+
+func configuredQueueNotifications(
+	dependencies unifiedBuilderDependencies,
+	wake func(core.RunnerPool),
+) *postgreSQLQueueNotificationListener {
+	if dependencies.queueNotifications == nil {
+		return nil
+	}
+	listener := newPostgreSQLQueueNotificationListener(*dependencies.queueNotifications)
+	listener.wake = wake
+	listener.report = func(err error) { reportQueueNotificationStatus(dependencies.report, err) }
+	return listener
+}
+
+func reportQueueNotificationStatus(report func(error), cause error) {
+	event := operationalEvent{
+		operation: "queue_notifications", stateBackend: "postgresql", stateOperation: "listen",
+	}
+	if cause == nil {
+		event.outcome = "recovered"
+		reportOperational(report, event)
+		return
+	}
+	event.outcome = "failed"
+	event.err = errors.New("PostgreSQL queue notifications unavailable")
+	reportOperationalError(report, event, cause)
 }
 
 func buildConfiguredEngine(
@@ -79,10 +118,11 @@ func buildConfiguredEngine(
 	discoveryInterval time.Duration,
 	jobGate *queuedJobEligibilityGate,
 	wakeJobs func(core.RunnerPool),
+	enqueueWake func(core.RunnerPool),
 	stateBackend string,
 ) *UnifiedEngine {
-	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, wakeJobs, stateBackend)
-	handler := newGitHubDemandHandler(queue, dependencies.demandStore, wakeJobs, stateBackend)
+	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, enqueueWake, stateBackend)
+	handler := newGitHubDemandHandler(queue, dependencies.demandStore, enqueueWake, stateBackend)
 	source := newGitHubSourceRuntime(
 		dependencies.manager, dependencies.store, string(dependencies.member),
 		handler,
@@ -98,6 +138,13 @@ func buildConfiguredEngine(
 		Inventory: dependencies.inventory, Report: dependencies.report,
 		JobGate: jobGate, WakeJobs: wakeJobs,
 	})
+}
+
+func configuredEnqueueWake(stateBackend string, wake func(core.RunnerPool)) func(core.RunnerPool) {
+	if stateBackend == "postgresql" {
+		return nil
+	}
+	return wake
 }
 
 func stateBackendName(configured config.StateConfig) string {

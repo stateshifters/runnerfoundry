@@ -157,6 +157,40 @@ func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.
 	}
 }
 
+func TestUnifiedGenerationOwnsQueueNotificationLifecycle(t *testing.T) {
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	notifications := &queueNotificationRuntimeFake{started: started, stopped: stopped}
+	generation := newMaintenanceGeneration(
+		&cycleEngineFake{cycles: make(chan struct{}, 1)},
+		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	generation.notifications = notifications
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
+	<-started
+	mustDeactivateGeneration(t, generation)
+	<-stopped
+	mustCloseGeneration(t, generation)
+}
+
+func TestUnifiedGenerationReportsQueueNotificationStopFailure(t *testing.T) {
+	wantErr := errors.New("notification stop failed")
+	notifications := &queueNotificationRuntimeFake{
+		started: make(chan struct{}), stopped: make(chan struct{}), stopErr: wantErr,
+	}
+	generation := newMaintenanceGeneration(
+		&cycleEngineFake{cycles: make(chan struct{}, 1)},
+		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	generation.notifications = notifications
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
+	if err := generation.Deactivate(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("deactivation error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 	t.Parallel()
 
@@ -404,6 +438,18 @@ type controlledCycleEngineFake struct {
 
 type processorLifecycleEngineFake struct {
 	processorStopped <-chan struct{}
+}
+
+type queueNotificationRuntimeFake struct {
+	started chan<- struct{}
+	stopped chan<- struct{}
+	stopErr error
+}
+
+func (runtime *queueNotificationRuntimeFake) Start(context.Context) { close(runtime.started) }
+func (runtime *queueNotificationRuntimeFake) Stop(context.Context) error {
+	close(runtime.stopped)
+	return runtime.stopErr
 }
 
 func (*processorLifecycleEngineFake) Activate() error { return nil }

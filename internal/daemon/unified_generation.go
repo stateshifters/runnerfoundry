@@ -32,6 +32,11 @@ type runtimeFinalizer interface {
 	Terminate(ctx context.Context) (remainingProcessing int, err error)
 }
 
+type queuedJobNotificationRuntime interface {
+	Start(ctx context.Context)
+	Stop(ctx context.Context) error
+}
+
 type gatedCycleEngine struct {
 	engine     cycleEngineRuntime
 	leadership generationLeadership
@@ -88,13 +93,14 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 // resources. Activation commits after the local generation gate is acquired;
 // maintenance begins immediately in the background.
 type maintenanceGeneration struct {
-	engine      cycleEngine
-	ticker      cycleTicker
-	report      func(error)
-	currentTime func() time.Time
-	closers     []runtimeCloser
-	finalizers  []runtimeFinalizer
-	processor   *queuedJobProcessor
+	engine        cycleEngine
+	ticker        cycleTicker
+	report        func(error)
+	currentTime   func() time.Time
+	closers       []runtimeCloser
+	finalizers    []runtimeFinalizer
+	processor     *queuedJobProcessor
+	notifications queuedJobNotificationRuntime
 
 	mutex         sync.Mutex
 	closeMutex    sync.Mutex
@@ -200,6 +206,9 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) error
 			return fmt.Errorf("start queued-job processor: %w", err)
 		}
 	}
+	if generation.notifications != nil {
+		generation.notifications.Start(runContext)
+	}
 	generation.mutex.Lock()
 	generation.runCancel = cancel
 	generation.runDone = make(chan struct{})
@@ -288,6 +297,11 @@ func (generation *maintenanceGeneration) stopActiveRuntime(
 	case <-done:
 	case <-ctx.Done():
 		return fmt.Errorf("wait for runtime generation: %w", ctx.Err())
+	}
+	if generation.notifications != nil {
+		if err := generation.notifications.Stop(ctx); err != nil {
+			return fmt.Errorf("stop queued-job notifications: %w", err)
+		}
 	}
 	if generation.processor != nil {
 		if err := generation.processor.Stop(ctx); err != nil {
