@@ -2,7 +2,6 @@ package github_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -59,46 +58,43 @@ func ignoredActivities(activities []githubsource.ManagerActivity) []githubsource
 	return ignored
 }
 
-func TestPollReportsIgnoredEvidenceForEachFailedHandlingAttempt(t *testing.T) {
+func TestPollUsesStatisticsWithoutClassifyingAssignedMessages(t *testing.T) {
 	t.Parallel()
 
 	message := &upstream.RunnerScaleSetMessage{MessageID: 182,
+		Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 4},
 		JobAssignedMessages: []*upstream.JobAssigned{
+			nil,
 			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 52}},
 			{},
+			{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: -1}},
 		}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	activities := make([]githubsource.ManagerActivity, 0)
-	adapter := newAdapter(client, &recordingEventHandler{requestErr: errors.New("state unavailable")})
+	handler := &recordingEventHandler{events: &client.events}
+	adapter := newAdapter(client, handler)
 	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
 		activities = append(activities, activity)
 	}}
 
 	result, err := adapter.Poll(context.Background(), 1)
-	if err == nil || result != (githubsource.PollResult{Received: true}) {
-		t.Fatalf("Poll() = (%#v, %v), want received durable failure", result, err)
+	assertChangedAcknowledgement(t, result, err)
+	if len(handler.requests) != 0 {
+		t.Fatalf("assigned messages persisted requests: %#v", handler.requests)
 	}
-	ignored := ignoredActivities(activities)
-	if len(ignored) != 1 || ignored[0].IdentityReason != "non_positive_request_id" ||
-		!ignored[0].SourceRequestIDSet || ignored[0].SourceRequestID != 0 {
-		t.Fatalf("ignored activities = %#v", ignored)
+	if len(client.requested) != 0 {
+		t.Fatalf("assigned messages triggered acquisitions: %#v", client.requested)
 	}
-	if len(client.acknowledged) != 0 {
-		t.Fatalf("acknowledgements = %#v, want none", client.acknowledged)
+	if ignored := ignoredActivities(activities); len(ignored) != 0 {
+		t.Fatalf("assigned messages produced ignored-identity diagnostics: %#v", ignored)
 	}
+	assertEvents(t, client.events, []string{"demand:4", "ack:182"})
 }
 
 func TestAvailableEventWithInvalidSourceIdentityKeepsCursor(t *testing.T) {
 	assertInvalidSourceIdentityKeepsCursor(t, &upstream.RunnerScaleSetMessage{MessageID: 191,
 		JobAvailableMessages: []*upstream.JobAvailable{{
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 61},
-		}}})
-}
-
-func TestAssignedEventWithInvalidSourceIdentityKeepsCursor(t *testing.T) {
-	assertInvalidSourceIdentityKeepsCursor(t, &upstream.RunnerScaleSetMessage{MessageID: 192,
-		JobAssignedMessages: []*upstream.JobAssigned{{
-			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 62},
 		}}})
 }
 

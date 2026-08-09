@@ -4,12 +4,15 @@ The [product contract](PRD.md) defines RunnerFoundry's source-neutral behavior. 
 
 GitHub Actions is the only supported Git source today. The adapter supports repositories installed under a personal account and represents each configured Runner Pool as a repository-scoped GitHub runner scale set. A Runner Pool name is also the `runs-on` value published to GitHub.
 
+For the upstream polling, messaging, demand, and assignment model, see
+[GitHub runner scale-set mechanics](references/github-scaleset-mechanics.md).
+
 ## Demand and lifecycle translation
 
 Each runner scale-set message can contain exact lifecycle events and an authoritative assigned-job count. The adapter validates and applies the exact events before reconciling the assigned count:
 
 1. Actionable `JobAvailable` events are offered to GitHub's acquire operation. Only acquired requests become jobs.
-2. Actionable `JobAssigned` events become ordinary durable jobs and provide idempotent acquisition recovery.
+2. `JobAssigned` events provide lifecycle history only. They do not create jobs or participate in acquisition.
 3. Actionable `JobStarted` events durably record runner acceptance.
 4. Actionable `JobCompleted` events terminalize the matching job regardless of the event's `Result` value.
 5. The message's assigned-job statistic reconciles the total durable demand for that repository and Runner Pool.
@@ -17,13 +20,15 @@ Each runner scale-set message can contain exact lifecycle events and an authorit
 
 A message without its required statistics fails handling and remains unacknowledged. A durable-handling or acknowledgement failure leaves the acknowledgement cursor unchanged so GitHub can redeliver the message.
 
-An exact demand event is actionable only when it identifies a positive runner request. Within one message, duplicate `JobAvailable` entries for the same request are considered once. `JobAssigned` redelivery remains safe because durable job creation is idempotent.
+`JobAvailable` is the only exact demand input. It is actionable only when it identifies a positive runner request, and duplicate entries for the same request within one message are considered once. Positive, zero, negative, nil, and redelivered `JobAssigned` entries are non-actionable protocol history: they create no job, require no identity validation, and do not block acknowledgement.
 
-Runner-started and runner-completed events may identify work by a positive runner request ID or by runner name. Nil events, negative request IDs, and events with neither identity are recorded as ignored evidence. They do not change job state. An acknowledgement failure after durable handling leaves the message available for redelivery, so all translated state changes remain idempotent.
+Runner-started and runner-completed events may identify work by a positive runner request ID or by runner name. A zero request ID therefore remains actionable when the event carries the RunnerFoundry runner name. Nil events, negative request IDs, and events with neither identity are recorded as ignored evidence. They do not change job state. An acknowledgement failure after durable handling leaves the message available for redelivery, so all translated state changes remain idempotent.
 
 GitHub's initial session statistics are reconciled before ordinary message polling. A session without its initial statistics cannot begin polling. Later messages reconcile their statistics after all actionable lifecycle events in that message are durable.
 
 GitHub's `TotalAssignedJobs` value is the desired active demand for one repository and Runner Pool. Exact queued jobs and all processing jobs count toward that total. A deficit becomes deterministic aggregate queued demand. A contraction removes only the newest aggregate queued jobs; it never removes exact or processing demand merely to match the statistic.
+
+Aggregate entries preserve the authoritative demand count, not an individual GitHub job identity or GitHub's original queue order. The adapter uses the observation time as their FIFO time because the statistic exposes neither per-job identity nor ordering. Once an exact or aggregate entry is durable in `runnerfoundry_queued_jobs`, claiming and execution use the source-neutral job and Runner Pool contracts; the GitHub adapter does not control which member claims it.
 
 ## Acceptance, terminalization, and redelivery
 

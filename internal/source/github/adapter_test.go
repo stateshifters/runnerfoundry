@@ -33,7 +33,6 @@ func TestPollOnceAcquiresAvailableWorkBeforePersistingBatchEffects(t *testing.T)
 	assertAcquisitionRequests(t, client, [][]int64{{41, 42}})
 	assertPersistedRequests(t, handler, []core.JobRequest{
 		jobRequest(t, 42, queueTime.Add(time.Second)),
-		jobRequest(t, 43, queueTime.Add(2*time.Second)),
 	})
 	assertStartedObservations(t, handler, []core.SourceReference{sourceReference(t, 44)})
 	assertTerminalObservations(t, handler, []core.SourceReference{sourceReference(t, 44), sourceReference(t, 45)})
@@ -57,8 +56,8 @@ func TestAdapterReportsPollAndDurableMessageActivities(t *testing.T) {
 	}
 
 	infoOutcomes, debugRequests := adapterActivityResults(activities)
-	wantInfo := []string{"job_ingestion:enqueue_jobs:2"}
-	if !reflect.DeepEqual(infoOutcomes, wantInfo) || !reflect.DeepEqual(debugRequests, []int64{42, 43}) {
+	wantInfo := []string{"job_ingestion:enqueue_jobs:1"}
+	if !reflect.DeepEqual(infoOutcomes, wantInfo) || !reflect.DeepEqual(debugRequests, []int64{42}) {
 		t.Fatalf("info outcomes=%#v debug requests=%#v", infoOutcomes, debugRequests)
 	}
 }
@@ -145,7 +144,6 @@ func batchEffectEvents(t *testing.T) []string {
 	return []string{
 		"acquire:41,42",
 		"request:" + string(sourceReference(t, 42).ID),
-		"request:" + string(sourceReference(t, 43).ID),
 		"started:" + string(sourceReference(t, 44).ID),
 		"completed:" + string(sourceReference(t, 44).ID),
 		"completed:" + string(sourceReference(t, 45).ID),
@@ -225,18 +223,27 @@ func (stateError adapterStateError) Unwrap() error { return stateError.cause }
 func (adapterStateError) StateBackend() string     { return "postgresql" }
 func (adapterStateError) StateOperation() string   { return "enqueue_job" }
 
-func TestPollOnceLeavesMessageWhenAssignedRequestCannotBePersisted(t *testing.T) {
+func TestPollOnceAcknowledgesAssignedMessagesWithoutPersistingRequests(t *testing.T) {
 	t.Parallel()
 
-	message := &upstream.RunnerScaleSetMessage{MessageID: 20, JobAssignedMessages: []*upstream.JobAssigned{{
-		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64},
-	}}}
-	assertMessageRemainsAfterFailure(
-		t,
-		message,
-		&recordingClient{},
-		&recordingEventHandler{requestErr: errors.New("persist assigned failed")},
-	)
+	message := &upstream.RunnerScaleSetMessage{MessageID: 20, JobAssignedMessages: []*upstream.JobAssigned{
+		nil,
+		{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64}},
+		{},
+		{JobMessageBase: upstream.JobMessageBase{RunnerRequestID: -1}},
+	}}
+	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
+	handler := &recordingEventHandler{requestErr: errors.New("requests must not be persisted")}
+	adapter := newAdapter(client, handler)
+
+	if received, err := adapter.PollOnce(context.Background(), 0); err != nil || !received {
+		t.Fatalf("PollOnce() = (%t, %v), want acknowledged success", received, err)
+	}
+	if len(handler.requests) != 0 || len(client.requested) != 0 ||
+		!reflect.DeepEqual(client.acknowledged, []int{20}) {
+		t.Fatalf("assigned message effects: requests=%#v acquisitions=%#v acknowledgements=%#v",
+			handler.requests, client.requested, client.acknowledged)
+	}
 }
 
 func TestPollOnceLeavesMessageWhenStartedObservationCannotBePersisted(t *testing.T) {

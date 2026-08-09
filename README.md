@@ -4,6 +4,8 @@ RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runn
 
 GitHub Actions is the only supported Git source. RunnerFoundry is designed for personal GitHub accounts that need to share self-hosted capacity across repositories without organization-level runners. Docker Compose and libvirt are the supported execution providers.
 
+RunnerFoundry integrates directly with GitHub Actions through the standalone [`github.com/actions/scaleset`](https://github.com/actions/scaleset) Go library. It does not run or integrate with Actions Runner Controller (ARC); ARC's Kubernetes controllers and behavior are not part of RunnerFoundry. See [GitHub runner scale-set mechanics](docs/references/github-scaleset-mechanics.md) for the upstream protocol RunnerFoundry consumes.
+
 RunnerFoundry publishes supported pre-1.0 releases. PostgreSQL state advances through forward migrations. SQLite state may require recreation when release notes identify a schema change; recreation discards the existing durable state.
 
 The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the source-neutral system boundaries, and the [GitHub adapter](docs/github-adapter.md) owns GitHub-specific protocol behavior.

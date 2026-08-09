@@ -127,7 +127,6 @@ func TestPollReconcilesMessageStatisticsAfterActionableEffectsBeforeAcknowledgem
 	result, err := adapter.Poll(context.Background(), 1)
 	assertChangedAcknowledgement(t, result, err)
 	wantEvents := []string{
-		"request:" + string(sourceReference(t, 72).ID),
 		"demand:3",
 		"ack:42",
 	}
@@ -215,7 +214,7 @@ func TestPollLeavesMessageUnHandledWhenStatisticsReconciliationFails(t *testing.
 	if !errors.Is(err, wantErr) || result != (githubsource.PollResult{Received: true}) {
 		t.Fatalf("Poll() = (%#v, %v), want received reconciliation failure", result, err)
 	}
-	if adapter.LastMessageID != 42 || len(client.acknowledged) != 0 || len(handler.requests) != 1 {
+	if adapter.LastMessageID != 42 || len(client.acknowledged) != 0 || len(handler.requests) != 0 {
 		t.Fatalf("cursor %d, acknowledgements %#v, durable requests %d",
 			adapter.LastMessageID, client.acknowledged, len(handler.requests))
 	}

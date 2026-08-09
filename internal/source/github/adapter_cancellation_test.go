@@ -17,7 +17,7 @@ func TestAdapterDoesNotHandleMessageReceivedByCancelledPoll(t *testing.T) {
 	received := make(chan struct{})
 	releaseReceive := make(chan struct{})
 	client := &cancellationMessageClient{
-		message:        assignedMessage(17, 41),
+		message:        acquiredAvailableMessage(17, 41),
 		received:       received,
 		releaseReceive: releaseReceive,
 	}
@@ -125,7 +125,7 @@ func TestAdapterDoesNotAcknowledgeMessageHandledByCancelledPoll(t *testing.T) {
 
 	handling := make(chan struct{})
 	releaseHandling := make(chan struct{})
-	client := &cancellationMessageClient{message: assignedMessage(17, 41)}
+	client := &cancellationMessageClient{message: acquiredAvailableMessage(17, 41)}
 	handler := &cancellationEventHandler{handling: handling, releaseHandling: releaseHandling}
 	adapter := newAdapter(client, handler)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,7 +152,7 @@ func TestAdapterReportsCancelledDurableHandlingWithoutOperationalFailure(t *test
 
 	handling := make(chan struct{})
 	releaseHandling := make(chan struct{})
-	client := &cancellationMessageClient{message: assignedMessage(18, 42)}
+	client := &cancellationMessageClient{message: acquiredAvailableMessage(18, 42)}
 	handler := &cancellationEventHandler{
 		handling: handling, releaseHandling: releaseHandling, returnContextError: true,
 	}
@@ -205,7 +205,7 @@ func assertCanceledLifecyclePersistence(t *testing.T, message *upstream.RunnerSc
 func TestAdapterReportsCancelledAcknowledgementWithoutOperationalFailure(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &cancellationMessageClient{message: assignedMessage(21, 43), cancelAcknowledgement: cancel}
+	client := &cancellationMessageClient{message: acquiredAvailableMessage(21, 43), cancelAcknowledgement: cancel}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, &cancellationEventHandler{})
 	adapter.Observer = githubsource.ManagerObserver{CurrentTime: adapter.Observer.CurrentTime, Report: func(activity githubsource.ManagerActivity) {
@@ -254,8 +254,8 @@ func (client *cancellationMessageClient) GetMessage(
 	return client.message, nil
 }
 
-func (*cancellationMessageClient) AcquireRequests(context.Context, []int64) ([]int64, error) {
-	return nil, nil
+func (*cancellationMessageClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
 }
 
 func (client *cancellationMessageClient) DeleteMessage(ctx context.Context, _ int) error {
@@ -338,10 +338,10 @@ func (*cancellationEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{}, nil
 }
 
-func assignedMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {
+func acquiredAvailableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {
 	return &upstream.RunnerScaleSetMessage{
 		MessageID: messageID, Statistics: &upstream.RunnerScaleSetStatistic{},
-		JobAssignedMessages: []*upstream.JobAssigned{{
+		JobAvailableMessages: []*upstream.JobAvailable{{
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: requestID},
 		}},
 	}

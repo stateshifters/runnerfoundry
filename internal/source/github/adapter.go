@@ -105,10 +105,7 @@ func (adapter *Adapter) applyMessageEffects(ctx context.Context, effects message
 	if err := adapter.persistRequests(ctx, acquired); err != nil {
 		return err
 	}
-	if err := adapter.persistRequests(ctx, effects.Assigned); err != nil {
-		return err
-	}
-	adapter.reportMessageCount("job_ingestion", "enqueue_jobs", len(acquired)+len(effects.Assigned))
+	adapter.reportMessageCount("job_ingestion", "enqueue_jobs", len(acquired))
 	if err := adapter.persistStarted(ctx, effects.Started); err != nil {
 		return err
 	}
@@ -203,7 +200,6 @@ type identifiedRequest struct {
 
 type messageEffects struct {
 	Available []identifiedRequest
-	Assigned  []identifiedRequest
 	Started   []identifiedObservation
 	Completed []identifiedObservation
 	Ignored   []ignoredEvidence
@@ -228,10 +224,6 @@ func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage)
 	if err != nil {
 		return messageEffects{}, err
 	}
-	assigned, ignoredAssigned, err := adapter.classifyAssigned(int64(message.MessageID), message.JobAssignedMessages)
-	if err != nil {
-		return messageEffects{}, err
-	}
 	started, ignoredStarted, err := adapter.validateStarted(int64(message.MessageID), message.JobStartedMessages)
 	if err != nil {
 		return messageEffects{}, err
@@ -241,8 +233,8 @@ func (adapter *Adapter) validateMessage(message *upstream.RunnerScaleSetMessage)
 		return messageEffects{}, err
 	}
 	return messageEffects{
-		Available: available, Assigned: assigned, Started: started, Completed: completed,
-		Ignored: append(append(append(ignoredAvailable, ignoredAssigned...), ignoredStarted...), ignoredCompleted...),
+		Available: available, Started: started, Completed: completed,
+		Ignored: append(append(ignoredAvailable, ignoredStarted...), ignoredCompleted...),
 	}, nil
 }
 
@@ -258,27 +250,8 @@ func (adapter *Adapter) classifyAvailable(
 	events []*upstream.JobAvailable,
 ) ([]identifiedRequest, []ignoredEvidence, error) {
 	return classifyRequestEvents(adapter, messageID, "JobAvailable", "validate_available", events,
-		firstRequestOccurrence,
 		func(event *upstream.JobAvailable) *upstream.JobMessageBase { return &event.JobMessageBase })
 }
-
-func (adapter *Adapter) classifyAssigned(
-	messageID int64,
-	events []*upstream.JobAssigned,
-) ([]identifiedRequest, []ignoredEvidence, error) {
-	return classifyRequestEvents(adapter, messageID, "JobAssigned", "validate_assigned", events,
-		everyRequestOccurrence,
-		func(event *upstream.JobAssigned) *upstream.JobMessageBase { return &event.JobMessageBase })
-}
-
-type requestSelector func(map[int64]struct{}, int64) bool
-
-func firstRequestOccurrence(seen map[int64]struct{}, requestID int64) bool {
-	_, duplicate := seen[requestID]
-	return !duplicate
-}
-
-func everyRequestOccurrence(map[int64]struct{}, int64) bool { return true }
 
 func classifyRequestEvents[eventType any](
 	adapter *Adapter,
@@ -286,7 +259,6 @@ func classifyRequestEvents[eventType any](
 	githubEventType string,
 	stage string,
 	events []*eventType,
-	selectRequest requestSelector,
 	baseFor func(*eventType) *upstream.JobMessageBase,
 ) ([]identifiedRequest, []ignoredEvidence, error) {
 	actionable := make([]identifiedRequest, 0, len(events))
@@ -294,7 +266,7 @@ func classifyRequestEvents[eventType any](
 	seen := make(map[int64]struct{}, len(events))
 	for _, event := range events {
 		classified, err := classifyRequestEvent(adapter,
-			messageID, githubEventType, stage, event, seen, selectRequest, baseFor,
+			messageID, githubEventType, stage, event, seen, baseFor,
 		)
 		if err != nil {
 			return nil, nil, err
@@ -323,7 +295,6 @@ func classifyRequestEvent[eventType any](
 	stage string,
 	event *eventType,
 	seen map[int64]struct{},
-	selectRequest requestSelector,
 	baseFor func(*eventType) *upstream.JobMessageBase,
 ) (classifiedRequestEvent, error) {
 	if event == nil {
@@ -335,7 +306,7 @@ func classifyRequestEvent[eventType any](
 		evidence := requestEvidence(messageID, githubEventType, stage, base, "non_positive_request_id")
 		return classifiedRequestEvent{Evidence: &evidence}, nil
 	}
-	if !selectRequest(seen, base.RunnerRequestID) {
+	if _, duplicate := seen[base.RunnerRequestID]; duplicate {
 		return classifiedRequestEvent{}, nil
 	}
 	request, err := adapter.jobRequest(base.RunnerRequestID, base.QueueTime)
