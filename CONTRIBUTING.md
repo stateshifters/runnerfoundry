@@ -80,16 +80,6 @@ For a behavior change, completion means the tests prove the production behavior.
 code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
 documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
 
-## Shared infrastructure risk
-
-This CLI relies on shared infrastructure and credentials. A single bad actor can therefore degrade or remove service for
-every user, and restoring service may require coordinated work. Treat any change that could amplify abuse, increase request
-volume, or relax safeguards as a safety boundary.
-
-Do not add user-facing knobs or configuration that let users change behavior in ways that could increase external load or
-reduce protections without explicit approval. If you believe an exception is needed, open an issue and get sign-off before
-changing behavior.
-
 ### Code philosophy
 
 - Simplicity first: implement the smallest change that satisfies the requirement.
