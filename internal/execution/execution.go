@@ -49,7 +49,9 @@ type RunnerInventory interface {
 }
 
 // ExecutionProvider combines the launch and inventory boundaries implemented by
-// a configured provider.
+// a configured provider. Implementations and deadline wrappers must support
+// concurrent calls for different Runner Pools. Calls for one Runner Pool are
+// serialized by the daemon's pool worker and maintenance gate.
 type ExecutionProvider interface {
 	RunnerLauncher
 	RunnerInventory

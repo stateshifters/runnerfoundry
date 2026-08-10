@@ -12,7 +12,7 @@ import (
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
-func TestQueuedJobProcessorStopCoversIdleAndDeadlinePaths(t *testing.T) {
+func TestQueuedJobProcessorStopBeforeStartIsIdempotent(t *testing.T) {
 	processor := newQueuedJobProcessor(queuedJobRequesterFake{request: func(
 		context.Context,
 		core.RunnerPool,
@@ -22,17 +22,19 @@ func TestQueuedJobProcessorStopCoversIdleAndDeadlinePaths(t *testing.T) {
 	if err := processor.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() before start error = %v", err)
 	}
+}
 
+func TestQueuedJobProcessorStopDeadlineRemainsRetryable(t *testing.T) {
 	requestStarted := make(chan struct{})
 	release := make(chan struct{})
-	processor = newQueuedJobProcessor(queuedJobRequesterFake{request: func(
+	processor := newQueuedJobProcessorForPools(queuedJobRequesterFake{request: func(
 		context.Context,
 		core.RunnerPool,
 	) (runtimeengine.ProcessResult, error) {
 		close(requestStarted)
 		<-release
 		return runtimeengine.ProcessResult{}, nil
-	}}, newQueuedJobEligibilityGate(), nil)
+	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
 	markQueuedJobPoolsEligible(processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -87,14 +89,14 @@ func TestUnifiedGenerationReportsQueuedJobProcessorStartFailure(t *testing.T) {
 func TestUnifiedGenerationReportsQueuedJobProcessorStopFailure(t *testing.T) {
 	requestStarted := make(chan struct{})
 	release := make(chan struct{})
-	processor := newQueuedJobProcessor(queuedJobRequesterFake{request: func(
+	processor := newQueuedJobProcessorForPools(queuedJobRequesterFake{request: func(
 		context.Context,
 		core.RunnerPool,
 	) (runtimeengine.ProcessResult, error) {
 		close(requestStarted)
 		<-release
 		return runtimeengine.ProcessResult{}, nil
-	}}, newQueuedJobEligibilityGate(), nil)
+	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
 	markQueuedJobPoolsEligible(processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)

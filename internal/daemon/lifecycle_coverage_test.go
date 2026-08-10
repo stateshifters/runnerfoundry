@@ -377,6 +377,11 @@ func (fake *lifecycleCycleEngineFake) Deactivate(context.Context) error {
 }
 func (fake *lifecycleCycleEngineFake) Cycle(context.Context) error { return fake.cycleErr }
 func (*lifecycleCycleEngineFake) Close(context.Context) error      { return nil }
+func (fake *lifecycleCycleEngineFake) MaintainMembership(ctx context.Context) error {
+	return fake.Cycle(ctx)
+}
+func (*lifecycleCycleEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*lifecycleCycleEngineFake) MaintainExecution(context.Context) error { return nil }
 
 type failOnceRuntimeCloser struct {
 	err   error

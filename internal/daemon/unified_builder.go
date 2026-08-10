@@ -33,6 +33,7 @@ type unifiedBuilderDependencies struct {
 	currentTime        func() time.Time
 	memberTTL          time.Duration
 	ticker             cycleTicker
+	tickers            *maintenanceLaneTickers
 	report             func(error)
 	closers            []runtimeCloser
 	processGate        *localLeadershipGate
@@ -72,17 +73,36 @@ func buildValidatedUnifiedGeneration(
 	engine := buildConfiguredEngine(
 		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, enqueueWake, stateBackendName(configured.State),
 	)
-	processor = newQueuedJobProcessor(engine, jobGate, dependencies.report)
+	processor = newQueuedJobProcessorForPools(engine, jobGate, dependencies.report, configuredRunnerPoolNames(assembled.pools))
 	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
-	generation := newMaintenanceGeneration(
-		processEngine, dependencies.ticker, dependencies.report, configuredClosers(dependencies),
-		assembled.finalizers,
-	)
+	generation := newConfiguredMaintenanceGeneration(processEngine, dependencies, assembled.finalizers)
 	generation.processor = processor
 	if notifications := configuredQueueNotifications(dependencies, wakeJobs); notifications != nil {
 		generation.notifications = notifications
 	}
 	return generation, nil
+}
+
+func newConfiguredMaintenanceGeneration(
+	engine *gatedCycleEngine,
+	dependencies unifiedBuilderDependencies,
+	finalizers []runtimeFinalizer,
+) *maintenanceGeneration {
+	closers := configuredClosers(dependencies)
+	if dependencies.tickers != nil {
+		return newIndependentMaintenanceGeneration(
+			engine, engine, *dependencies.tickers, dependencies.report, closers, finalizers,
+		)
+	}
+	return newMaintenanceGeneration(engine, dependencies.ticker, dependencies.report, closers, finalizers)
+}
+
+func configuredRunnerPoolNames(pools []RunnerPoolRuntime) []core.RunnerPool {
+	runnerPools := make([]core.RunnerPool, 0, len(pools))
+	for _, pool := range pools {
+		runnerPools = append(runnerPools, pool.RunnerPool)
+	}
+	return runnerPools
 }
 
 func configuredQueueNotifications(
@@ -252,7 +272,8 @@ func newOrchestrationPool(
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
 	if dependencies.store == nil || dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
-		dependencies.leadership == nil || dependencies.currentTime == nil || dependencies.ticker == nil ||
+		dependencies.leadership == nil || dependencies.currentTime == nil ||
+		(dependencies.ticker == nil && dependencies.tickers == nil) ||
 		dependencies.processGate == nil || dependencies.inventory == nil {
 		return errors.New("state, GitHub manager, member, leadership, clock, ticker, and process gate are required")
 	}

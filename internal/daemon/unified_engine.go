@@ -34,6 +34,8 @@ type poolRuntime interface {
 	RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error
 }
 
+type foreignRecovery func(context.Context, RunnerPoolRuntime) error
+
 // RunnerPoolRuntime binds one configured Runner Pool to its member-local
 // execution runtime. Every backend uses this same lifecycle.
 type RunnerPoolRuntime struct {
@@ -42,7 +44,7 @@ type RunnerPoolRuntime struct {
 }
 
 // UnifiedEngineConfig contains the boundaries used by a member's maintenance
-// cycle. Callers supply a deterministic clock and backend-specific state
+// lanes. Callers supply a deterministic clock and backend-specific state
 // implementations; the engine never selects behavior from a database type.
 type UnifiedEngineConfig struct {
 	CurrentTime func() time.Time
@@ -57,8 +59,9 @@ type UnifiedEngineConfig struct {
 	WakeJobs    func(core.RunnerPool)
 }
 
-// UnifiedEngine advances one source-neutral lifecycle for a member. Callers own
-// scheduling; concurrent Cycle calls are accepted and serialized.
+// UnifiedEngine advances one source-neutral lifecycle for a member. Production
+// schedules membership, source control, and execution independently. Source
+// and execution maintenance each serialize their own mutable state.
 type UnifiedEngine struct {
 	currentTime    func() time.Time
 	memberTTL      time.Duration
@@ -68,7 +71,8 @@ type UnifiedEngine struct {
 	pools          []RunnerPoolRuntime
 	inventory      execution.RunnerInventory
 	leaderOpen     bool
-	cycleMutex     sync.Mutex
+	sourceMutex    sync.Mutex
+	executionMutex sync.Mutex
 	report         func(error)
 	jobGate        *queuedJobEligibilityGate
 	wakeJobs       func(core.RunnerPool)
@@ -90,98 +94,144 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 	}
 }
 
-// Cycle performs one serialized, bounded maintenance pass. Independent work
-// continues after individual failures and all failures are returned together.
+// Cycle preserves the former test and diagnostic entry point. Production
+// scheduling invokes the three maintenance lanes independently.
 func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
-	engine.cycleMutex.Lock()
-	defer engine.cycleMutex.Unlock()
-	now := engine.currentTime()
-	liveMemberCutoff := now.Add(-engine.memberTTL)
-	cycleErrors := engine.runMemberPhases(ctx)
-	started := engine.phaseStarted("leader_work", "source", "")
-	leader, leaderErrors := engine.runLeaderWork(ctx, liveMemberCutoff)
-	engine.phaseCompleted("leader_work", "source", "", started, errors.Join(leaderErrors...))
-	cycleErrors = append(cycleErrors, leaderErrors...)
-	var recoverForeign func(context.Context) []error
+	membershipErr := engine.MaintainMembership(ctx)
+	leader, sourceErr := engine.runSourceMaintenance(ctx)
+	var foreignWork foreignRecovery
 	if leader {
-		recoverForeign = engine.recoverForeign
+		foreignWork = engine.recoverForeignPool
 	}
-	cycleErrors = append(cycleErrors, engine.runExecutionPhases(ctx, recoverForeign)...)
-	return errors.Join(cycleErrors...)
+	return errors.Join(membershipErr, sourceErr, engine.runExecutionMaintenance(ctx, foreignWork))
 }
 
-func (engine *UnifiedEngine) runMemberPhases(ctx context.Context) []error {
-	cycleErrors := make([]error, 0, 2)
+func (engine *UnifiedEngine) MaintainMembership(ctx context.Context) error {
 	started := engine.phaseStarted("heartbeat", "membership", "")
-	if err := engine.membership.Heartbeat(ctx); err != nil {
-		engine.phaseCompleted("heartbeat", "membership", "", started, err)
-		cycleErrors = append(cycleErrors, fmt.Errorf("heartbeat member: %w", err))
-	} else {
-		engine.phaseCompleted("heartbeat", "membership", "", started, nil)
+	err := engine.membership.Heartbeat(ctx)
+	engine.phaseCompleted("heartbeat", "membership", "", started, err)
+	if err != nil {
+		return fmt.Errorf("heartbeat member: %w", err)
 	}
-	started = engine.phaseStarted("refresh_member_routes", "source", "")
+	return nil
+}
+
+func (engine *UnifiedEngine) MaintainSource(ctx context.Context) error {
+	_, err := engine.runSourceMaintenance(ctx)
+	return err
+}
+
+func (engine *UnifiedEngine) runSourceMaintenance(ctx context.Context) (bool, error) {
+	engine.sourceMutex.Lock()
+	defer engine.sourceMutex.Unlock()
+	var sourceErrors []error
+	started := engine.phaseStarted("refresh_member_routes", "source", "")
 	if err := engine.source.RefreshMembers(ctx); err != nil {
 		engine.phaseCompleted("refresh_member_routes", "source", "", started, err)
-		cycleErrors = append(cycleErrors, fmt.Errorf("refresh source member routes: %w", err))
+		sourceErrors = append(sourceErrors, fmt.Errorf("refresh source member routes: %w", err))
 	} else {
 		engine.phaseCompleted("refresh_member_routes", "source", "", started, nil)
 	}
-	return cycleErrors
+	liveMemberCutoff := engine.currentTime().Add(-engine.memberTTL)
+	started = engine.phaseStarted("leader_work", "source", "")
+	leader, leaderErrors := engine.runLeaderWork(ctx, liveMemberCutoff)
+	engine.phaseCompleted("leader_work", "source", "", started, errors.Join(leaderErrors...))
+	sourceErrors = append(sourceErrors, leaderErrors...)
+	return leader, errors.Join(sourceErrors...)
+}
+
+func (engine *UnifiedEngine) MaintainExecution(ctx context.Context) error {
+	leader, err := engine.leadership.IsLeader(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect source leadership for foreign recovery: %w", err)
+	}
+	var foreignWork foreignRecovery
+	if leader {
+		foreignWork = engine.recoverForeignPool
+	}
+	return engine.runExecutionMaintenance(ctx, foreignWork)
+}
+
+func (engine *UnifiedEngine) runExecutionMaintenance(ctx context.Context, foreignWork foreignRecovery) error {
+	engine.executionMutex.Lock()
+	defer engine.executionMutex.Unlock()
+	return errors.Join(engine.runExecutionPhases(ctx, foreignWork)...)
 }
 
 func (engine *UnifiedEngine) runExecutionPhases(
 	ctx context.Context,
-	recoverForeign func(context.Context) []error,
+	foreignWork foreignRecovery,
 ) []error {
-	if engine.jobGate == nil {
-		return engine.runEligibleExecutionPhases(ctx, recoverForeign, nil)
-	}
-	eligibleRunnerPools := make([]core.RunnerPool, 0, len(engine.pools))
-	var cycleErrors []error
-	engine.jobGate.Maintain(func(maintenance *queuedJobMaintenance) {
-		cycleErrors = engine.runEligibleExecutionPhases(ctx, recoverForeign, func(runnerPool core.RunnerPool) {
-			maintenance.MarkEligible(runnerPool)
-			eligibleRunnerPools = append(eligibleRunnerPools, runnerPool)
-		})
-	})
-	if engine.wakeJobs != nil {
-		for _, runnerPool := range eligibleRunnerPools {
-			engine.wakeJobs(runnerPool)
-		}
-	}
-	return cycleErrors
-}
-
-func (engine *UnifiedEngine) runEligibleExecutionPhases(
-	ctx context.Context,
-	recoverForeign func(context.Context) []error,
-	markEligible func(core.RunnerPool),
-) []error {
-	cycleErrors := make([]error, 0)
 	started := engine.phaseStarted("refresh_inventory", "inventory", "")
-	if err := engine.refreshInventory(ctx); err != nil {
-		engine.phaseCompleted("refresh_inventory", "inventory", "", started, err)
-		cycleErrors = append(cycleErrors, err)
-		return cycleErrors
+	refresh := func() error { return engine.refreshInventory(ctx) }
+	var refreshErr error
+	if engine.jobGate == nil {
+		refreshErr = refresh()
+	} else {
+		refreshErr = engine.jobGate.RefreshInventory(refresh)
+	}
+	if refreshErr != nil {
+		engine.phaseCompleted("refresh_inventory", "inventory", "", started, refreshErr)
+		return []error{refreshErr}
 	}
 	engine.phaseCompleted("refresh_inventory", "inventory", "", started, nil)
-	if recoverForeign != nil && engine.inventory != nil {
-		started = engine.phaseStarted("recover_foreign", "recovery", "")
-		foreignErrors := recoverForeign(ctx)
-		engine.phaseCompleted("recover_foreign", "recovery", "", started, errors.Join(foreignErrors...))
-		cycleErrors = append(cycleErrors, foreignErrors...)
-	}
-	for _, runnerPool := range engine.pools {
-		started = engine.phaseStarted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool)
-		poolErrors := engine.runPoolWork(ctx, runnerPool)
-		engine.phaseCompleted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool, started, errors.Join(poolErrors...))
-		cycleErrors = append(cycleErrors, poolErrors...)
-		if len(poolErrors) == 0 && markEligible != nil {
-			markEligible(runnerPool.RunnerPool)
-		}
-	}
+	return engine.maintainRunnerPools(ctx, foreignWork)
+}
 
-	return cycleErrors
+func (engine *UnifiedEngine) maintainRunnerPools(ctx context.Context, foreignWork foreignRecovery) []error {
+	poolErrors := make(chan error, len(engine.pools))
+	var pools sync.WaitGroup
+	pools.Add(len(engine.pools))
+	for _, runnerPool := range engine.pools {
+		go func() {
+			defer pools.Done()
+			if err := engine.maintainRunnerPool(ctx, runnerPool, foreignWork); err != nil {
+				poolErrors <- err
+			}
+		}()
+	}
+	pools.Wait()
+	close(poolErrors)
+	failures := make([]error, 0, len(poolErrors))
+	for err := range poolErrors {
+		failures = append(failures, err)
+	}
+	return failures
+}
+
+func (engine *UnifiedEngine) maintainRunnerPool(
+	ctx context.Context,
+	runnerPool RunnerPoolRuntime,
+	foreignWork foreignRecovery,
+) error {
+	work := func() (bool, error) {
+		var foreignErr error
+		if foreignWork != nil && engine.inventory != nil {
+			foreignErr = foreignWork(ctx, runnerPool)
+		}
+		started := engine.phaseStarted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool)
+		reconcileErr := errors.Join(engine.runPoolWork(ctx, runnerPool)...)
+		engine.phaseCompleted("reconcile_runner_pool", "runner_pool", runnerPool.RunnerPool, started, reconcileErr)
+		if reconcileErr == nil && engine.wakeJobs != nil {
+			engine.wakeJobs(runnerPool.RunnerPool)
+		}
+		return reconcileErr == nil, errors.Join(foreignErr, reconcileErr)
+	}
+	if engine.jobGate == nil {
+		_, err := work()
+		return err
+	}
+	return engine.jobGate.MaintainPool(runnerPool.RunnerPool, work)
+}
+
+func (engine *UnifiedEngine) recoverForeignPool(ctx context.Context, runnerPool RunnerPoolRuntime) error {
+	started := engine.phaseStarted("recover_foreign", "recovery", runnerPool.RunnerPool)
+	err := runnerPool.runtime.RecoverForeign(ctx, runnerPool.RunnerPool)
+	if err != nil {
+		err = fmt.Errorf("recover foreign Runner Pool %q: %w", runnerPool.RunnerPool, err)
+	}
+	engine.phaseCompleted("recover_foreign", "recovery", runnerPool.RunnerPool, started, err)
+	return err
 }
 
 func (engine *UnifiedEngine) phaseStarted(operation, stage string, runnerPool core.RunnerPool) time.Time {
@@ -224,18 +274,6 @@ func (engine *UnifiedEngine) refreshInventory(ctx context.Context) error {
 		return fmt.Errorf("refresh runner inventory: %w", err)
 	}
 	return nil
-}
-
-func (engine *UnifiedEngine) recoverForeign(ctx context.Context) []error {
-	failures := make([]error, 0)
-	for _, runnerPool := range engine.pools {
-		if err := runnerPool.runtime.RecoverForeign(ctx, runnerPool.RunnerPool); err != nil {
-			failures = append(failures, fmt.Errorf(
-				"recover foreign Runner Pool %q: %w", runnerPool.RunnerPool, err,
-			))
-		}
-	}
-	return failures
 }
 
 func (engine *UnifiedEngine) runLeaderWork(ctx context.Context, liveMemberCutoff time.Time) (bool, []error) {

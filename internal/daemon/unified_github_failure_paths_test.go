@@ -44,6 +44,28 @@ func TestGitHubSourceRuntimeStopsWaitingForPollsWhenContextIsCanceled(t *testing
 	}
 }
 
+func TestGitHubSourceRuntimeStopsOnlySelectedPolls(t *testing.T) {
+	kept := &githubsource.Adapter{}
+	stopped := &githubsource.Adapter{}
+	stoppedResult := make(chan githubPollResult, 1)
+	stoppedResult <- githubPollResult{}
+	source := &githubSourceRuntime{polls: map[*githubsource.Adapter]*githubPollAttempt{
+		kept:    {cancel: func() {}, result: make(chan githubPollResult)},
+		stopped: {cancel: func() {}, result: stoppedResult},
+	}}
+	if err := source.stopPolls(context.Background(), func(adapter *githubsource.Adapter) bool {
+		return adapter == stopped
+	}); err != nil {
+		t.Fatalf("stop selected poll: %v", err)
+	}
+	if _, exists := source.polls[stopped]; exists {
+		t.Fatal("selected poll was retained")
+	}
+	if _, exists := source.polls[kept]; !exists {
+		t.Fatal("unselected poll was removed")
+	}
+}
+
 func TestGitHubSourceRuntimeRetriesSessionRetirement(t *testing.T) {
 	manager := branchGitHubManager()
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},

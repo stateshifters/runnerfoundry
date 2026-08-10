@@ -162,20 +162,33 @@ func buildTimedProductionGeneration(
 	components productionGenerationComponents,
 	dependencies productionDependencies,
 ) (*maintenanceGeneration, error) {
-	operatingSystemTicker := dependencies.newTicker(runtimeCycleInterval)
-	ticker := productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
+	tickers := newProductionMaintenanceLaneTickers(dependencies.newTicker)
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{
 		store: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
-		ticker: ticker, report: report,
+		tickers: &tickers, report: report,
 		processGate: processGate, queueNotifications: state.queueNotifications,
 	})
 	if err != nil {
-		ticker.Stop()
+		stopMaintenanceLaneTickers(tickers)
 		return nil, err
 	}
 	return generation, nil
+}
+
+func newProductionMaintenanceLaneTickers(newTicker func(time.Duration) *time.Ticker) maintenanceLaneTickers {
+	build := func() cycleTicker {
+		operatingSystemTicker := newTicker(runtimeCycleInterval)
+		return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
+	}
+	return maintenanceLaneTickers{membership: build(), source: build(), execution: build()}
+}
+
+func stopMaintenanceLaneTickers(tickers maintenanceLaneTickers) {
+	tickers.membership.Stop()
+	tickers.source.Stop()
+	tickers.execution.Stop()
 }
 
 func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {

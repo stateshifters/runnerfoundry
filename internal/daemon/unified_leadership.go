@@ -17,6 +17,7 @@ type tryLeader func(context.Context) (leaderLease, error)
 type exclusiveLeadership struct {
 	notLeader error
 	try       tryLeader
+	mutex     sync.Mutex
 	lease     leaderLease
 }
 
@@ -25,6 +26,8 @@ func newExclusiveLeadership(notLeader error, try tryLeader) *exclusiveLeadership
 }
 
 func (leadership *exclusiveLeadership) IsLeader(ctx context.Context) (bool, error) {
+	leadership.mutex.Lock()
+	defer leadership.mutex.Unlock()
 	if leadership.lease != nil && leadership.lease.Alive(ctx) {
 		return true, nil
 	}
@@ -46,6 +49,8 @@ func (leadership *exclusiveLeadership) IsLeader(ctx context.Context) (bool, erro
 }
 
 func (leadership *exclusiveLeadership) Close(ctx context.Context) error {
+	leadership.mutex.Lock()
+	defer leadership.mutex.Unlock()
 	if leadership.lease == nil {
 		return nil
 	}

@@ -55,6 +55,18 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 	}
 }
 
+func TestUnifiedEngineMaintainsSourceIndependently(t *testing.T) {
+	events := make([]string, 0)
+	engine := unifiedEngineFixture(&events)
+	if err := engine.MaintainSource(context.Background()); err != nil {
+		t.Fatalf("MaintainSource() error = %v", err)
+	}
+	want := []string{"refresh-members", "leadership", "open-leader", "poll"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("source events = %#v, want %#v", events, want)
+	}
+}
+
 func TestUnifiedEngineRunsForeignRecoveryOnlyForTheLeaderAfterInventoryRefresh(t *testing.T) {
 	events := runEngineCycleWithInventory(t, true)
 	refreshIndex := eventIndex(events, "refresh-inventory")
@@ -78,8 +90,8 @@ func runEngineCycleWithInventory(t *testing.T, leader bool) []string {
 	engine := unifiedEngineFixture(&events)
 	engine.leadership = leadershipFake{leader: leader, events: &events}
 	engine.inventory = inventoryRuntimeFake{events: &events}
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("Cycle() error = %v", err)
+	if err := engine.MaintainExecution(context.Background()); err != nil {
+		t.Fatalf("MaintainExecution() error = %v", err)
 	}
 	return events
 }
@@ -101,13 +113,17 @@ func TestUnifiedEngineSkipsRecoveryAndLocalWorkWhenInventoryRefreshFails(t *test
 
 func TestUnifiedEngineReportsForeignRecoveryFailureAndContinuesLocalWork(t *testing.T) {
 	events := make([]string, 0)
+	woken := make([]core.RunnerPool, 0, 1)
 	wantErr := errors.New("foreign recovery failed")
 	engine := unifiedEngineFixture(&events)
 	engine.inventory = inventoryRuntimeFake{events: &events}
+	engine.jobGate = newQueuedJobEligibilityGate()
+	engine.wakeJobs = func(runnerPool core.RunnerPool) { woken = append(woken, runnerPool) }
 	engine.pools[0].runtime = poolRuntimeFake{events: &events, recoverErr: wantErr}
 	err := engine.Cycle(context.Background())
-	if !errors.Is(err, wantErr) || occurrences(events, "reconcile:linux") != 1 {
-		t.Fatalf("Cycle() = %v, events=%#v", err, events)
+	if !errors.Is(err, wantErr) || occurrences(events, "reconcile:linux") != 1 ||
+		!reflect.DeepEqual(woken, []core.RunnerPool{"linux"}) {
+		t.Fatalf("Cycle() = %v, events=%#v, wakes=%#v", err, events, woken)
 	}
 }
 
@@ -194,7 +210,7 @@ func TestStandbyUnifiedEngineWakesIndependentQueuedJobProcessor(t *testing.T) {
 	engine.leadership = leadershipFake{leader: false, events: &events}
 	engine.pools[0].runtime = pool
 	gate := newQueuedJobEligibilityGate()
-	processor := newQueuedJobProcessor(engine, gate, nil)
+	processor := newQueuedJobProcessorForPools(engine, gate, nil, []core.RunnerPool{"linux"})
 	engine.jobGate = gate
 	engine.wakeJobs = processor.Wake
 	if err := processor.Start(context.Background()); err != nil {
@@ -226,7 +242,7 @@ func TestUnifiedEngineDoesNotHoldProviderGateDuringSourcePolling(t *testing.T) {
 		release:           releasePoll,
 	}
 	engine.jobGate = newQueuedJobEligibilityGate()
-	engine.jobGate.eligible["linux"] = struct{}{}
+	markQueuedJobPoolsEligible(engine.jobGate, "linux")
 
 	cycleDone := make(chan error, 1)
 	go func() { cycleDone <- engine.Cycle(context.Background()) }()
@@ -302,6 +318,9 @@ func TestUnifiedEngineReportsLeadershipLifecycleFailures(t *testing.T) {
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
 	engine.leadership = leadershipFake{leader: true, events: &events, err: wantErr}
+	if err := engine.MaintainExecution(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("execution leadership error = %v", err)
+	}
 	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("inspect leadership error = %v", err)
 	}

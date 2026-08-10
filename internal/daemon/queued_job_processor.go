@@ -15,27 +15,92 @@ type queuedJobRequester interface {
 }
 
 type queuedJobEligibilityGate struct {
+	inventoryBarrier sync.RWMutex
+	poolsMutex       sync.Mutex
+	pools            map[core.RunnerPool]*queuedJobPoolGate
+}
+
+type queuedJobPoolGate struct {
 	mutex    sync.Mutex
-	eligible map[core.RunnerPool]struct{}
+	eligible bool
 }
 
 func newQueuedJobEligibilityGate() *queuedJobEligibilityGate {
-	return &queuedJobEligibilityGate{eligible: make(map[core.RunnerPool]struct{})}
+	return &queuedJobEligibilityGate{pools: make(map[core.RunnerPool]*queuedJobPoolGate)}
 }
 
+// Maintain preserves the all-pool maintenance helper used by focused tests.
+// Production execution uses RefreshInventory followed by MaintainPool.
 func (gate *queuedJobEligibilityGate) Maintain(work func(*queuedJobMaintenance)) {
-	gate.mutex.Lock()
-	defer gate.mutex.Unlock()
-	clear(gate.eligible)
-	work(&queuedJobMaintenance{eligible: gate.eligible})
+	gate.inventoryBarrier.Lock()
+	defer gate.inventoryBarrier.Unlock()
+	gate.markAllIneligible()
+	work(&queuedJobMaintenance{gate: gate})
+}
+
+func (gate *queuedJobEligibilityGate) RefreshInventory(work func() error) error {
+	gate.inventoryBarrier.Lock()
+	defer gate.inventoryBarrier.Unlock()
+	gate.markAllIneligible()
+	return work()
+}
+
+func (gate *queuedJobEligibilityGate) MaintainPool(
+	runnerPool core.RunnerPool,
+	work func() (eligible bool, err error),
+) error {
+	pool := gate.pool(runnerPool)
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	eligible, err := work()
+	pool.eligible = eligible
+	return err
+}
+
+func (gate *queuedJobEligibilityGate) markAllIneligible() {
+	gate.poolsMutex.Lock()
+	pools := make([]*queuedJobPoolGate, 0, len(gate.pools))
+	for _, pool := range gate.pools {
+		pools = append(pools, pool)
+	}
+	gate.poolsMutex.Unlock()
+	for _, pool := range pools {
+		pool.mutex.Lock()
+		pool.eligible = false
+		pool.mutex.Unlock()
+	}
+}
+
+func (gate *queuedJobEligibilityGate) pool(runnerPool core.RunnerPool) *queuedJobPoolGate {
+	gate.poolsMutex.Lock()
+	defer gate.poolsMutex.Unlock()
+	pool := gate.pools[runnerPool]
+	if pool == nil {
+		pool = &queuedJobPoolGate{}
+		gate.pools[runnerPool] = pool
+	}
+	return pool
+}
+
+func (gate *queuedJobEligibilityGate) runnerPools() []core.RunnerPool {
+	gate.poolsMutex.Lock()
+	defer gate.poolsMutex.Unlock()
+	runnerPools := make([]core.RunnerPool, 0, len(gate.pools))
+	for runnerPool := range gate.pools {
+		runnerPools = append(runnerPools, runnerPool)
+	}
+	return runnerPools
 }
 
 type queuedJobMaintenance struct {
-	eligible map[core.RunnerPool]struct{}
+	gate *queuedJobEligibilityGate
 }
 
 func (maintenance *queuedJobMaintenance) MarkEligible(runnerPool core.RunnerPool) {
-	maintenance.eligible[runnerPool] = struct{}{}
+	pool := maintenance.gate.pool(runnerPool)
+	pool.mutex.Lock()
+	pool.eligible = true
+	pool.mutex.Unlock()
 }
 
 func (gate *queuedJobEligibilityGate) requestIfEligible(
@@ -43,9 +108,12 @@ func (gate *queuedJobEligibilityGate) requestIfEligible(
 	runnerPool core.RunnerPool,
 	requester queuedJobRequester,
 ) (runtimeengine.ProcessResult, bool, error) {
-	gate.mutex.Lock()
-	defer gate.mutex.Unlock()
-	if _, eligible := gate.eligible[runnerPool]; !eligible {
+	gate.inventoryBarrier.RLock()
+	defer gate.inventoryBarrier.RUnlock()
+	pool := gate.pool(runnerPool)
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if !pool.eligible {
 		return runtimeengine.ProcessResult{}, false, nil
 	}
 	result, err := requester.RequestWork(ctx, runnerPool)
@@ -60,15 +128,17 @@ type queuedJobProcessor struct {
 	gate      *queuedJobEligibilityGate
 	report    func(error)
 
-	queueMutex sync.Mutex
-	queue      []core.RunnerPool
-	pending    map[core.RunnerPool]struct{}
-	wake       chan struct{}
-
 	lifecycleMutex sync.Mutex
+	stopMutex      sync.Mutex
 	cancel         context.CancelFunc
-	done           chan struct{}
-	failed         bool
+	workers        map[core.RunnerPool]*queuedJobPoolWorker
+}
+
+type queuedJobPoolWorker struct {
+	runnerPool core.RunnerPool
+	wake       chan struct{}
+	done       chan struct{}
+	failed     bool
 }
 
 func newQueuedJobProcessor(
@@ -76,92 +146,119 @@ func newQueuedJobProcessor(
 	gate *queuedJobEligibilityGate,
 	report func(error),
 ) *queuedJobProcessor {
-	return &queuedJobProcessor{
+	return newQueuedJobProcessorForPools(requester, gate, report, gate.runnerPools())
+}
+
+func newQueuedJobProcessorForPools(
+	requester queuedJobRequester,
+	gate *queuedJobEligibilityGate,
+	report func(error),
+	runnerPools []core.RunnerPool,
+) *queuedJobProcessor {
+	processor := &queuedJobProcessor{
 		requester: requester,
 		gate:      gate,
 		report:    report,
-		pending:   make(map[core.RunnerPool]struct{}),
-		wake:      make(chan struct{}, 1),
+		workers:   make(map[core.RunnerPool]*queuedJobPoolWorker, len(runnerPools)),
 	}
+	for _, runnerPool := range runnerPools {
+		processor.workers[runnerPool] = newQueuedJobPoolWorker(runnerPool)
+		gate.pool(runnerPool)
+	}
+	return processor
+}
+
+func newQueuedJobPoolWorker(runnerPool core.RunnerPool) *queuedJobPoolWorker {
+	return &queuedJobPoolWorker{runnerPool: runnerPool, wake: make(chan struct{}, 1)}
 }
 
 func (processor *queuedJobProcessor) Start(ctx context.Context) error {
 	processor.lifecycleMutex.Lock()
 	defer processor.lifecycleMutex.Unlock()
-	if processor.done != nil {
+	if processor.cancel != nil {
 		return errors.New("queued-job processor is already started")
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	processor.cancel = cancel
-	processor.done = make(chan struct{})
-	go processor.run(runContext, processor.done)
+	for _, worker := range processor.workers {
+		processor.startWorker(runContext, worker)
+	}
 	return nil
 }
 
 func (processor *queuedJobProcessor) Stop(ctx context.Context) error {
+	processor.stopMutex.Lock()
+	defer processor.stopMutex.Unlock()
 	processor.lifecycleMutex.Lock()
-	cancel, done := processor.cancel, processor.done
-	processor.lifecycleMutex.Unlock()
-	if done == nil {
-		return nil
-	}
-	cancel()
-	select {
-	case <-done:
-		processor.lifecycleMutex.Lock()
-		if processor.done == done {
-			processor.cancel = nil
-			processor.done = nil
-		}
+	cancel := processor.cancel
+	if cancel == nil {
 		processor.lifecycleMutex.Unlock()
 		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("stop queued-job processor: %w", ctx.Err())
 	}
+	done := make([]<-chan struct{}, 0, len(processor.workers))
+	for _, worker := range processor.workers {
+		if worker.done != nil {
+			done = append(done, worker.done)
+		}
+	}
+	processor.lifecycleMutex.Unlock()
+	cancel()
+	for _, workerDone := range done {
+		select {
+		case <-workerDone:
+		case <-ctx.Done():
+			return fmt.Errorf("stop queued-job processor: %w", ctx.Err())
+		}
+	}
+	processor.lifecycleMutex.Lock()
+	processor.cancel = nil
+	for _, worker := range processor.workers {
+		worker.done = nil
+	}
+	processor.lifecycleMutex.Unlock()
+	return nil
 }
 
-func (processor *queuedJobProcessor) run(ctx context.Context, done chan struct{}) {
-	defer close(done)
+func (processor *queuedJobProcessor) startWorker(ctx context.Context, worker *queuedJobPoolWorker) {
+	worker.done = make(chan struct{})
+	go processor.runWorker(ctx, worker)
+}
+
+func (processor *queuedJobProcessor) runWorker(ctx context.Context, worker *queuedJobPoolWorker) {
+	defer close(worker.done)
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		runnerPool, available := processor.dequeue()
-		if available {
-			processor.processRunnerPool(ctx, runnerPool)
-			continue
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-processor.wake:
+		case <-worker.wake:
+			processor.processRunnerPool(ctx, worker)
 		}
 	}
 }
 
-func (processor *queuedJobProcessor) processRunnerPool(ctx context.Context, runnerPool core.RunnerPool) {
-	result, eligible, err := processor.gate.requestIfEligible(ctx, runnerPool, processor.requester)
+func (processor *queuedJobProcessor) processRunnerPool(ctx context.Context, worker *queuedJobPoolWorker) {
+	result, eligible, err := processor.gate.requestIfEligible(ctx, worker.runnerPool, processor.requester)
 	if !eligible {
 		return
 	}
 	if err != nil {
-		processor.reportProcessingFailure(ctx, runnerPool, result, err)
+		processor.reportProcessingFailure(ctx, worker, result, err)
 		return
 	}
-	if processor.failed {
+	if worker.failed {
 		reportOperational(processor.report, operationalEvent{
-			operation: "job_processing", outcome: "recovered", runnerPool: runnerPool,
+			operation: "job_processing", outcome: "recovered", runnerPool: worker.runnerPool,
 		})
-		processor.failed = false
+		worker.failed = false
 	}
 	if shouldContinueQueuedJobPass(result) {
-		processor.enqueue(runnerPool)
+		processor.wakeWorker(worker)
 	}
 }
 
 func (processor *queuedJobProcessor) reportProcessingFailure(
 	ctx context.Context,
-	runnerPool core.RunnerPool,
+	worker *queuedJobPoolWorker,
 	result runtimeengine.ProcessResult,
 	err error,
 ) {
@@ -170,12 +267,12 @@ func (processor *queuedJobProcessor) reportProcessingFailure(
 	}
 	if !operationalErrorWasReported(err) {
 		reportOperational(processor.report, operationalEvent{
-			operation: "job_processing", outcome: "failed", runnerPool: runnerPool, err: err,
+			operation: "job_processing", outcome: "failed", runnerPool: worker.runnerPool, err: err,
 		})
 	}
-	processor.failed = true
+	worker.failed = true
 	if shouldContinueQueuedJobPass(result) {
-		processor.enqueue(runnerPool)
+		processor.wakeWorker(worker)
 	}
 }
 
@@ -185,30 +282,17 @@ func shouldContinueQueuedJobPass(result runtimeengine.ProcessResult) bool {
 }
 
 func (processor *queuedJobProcessor) Wake(runnerPool core.RunnerPool) {
-	processor.enqueue(runnerPool)
+	processor.lifecycleMutex.Lock()
+	worker := processor.workers[runnerPool]
+	if worker != nil {
+		processor.wakeWorker(worker)
+	}
+	processor.lifecycleMutex.Unlock()
 }
 
-func (processor *queuedJobProcessor) enqueue(runnerPool core.RunnerPool) {
-	processor.queueMutex.Lock()
-	if _, exists := processor.pending[runnerPool]; !exists {
-		processor.queue = append(processor.queue, runnerPool)
-		processor.pending[runnerPool] = struct{}{}
-	}
-	processor.queueMutex.Unlock()
+func (*queuedJobProcessor) wakeWorker(worker *queuedJobPoolWorker) {
 	select {
-	case processor.wake <- struct{}{}:
+	case worker.wake <- struct{}{}:
 	default:
 	}
-}
-
-func (processor *queuedJobProcessor) dequeue() (core.RunnerPool, bool) {
-	processor.queueMutex.Lock()
-	defer processor.queueMutex.Unlock()
-	if len(processor.queue) == 0 {
-		return "", false
-	}
-	runnerPool := processor.queue[0]
-	processor.queue = processor.queue[1:]
-	delete(processor.pending, runnerPool)
-	return runnerPool, true
 }

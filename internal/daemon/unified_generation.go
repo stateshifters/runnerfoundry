@@ -18,9 +18,21 @@ type cycleEngine interface {
 	Close(ctx context.Context) error
 }
 
+type maintenanceLaneRuntime interface {
+	MaintainMembership(ctx context.Context) error
+	MaintainSource(ctx context.Context) error
+	MaintainExecution(ctx context.Context) error
+}
+
 type cycleTicker interface {
 	Ticks() <-chan time.Time
 	Stop()
+}
+
+type maintenanceLaneTickers struct {
+	membership cycleTicker
+	source     cycleTicker
+	execution  cycleTicker
 }
 
 type runtimeCloser interface {
@@ -45,6 +57,7 @@ type gatedCycleEngine struct {
 type cycleEngineRuntime interface {
 	Cycle(ctx context.Context) error
 	Close(ctx context.Context) error
+	maintenanceLaneRuntime
 }
 
 type generationLeadership interface {
@@ -72,6 +85,26 @@ func (engine *gatedCycleEngine) Deactivate(ctx context.Context) error {
 }
 
 func (engine *gatedCycleEngine) Cycle(ctx context.Context) error {
+	return engine.runActive(ctx, "cycle", engine.engine.Cycle)
+}
+
+func (engine *gatedCycleEngine) MaintainMembership(ctx context.Context) error {
+	return engine.runActive(ctx, "membership", engine.engine.MaintainMembership)
+}
+
+func (engine *gatedCycleEngine) MaintainSource(ctx context.Context) error {
+	return engine.runActive(ctx, "source", engine.engine.MaintainSource)
+}
+
+func (engine *gatedCycleEngine) MaintainExecution(ctx context.Context) error {
+	return engine.runActive(ctx, "execution", engine.engine.MaintainExecution)
+}
+
+func (engine *gatedCycleEngine) runActive(
+	ctx context.Context,
+	name string,
+	run func(context.Context) error,
+) error {
 	active, err := engine.leadership.IsLeader(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect local generation leadership: %w", err)
@@ -79,8 +112,8 @@ func (engine *gatedCycleEngine) Cycle(ctx context.Context) error {
 	if !active {
 		return errors.New("runtime generation does not own the local gate")
 	}
-	if err := engine.engine.Cycle(ctx); err != nil {
-		return fmt.Errorf("run active generation cycle: %w", err)
+	if err := run(ctx); err != nil {
+		return fmt.Errorf("run active generation %s: %w", name, err)
 	}
 	return nil
 }
@@ -93,8 +126,8 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 // resources. Activation commits after the local generation gate is acquired;
 // maintenance begins immediately in the background.
 type maintenanceGeneration struct {
-	engine        cycleEngine
-	ticker        cycleTicker
+	engine        generationLifecycleEngine
+	lanes         []scheduledMaintenanceLane
 	report        func(error)
 	currentTime   func() time.Time
 	closers       []runtimeCloser
@@ -104,7 +137,6 @@ type maintenanceGeneration struct {
 
 	mutex         sync.Mutex
 	closeMutex    sync.Mutex
-	cycleMutex    sync.Mutex
 	runCancel     context.CancelFunc
 	runDone       chan struct{}
 	prepared      bool
@@ -115,9 +147,50 @@ type maintenanceGeneration struct {
 	closed        bool
 }
 
+type generationLifecycleEngine interface {
+	Activate() error
+	Deactivate(ctx context.Context) error
+	Close(ctx context.Context) error
+}
+
+type scheduledMaintenanceLane struct {
+	name   string
+	ticker cycleTicker
+	run    func(context.Context) error
+}
+
 func newMaintenanceGeneration(
 	engine cycleEngine,
 	ticker cycleTicker,
+	report func(error),
+	closers []runtimeCloser,
+	finalizers []runtimeFinalizer,
+) *maintenanceGeneration {
+	return newScheduledMaintenanceGeneration(
+		engine,
+		[]scheduledMaintenanceLane{{name: "cycle", ticker: ticker, run: engine.Cycle}},
+		report, closers, finalizers,
+	)
+}
+
+func newIndependentMaintenanceGeneration(
+	engine generationLifecycleEngine,
+	runtime maintenanceLaneRuntime,
+	tickers maintenanceLaneTickers,
+	report func(error),
+	closers []runtimeCloser,
+	finalizers []runtimeFinalizer,
+) *maintenanceGeneration {
+	return newScheduledMaintenanceGeneration(engine, []scheduledMaintenanceLane{
+		{name: "membership", ticker: tickers.membership, run: runtime.MaintainMembership},
+		{name: "source", ticker: tickers.source, run: runtime.MaintainSource},
+		{name: "execution", ticker: tickers.execution, run: runtime.MaintainExecution},
+	}, report, closers, finalizers)
+}
+
+func newScheduledMaintenanceGeneration(
+	engine generationLifecycleEngine,
+	lanes []scheduledMaintenanceLane,
 	report func(error),
 	closers []runtimeCloser,
 	finalizers []runtimeFinalizer,
@@ -126,7 +199,7 @@ func newMaintenanceGeneration(
 		report = func(error) {}
 	}
 	return &maintenanceGeneration{
-		engine: engine, ticker: ticker, report: report,
+		engine: engine, lanes: append([]scheduledMaintenanceLane(nil), lanes...), report: report,
 		currentTime: time.Now,
 		closers:     append([]runtimeCloser(nil), closers...), finalizers: append([]runtimeFinalizer(nil), finalizers...),
 		closerClosed: make([]bool, len(closers)),
@@ -220,35 +293,66 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) error
 }
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
-	defer close(done)
-	generation.runCycle(ctx, "immediate", slog.LevelInfo)
+	var lanes sync.WaitGroup
+	lanes.Add(len(generation.lanes))
+	for _, lane := range generation.lanes {
+		go func() {
+			defer lanes.Done()
+			generation.runLane(ctx, lane)
+		}()
+	}
+	lanes.Wait()
+	close(done)
+}
+
+func (generation *maintenanceGeneration) runLane(ctx context.Context, lane scheduledMaintenanceLane) {
+	generation.runCycle(ctx, lane, "immediate", slog.LevelInfo)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-generation.ticker.Ticks():
-			generation.runCycle(ctx, "scheduled", slog.LevelDebug)
+		case <-lane.ticker.Ticks():
+			generation.runCycle(ctx, lane, "scheduled", slog.LevelDebug)
 		}
 	}
 }
 
-func (generation *maintenanceGeneration) runCycle(ctx context.Context, stage string, startLevel slog.Level) {
+func (generation *maintenanceGeneration) runCycle(
+	ctx context.Context,
+	lane scheduledMaintenanceLane,
+	stage string,
+	startLevel slog.Level,
+) {
 	started := generation.currentTime()
 	reportProgress(generation.report, startLevel, operationalEvent{
-		operation: "maintenance_cycle", stage: stage, outcome: "started",
+		operation: "maintenance_" + lane.name, stage: stage, outcome: "started",
 	})
-	generation.cycleMutex.Lock()
-	err := generation.engine.Cycle(ctx)
-	generation.cycleMutex.Unlock()
+	err := lane.run(ctx)
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
 	}
 	reportProgress(generation.report, slog.LevelDebug, operationalEvent{
-		operation: "maintenance_cycle", stage: stage, outcome: outcome,
+		operation: "maintenance_" + lane.name, stage: stage, outcome: outcome,
 		duration: generation.currentTime().Sub(started),
 	})
-	generation.reportCycle(err)
+	if lane.name == "cycle" {
+		generation.reportCycle(err)
+		return
+	}
+	generation.reportLane(lane.name, err)
+}
+
+func (generation *maintenanceGeneration) reportLane(name string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	event := operationalEvent{operation: "maintenance_lane", stage: name, outcome: "recovered"}
+	if err != nil {
+		event.outcome = "failed"
+		event.err = err
+	}
+	reportOperational(generation.report, event)
 }
 
 func (generation *maintenanceGeneration) reportCycle(err error) {
@@ -347,7 +451,9 @@ func (generation *maintenanceGeneration) beginClose() bool {
 		return true
 	}
 	if !generation.tickerStopped {
-		generation.ticker.Stop()
+		for _, lane := range generation.lanes {
+			lane.ticker.Stop()
+		}
 		generation.tickerStopped = true
 	}
 	return false

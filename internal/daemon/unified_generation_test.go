@@ -315,6 +315,18 @@ func TestGatedCycleEnginePreventsReloadGenerationOverlap(t *testing.T) {
 	waitForCycle(t, replacementCycles)
 }
 
+func TestGatedCycleEngineRunsIndependentMaintenanceLanes(t *testing.T) {
+	cycles := make(chan struct{}, 1)
+	gate := &localLeadershipGate{}
+	engine := newGatedCycleEngine(&cycleEngineFake{cycles: cycles}, gate.NewLeadership())
+	assertNoTestError(t, engine.Activate(), "activate gated engine")
+	assertNoTestError(t, engine.MaintainMembership(context.Background()), "maintain membership")
+	waitForCycle(t, cycles)
+	assertNoTestError(t, engine.MaintainSource(context.Background()), "maintain source")
+	assertNoTestError(t, engine.MaintainExecution(context.Background()), "maintain execution")
+	assertNoTestError(t, engine.Close(context.Background()), "close gated engine")
+}
+
 func TestCloseRuntimeResourcesReversesBuildOwnershipAndJoinsFailures(t *testing.T) {
 	t.Parallel()
 
@@ -539,8 +551,12 @@ func (fake *cycleEngineFake) Cycle(context.Context) error {
 	}
 	return fake.cycleErr
 }
-func (*cycleEngineFake) Activate() error                  { return nil }
-func (*cycleEngineFake) Deactivate(context.Context) error { return nil }
+
+func (fake *cycleEngineFake) MaintainMembership(ctx context.Context) error { return fake.Cycle(ctx) }
+func (*cycleEngineFake) MaintainSource(context.Context) error              { return nil }
+func (*cycleEngineFake) MaintainExecution(context.Context) error           { return nil }
+func (*cycleEngineFake) Activate() error                                   { return nil }
+func (*cycleEngineFake) Deactivate(context.Context) error                  { return nil }
 func (fake *cycleEngineFake) Close(context.Context) error {
 	fake.closes++
 	if fake.closeEvents != nil {
