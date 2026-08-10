@@ -37,8 +37,8 @@ func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T)
 	if messageClient.maxCapacity != 7 {
 		t.Fatalf("poll capacity = %d, want available 7", messageClient.maxCapacity)
 	}
-	if len(capacities.queries) != 2 {
-		t.Fatalf("available-capacity queries = %d, want one per repository", len(capacities.queries))
+	if len(capacities.queries) != 1 {
+		t.Fatalf("available-capacity queries = %d, want one per Runner Pool", len(capacities.queries))
 	}
 }
 
@@ -274,7 +274,7 @@ func TestGitHubSourceRuntimeKeepsInstalledAdaptersWhenOldSessionCloseFails(t *te
 	}
 }
 
-func TestGitHubSourceRuntimeReportsLifecycleAndCapacityFailures(t *testing.T) {
+func TestGitHubSourceRuntimeReportsLifecycleFailures(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("GitHub failed")
@@ -292,39 +292,31 @@ func TestGitHubSourceRuntimeReportsLifecycleAndCapacityFailures(t *testing.T) {
 	}
 	awaitGitHubDiscoveryError(t, source, wantErr)
 	mustCloseGitHubSource(t, source)
-	manager.reconcileErr = nil
-	manager.refreshErr = wantErr
+}
+
+func TestGitHubSourceRuntimeMarksMemberRefreshDueAfterDiscovery(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	manager := &githubManagerFake{refreshErr: errors.New("member refresh called during discovery")}
+	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+	source.nextMemberRefresh = now.Add(time.Hour)
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)
 	}
-	awaitGitHubDiscoveryError(t, source, wantErr)
-	mustCloseGitHubSource(t, source)
-}
-
-func TestGitHubSourceRuntimeReportsCapacityAndCloseFailures(t *testing.T) {
-	t.Parallel()
-	wantErr := errors.New("GitHub failed")
-	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	manager := &githubManagerFake{}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+	awaitGitHubDiscovery(t, source)
+	if occurrences(manager.events, "refresh") != 0 {
+		t.Fatalf("discovery refreshed member routes: %#v", manager.events)
+	}
 	manager.refreshErr = nil
-	messageClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
-	manager.adapters = []*githubsource.Adapter{{Client: messageClient, Handler: eventHandlerFake{}, RunnerPool: "linux"}}
-	source.config = managerConfigForAdapters(manager.adapters)
-	mustOpenGitHubSource(t, source)
-	source.capacities = &capacityAggregatorFake{err: wantErr}
-	if err := source.Poll(context.Background(), now); !errors.Is(err, wantErr) {
-		t.Fatalf("capacity error = %v", err)
+	if err := source.RefreshMembers(context.Background()); err != nil {
+		t.Fatalf("refresh routes marked due by discovery: %v", err)
 	}
-	<-messageClient.finished
-	if messageClient.maxCapacity != 0 {
-		t.Fatalf("capacity after read failure = %d, want zero", messageClient.maxCapacity)
+	if occurrences(manager.events, "refresh") != 1 {
+		t.Fatalf("member route refresh was not marked due: %#v", manager.events)
 	}
-	manager.closeErr = wantErr
-	if err := source.CloseLeader(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("close error = %v", err)
-	}
+	mustCloseGitHubSource(t, source)
 }
 
 type githubManagerFake struct {
@@ -338,6 +330,8 @@ type githubManagerFake struct {
 	reconcileStarted  chan<- struct{}
 	reconcileRelease  <-chan struct{}
 	refreshErr        error
+	openStarted       chan<- struct{}
+	openRelease       <-chan struct{}
 	snapshotErr       error
 	closeErr          error
 	closeCalls        int
@@ -418,6 +412,16 @@ func (fake *githubManagerFake) OpenRegistrationSession(
 	owner string,
 	handler githubsource.EventHandler,
 ) (*githubsource.RegistrationSession, error) {
+	if fake.openStarted != nil {
+		fake.openStarted <- struct{}{}
+	}
+	if fake.openRelease != nil {
+		select {
+		case <-fake.openRelease:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("wait to open test registration session: %w", ctx.Err())
+		}
+	}
 	adapters, openErr := fake.beginRepositorySessionOpen()
 	if openErr != nil {
 		return nil, openErr

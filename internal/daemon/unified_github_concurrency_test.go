@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +35,50 @@ func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t 
 	assertNoPolledCapacity(t, firstClient.started, "first repository")
 	assertNoPolledCapacity(t, secondClient.started, "second repository")
 	mustCloseGitHubSource(t, source)
+}
+
+func TestGitHubSourceRuntimeBoundsConcurrentSessionRestorationAtSixteen(t *testing.T) {
+	t.Parallel()
+
+	adapters := make([]*githubsource.Adapter, 17)
+	for index := range adapters {
+		adapters[index] = &githubsource.Adapter{Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{},
+			Repository: fmt.Sprintf("https://github.example/repository-%02d", index), RunnerPool: "linux"}
+	}
+	started := make(chan struct{}, len(adapters))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	manager := &githubManagerFake{adapters: adapters, openStarted: started, openRelease: release}
+	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+		managerConfigForAdapters(adapters), time.Minute, func() time.Time { return time.Time{} })
+	if err := source.OpenLeader(context.Background()); err != nil {
+		t.Fatalf("OpenLeader() error = %v", err)
+	}
+	awaitSessionRestorationStarts(t, started, 16)
+	select {
+	case <-started:
+		t.Fatal("seventeenth session restoration exceeded the concurrency bound")
+	default:
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("seventeenth session restoration did not start after capacity became available")
+	}
+	mustCloseGitHubSource(t, source)
+}
+
+func awaitSessionRestorationStarts(t *testing.T, started <-chan struct{}, count int) {
+	t.Helper()
+	for current := 1; current <= count; current++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("concurrent session restorations = %d, want %d", current-1, count)
+		}
+	}
 }
 
 func TestGitHubSourceRuntimeLeavesPeerPollRunningAfterMessage(t *testing.T) {

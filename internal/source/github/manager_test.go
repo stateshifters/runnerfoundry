@@ -197,6 +197,34 @@ func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	}
 }
 
+func TestManagerSharesRepositoryClientAcrossRunnerPools(t *testing.T) {
+	t.Parallel()
+
+	linux := managerRecord("https://github.com/octo/repo", 17)
+	windows := linux
+	windows.RunnerPool = "windows"
+	windows.ScaleSetID = 18
+	repository := &registrationRepositoryFake{records: []githubsource.Registration{linux, windows}}
+	factoryCalls := 0
+	manager := newManagerFixture(t, &managerDiscovererFake{}, func(
+		context.Context, transport.Repository,
+	) (githubsource.ManagerClient, error) {
+		factoryCalls++
+		return githubsource.ManagerClient{}, nil
+	}, repository)
+	config := githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
+		{RunnerPool: "linux", RunnerGroup: "default"},
+		{RunnerPool: "windows", RunnerGroup: "default"},
+	}}
+
+	if err := manager.RefreshMembers(context.Background(), config); err != nil {
+		t.Fatalf("RefreshMembers() error = %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("repository client constructions = %d, want one", factoryCalls)
+	}
+}
+
 func TestManagerReturnsDefensiveCommittedRegistrationSnapshot(t *testing.T) {
 	t.Parallel()
 

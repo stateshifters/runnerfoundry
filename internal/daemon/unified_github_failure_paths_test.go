@@ -26,6 +26,24 @@ func TestGitHubSourceRuntimeCoversInactiveCleanupPaths(t *testing.T) {
 	}
 }
 
+func TestGitHubSourceRuntimeStopsWaitingForPollsWhenContextIsCanceled(t *testing.T) {
+	t.Parallel()
+
+	cancelCalled := false
+	adapter := &githubsource.Adapter{}
+	source := &githubSourceRuntime{polls: map[*githubsource.Adapter]*githubPollAttempt{
+		adapter: {cancel: func() { cancelCalled = true }, result: make(chan githubPollResult)},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := source.stopAllPolls(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopAllPolls() error = %v, want %v", err, context.Canceled)
+	}
+	if !cancelCalled {
+		t.Fatal("stopAllPolls() did not cancel the in-flight poll")
+	}
+}
+
 func TestGitHubSourceRuntimeRetriesSessionRetirement(t *testing.T) {
 	manager := branchGitHubManager()
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},

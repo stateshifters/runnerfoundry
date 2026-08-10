@@ -166,7 +166,7 @@ func (manager *Manager) pruneRegistrations(
 	for index, repository := range repositories {
 		started := manager.observer.currentTime()
 		manager.reportPruneRepository(repository.URL, index+1, len(repositories), "started", started, nil)
-		client, err := manager.factory(ctx, repository)
+		client, err := manager.repositoryClient(ctx, repository)
 		if err != nil {
 			manager.reportPruneRepository(repository.URL, index+1, len(repositories), "failed", started, err)
 			return nil, fmt.Errorf("create GitHub prune client for repository %q: %w", repository.URL, err)

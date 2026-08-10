@@ -13,7 +13,7 @@ import (
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
-const githubRegistrationSessionConcurrency = 4
+const githubRegistrationSessionConcurrency = 16
 
 type githubManagerRuntime interface {
 	ActiveRegistrations(ctx context.Context) ([]githubsource.Registration, error)

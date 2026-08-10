@@ -10,10 +10,9 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 )
 
-// RefreshMembers validates current configuration and independently verifies
-// each active registration before replacing member bootstrap routes.
-// Unconfigured or stale registrations are not admitted. No leader message
-// session is needed on ordinary members.
+// RefreshMembers rebuilds member bootstrap routes from committed registrations
+// for locally configured Runner Pools. Cluster reconciliation owns runner-group
+// validation; ordinary members do not repeat that upstream work.
 func (manager *Manager) RefreshMembers(ctx context.Context, config ManagerConfig) (resultErr error) {
 	if err := validateManagerConfig(config); err != nil {
 		return err
@@ -36,12 +35,15 @@ func (manager *Manager) RefreshMembers(ctx context.Context, config ManagerConfig
 		return fmt.Errorf("list GitHub registrations: %w", err)
 	}
 	routes, err := manager.buildMemberRoutes(ctx, registrations, config)
+	routeCount = len(routes)
+	if err != nil {
+		return err
+	}
 	replaceErr := manager.source.ReplaceRoutes(routes)
 	if replaceErr != nil {
 		replaceErr = fmt.Errorf("replace GitHub member routes: %w", replaceErr)
 	}
-	routeCount = len(routes)
-	return errors.Join(err, replaceErr)
+	return replaceErr
 }
 
 func (manager *Manager) buildMemberRoutes(
@@ -49,20 +51,20 @@ func (manager *Manager) buildMemberRoutes(
 	registrations []Registration,
 	config ManagerConfig,
 ) ([]MemberRoute, error) {
-	configured := make(map[core.RunnerPool]RunnerPoolConfig, len(config.RunnerPools))
+	configured := make(map[core.RunnerPool]struct{}, len(config.RunnerPools))
 	for _, runnerPool := range config.RunnerPools {
-		configured[runnerPool.RunnerPool] = runnerPool
+		configured[runnerPool.RunnerPool] = struct{}{}
 	}
 	routes := make([]MemberRoute, 0, len(registrations))
 	var joined error
 	for index, record := range registrations {
-		runnerPool, admitted := configured[record.RunnerPool]
+		_, admitted := configured[record.RunnerPool]
 		if !admitted {
 			continue
 		}
 		started := manager.observer.currentTime()
 		manager.reportRouteActivity(record, index+1, len(registrations), "started", started, nil)
-		route, admitted, routeErr := manager.buildMemberRoute(ctx, record, runnerPool)
+		route, admitted, routeErr := manager.buildMemberRoute(ctx, record)
 		if routeErr != nil || !admitted {
 			manager.reportRouteActivity(record, index+1, len(registrations), "failed", started, routeErr)
 			joined = errors.Join(joined, routeErr)
@@ -77,25 +79,10 @@ func (manager *Manager) buildMemberRoutes(
 func (manager *Manager) buildMemberRoute(
 	ctx context.Context,
 	record Registration,
-	runnerPool RunnerPoolConfig,
 ) (MemberRoute, bool, error) {
-	client, err := manager.factory(ctx, repositoryFromRegistration(record))
+	client, err := manager.repositoryClient(ctx, repositoryFromRegistration(record))
 	if err != nil {
 		return manager.handleMissingMemberRouteClient(ctx, record, err)
-	}
-	if client.ResolveRunnerGroup == nil {
-		return MemberRoute{}, false, errors.New("GitHub runner-group resolution is required")
-	}
-	runnerGroupID, err := client.ResolveRunnerGroup(ctx, runnerPool.RunnerGroup)
-	if err != nil {
-		return MemberRoute{}, false, fmt.Errorf("resolve GitHub runner group %q for repository %q: %w",
-			runnerPool.RunnerGroup, record.RepositoryURL, err)
-	}
-	if runnerGroupID != record.RunnerGroupID {
-		return MemberRoute{}, false, fmt.Errorf(
-			"configured runner group for Runner Pool %q does not match committed GitHub registration",
-			record.RunnerPool,
-		)
 	}
 	return MemberRoute{Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
 		Client: managedBootstrapClient{client: client}, Registration: transportRegistration(record)}, true, nil

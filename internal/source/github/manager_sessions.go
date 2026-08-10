@@ -68,7 +68,7 @@ func (manager *Manager) OpenRegistrationSession(
 }
 
 func (manager *Manager) registrationSessionClient(ctx context.Context, record Registration) (ManagerClient, error) {
-	client, err := manager.factory(ctx, repositoryFromRegistration(record))
+	client, err := manager.repositoryClient(ctx, repositoryFromRegistration(record))
 	if err == nil {
 		return client, nil
 	}

@@ -109,8 +109,8 @@ func TestManagerReconcileReturnsErrorsInDiscoveryOrder(t *testing.T) {
 	if !errors.Is(err, secondErr) {
 		t.Fatalf("Reconcile() error = %v, want second discovery-ordered error %v", err, secondErr)
 	}
-	if got := err.Error(); got != "create GitHub client for repository \"https://github.com/octo/repository-001\": first repository failed\n"+
-		"create GitHub client for repository \"https://github.com/octo/repository-002\": second repository failed" {
+	if got := err.Error(); got != "create GitHub client for repository \"https://github.com/octo/repository-001\": load GitHub repository client: first repository failed\n"+
+		"create GitHub client for repository \"https://github.com/octo/repository-002\": load GitHub repository client: second repository failed" {
 		t.Fatalf("Reconcile() error order = %q", got)
 	}
 }

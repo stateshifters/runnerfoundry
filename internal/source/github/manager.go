@@ -11,6 +11,7 @@ import (
 	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 const repositoryConcurrency = 4
@@ -158,6 +159,9 @@ type Manager struct {
 	observer      ManagerObserver
 	source        *Source
 	activityMu    sync.Mutex
+	clientsMu     sync.RWMutex
+	clients       map[transport.Repository]ManagerClient
+	clientLoads   singleflight.Group
 }
 
 type openedLeader struct {
@@ -177,7 +181,58 @@ func NewManager(
 	source := &Source{routes: make(map[routeKey]memberRoute)}
 	return &Manager{
 		discoverer: discoverer, factory: factory, registrations: registrations, observer: observer, source: source,
+		clients: make(map[transport.Repository]ManagerClient),
 	}, nil
+}
+
+func (manager *Manager) repositoryClient(
+	ctx context.Context,
+	repository transport.Repository,
+) (ManagerClient, error) {
+	client, found := manager.cachedRepositoryClient(repository)
+	if found {
+		return client, nil
+	}
+	cacheKey := fmt.Sprintf("%d\x00%s", repository.InstallationID, repository.URL)
+	loaded, err, _ := manager.clientLoads.Do(cacheKey, func() (any, error) {
+		return manager.loadRepositoryClient(ctx, repository)
+	})
+	if err != nil {
+		return ManagerClient{}, fmt.Errorf("load GitHub repository client: %w", err)
+	}
+	return repositoryClientLoadValue(loaded)
+}
+
+func repositoryClientLoadValue(loaded any) (ManagerClient, error) {
+	client, valid := loaded.(ManagerClient)
+	if !valid {
+		return ManagerClient{}, errors.New("GitHub repository client cache returned an invalid value")
+	}
+	return client, nil
+}
+
+func (manager *Manager) cachedRepositoryClient(repository transport.Repository) (ManagerClient, bool) {
+	manager.clientsMu.RLock()
+	defer manager.clientsMu.RUnlock()
+	client, found := manager.clients[repository]
+	return client, found
+}
+
+func (manager *Manager) loadRepositoryClient(
+	ctx context.Context,
+	repository transport.Repository,
+) (ManagerClient, error) {
+	if cached, found := manager.cachedRepositoryClient(repository); found {
+		return cached, nil
+	}
+	created, err := manager.factory(ctx, repository)
+	if err != nil {
+		return ManagerClient{}, err
+	}
+	manager.clientsMu.Lock()
+	manager.clients[repository] = created
+	manager.clientsMu.Unlock()
+	return created, nil
 }
 
 func (manager *Manager) Source() *Source {
@@ -451,7 +506,7 @@ func (manager *Manager) ensureRepository(
 	if len(config.RunnerPools) == 0 {
 		return nil, nil
 	}
-	client, err := manager.factory(ctx, repository)
+	client, err := manager.repositoryClient(ctx, repository)
 	if err != nil {
 		manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_reconciliation",
 			Stage: "create_repository_client", Outcome: "failed", Repository: repository.URL, Err: err})

@@ -273,10 +273,7 @@ func (source *githubSourceRuntime) applyDiscoveredRegistrations(
 	source.desired = configuredGitHubRegistrationRoutes(registrations)
 	source.beginSessionActivation()
 	source.scheduleRequiredRegistrationSessions(ctx, term)
-	if err := source.manager.RefreshMembers(ctx, source.config); err != nil {
-		return []error{markOperationallyReported(fmt.Errorf("refresh GitHub member routes: %w", err))}
-	}
-	source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
+	source.nextMemberRefresh = time.Time{}
 	return nil
 }
 
@@ -374,19 +371,29 @@ func (source *githubSourceRuntime) launchIdlePolls(
 func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapter *githubsource.Adapter,
 	liveMemberCutoff time.Time, capacities map[core.RunnerPool]runnerPoolPublication,
 ) (int, error) {
+	aggregate, observed := capacities[adapter.RunnerPool]
+	if observed {
+		aggregate.count++
+		capacities[adapter.RunnerPool] = aggregate
+		reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
+			outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository,
+			capacity: aggregate.capacity})
+		return aggregate.capacity, nil
+	}
 	capacity, err := source.capacities.AvailableRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
 	if err != nil {
 		reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
 			runnerPool: adapter.RunnerPool, err: err})
-		return 0, markOperationallyReported(fmt.Errorf(
+		aggregate.count = 1
+		capacities[adapter.RunnerPool] = aggregate
+		return aggregate.capacity, markOperationallyReported(fmt.Errorf(
 			"read Runner Pool %q available capacity: %w", adapter.RunnerPool, err,
 		))
 	}
 	reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
 		outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository, capacity: capacity})
-	aggregate := capacities[adapter.RunnerPool]
 	aggregate.capacity = capacity
-	aggregate.count++
+	aggregate.count = 1
 	capacities[adapter.RunnerPool] = aggregate
 	return capacity, nil
 }

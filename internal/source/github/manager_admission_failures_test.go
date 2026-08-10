@@ -177,40 +177,28 @@ func TestRefreshMembersRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestRefreshMembersReportsConfiguredRouteVerificationFailures(t *testing.T) {
+func TestRefreshMembersUsesCommittedRegistrationWithoutRunnerGroupLookup(t *testing.T) {
 	t.Parallel()
 
-	wantErr := errors.New("verification failed")
 	record := managerRecord("https://github.com/octo/repo", 11)
-	tests := []struct {
-		name      string
-		client    githubsource.ManagerClient
-		deleteErr error
-	}{
-		{name: "missing resolver"},
-		{name: "resolver failure", client: githubsource.ManagerClient{ResolveRunnerGroup: func(
-			context.Context, string,
-		) (transport.RunnerGroupID, error) {
-			return 0, wantErr
-		}}},
-		{name: "runner group mismatch", client: githubsource.ManagerClient{ResolveRunnerGroup: func(
-			context.Context, string,
-		) (transport.RunnerGroupID, error) {
-			return record.RunnerGroupID + 1, nil
-		}}},
+	resolverCalls := 0
+	client := githubsource.ManagerClient{ResolveRunnerGroup: func(
+		context.Context, string,
+	) (transport.RunnerGroupID, error) {
+		resolverCalls++
+		return record.RunnerGroupID + 1, nil
+	}}
+	repository := &registrationRepositoryFake{records: []githubsource.Registration{record}}
+	manager := newManagerFixture(t, &managerDiscovererFake{}, fixedManagerClientFactory(client), repository)
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
+		t.Fatalf("RefreshMembers() error = %v", err)
 	}
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			repository := &registrationRepositoryFake{records: []githubsource.Registration{record}, deleteErr: testCase.deleteErr}
-			manager := newManagerFixture(t, &managerDiscovererFake{}, fixedManagerClientFactory(testCase.client), repository)
-			if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err == nil {
-				t.Fatal("RefreshMembers() succeeded despite route verification failure")
-			}
-		})
+	if resolverCalls != 0 {
+		t.Fatalf("runner-group resolver calls = %d, want zero", resolverCalls)
 	}
 }
 
-func TestRefreshMembersHandlesTerminalAndStaleRoutesIndependently(t *testing.T) {
+func TestRefreshMembersHandlesTerminalAndCommittedRoutesIndependently(t *testing.T) {
 	t.Parallel()
 
 	terminal := managerRecord("https://github.com/octo/missing", 11)
@@ -225,19 +213,68 @@ func TestRefreshMembersHandlesTerminalAndStaleRoutesIndependently(t *testing.T) 
 		if target.URL == terminal.RepositoryURL {
 			return githubsource.ManagerClient{}, upstream.NotFoundError
 		}
-		return githubsource.ManagerClient{ResolveRunnerGroup: func(
-			context.Context, string,
-		) (transport.RunnerGroupID, error) {
-			return stale.RunnerGroupID + 1, nil
+		return githubsource.ManagerClient{GenerateBootstrap: func(
+			context.Context, transport.Registration, string,
+		) ([]byte, error) {
+			return []byte("opaque"), nil
 		}}, nil
 	}, repository)
 
-	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err == nil {
-		t.Fatal("RefreshMembers() succeeded despite stale local runner-group configuration")
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
+		t.Fatalf("RefreshMembers() error = %v", err)
 	}
-	if len(repository.records) != 1 || repository.records[0] != stale ||
-		len(repository.owned) != 1 || repository.owned[0] != stale {
+	assertOnlyRegistration(t, repository, stale)
+	assertBootstrapAvailable(t, manager, stale)
+}
+
+func TestRefreshMembersRetainsEstablishedRoutesUntilReplacementIsComplete(t *testing.T) {
+	t.Parallel()
+
+	established := managerRecord("https://github.com/octo/established", 11)
+	replacement := managerRecord("https://github.com/octo/replacement", 12)
+	repository := &registrationRepositoryFake{records: []githubsource.Registration{established}}
+	wantErr := errors.New("repository client unavailable")
+	manager := newManagerFixture(t, &managerDiscovererFake{}, func(
+		_ context.Context,
+		target transport.Repository,
+	) (githubsource.ManagerClient, error) {
+		if target.URL == replacement.RepositoryURL {
+			return githubsource.ManagerClient{}, wantErr
+		}
+		return githubsource.ManagerClient{GenerateBootstrap: func(
+			context.Context, transport.Registration, string,
+		) ([]byte, error) {
+			return []byte("opaque"), nil
+		}}, nil
+	}, repository)
+
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
+		t.Fatalf("initial RefreshMembers() error = %v", err)
+	}
+	repository.records = []githubsource.Registration{replacement}
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); !errors.Is(err, wantErr) {
+		t.Fatalf("replacement RefreshMembers() error = %v, want %v", err, wantErr)
+	}
+	assertBootstrapAvailable(t, manager, established)
+}
+
+func assertOnlyRegistration(
+	t *testing.T,
+	repository *registrationRepositoryFake,
+	want githubsource.Registration,
+) {
+	t.Helper()
+	if len(repository.records) != 1 || repository.records[0] != want ||
+		len(repository.owned) != 1 || repository.owned[0] != want {
 		t.Fatalf("registration state = active %#v owned %#v", repository.records, repository.owned)
+	}
+}
+
+func assertBootstrapAvailable(t *testing.T, manager *githubsource.Manager, registration githubsource.Registration) {
+	t.Helper()
+	job := sourceJob(t, registration.RepositoryURL, registration.RunnerPool, 61)
+	if _, err := manager.Source().GenerateBootstrap(context.Background(), job, "runner-61"); err != nil {
+		t.Fatalf("generate bootstrap from committed route: %v", err)
 	}
 }
 
