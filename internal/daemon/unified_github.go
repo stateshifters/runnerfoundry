@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -14,38 +13,44 @@ import (
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
-const githubRepositorySessionConcurrency = 4
+const githubRegistrationSessionConcurrency = 4
 
 type githubManagerRuntime interface {
-	RegistrationSnapshot(ctx context.Context) (githubsource.RegistrationSnapshot, error)
-	Reconcile(ctx context.Context, config githubsource.ManagerConfig) (githubsource.RegistrationSnapshot, error)
-	RefreshMembers(ctx context.Context) error
-	OpenRepositorySessions(ctx context.Context, records []githubsource.Registration, owner string,
-		handler githubsource.EventHandler) (*githubsource.RepositorySessionGeneration, error)
+	ActiveRegistrations(ctx context.Context) ([]githubsource.Registration, error)
+	Reconcile(ctx context.Context, config githubsource.ManagerConfig) ([]githubsource.Registration, error)
+	RefreshMembers(ctx context.Context, config githubsource.ManagerConfig) error
+	OpenRegistrationSession(ctx context.Context, record githubsource.Registration,
+		configured githubsource.RunnerPoolConfig, owner string,
+		handler githubsource.EventHandler) (*githubsource.RegistrationSession, error)
 }
 
 type capacityAggregator interface {
 	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
 }
 
-type githubRepositoryOpenResult struct {
-	epoch      uint64
+type githubRegistrationKey struct {
 	repository string
-	records    []githubsource.Registration
-	generation *githubsource.RepositorySessionGeneration
-	err        error
+	runnerPool core.RunnerPool
+}
+
+type githubRegistrationOpenResult struct {
+	epoch     uint64
+	key       githubRegistrationKey
+	requested githubsource.Registration
+	session   *githubsource.RegistrationSession
+	err       error
 }
 
 type githubDiscoveryResult struct {
-	epoch       uint64
-	completedAt time.Time
-	snapshot    githubsource.RegistrationSnapshot
-	err         error
+	epoch         uint64
+	completedAt   time.Time
+	registrations []githubsource.Registration
+	err           error
 }
 
 type githubLeadershipTerm struct {
 	epoch           uint64
-	openResults     chan githubRepositoryOpenResult
+	openResults     chan githubRegistrationOpenResult
 	discoveryResult chan githubDiscoveryResult
 	discoveryActive bool
 	background      sync.WaitGroup
@@ -73,12 +78,12 @@ type githubSourceRuntime struct {
 
 	epoch                   uint64
 	term                    *githubLeadershipTerm
-	desired                 map[string][]githubsource.Registration
-	opening                 map[string][]githubsource.Registration
-	generations             map[string]*githubsource.RepositorySessionGeneration
-	retiring                []*githubsource.RepositorySessionGeneration
+	desired                 map[githubRegistrationKey]githubsource.Registration
+	opening                 map[githubRegistrationKey]githubsource.Registration
+	sessions                map[githubRegistrationKey]*githubsource.RegistrationSession
+	retiring                []*githubsource.RegistrationSession
 	cleanupMu               sync.Mutex
-	abandoned               []*githubsource.RepositorySessionGeneration
+	abandoned               []*githubsource.RegistrationSession
 	sessionActivationActive bool
 	sessionActivationTotal  int
 	sessionActivationLast   int
@@ -97,8 +102,9 @@ func newGitHubSourceRuntime(
 		manager: manager, capacities: capacities, owner: owner, handler: handler,
 		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
 		polls: make(map[*githubsource.Adapter]*githubPollAttempt), publishedCapacity: make(map[core.RunnerPool]int),
-		desired: make(map[string][]githubsource.Registration), opening: make(map[string][]githubsource.Registration),
-		generations: make(map[string]*githubsource.RepositorySessionGeneration),
+		desired:  make(map[githubRegistrationKey]githubsource.Registration),
+		opening:  make(map[githubRegistrationKey]githubsource.Registration),
+		sessions: make(map[githubRegistrationKey]*githubsource.RegistrationSession),
 	}
 }
 
@@ -106,7 +112,18 @@ func (source *githubSourceRuntime) RefreshMembers(ctx context.Context) error {
 	if source.currentTime().Before(source.nextMemberRefresh) {
 		return nil
 	}
-	if err := source.manager.RefreshMembers(ctx); err != nil {
+	if declarations, available := source.manager.(interface {
+		PublishRunnerPoolDeclarations(
+			ctx context.Context,
+			memberID core.MemberID,
+			config githubsource.ManagerConfig,
+		) error
+	}); available {
+		if err := declarations.PublishRunnerPoolDeclarations(ctx, core.MemberID(source.owner), source.config); err != nil {
+			return fmt.Errorf("publish GitHub Runner Pool declarations: %w", err)
+		}
+	}
+	if err := source.manager.RefreshMembers(ctx, source.config); err != nil {
 		return fmt.Errorf("refresh GitHub member routes: %w", err)
 	}
 	source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
@@ -117,40 +134,51 @@ func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
 	if source.leaderInstalled {
 		return nil
 	}
-	snapshot, err := source.manager.RegistrationSnapshot(ctx)
+	registrations, err := source.manager.ActiveRegistrations(ctx)
 	if err != nil {
 		return fmt.Errorf("load committed GitHub registrations: %w", err)
 	}
 	source.epoch++
-	groups := groupActiveRegistrations(snapshot.Active)
+	desired := configuredGitHubRegistrationRoutes(registrations)
 	term := &githubLeadershipTerm{
-		epoch:           source.epoch,
-		openResults:     make(chan githubRepositoryOpenResult, max(1, len(groups))),
+		epoch: source.epoch, openResults: make(chan githubRegistrationOpenResult, max(1, len(desired))),
 		discoveryResult: make(chan githubDiscoveryResult, 1),
-		openSlots:       make(chan struct{}, githubRepositorySessionConcurrency),
+		openSlots:       make(chan struct{}, githubRegistrationSessionConcurrency),
 		operations:      make(map[uint64]context.CancelFunc),
 	}
 	source.term = term
 	source.leaderInstalled = true
-	source.desired = groups
+	source.desired = desired
 	source.beginSessionActivation()
-	source.scheduleRequiredRepositoryGenerations(ctx, term)
-	source.startDiscovery(ctx, term)
+	source.scheduleRequiredRegistrationSessions(ctx, term)
+	sharedDeclarations, available := source.manager.(interface{ UsesSharedRunnerPoolDeclarations() bool })
+	if !available || !sharedDeclarations.UsesSharedRunnerPoolDeclarations() {
+		source.startDiscovery(ctx, term, source.config)
+	}
 	return nil
 }
 
-func (source *githubSourceRuntime) startDiscovery(ctx context.Context, term *githubLeadershipTerm) {
+func (source *githubSourceRuntime) startDiscovery(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	configs ...githubsource.ManagerConfig,
+) {
 	if term == nil || term.discoveryActive {
 		return
 	}
 	term.discoveryActive = true
+	config := source.config
+	if len(configs) != 0 {
+		config = configs[0]
+	}
 	operationContext, operationID := term.startOperation(ctx)
 	term.background.Add(1)
 	go func() {
 		defer term.background.Done()
 		defer term.finishOperation(operationID)
-		snapshot, err := source.manager.Reconcile(operationContext, source.config)
-		result := githubDiscoveryResult{epoch: term.epoch, completedAt: source.currentTime(), snapshot: snapshot, err: err}
+		registrations, err := source.manager.Reconcile(operationContext, config)
+		result := githubDiscoveryResult{epoch: term.epoch, completedAt: source.currentTime(),
+			registrations: registrations, err: err}
 		select {
 		case term.discoveryResult <- result:
 		case <-operationContext.Done():
@@ -158,44 +186,45 @@ func (source *githubSourceRuntime) startDiscovery(ctx context.Context, term *git
 	}()
 }
 
-func (source *githubSourceRuntime) scheduleRequiredRepositoryGenerations(
+func (source *githubSourceRuntime) scheduleRequiredRegistrationSessions(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 ) {
-	for _, repository := range sortedRegistrationRepositories(source.desired) {
-		records := source.desired[repository]
-		if generation := source.generations[repository]; generation != nil &&
-			sameRegistrations(generation.Registrations(), records) {
+	for _, key := range sortedGitHubRegistrationKeys(source.desired) {
+		record := source.desired[key]
+		if session := source.sessions[key]; session != nil && session.Registration() == record {
 			continue
 		}
-		if pending, exists := source.opening[repository]; exists && sameRegistrations(pending, records) {
+		if pending, exists := source.opening[key]; exists && pending == record {
 			continue
 		}
-		source.opening[repository] = append([]githubsource.Registration(nil), records...)
-		source.startRepositoryGeneration(ctx, term, repository, records)
+		source.opening[key] = record
+		source.startRegistrationSession(ctx, term, key, record,
+			githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool})
 	}
 }
 
-func (source *githubSourceRuntime) startRepositoryGeneration(
+func (source *githubSourceRuntime) startRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
-	repository string,
-	records []githubsource.Registration,
+	key githubRegistrationKey,
+	record githubsource.Registration,
+	configured githubsource.RunnerPoolConfig,
 ) {
-	records = append([]githubsource.Registration(nil), records...)
 	operationContext, operationID := term.startOperation(ctx)
 	term.background.Add(1)
 	go func() {
 		defer term.finishOperation(operationID)
-		source.openRepositoryGeneration(operationContext, term, repository, records)
+		source.openRegistrationSession(operationContext, term, key, record, configured)
 	}()
 }
 
-func (source *githubSourceRuntime) openRepositoryGeneration(
+func (source *githubSourceRuntime) openRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
-	repository string,
-	records []githubsource.Registration,
+	key githubRegistrationKey,
+	record githubsource.Registration,
+	configured githubsource.RunnerPoolConfig,
 ) {
 	defer term.background.Done()
 	select {
@@ -204,27 +233,26 @@ func (source *githubSourceRuntime) openRepositoryGeneration(
 	case <-ctx.Done():
 		return
 	}
-	generation, err := source.manager.OpenRepositorySessions(ctx, records, source.owner, source.handler)
+	session, err := source.manager.OpenRegistrationSession(ctx, record, configured, source.owner, source.handler)
 	if ctx.Err() != nil {
-		if generation != nil {
-			source.abandonGeneration(generation)
+		if session != nil {
+			source.abandonSession(session)
 		}
 		return
 	}
-	result := githubRepositoryOpenResult{epoch: term.epoch, repository: repository,
-		records: records, generation: generation, err: err}
+	result := githubRegistrationOpenResult{epoch: term.epoch, key: key, requested: record, session: session, err: err}
 	select {
 	case term.openResults <- result:
 	case <-ctx.Done():
-		if generation != nil {
-			source.abandonGeneration(generation)
+		if session != nil {
+			source.abandonSession(session)
 		}
 	}
 }
 
 func (source *githubSourceRuntime) CloseLeader(ctx context.Context) error {
 	if !source.leaderInstalled {
-		return source.retryRetiringGenerations(ctx)
+		return source.retryRetiringSessions(ctx)
 	}
 	term := source.term
 	source.leaderInstalled = false
@@ -234,24 +262,24 @@ func (source *githubSourceRuntime) CloseLeader(ctx context.Context) error {
 		term.cancelOperations()
 	}
 	stopErr := source.stopAllPolls(ctx)
-	active := source.generations
-	source.generations = make(map[string]*githubsource.RepositorySessionGeneration)
-	source.desired = make(map[string][]githubsource.Registration)
-	source.opening = make(map[string][]githubsource.Registration)
+	active := source.sessions
+	source.sessions = make(map[githubRegistrationKey]*githubsource.RegistrationSession)
+	source.desired = make(map[githubRegistrationKey]githubsource.Registration)
+	source.opening = make(map[githubRegistrationKey]githubsource.Registration)
 	source.adapters = nil
 	source.sessionActivationActive = false
 	var cleanupErr error
-	for _, repository := range sortedGenerationRepositories(active) {
-		if err := active[repository].Close(ctx); err != nil {
-			source.retiring = append(source.retiring, active[repository])
+	for _, key := range sortedGitHubRegistrationKeys(active) {
+		if err := active[key].Close(ctx); err != nil {
+			source.retiring = append(source.retiring, active[key])
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	if term != nil {
 		cleanupErr = errors.Join(cleanupErr, source.waitForTerm(ctx, term), source.drainCancelledTerm(ctx, term))
 	}
-	source.collectAbandonedGenerations()
-	cleanupErr = errors.Join(cleanupErr, source.retryRetiringGenerations(ctx))
+	source.collectAbandonedSessions()
+	cleanupErr = errors.Join(cleanupErr, source.retryRetiringSessions(ctx))
 	return errors.Join(stopErr, cleanupErr)
 }
 
@@ -288,9 +316,9 @@ func (term *githubLeadershipTerm) cancelOperations() {
 func (source *githubSourceRuntime) beginSessionActivation() {
 	source.sessionActivationActive = false
 	required := 0
-	for repository, records := range source.desired {
-		generation := source.generations[repository]
-		if generation == nil || !sameRegistrations(generation.Registrations(), records) {
+	for key, record := range source.desired {
+		session := source.sessions[key]
+		if session == nil || session.Registration() != record {
 			required++
 		}
 	}
@@ -299,7 +327,7 @@ func (source *githubSourceRuntime) beginSessionActivation() {
 	}
 	source.sessionActivationActive = true
 	source.sessionActivationTotal = len(source.desired)
-	source.sessionActivationLast = source.readyRepositoryGenerationCount()
+	source.sessionActivationLast = source.readyRegistrationSessionCount()
 	reportProgress(source.report, slog.LevelInfo, operationalEvent{
 		operation: "source_sessions", stage: "open_sessions", outcome: "started",
 		total: source.sessionActivationTotal,
@@ -310,7 +338,7 @@ func (source *githubSourceRuntime) reportSessionActivationProgress() {
 	if !source.sessionActivationActive {
 		return
 	}
-	current := source.readyRepositoryGenerationCount()
+	current := source.readyRegistrationSessionCount()
 	total := source.sessionActivationTotal
 	if current == total {
 		reportProgress(source.report, slog.LevelInfo, operationalEvent{
@@ -329,11 +357,11 @@ func (source *githubSourceRuntime) reportSessionActivationProgress() {
 	source.sessionActivationLast = current
 }
 
-func (source *githubSourceRuntime) readyRepositoryGenerationCount() int {
+func (source *githubSourceRuntime) readyRegistrationSessionCount() int {
 	ready := 0
-	for repository, records := range source.desired {
-		generation := source.generations[repository]
-		if generation != nil && sameRegistrations(generation.Registrations(), records) {
+	for key, record := range source.desired {
+		session := source.sessions[key]
+		if session != nil && session.Registration() == record {
 			ready++
 		}
 	}
@@ -354,17 +382,14 @@ func (source *githubSourceRuntime) waitForTerm(ctx context.Context, term *github
 	}
 }
 
-func (source *githubSourceRuntime) drainCancelledTerm(
-	ctx context.Context,
-	term *githubLeadershipTerm,
-) error {
+func (source *githubSourceRuntime) drainCancelledTerm(ctx context.Context, term *githubLeadershipTerm) error {
 	var joined error
 	for {
 		select {
 		case result := <-term.openResults:
-			if result.generation != nil {
-				if err := result.generation.Close(ctx); err != nil {
-					source.retiring = append(source.retiring, result.generation)
+			if result.session != nil {
+				if err := result.session.Close(ctx); err != nil {
+					source.retiring = append(source.retiring, result.session)
 					joined = errors.Join(joined, err)
 				}
 			}
@@ -374,13 +399,13 @@ func (source *githubSourceRuntime) drainCancelledTerm(
 	}
 }
 
-func (source *githubSourceRuntime) abandonGeneration(generation *githubsource.RepositorySessionGeneration) {
+func (source *githubSourceRuntime) abandonSession(session *githubsource.RegistrationSession) {
 	source.cleanupMu.Lock()
-	source.abandoned = append(source.abandoned, generation)
+	source.abandoned = append(source.abandoned, session)
 	source.cleanupMu.Unlock()
 }
 
-func (source *githubSourceRuntime) collectAbandonedGenerations() {
+func (source *githubSourceRuntime) collectAbandonedSessions() {
 	source.cleanupMu.Lock()
 	abandoned := source.abandoned
 	source.abandoned = nil
@@ -388,39 +413,30 @@ func (source *githubSourceRuntime) collectAbandonedGenerations() {
 	source.retiring = append(source.retiring, abandoned...)
 }
 
-func groupActiveRegistrations(records []githubsource.Registration) map[string][]githubsource.Registration {
-	groups := make(map[string][]githubsource.Registration)
-	for _, record := range records {
-		groups[record.RepositoryURL] = append(groups[record.RepositoryURL], record)
+func configuredGitHubRegistrationRoutes(records []githubsource.Registration) map[githubRegistrationKey]githubsource.Registration {
+	routes := make(map[githubRegistrationKey]githubsource.Registration)
+	for _, record := range canonicalRegistrations(records) {
+		routes[registrationKey(record)] = record
 	}
-	for repository, registrations := range groups {
-		groups[repository] = canonicalRegistrations(registrations)
-	}
-	return groups
+	return routes
 }
 
-func sortedRegistrationRepositories(groups map[string][]githubsource.Registration) []string {
-	repositories := make([]string, 0, len(groups))
-	for repository := range groups {
-		repositories = append(repositories, repository)
-	}
-	sort.Strings(repositories)
-	return repositories
+func registrationKey(record githubsource.Registration) githubRegistrationKey {
+	return githubRegistrationKey{repository: record.RepositoryURL, runnerPool: record.RunnerPool}
 }
 
-func sortedGenerationRepositories(
-	generations map[string]*githubsource.RepositorySessionGeneration,
-) []string {
-	repositories := make([]string, 0, len(generations))
-	for repository := range generations {
-		repositories = append(repositories, repository)
+func sortedGitHubRegistrationKeys[Value any](routes map[githubRegistrationKey]Value) []githubRegistrationKey {
+	keys := make([]githubRegistrationKey, 0, len(routes))
+	for key := range routes {
+		keys = append(keys, key)
 	}
-	sort.Strings(repositories)
-	return repositories
-}
-
-func sameRegistrations(first, second []githubsource.Registration) bool {
-	return slices.Equal(canonicalRegistrations(first), canonicalRegistrations(second))
+	sort.Slice(keys, func(firstIndex, secondIndex int) bool {
+		if keys[firstIndex].repository != keys[secondIndex].repository {
+			return keys[firstIndex].repository < keys[secondIndex].repository
+		}
+		return keys[firstIndex].runnerPool < keys[secondIndex].runnerPool
+	})
+	return keys
 }
 
 func canonicalRegistrations(records []githubsource.Registration) []githubsource.Registration {

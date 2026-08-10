@@ -197,9 +197,11 @@ These settings belong to the GitHub adapter. GitHub runner scale-set terminology
 | `scale_sets[].name` | Required and unique | Runner Pool name and GitHub `runs-on` value. |
 | `scale_sets[].runner_group` | Optional; default `default` | GitHub runner group used for the published capacity. |
 | `scale_sets[].max_runners` | Required positive integer | Capacity contributed by this member. |
-| `prune` | Optional; default `false` | Remove GitHub runner scale sets not present in this configuration. Enable only when RunnerFoundry owns them. |
+| `prune` | Optional; default `false` | Remove owned GitHub runner scale sets only after no live cluster member declares their Runner Pool. |
 
 Each `scale_sets` entry configures exactly one execution provider: `docker` or `libvirt`.
+
+In a PostgreSQL cluster, each member publishes its configured Runner Pools and runner-group names to shared state. GitHub reconciliation uses the union declared by members that have heartbeated within the liveness cutoff; it does not treat the leader's local `scale_sets` as cluster-wide configuration. Members may therefore contribute different pools. A Runner Pool must use one runner-group name across the cluster. A disagreement preserves existing registrations and degrades reconciliation for that pool without affecting other pools.
 
 ### State settings
 
@@ -275,7 +277,7 @@ Connection values may be literals, `env://VARIABLE` references, or absolute `fil
 
 Session pooling on the primary endpoint is recommended for the best job-pickup performance. In PostgreSQL deployments, each member attempts to reserve one primary pooled connection for `LISTEN`, while queue inserts publish best-effort `NOTIFY` wakes so members can compete for newly queued work immediately. Deployments where `LISTEN` is unavailable remain supported; members discover the same durable work during the next maintenance cycle. Do not configure or use `state.postgres.direct` merely to enable queue notifications. The direct endpoint is reserved for operations that cannot work through the primary pool.
 
-Every member in a cluster uses the same GitHub and PostgreSQL configuration. Members may contribute different local providers and capacity under the same Runner Pool name.
+Every member in a cluster uses the same GitHub App and PostgreSQL database. Members may declare different Runner Pools and contribute different local providers and capacity. Members that declare the same Runner Pool must use the same GitHub runner-group name.
 
 ### Migrate PostgreSQL
 
@@ -388,9 +390,13 @@ Reload validates and prepares the replacement configuration before applying it. 
 
 Runner reconciliation is provider-agnostic. Docker inventory endpoint identity is the member's Docker host; the configured Compose mechanism remains specific to provisioning. Libvirt endpoint identity uses the normalized connection URI. Each endpoint returns all observable RunnerFoundry resources with their Runner Pool, is queried once per maintenance cycle, and is then partitioned by pool. Duplicate configured endpoints are queried once. Inventory errors retain processing because absence was not established. Failed provisioning triggers a fresh inspection of the exact endpoint recorded with the claim.
 
-GitHub discovery replaces its complete persisted registration snapshot in one transaction. When `prune` is enabled, RunnerFoundry deletes only scale-set IDs from its previous committed snapshot after the current ID, name, and runner group still match. Similar labels or update settings do not establish ownership.
+GitHub discovery persists each successful registration independently. Each upsert atomically stores the active route and its ownership evidence; unchanged registrations cause no table-wide rewrite. When `prune` is enabled, RunnerFoundry deletes only scale-set IDs whose current ID, name, and runner group still match durable ownership. Similar labels or update settings do not establish ownership.
 
-The source leader uses that committed snapshot as its reconnect fast path. On leadership acquisition it opens fresh repository sessions from durable registrations while discovery runs independently. Repositories reconcile independently with at most four operations in flight, and a pass commits only after every repository succeeds. An inconclusive discovery failure retains the last committed registrations and usable sessions. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
+The source leader restores every committed registration immediately while discovery runs independently. Restoration does not filter registrations through the new leader's local Runner Pools, so a leadership change does not alter registration IDs or counts. Local configuration controls only the bootstrap routes and provider capacity available on that member. Successful repository and Runner Pool routes activate even when another route fails.
+
+GitHub message sessions remain process-local because the pinned `github.com/actions/scaleset` library creates sessions but does not expose session adoption. Graceful leadership loss cancels polling and best-effort closes those sessions. After an ungraceful handoff, an individual restored route may receive `409 Conflict` until GitHub expires the former session lease; that route retries without blocking discovery, queue processing, leadership, or sibling routes. Initial session statistics restore assigned demand when its replacement session opens.
+
+GitHub installation IDs are opaque, and records with different installation IDs may coexist while routes converge. Discovery through an accessible installation replaces the active record for each route it confirms. Inability to discover access is inconclusive: RunnerFoundry retains the exact record for retry and does not infer an installation remap. A definitive repository or session not-found through an old installation is terminal and deletes only the exact persisted fingerprint under a guard, so it cannot erase a newer replacement. Pruning remains separate cleanup and is the explicit gate for cluster-wide Runner Pool removal: with pruning disabled, absent declarations do not remove registrations; with pruning enabled, a pool is eligible only after no live member declares it. A pruning failure retains ownership and does not prevent newly reconciled routes from activating. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
 
 Durable queue processing is member-local and does not depend on source leadership. Every active member starts its queue processor with the runtime generation. Claims begin only after that member has refreshed inventory and reconciled the affected Runner Pool successfully. SQLite wakes the local pool after an enqueue is durable. PostgreSQL broadcasts a best-effort wake after commit so every listening member can enter the claim race; maintenance still discovers jobs when a notification is unavailable or missed.
 

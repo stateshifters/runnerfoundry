@@ -390,6 +390,9 @@ func (*builderStoreFake) Registration(context.Context, string, core.RunnerPool) 
 func (store *builderStoreFake) Registrations(context.Context) ([]githubsource.Registration, error) {
 	return append([]githubsource.Registration(nil), store.registrations...), nil
 }
+func (store *builderStoreFake) OwnedRegistrations(context.Context) ([]githubsource.Registration, error) {
+	return append([]githubsource.Registration(nil), store.registrations...), nil
+}
 func (store *builderStoreFake) RegistrationSnapshot(context.Context) (githubsource.RegistrationSnapshot, error) {
 	registrations := append([]githubsource.Registration(nil), store.registrations...)
 	return githubsource.RegistrationSnapshot{
@@ -398,5 +401,21 @@ func (store *builderStoreFake) RegistrationSnapshot(context.Context) (githubsour
 	}, nil
 }
 func (*builderStoreFake) DeleteRegistration(context.Context, string, core.RunnerPool) error {
+	return nil
+}
+func (*builderStoreFake) DeleteActiveRegistration(context.Context, githubsource.Registration) error {
+	return nil
+}
+func (*builderStoreFake) DeleteOwnedRegistration(context.Context, githubsource.Registration) error {
+	return nil
+}
+func (*builderStoreFake) DeleteRegistrationState(context.Context, githubsource.Registration) error {
+	return nil
+}
+func (*builderStoreFake) DeleteRepositoryRegistrationState(
+	context.Context,
+	string,
+	transport.InstallationID,
+) error {
 	return nil
 }

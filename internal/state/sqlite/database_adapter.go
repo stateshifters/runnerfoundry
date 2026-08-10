@@ -140,7 +140,8 @@ func sqliteCapacitySchemaStatements() []string {
 		runner_group_id INTEGER NOT NULL CHECK(runner_group_id > 0),
 		scale_set_id INTEGER NOT NULL CHECK(scale_set_id > 0),
 		PRIMARY KEY(repository_url, runner_pool)
-	)`,
+		)`,
+		sqliteGitHubMemberRunnerPoolsSchema,
 		`CREATE TABLE IF NOT EXISTS runnerfoundry_github_scale_set_ownership (
 		repository_url TEXT NOT NULL CHECK(length(trim(repository_url)) > 0),
 		runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
@@ -152,8 +153,15 @@ func sqliteCapacitySchemaStatements() []string {
 	}
 }
 
-const sqliteSchemaVersion = 106
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 106"
+const sqliteGitHubMemberRunnerPoolsSchema = `CREATE TABLE IF NOT EXISTS runnerfoundry_github_member_runner_pools (
+	member_id TEXT NOT NULL REFERENCES runnerfoundry_members(member_id) ON DELETE CASCADE,
+	runner_pool TEXT NOT NULL CHECK(length(trim(runner_pool)) > 0),
+	runner_group TEXT NOT NULL CHECK(length(trim(runner_group)) > 0),
+	PRIMARY KEY(member_id, runner_pool)
+)`
+
+const sqliteSchemaVersion = 107
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 107"
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)
@@ -176,6 +184,9 @@ func validateSQLiteSchema(ctx context.Context, database *sql.DB) (bool, error) {
 	}
 	if version == 105 {
 		return false, migrateSQLite105(ctx, database)
+	}
+	if version == 106 {
+		return false, migrateSQLite106(ctx, database)
 	}
 	if version != 0 {
 		return false, fmt.Errorf("SQLite job schema version %d requires database recreation", version)
@@ -210,11 +221,38 @@ func migrateSQLite105(ctx context.Context, database *sql.DB) (resultErr error) {
 		`UPDATE runnerfoundry_processing_jobs SET runner_name = 'runnerfoundry-' || job_id`); err != nil {
 		return fmt.Errorf("backfill SQLite runner attempt identity: %w", err)
 	}
+	if _, err = transaction.ExecContext(ctx, sqliteGitHubMemberRunnerPoolsSchema); err != nil {
+		return fmt.Errorf("add SQLite GitHub Runner Pool declarations: %w", err)
+	}
 	if _, err = transaction.ExecContext(ctx, sqliteSchemaVersionSQL); err != nil {
 		return fmt.Errorf("record SQLite job schema upgrade: %w", err)
 	}
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit SQLite job schema upgrade: %w", err)
+	}
+	open = false
+	return nil
+}
+
+func migrateSQLite106(ctx context.Context, database *sql.DB) (resultErr error) {
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin SQLite GitHub declaration schema upgrade: %w", err)
+	}
+	open := true
+	defer func() {
+		if open {
+			resultErr = errors.Join(resultErr, transaction.Rollback())
+		}
+	}()
+	if _, err = transaction.ExecContext(ctx, sqliteGitHubMemberRunnerPoolsSchema); err != nil {
+		return fmt.Errorf("add SQLite GitHub Runner Pool declarations: %w", err)
+	}
+	if _, err = transaction.ExecContext(ctx, sqliteSchemaVersionSQL); err != nil {
+		return fmt.Errorf("record SQLite GitHub declaration schema upgrade: %w", err)
+	}
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit SQLite GitHub declaration schema upgrade: %w", err)
 	}
 	open = false
 	return nil

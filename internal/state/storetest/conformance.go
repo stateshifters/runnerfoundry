@@ -34,7 +34,7 @@ const (
 	RemovalMissing       Scenario = "removal/missing"
 	RemovalNotTerminal   Scenario = "removal/not-terminal"
 	Capacity             Scenario = "capacity/calculation"
-	RegistrationSnapshot Scenario = "registration/snapshot-replacement"
+	RegistrationRecords  Scenario = "registration/independent-records"
 )
 
 type Observation struct {
@@ -89,7 +89,7 @@ var conformanceExpectations = map[Scenario]Observation{
 	RecoveryClaimChanged: {RetryOutcome: core.RetryClaimChanged},
 	RemovalRemoved:       {RemovalOutcome: core.TerminalRemoved}, RemovalMissing: {RemovalOutcome: core.TerminalMissing},
 	RemovalNotTerminal: {RemovalOutcome: core.TerminalNotTerminal},
-	Capacity:           {Capacity: 2}, RegistrationSnapshot: {Registrations: ExpectedRegistrations()},
+	Capacity:           {Capacity: 2}, RegistrationRecords: {Registrations: ExpectedRegistrations()},
 }
 
 func OldestJob() core.Job {

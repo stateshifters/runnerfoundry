@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/meza/RunnerFoundry/internal/core"
 	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
 )
 
@@ -17,7 +18,7 @@ func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
 	}
 	for attempts := 0; len(source.opening) != 0 && attempts < 10_000; attempts++ {
 		runtime.Gosched()
-		if failures := source.harvestRepositoryOpenResults(context.Background(), source.term); len(failures) != 0 {
+		if failures := source.harvestRegistrationOpenResults(context.Background(), source.term); len(failures) != 0 {
 			t.Fatalf("install GitHub repository sessions: %v", errors.Join(failures...))
 		}
 	}
@@ -95,7 +96,7 @@ func awaitGitHubOpeningError(t *testing.T, source *githubSourceRuntime, wantErr 
 	t.Helper()
 	for attempts := 0; attempts < 10_000; attempts++ {
 		runtime.Gosched()
-		failures := source.harvestRepositoryOpenResults(context.Background(), source.term)
+		failures := source.harvestRegistrationOpenResults(context.Background(), source.term)
 		if len(failures) != 0 {
 			if !errors.Is(errors.Join(failures...), wantErr) {
 				t.Fatalf("repository opening error = %v, want %v", errors.Join(failures...), wantErr)
@@ -113,5 +114,20 @@ func newGitHubPollingTestSource(
 ) *githubSourceRuntime {
 	manager := &githubManagerFake{adapters: adapters}
 	return newGitHubSourceRuntime(manager, capacities, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, currentTime)
+		managerConfigForAdapters(adapters), time.Minute, currentTime)
+}
+
+func managerConfigForAdapters(adapters []*githubsource.Adapter) githubsource.ManagerConfig {
+	seen := make(map[core.RunnerPool]struct{}, len(adapters))
+	config := githubsource.ManagerConfig{RunnerPools: make([]githubsource.RunnerPoolConfig, 0, len(adapters))}
+	for _, adapter := range adapters {
+		if _, exists := seen[adapter.RunnerPool]; exists {
+			continue
+		}
+		seen[adapter.RunnerPool] = struct{}{}
+		config.RunnerPools = append(config.RunnerPools, githubsource.RunnerPoolConfig{
+			RunnerPool: adapter.RunnerPool, RunnerGroup: "default",
+		})
+	}
+	return config
 }

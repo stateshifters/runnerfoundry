@@ -27,8 +27,9 @@ type RunnerPoolConfig struct {
 }
 
 type ManagerConfig struct {
-	RunnerPools []RunnerPoolConfig
-	Prune       bool
+	RunnerPools         []RunnerPoolConfig
+	PreserveRunnerPools []core.RunnerPool
+	Prune               bool
 }
 
 type RepositoryDiscoverer interface {
@@ -41,11 +42,12 @@ type ManagedSession interface {
 }
 
 type ManagerClient struct {
-	EnsureRunnerPool  func(context.Context, string, string) (transport.Registration, error)
-	OpenSession       func(context.Context, transport.Registration, string) (ManagedSession, error)
-	GenerateBootstrap func(context.Context, transport.Registration, string) ([]byte, error)
-	CleanupRunner     func(context.Context, string) error
-	PruneRunnerPools  func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
+	EnsureRunnerPool   func(context.Context, string, string) (transport.Registration, error)
+	ResolveRunnerGroup func(context.Context, string) (transport.RunnerGroupID, error)
+	OpenSession        func(context.Context, transport.Registration, string) (ManagedSession, error)
+	GenerateBootstrap  func(context.Context, transport.Registration, string) ([]byte, error)
+	CleanupRunner      func(context.Context, string) error
+	PruneRunnerPools   func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error)
 }
 
 type managedBootstrapClient struct{ client ManagerClient }
@@ -72,6 +74,7 @@ type ManagerClientFactoryFunc func(context.Context, transport.Repository) (Manag
 func NewTransportManagerClient(client *transport.Client) ManagerClient {
 	return composeTransportManagerClient(
 		client.EnsureRunnerPool,
+		client.ResolveRunnerGroup,
 		client.OpenSession,
 		client.GenerateBootstrap,
 		client.PruneRunnerPools,
@@ -81,17 +84,19 @@ func NewTransportManagerClient(client *transport.Client) ManagerClient {
 
 func composeTransportManagerClient(
 	ensure func(context.Context, string, string) (transport.Registration, error),
+	resolveRunnerGroup func(context.Context, string) (transport.RunnerGroupID, error),
 	open func(context.Context, transport.Registration, string) (*transport.Session, error),
 	generate func(context.Context, transport.Registration, string) ([]byte, error),
 	prune func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error),
 	cleanup func(context.Context, string) error,
 ) ManagerClient {
 	return ManagerClient{
-		EnsureRunnerPool:  wrapTransportEnsure(ensure),
-		OpenSession:       wrapTransportOpen(open),
-		GenerateBootstrap: wrapTransportGenerate(generate),
-		PruneRunnerPools:  wrapTransportPrune(prune),
-		CleanupRunner:     cleanup,
+		EnsureRunnerPool:   wrapTransportEnsure(ensure),
+		ResolveRunnerGroup: resolveRunnerGroup,
+		OpenSession:        wrapTransportOpen(open),
+		GenerateBootstrap:  wrapTransportGenerate(generate),
+		PruneRunnerPools:   wrapTransportPrune(prune),
+		CleanupRunner:      cleanup,
 	}
 }
 
@@ -179,29 +184,12 @@ func (manager *Manager) Source() *Source {
 	return manager.source
 }
 
-// RegistrationSnapshot returns the currently committed registration facts.
-// The returned slices are defensive copies so callers cannot mutate durable
-// repository-owned state.
-func (manager *Manager) RegistrationSnapshot(ctx context.Context) (RegistrationSnapshot, error) {
-	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
-	if err != nil {
-		return RegistrationSnapshot{}, fmt.Errorf("load GitHub registration snapshot: %w", err)
-	}
-	canonical, err := canonicalRegistrationSnapshot(snapshot)
-	if err != nil {
-		return RegistrationSnapshot{}, fmt.Errorf("validate GitHub registration snapshot: %w", err)
-	}
-	return canonical, nil
-}
-
 // Reconcile discovers repositories, ensures every configured Runner Pool,
-// optionally prunes absent owned scale sets, and atomically persists the
-// resulting registration records. It works on at most four repositories at a
-// time while preserving discovery order in the committed snapshot and errors.
-// A successful return is the exact snapshot passed to the repository boundary;
-// failures return an empty snapshot.
+// optionally prunes absent owned scale sets, and converges each successful
+// registration independently. It works on at most four repositories at a time.
+// An inconclusive pass never deletes registrations it could not disprove.
 func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) (
-	committed RegistrationSnapshot,
+	committed []Registration,
 	resultErr error,
 ) {
 	reconciliationStarted := manager.observer.currentTime()
@@ -217,53 +205,101 @@ func (manager *Manager) Reconcile(ctx context.Context, config ManagerConfig) (
 			Duration: manager.observer.currentTime().Sub(reconciliationStarted)})
 	}()
 	if err := validateManagerConfig(config); err != nil {
-		return RegistrationSnapshot{}, err
+		return nil, err
 	}
 	return manager.reconcileConfigured(ctx, config)
 }
 
-func (manager *Manager) reconcileConfigured(ctx context.Context, config ManagerConfig) (RegistrationSnapshot, error) {
-	previous, err := manager.loadRegistrationSnapshot(ctx)
+func (manager *Manager) reconcileConfigured(ctx context.Context, config ManagerConfig) ([]Registration, error) {
+	previous, err := manager.ActiveRegistrations(ctx)
 	if err != nil {
-		return RegistrationSnapshot{}, err
+		return nil, err
 	}
 	result, err := manager.discoverRepositories(ctx)
 	if err != nil {
-		return RegistrationSnapshot{}, err
+		return nil, err
 	}
 	if failureErr := discoveryFailures(result.InstallationFailures); failureErr != nil {
-		return RegistrationSnapshot{}, failureErr
+		return nil, failureErr
 	}
 	active, err := manager.ensureRegistrations(ctx, result.Repositories, config)
 	if err != nil {
-		return RegistrationSnapshot{}, err
+		return nil, err
 	}
-	owned := mergeOwnedRegistrations(previous.Owned, active)
+	canonical, err := canonicalRegistrationSnapshot(RegistrationSnapshot{Active: active})
+	if err != nil {
+		return nil, err
+	}
+	active = canonical.Active
+	active = retainEstablishedRegistrations(previous, active, result.Repositories, config)
+	if err = manager.deleteInactiveRegistrations(ctx, previous, active); err != nil {
+		return nil, err
+	}
 	if config.Prune {
-		owned, err = manager.pruneOwnedRegistrations(ctx, result.Repositories, active, owned)
-		if err != nil {
-			return RegistrationSnapshot{}, err
+		if err = manager.pruneReconciledRegistrations(ctx, result.Repositories, active); err != nil {
+			return active, err
 		}
 	}
-	return manager.persistRegistrationSnapshot(ctx, active, owned)
+	return active, nil
 }
 
-func (manager *Manager) loadRegistrationSnapshot(ctx context.Context) (RegistrationSnapshot, error) {
-	started := manager.observer.currentTime()
-	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
-		Stage: "load_registration_snapshot", Outcome: "started"})
-	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
-	outcome := "completed"
-	if err != nil {
-		outcome = "failed"
+func retainEstablishedRegistrations(
+	previous, ensured []Registration,
+	repositories []transport.Repository,
+	config ManagerConfig,
+) []Registration {
+	active := append([]Registration(nil), ensured...)
+	activeKeys := activeRegistrationKeys(active)
+	discovered := discoveredRepositoryURLs(repositories)
+	preserved := runnerPoolSet(config.PreserveRunnerPools)
+	for _, record := range previous {
+		key := activeRegistrationIdentity{repositoryURL: record.RepositoryURL, runnerPool: record.RunnerPool}
+		if !retainEstablishedRegistration(record, key, activeKeys, discovered, preserved, config.Prune) {
+			continue
+		}
+		active = append(active, record)
+		activeKeys[key] = struct{}{}
 	}
-	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
-		Stage: "load_registration_snapshot", Outcome: outcome, Count: len(snapshot.Active), Err: err,
-		Duration: manager.observer.currentTime().Sub(started)})
-	if err != nil {
-		return RegistrationSnapshot{}, fmt.Errorf("load owned GitHub registrations: %w", err)
+	sort.Slice(active, func(first, second int) bool { return lessActiveRegistration(active[first], active[second]) })
+	return active
+}
+
+func activeRegistrationKeys(records []Registration) map[activeRegistrationIdentity]struct{} {
+	keys := make(map[activeRegistrationIdentity]struct{}, len(records))
+	for _, record := range records {
+		keys[activeRegistrationIdentity{repositoryURL: record.RepositoryURL, runnerPool: record.RunnerPool}] = struct{}{}
 	}
-	return snapshot, nil
+	return keys
+}
+
+func discoveredRepositoryURLs(repositories []transport.Repository) map[string]struct{} {
+	urls := make(map[string]struct{}, len(repositories))
+	for _, repository := range repositories {
+		urls[repository.URL] = struct{}{}
+	}
+	return urls
+}
+
+func runnerPoolSet(runnerPools []core.RunnerPool) map[core.RunnerPool]struct{} {
+	set := make(map[core.RunnerPool]struct{}, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		set[runnerPool] = struct{}{}
+	}
+	return set
+}
+
+func retainEstablishedRegistration(
+	record Registration,
+	key activeRegistrationIdentity,
+	activeKeys map[activeRegistrationIdentity]struct{},
+	discovered map[string]struct{},
+	preserved map[core.RunnerPool]struct{},
+	prune bool,
+) bool {
+	_, repositoryExists := discovered[record.RepositoryURL]
+	_, alreadyActive := activeKeys[key]
+	_, preservePool := preserved[record.RunnerPool]
+	return repositoryExists && !alreadyActive && (!prune || preservePool)
 }
 
 func (manager *Manager) discoverRepositories(ctx context.Context) (transport.DiscoveryResult, error) {
@@ -290,6 +326,9 @@ func (manager *Manager) pruneOwnedRegistrations(ctx context.Context, repositorie
 	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
 		Stage: "prune_registrations", Outcome: "started", Total: len(owned)})
 	pruned, err := manager.pruneRegistrations(ctx, repositories, active, owned)
+	if err == nil {
+		err = manager.deletePrunedOwnership(ctx, owned, pruned)
+	}
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
@@ -298,32 +337,6 @@ func (manager *Manager) pruneOwnedRegistrations(ctx context.Context, repositorie
 		Stage: "prune_registrations", Outcome: outcome, Count: len(pruned), Err: err,
 		Duration: manager.observer.currentTime().Sub(started)})
 	return pruned, err
-}
-
-func (manager *Manager) persistRegistrationSnapshot(
-	ctx context.Context,
-	active []Registration,
-	owned []Registration,
-) (RegistrationSnapshot, error) {
-	started := manager.observer.currentTime()
-	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
-		Stage: "persist_registrations", Outcome: "started", Total: len(active)})
-	snapshot, err := canonicalRegistrationSnapshot(RegistrationSnapshot{Active: active, Owned: owned})
-	if err != nil {
-		return RegistrationSnapshot{}, err
-	}
-	err = manager.replaceRegistrations(ctx, snapshot)
-	outcome := "completed"
-	if err != nil {
-		outcome = "failed"
-	}
-	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
-		Stage: "persist_registrations", Outcome: outcome, Count: len(active), Err: err,
-		Duration: manager.observer.currentTime().Sub(started)})
-	if err != nil {
-		return RegistrationSnapshot{}, fmt.Errorf("persist GitHub registrations: %w", err)
-	}
-	return snapshot, nil
 }
 
 func (manager *Manager) ensureRegistrations(
@@ -462,6 +475,13 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 	manager.reportRunnerPoolActivity(repository, runnerPool.RunnerPool, transport.Registration{},
 		current, total, "started", started, nil)
 	registration, err := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
+	record := Registration{RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
+		InstallationID: repository.InstallationID}
+	if err == nil {
+		record.RunnerGroupID = registration.RunnerGroupID
+		record.ScaleSetID = registration.ID
+		err = manager.registrations.UpsertRegistration(ctx, record)
+	}
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"
@@ -471,8 +491,7 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 	if err != nil {
 		return Registration{}, fmt.Errorf("ensure Runner Pool %q for repository %q: %w", runnerPool.RunnerPool, repository.URL, err)
 	}
-	return Registration{RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
-		InstallationID: repository.InstallationID, RunnerGroupID: registration.RunnerGroupID, ScaleSetID: registration.ID}, nil
+	return record, nil
 }
 
 func (manager *Manager) reportRunnerPoolActivity(repository transport.Repository, runnerPool core.RunnerPool,
@@ -487,13 +506,6 @@ func (manager *Manager) reportRunnerPoolActivity(repository transport.Repository
 		InstallationID: int64(repository.InstallationID), RunnerGroupID: int64(registration.RunnerGroupID),
 		ScaleSetID: int64(registration.ID),
 		Current:    current, Total: total, Duration: duration, Err: err})
-}
-
-func (manager *Manager) replaceRegistrations(ctx context.Context, snapshot RegistrationSnapshot) error {
-	if err := manager.registrations.ReplaceRegistrationSnapshot(ctx, snapshot); err != nil {
-		return fmt.Errorf("replace GitHub registration snapshot: %w", err)
-	}
-	return nil
 }
 
 func validateManagerConfig(config ManagerConfig) error {
@@ -521,67 +533,4 @@ func discoveryFailures(failures map[transport.InstallationID]error) error {
 		joined = errors.Join(joined, fmt.Errorf("discover GitHub installation %d: %w", installationID, failures[installationID]))
 	}
 	return joined
-}
-
-// RefreshMembers replaces bootstrap routes from the persisted registration
-// snapshot. No leader message session is needed on ordinary members.
-func (manager *Manager) RefreshMembers(ctx context.Context) (resultErr error) {
-	started := manager.observer.currentTime()
-	routeCount := 0
-	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_routes",
-		Stage: "replace_routes", Outcome: "started"})
-	defer func() {
-		outcome := "completed"
-		if resultErr != nil {
-			outcome = "failed"
-		}
-		manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_routes",
-			Stage: "replace_routes", Outcome: outcome, Count: routeCount,
-			Duration: manager.observer.currentTime().Sub(started), Err: resultErr})
-	}()
-	snapshot, err := manager.registrations.RegistrationSnapshot(ctx)
-	if err != nil {
-		return fmt.Errorf("list GitHub registrations: %w", err)
-	}
-	routes, err := manager.buildMemberRoutes(ctx, snapshot.Active)
-	if err != nil {
-		return err
-	}
-	if err := manager.source.ReplaceRoutes(routes); err != nil {
-		return fmt.Errorf("replace GitHub member routes: %w", err)
-	}
-	routeCount = len(routes)
-	return nil
-}
-
-func (manager *Manager) buildMemberRoutes(ctx context.Context, registrations []Registration) ([]MemberRoute, error) {
-	routes := make([]MemberRoute, 0, len(registrations))
-	for index, record := range registrations {
-		started := manager.observer.currentTime()
-		manager.reportRouteActivity(record, index+1, len(registrations), "started", started, nil)
-		repository := repositoryFromRegistration(record)
-		client, clientErr := manager.factory(ctx, repository)
-		if clientErr != nil {
-			manager.reportRouteActivity(record, index+1, len(registrations), "failed", started, clientErr)
-			return nil, fmt.Errorf("create GitHub member client for repository %q: %w", record.RepositoryURL, clientErr)
-		}
-		routes = append(routes, MemberRoute{
-			Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
-			Client: managedBootstrapClient{client: client}, Registration: transportRegistration(record),
-		})
-		manager.reportRouteActivity(record, index+1, len(registrations), "completed", started, nil)
-	}
-	return routes, nil
-}
-
-func (manager *Manager) reportRouteActivity(record Registration, current, total int, outcome string,
-	started time.Time, err error,
-) {
-	duration := time.Duration(0)
-	if outcome != "started" {
-		duration = manager.observer.currentTime().Sub(started)
-	}
-	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_routes",
-		Stage: "configure_route", Outcome: outcome, Repository: record.RepositoryURL, RunnerPool: record.RunnerPool,
-		Current: current, Total: total, Duration: duration, Err: err})
 }

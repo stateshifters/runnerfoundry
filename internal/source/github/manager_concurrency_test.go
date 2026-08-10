@@ -20,7 +20,7 @@ func TestManagerReconcileBoundsRepositoryConcurrencyAndPreservesDiscoveryOrder(t
 	if reconciled.err != nil {
 		t.Fatalf("Reconcile() error = %v", reconciled.err)
 	}
-	assertRegistrationDiscoveryOrder(t, reconciled.snapshot.Active, repositories)
+	assertRegistrationDiscoveryOrder(t, reconciled.snapshot, repositories)
 }
 
 func newBlockingReconcileManager(
@@ -116,6 +116,6 @@ func TestManagerReconcileReturnsErrorsInDiscoveryOrder(t *testing.T) {
 }
 
 type reconcileResult struct {
-	snapshot githubsource.RegistrationSnapshot
+	snapshot []githubsource.Registration
 	err      error
 }

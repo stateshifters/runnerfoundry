@@ -38,6 +38,31 @@ func TestEnsureRunnerPoolCreatesMissingScaleSetWithRequiredSettings(t *testing.T
 	}
 }
 
+func TestResolveRunnerGroupReturnsConfiguredGroupID(t *testing.T) {
+	t.Parallel()
+
+	api := &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}}
+	client := Client{registrations: api}
+
+	runnerGroupID, err := client.ResolveRunnerGroup(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("ResolveRunnerGroup() error = %v", err)
+	}
+	if runnerGroupID != 17 {
+		t.Fatalf("ResolveRunnerGroup() = %d, want 17", runnerGroupID)
+	}
+}
+
+func TestResolveRunnerGroupRequiresRegistrationAPI(t *testing.T) {
+	t.Parallel()
+
+	for _, client := range []*Client{nil, {}} {
+		if _, err := client.ResolveRunnerGroup(context.Background(), "default"); err == nil {
+			t.Fatal("ResolveRunnerGroup() accepted a missing registration API")
+		}
+	}
+}
+
 func TestEnsureRunnerPoolReportsBoundaryFailures(t *testing.T) {
 	t.Parallel()
 

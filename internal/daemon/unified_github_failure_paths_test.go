@@ -12,28 +12,27 @@ import (
 )
 
 func TestGitHubSourceRuntimeCoversInactiveCleanupPaths(t *testing.T) {
-	manager := branchGitHubManager()
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(branchGitHubManager(), &capacityAggregatorFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	if err := source.Poll(context.Background(), time.Time{}); err != nil {
 		t.Fatalf("inactive Poll() error = %v", err)
 	}
 	source.reportSessionActivationProgress()
-	if err := source.stopRepositoryGenerationPolls(context.Background(), nil); err != nil {
-		t.Fatalf("stop nil generation: %v", err)
+	if err := source.stopRegistrationSessionPoll(context.Background(), nil); err != nil {
+		t.Fatalf("stop nil session: %v", err)
 	}
-	if err := source.closeRepositoryGeneration(context.Background(), nil, "close nil"); err != nil {
-		t.Fatalf("close nil generation: %v", err)
+	if err := source.closeRegistrationSession(context.Background(), nil, "close nil"); err != nil {
+		t.Fatalf("close nil session: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeRetriesGenerationRetirement(t *testing.T) {
+func TestGitHubSourceRuntimeRetriesSessionRetirement(t *testing.T) {
 	manager := branchGitHubManager()
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	generation := openBranchGeneration(t, manager)
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	session := openBranchSession(t, manager)
 	manager.setCloseError(errors.New("close failed"))
-	if err := source.closeRepositoryGeneration(context.Background(), generation, "close generation"); err == nil {
+	if err := source.closeRegistrationSession(context.Background(), session, "close session"); err == nil {
 		t.Fatal("close failure was not reported")
 	}
 	if err := source.CloseLeader(context.Background()); err == nil {
@@ -44,7 +43,7 @@ func TestGitHubSourceRuntimeRetriesGenerationRetirement(t *testing.T) {
 		t.Fatalf("retirement retry: %v", err)
 	}
 
-	retrying := openBranchGeneration(t, manager)
+	retrying := openBranchSession(t, manager)
 	manager.setCloseError(errors.New("poll retirement failed"))
 	source.leaderInstalled = true
 	source.term = branchLeadershipTerm(1)
@@ -54,115 +53,253 @@ func TestGitHubSourceRuntimeRetriesGenerationRetirement(t *testing.T) {
 		t.Fatal("active retirement retry failure was not reported")
 	}
 	manager.setCloseError(nil)
-	if err := source.retryRetiringGenerations(context.Background()); err != nil {
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
 		t.Fatalf("finish active retirement retry: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeRejectsStaleAndInvalidOpenResults(t *testing.T) {
+func TestGitHubSourceRuntimeRejectsStaleOpenResult(t *testing.T) {
 	manager := branchGitHubManager()
+	record := manager.snapshotFacts().Active[0]
+	session := openBranchSession(t, manager)
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	records := manager.snapshotFacts().Active
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(2)
 	source.term = term
 	source.leaderInstalled = true
-	source.desired[records[0].RepositoryURL] = records
-
-	stale := githubRepositoryOpenResult{epoch: 1, repository: records[0].RepositoryURL,
-		records: records, generation: openBranchGeneration(t, manager)}
-	if err := source.installRepositoryGeneration(context.Background(), term, stale); err != nil {
-		t.Fatalf("discard stale generation: %v", err)
+	source.desired[registrationKey(record)] = record
+	stale := githubRegistrationOpenResult{epoch: 1, key: registrationKey(record), requested: record, session: session}
+	if err := source.installRegistrationSession(context.Background(), term, stale); err != nil {
+		t.Fatalf("discard stale session: %v", err)
 	}
-	invalid := githubRepositoryOpenResult{epoch: 2, repository: records[0].RepositoryURL, records: records}
-	if err := source.installRepositoryGeneration(context.Background(), term, invalid); err == nil {
-		t.Fatal("nil generation was accepted")
+}
+
+func TestGitHubSourceRuntimeRejectsChangedRouteIdentityAndRetainsFailedCleanup(t *testing.T) {
+	manager := branchGitHubManager()
+	session := openBranchSession(t, manager)
+	requested := session.Registration()
+	requested.RunnerPool = "windows"
+	key := registrationKey(requested)
+	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	term := branchLeadershipTerm(1)
+	source.term = term
+	source.leaderInstalled = true
+	source.desired[key] = requested
+	manager.setCloseError(errors.New("close invalid session"))
+
+	err := source.installRegistrationSession(context.Background(), term, githubRegistrationOpenResult{
+		epoch: 1, key: key, requested: requested, session: session,
+	})
+	if err == nil || len(source.retiring) != 1 || len(source.sessions) != 0 {
+		t.Fatalf("changed route result = error %v, retiring %d, installed %d",
+			err, len(source.retiring), len(source.sessions))
+	}
+	manager.setCloseError(nil)
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
+		t.Fatalf("retry invalid session cleanup: %v", err)
 	}
 }
 
 func TestGitHubSourceRuntimeRejectsReplacementWhenOldPollCannotStop(t *testing.T) {
 	manager := branchGitHubManager()
-	records := manager.snapshotFacts().Active
-	previous := openBranchGeneration(t, manager)
-	replacement := openBranchGeneration(t, manager)
+	record := manager.snapshotFacts().Active[0]
+	previous := openBranchSession(t, manager)
+	replacement := openBranchSession(t, manager)
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	source.term = term
 	source.leaderInstalled = true
-	source.desired[records[0].RepositoryURL] = records
-	source.generations[records[0].RepositoryURL] = previous
-	adapter := previous.Adapters()[0]
-	source.polls[adapter] = &githubPollAttempt{cancel: func() {}, result: make(chan githubPollResult)}
+	key := registrationKey(record)
+	source.desired[key] = record
+	source.sessions[key] = previous
+	source.polls[previous.Adapter()] = &githubPollAttempt{cancel: func() {}, result: make(chan githubPollResult)}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	result := githubRepositoryOpenResult{epoch: 1, repository: records[0].RepositoryURL,
-		records: records, generation: replacement}
-	if err := source.installRepositoryGeneration(canceled, term, result); !errors.Is(err, context.Canceled) {
+	result := githubRegistrationOpenResult{epoch: 1, key: key, requested: record, session: replacement}
+	if err := source.installRegistrationSession(canceled, term, result); !errors.Is(err, context.Canceled) {
 		t.Fatalf("install replacement error = %v", err)
 	}
-	term.cancelOperations()
-	if err := source.waitForTerm(context.Background(), term); err != nil {
-		t.Fatalf("wait for retry operation: %v", err)
-	}
+	delete(source.polls, previous.Adapter())
 	if err := previous.Close(context.Background()); err != nil {
-		t.Fatalf("close previous generation: %v", err)
+		t.Fatalf("close previous session: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeRetiresOnlyRemovedRepositories(t *testing.T) {
+func TestGitHubSourceRuntimeRetiresOnlyRemovedRegistration(t *testing.T) {
 	manager := branchGitHubManager()
-	records := manager.snapshotFacts().Active
-	retained := openBranchGeneration(t, manager)
-	removed := openBranchGeneration(t, manager)
+	record := manager.snapshotFacts().Active[0]
+	retained := openBranchSession(t, manager)
+	removed := openBranchSession(t, manager)
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	source.desired["retained"] = records
-	source.generations["retained"] = retained
-	source.generations["removed"] = removed
-	removedAdapter := removed.Adapters()[0]
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	retainedKey := githubRegistrationKey{repository: "retained", runnerPool: record.RunnerPool}
+	removedKey := githubRegistrationKey{repository: "removed", runnerPool: record.RunnerPool}
+	source.desired[retainedKey] = record
+	source.sessions[retainedKey] = retained
+	source.sessions[removedKey] = removed
 	completed := make(chan githubPollResult, 1)
 	completed <- githubPollResult{}
-	source.polls[removedAdapter] = &githubPollAttempt{cancel: func() {}, result: completed}
-	manager.setCloseError(errors.New("close removed generation"))
-	if resultErrors := source.retireRemovedRepositories(context.Background()); len(resultErrors) != 1 {
+	source.polls[removed.Adapter()] = &githubPollAttempt{cancel: func() {}, result: completed}
+	manager.setCloseError(errors.New("close removed session"))
+	if resultErrors := source.retireRemovedRegistrationSessions(context.Background()); len(resultErrors) != 0 {
 		t.Fatalf("retirement errors = %v", resultErrors)
 	}
+	if err := source.retryRetiringSessions(context.Background()); err == nil {
+		t.Fatal("retirement retry succeeded despite close failure")
+	}
 	manager.setCloseError(nil)
-	if err := source.retryRetiringGenerations(context.Background()); err != nil {
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
 		t.Fatalf("retry retirement: %v", err)
 	}
 	if err := retained.Close(context.Background()); err != nil {
-		t.Fatalf("close retained generation: %v", err)
+		t.Fatalf("close retained session: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeKeepsRemovedRepositoryWhenPollCannotStop(t *testing.T) {
+func TestGitHubSourceRuntimeBoundsSessionRetirementWork(t *testing.T) {
 	manager := branchGitHubManager()
-	generation := openBranchGeneration(t, manager)
+	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	for range githubSessionRetirementLimit + 2 {
+		source.retiring = append(source.retiring, openBranchSession(t, manager))
+	}
+	manager.setCloseError(errors.New("close failed"))
+	if err := source.retryRetiringSessions(context.Background()); err == nil {
+		t.Fatal("retirement retry succeeded despite close failures")
+	}
+	manager.mu.Lock()
+	closeCalls := manager.closeCalls
+	manager.mu.Unlock()
+	if closeCalls != githubSessionRetirementLimit {
+		t.Fatalf("close calls = %d, want bounded %d", closeCalls, githubSessionRetirementLimit)
+	}
+	if len(source.retiring) != githubSessionRetirementLimit+2 {
+		t.Fatalf("retained retirement work = %d, want 6", len(source.retiring))
+	}
+}
+
+func TestGitHubSourceRuntimeReportsDeclarationPublicationFailure(t *testing.T) {
+	wantErr := errors.New("declaration failure")
+	manager, source := newDeclarationTestSource()
+	manager.publishErr = wantErr
+	if err := source.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("RefreshMembers() error = %v, want publication failure", err)
+	}
+}
+
+func TestGitHubSourceRuntimePreservesLeadershipWhenDeclarationReadFails(t *testing.T) {
+	wantErr := errors.New("declaration failure")
+	manager, source := newDeclarationTestSource()
+	manager.readErr = wantErr
+	openDeclarationTestLeader(t, source)
+	if err := source.Poll(context.Background(), time.Time{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Poll() error = %v, want declaration read failure", err)
+	}
+	if manager.base.reconciles != 0 {
+		t.Fatalf("reconciliations = %d, want zero", manager.base.reconciles)
+	}
+	closeDeclarationTestLeader(t, source)
+}
+
+func TestGitHubSourceRuntimeFallsBackWhenDeclarationPersistenceIsUnavailable(t *testing.T) {
+	manager, source := newDeclarationTestSource()
+	manager.readErr = githubsource.ErrRunnerPoolDeclarationPersistenceUnavailable
+	openDeclarationTestLeader(t, source)
+	if err := source.Poll(context.Background(), time.Time{}); err != nil {
+		t.Fatalf("Poll() fallback error = %v", err)
+	}
+	awaitGitHubDiscovery(t, source)
+	closeDeclarationTestLeader(t, source)
+}
+
+func TestGitHubSourceRuntimeReportsConflictsWithoutBlockingOtherDeclarations(t *testing.T) {
+	manager, source := newDeclarationTestSource()
+	manager.snapshot = githubsource.RunnerPoolDeclarationSnapshot{
+		RunnerPools:           []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}},
+		ConflictedRunnerPools: []core.RunnerPool{"windows"},
+	}
+	openDeclarationTestLeader(t, source)
+	if err := source.Poll(context.Background(), time.Time{}); err == nil {
+		t.Fatal("Poll() did not report conflicting live declarations")
+	}
+	awaitGitHubDiscovery(t, source)
+	closeDeclarationTestLeader(t, source)
+}
+
+func newDeclarationTestSource() (*declarationRuntimeFake, *githubSourceRuntime) {
+	base := &githubManagerFake{}
+	manager := &declarationRuntimeFake{githubManagerRuntime: base, base: base}
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	source.generations["removed"] = generation
-	adapter := generation.Adapters()[0]
-	source.polls[adapter] = &githubPollAttempt{cancel: func() {}, result: make(chan githubPollResult)}
+	return manager, source
+}
+
+func openDeclarationTestLeader(t *testing.T, source *githubSourceRuntime) {
+	t.Helper()
+	if err := source.OpenLeader(context.Background()); err != nil {
+		t.Fatalf("OpenLeader() error = %v", err)
+	}
+}
+
+func closeDeclarationTestLeader(t *testing.T, source *githubSourceRuntime) {
+	t.Helper()
+	if err := source.CloseLeader(context.Background()); err != nil {
+		t.Fatalf("CloseLeader() error = %v", err)
+	}
+}
+
+type declarationRuntimeFake struct {
+	githubManagerRuntime
+	base       *githubManagerFake
+	snapshot   githubsource.RunnerPoolDeclarationSnapshot
+	publishErr error
+	readErr    error
+}
+
+func (*declarationRuntimeFake) UsesSharedRunnerPoolDeclarations() bool { return true }
+
+func (fake *declarationRuntimeFake) PublishRunnerPoolDeclarations(
+	_ context.Context,
+	_ core.MemberID,
+	_ githubsource.ManagerConfig,
+) error {
+	return fake.publishErr
+}
+
+func (fake *declarationRuntimeFake) ClusterRunnerPools(
+	_ context.Context,
+	_ time.Time,
+) (githubsource.RunnerPoolDeclarationSnapshot, error) {
+	return fake.snapshot, fake.readErr
+}
+
+func TestGitHubSourceRuntimeRetainsRemovedSessionWhenPollCannotStop(t *testing.T) {
+	manager := branchGitHubManager()
+	session := openBranchSession(t, manager)
+	key := registrationKey(session.Registration())
+	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	source.sessions[key] = session
+	source.polls[session.Adapter()] = &githubPollAttempt{cancel: func() {}, result: make(chan githubPollResult)}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if resultErrors := source.retireRemovedRepositories(canceled); len(resultErrors) != 1 {
-		t.Fatalf("retirement errors = %v", resultErrors)
+
+	resultErrors := source.retireRemovedRegistrationSessions(canceled)
+	if len(resultErrors) != 1 || source.sessions[key] != session {
+		t.Fatalf("retirement errors = %v, retained session = %t", resultErrors, source.sessions[key] == session)
 	}
-	if source.generations["removed"] == nil {
-		t.Fatal("removed generation was discarded while its poll remained active")
-	}
-	delete(source.polls, adapter)
-	if err := generation.Close(context.Background()); err != nil {
-		t.Fatalf("close removed generation: %v", err)
+	delete(source.polls, session.Adapter())
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close retained removed session: %v", err)
 	}
 }
 
 func TestGitHubSourceRuntimeCoversStaleDiscoveryAndCanceledDrain(t *testing.T) {
 	manager := branchGitHubManager()
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(2)
 	source.term = term
 	source.leaderInstalled = true
@@ -170,64 +307,68 @@ func TestGitHubSourceRuntimeCoversStaleDiscoveryAndCanceledDrain(t *testing.T) {
 	if resultErrors := source.harvestDiscovery(context.Background(), term); len(resultErrors) != 0 {
 		t.Fatalf("stale discovery errors = %v", resultErrors)
 	}
-
-	generation := openBranchGeneration(t, manager)
+	session := openBranchSession(t, manager)
 	manager.setCloseError(errors.New("drain close failed"))
-	term.openResults <- githubRepositoryOpenResult{generation: generation}
+	term.openResults <- githubRegistrationOpenResult{session: session}
 	if err := source.drainCancelledTerm(context.Background(), term); err == nil {
 		t.Fatal("canceled term drain failure was not reported")
 	}
 	manager.setCloseError(nil)
-	if err := source.retryRetiringGenerations(context.Background()); err != nil {
-		t.Fatalf("retry drained generation: %v", err)
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
+		t.Fatalf("retry drained session: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeAbandonsGenerationCanceledDuringResultDelivery(t *testing.T) {
+func TestGitHubSourceRuntimeAbandonsSessionCanceledAfterOpening(t *testing.T) {
 	manager := branchGitHubManager()
-	generation := openBranchGeneration(t, manager)
-	staticManager := &staticGenerationManager{githubManagerRuntime: manager, generation: generation}
+	record := manager.snapshotFacts().Active[0]
+	session := openBranchSession(t, manager)
+	staticManager := &staticRegistrationSessionManager{githubManagerRuntime: manager, session: session}
 	source := newGitHubSourceRuntime(staticManager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+	term := branchLeadershipTerm(1)
+	term.background.Add(1)
+	configured := source.config.RunnerPools[0]
+	source.openRegistrationSession(newCancelAfterFirstErrContext(true), term, registrationKey(record), record, configured)
+	source.collectAbandonedSessions()
+	if len(source.retiring) != 1 {
+		t.Fatalf("abandoned sessions = %d, want 1", len(source.retiring))
+	}
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
+		t.Fatalf("retire abandoned session: %v", err)
+	}
+}
+
+func TestGitHubSourceRuntimeAbandonsSessionCanceledDuringResultDelivery(t *testing.T) {
+	manager := branchGitHubManager()
+	record := manager.snapshotFacts().Active[0]
+	session := openBranchSession(t, manager)
+	staticManager := &staticRegistrationSessionManager{githubManagerRuntime: manager, session: session}
+	source := newGitHubSourceRuntime(staticManager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	for range cap(term.openResults) {
-		term.openResults <- githubRepositoryOpenResult{}
+		term.openResults <- githubRegistrationOpenResult{}
 	}
-	ctx := newCancelAfterFirstErrContext(false)
 	term.background.Add(1)
-	source.openRepositoryGeneration(ctx, term, "repository", manager.snapshotFacts().Active)
-	source.collectAbandonedGenerations()
+	configured := source.config.RunnerPools[0]
+
+	source.openRegistrationSession(newCancelAfterFirstErrContext(false), term,
+		registrationKey(record), record, configured)
+	source.collectAbandonedSessions()
 	if len(source.retiring) != 1 {
-		t.Fatalf("abandoned generations = %d, want 1", len(source.retiring))
+		t.Fatalf("abandoned sessions = %d, want 1", len(source.retiring))
 	}
-	if err := source.retryRetiringGenerations(context.Background()); err != nil {
-		t.Fatalf("retire abandoned generation: %v", err)
+	if err := source.retryRetiringSessions(context.Background()); err != nil {
+		t.Fatalf("retire abandoned session: %v", err)
 	}
 }
 
-func TestGitHubSourceRuntimeAbandonsGenerationCanceledAfterOpening(t *testing.T) {
+func TestGitHubSourceRuntimeStopsOpeningWhileWaitingForSlot(t *testing.T) {
 	manager := branchGitHubManager()
-	generation := openBranchGeneration(t, manager)
-	staticManager := &staticGenerationManager{githubManagerRuntime: manager, generation: generation}
-	source := newGitHubSourceRuntime(staticManager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	term := branchLeadershipTerm(1)
-	term.background.Add(1)
-	source.openRepositoryGeneration(newCancelAfterFirstErrContext(true), term, "repository",
-		manager.snapshotFacts().Active)
-	source.collectAbandonedGenerations()
-	if len(source.retiring) != 1 {
-		t.Fatalf("abandoned generations = %d, want 1", len(source.retiring))
-	}
-	if err := source.retryRetiringGenerations(context.Background()); err != nil {
-		t.Fatalf("retire abandoned generation: %v", err)
-	}
-}
-
-func TestGitHubSourceRuntimeStopsOpeningWhileWaitingForRepositorySlot(t *testing.T) {
-	manager := branchGitHubManager()
+	record := manager.snapshotFacts().Active[0]
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	for range cap(term.openSlots) {
 		term.openSlots <- struct{}{}
@@ -235,7 +376,8 @@ func TestGitHubSourceRuntimeStopsOpeningWhileWaitingForRepositorySlot(t *testing
 	term.background.Add(1)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	source.openRepositoryGeneration(canceled, term, "repository", manager.snapshotFacts().Active)
+	configured := source.config.RunnerPools[0]
+	source.openRegistrationSession(canceled, term, registrationKey(record), record, configured)
 	manager.mu.Lock()
 	opens := manager.opens
 	manager.mu.Unlock()
@@ -252,34 +394,35 @@ func branchGitHubManager() *githubManagerFake {
 }
 
 func branchLeadershipTerm(epoch uint64) *githubLeadershipTerm {
-	return &githubLeadershipTerm{epoch: epoch, openResults: make(chan githubRepositoryOpenResult, 4),
+	return &githubLeadershipTerm{epoch: epoch, openResults: make(chan githubRegistrationOpenResult, 4),
 		discoveryResult: make(chan githubDiscoveryResult, 1), openSlots: make(chan struct{}, 4),
 		operations: make(map[uint64]context.CancelFunc)}
 }
 
-func openBranchGeneration(t *testing.T, manager *githubManagerFake) *githubsource.RepositorySessionGeneration {
+func openBranchSession(t *testing.T, manager *githubManagerFake) *githubsource.RegistrationSession {
 	t.Helper()
-	generation, err := manager.OpenRepositorySessions(
-		context.Background(), manager.snapshotFacts().Active, "member", eventHandlerFake{},
-	)
+	record := manager.snapshotFacts().Active[0]
+	configured := managerConfigForAdapters(manager.adapters).RunnerPools[0]
+	session, err := manager.OpenRegistrationSession(context.Background(), record, configured, "member", eventHandlerFake{})
 	if err != nil {
-		t.Fatalf("open test repository generation: %v", err)
+		t.Fatalf("open test registration session: %v", err)
 	}
-	return generation
+	return session
 }
 
-type staticGenerationManager struct {
+type staticRegistrationSessionManager struct {
 	githubManagerRuntime
-	generation *githubsource.RepositorySessionGeneration
+	session *githubsource.RegistrationSession
 }
 
-func (manager *staticGenerationManager) OpenRepositorySessions(
+func (manager *staticRegistrationSessionManager) OpenRegistrationSession(
 	context.Context,
-	[]githubsource.Registration,
+	githubsource.Registration,
+	githubsource.RunnerPoolConfig,
 	string,
 	githubsource.EventHandler,
-) (*githubsource.RepositorySessionGeneration, error) {
-	return manager.generation, nil
+) (*githubsource.RegistrationSession, error) {
+	return manager.session, nil
 }
 
 type cancelAfterFirstErrContext struct {

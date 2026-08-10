@@ -5,7 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/meza/RunnerFoundry/internal/core"
@@ -38,8 +40,8 @@ func TestManagerPreservesSnapshotAfterPartialPruneFailureAndRetries(t *testing.T
 	if _, err = fixture.manager.Reconcile(context.Background(), githubsource.ManagerConfig{Prune: true}); err != nil {
 		t.Fatalf("retry prune: %v", err)
 	}
-	if fixture.repository.replaceCalls != 1 || len(fixture.repository.snapshot.Owned) != 0 {
-		t.Fatalf("retry snapshot = %#v replace calls=%d", fixture.repository.snapshot, fixture.repository.replaceCalls)
+	if len(fixture.repository.snapshot.Owned) != 0 {
+		t.Fatalf("retry snapshot = %#v", fixture.repository.snapshot)
 	}
 }
 
@@ -79,8 +81,9 @@ func assertPartialPruneFailure(t *testing.T, fixture partialPruneRetryFixture, e
 	if !errors.Is(err, fixture.wantErr) {
 		t.Fatalf("first reconcile error = %v, want %v", err, fixture.wantErr)
 	}
-	if fixture.repository.replaceCalls != 0 || !reflect.DeepEqual(fixture.repository.snapshot, fixture.previous) {
-		t.Fatalf("snapshot changed after partial failure: %#v", fixture.repository.snapshot)
+	if len(fixture.repository.snapshot.Active) != 0 ||
+		!reflect.DeepEqual(fixture.repository.snapshot.Owned, fixture.previous.Owned) {
+		t.Fatalf("registration state after partial failure: %#v", fixture.repository.snapshot)
 	}
 }
 
@@ -119,6 +122,59 @@ func (repository *snapshotRepositoryFake) ReplaceRegistrationSnapshot(
 	return nil
 }
 
+func (repository *snapshotRepositoryFake) Registrations(context.Context) ([]githubsource.Registration, error) {
+	return append([]githubsource.Registration(nil), repository.snapshot.Active...), nil
+}
+
+func (repository *snapshotRepositoryFake) OwnedRegistrations(context.Context) ([]githubsource.Registration, error) {
+	return append([]githubsource.Registration(nil), repository.snapshot.Owned...), nil
+}
+
+func (repository *snapshotRepositoryFake) UpsertRegistration(
+	_ context.Context,
+	record githubsource.Registration,
+) error {
+	repository.snapshot.Active = upsertActiveRecord(repository.snapshot.Active, record)
+	repository.snapshot.Owned = upsertOwnedRecord(repository.snapshot.Owned, record)
+	return nil
+}
+
+func (repository *snapshotRepositoryFake) DeleteActiveRegistration(
+	_ context.Context,
+	record githubsource.Registration,
+) error {
+	repository.snapshot.Active = removeExactRecord(repository.snapshot.Active, record)
+	return nil
+}
+
+func (repository *snapshotRepositoryFake) DeleteOwnedRegistration(
+	_ context.Context,
+	record githubsource.Registration,
+) error {
+	repository.snapshot.Owned = removeExactRecord(repository.snapshot.Owned, record)
+	return nil
+}
+
+func (repository *snapshotRepositoryFake) DeleteRegistrationState(
+	ctx context.Context,
+	record githubsource.Registration,
+) error {
+	if err := repository.DeleteActiveRegistration(ctx, record); err != nil {
+		return err
+	}
+	return repository.DeleteOwnedRegistration(ctx, record)
+}
+
+func (repository *snapshotRepositoryFake) DeleteRepositoryRegistrationState(
+	_ context.Context,
+	repositoryURL string,
+	installationID transport.InstallationID,
+) error {
+	repository.snapshot.Active = removeRepositoryRecords(repository.snapshot.Active, repositoryURL, installationID)
+	repository.snapshot.Owned = removeRepositoryRecords(repository.snapshot.Owned, repositoryURL, installationID)
+	return nil
+}
+
 func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +185,7 @@ func TestManagerRefreshesMemberRoutes(t *testing.T) {
 	factory.clients[record.RepositoryURL].bootstrap = []byte("opaque")
 	manager := newManagerFixture(t, &managerDiscovererFake{}, factory.Client, repository)
 
-	if err := manager.RefreshMembers(context.Background()); err != nil {
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
 		t.Fatalf("refresh members: %v", err)
 	}
 	job := sourceJob(t, record.RepositoryURL, record.RunnerPool, 61)
@@ -196,7 +252,7 @@ func TestManagerRejectsDuplicateRepositoryRunnerPoolRegistrations(t *testing.T) 
 	}
 }
 
-func TestManagerCanonicalizesOwnedRegistrationsByAllOwnershipFacts(t *testing.T) {
+func TestManagerRejectsDuplicateOwnershipIdentityDespiteOtherFactDifferences(t *testing.T) {
 	t.Parallel()
 
 	base := managerRecord("https://github.com/octo/repository", 17)
@@ -215,13 +271,9 @@ func TestManagerCanonicalizesOwnedRegistrationsByAllOwnershipFacts(t *testing.T)
 	}}}
 	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
 
-	snapshot, err := manager.RegistrationSnapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []githubsource.Registration{base, byRunnerGroup, byInstallation, byPool, byScaleSet, byRepository}
-	if !reflect.DeepEqual(snapshot.Owned, want) {
-		t.Fatalf("owned registrations = %#v, want %#v", snapshot.Owned, want)
+	_, err := manager.RegistrationSnapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "duplicate GitHub ownership") {
+		t.Fatalf("RegistrationSnapshot() error = %v, want duplicate ownership rejection", err)
 	}
 }
 
@@ -253,7 +305,7 @@ func TestManagerReportsMemberRouteReplacement(t *testing.T) {
 	transportRepository := managerTransportRepository(record)
 	factory := newManagerFactoryFake([]transport.Repository{transportRepository})
 	manager, activities := newObservedManager(t, &managerDiscovererFake{}, factory.Client, repository)
-	if err := manager.RefreshMembers(context.Background()); err != nil {
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
 		t.Fatalf("refresh members: %v", err)
 	}
 	completed := findManagerActivity(*activities, "replace_routes", "completed")
@@ -293,6 +345,10 @@ func managerRecord(repositoryURL string, registrationID int) githubsource.Regist
 	}
 }
 
+func managerConfigForTests() githubsource.ManagerConfig {
+	return githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}}}
+}
+
 type managerDiscovererFake struct {
 	repositories         []transport.Repository
 	installationFailures map[transport.InstallationID]error
@@ -306,10 +362,44 @@ func (discoverer *managerDiscovererFake) Discover(context.Context) (transport.Di
 }
 
 type registrationRepositoryFake struct {
-	records   []githubsource.Registration
-	listErr   error
-	upsertErr error
-	deleteErr error
+	mutex          sync.Mutex
+	records        []githubsource.Registration
+	owned          []githubsource.Registration
+	listErr        error
+	ownedErr       error
+	upsertErr      error
+	deleteErr      error
+	declarations   []githubsource.MemberRunnerPoolDeclaration
+	declarationErr error
+}
+
+func (repository *registrationRepositoryFake) ReplaceGitHubRunnerPoolDeclarations(
+	_ context.Context,
+	memberID core.MemberID,
+	declarations []githubsource.RunnerPoolDeclaration,
+) error {
+	if repository.declarationErr != nil {
+		return repository.declarationErr
+	}
+	retained := repository.declarations[:0]
+	for _, declaration := range repository.declarations {
+		if declaration.MemberID != memberID {
+			retained = append(retained, declaration)
+		}
+	}
+	for _, declaration := range declarations {
+		retained = append(retained, githubsource.MemberRunnerPoolDeclaration{MemberID: memberID,
+			RunnerPool: declaration.RunnerPool, RunnerGroup: declaration.RunnerGroup})
+	}
+	repository.declarations = retained
+	return nil
+}
+
+func (repository *registrationRepositoryFake) LiveGitHubRunnerPoolDeclarations(
+	context.Context,
+	time.Time,
+) ([]githubsource.MemberRunnerPoolDeclaration, error) {
+	return append([]githubsource.MemberRunnerPoolDeclaration(nil), repository.declarations...), repository.declarationErr
 }
 
 func (repository *registrationRepositoryFake) ReplaceRegistrations(_ context.Context, records []githubsource.Registration) error {
@@ -342,17 +432,13 @@ func (repository *registrationRepositoryFake) UpsertRegistration(
 	_ context.Context,
 	record githubsource.Registration,
 ) error {
+	repository.mutex.Lock()
+	defer repository.mutex.Unlock()
 	if repository.upsertErr != nil {
 		return repository.upsertErr
 	}
-	for index := range repository.records {
-		if repository.records[index].RepositoryURL == record.RepositoryURL &&
-			repository.records[index].RunnerPool == record.RunnerPool {
-			repository.records[index] = record
-			return nil
-		}
-	}
-	repository.records = append(repository.records, record)
+	repository.records = upsertActiveRecord(repository.records, record)
+	repository.owned = upsertOwnedRecord(repository.owned, record)
 	return nil
 }
 
@@ -371,6 +457,50 @@ func (repository *registrationRepositoryFake) Registration(
 
 func (repository *registrationRepositoryFake) Registrations(context.Context) ([]githubsource.Registration, error) {
 	return append([]githubsource.Registration(nil), repository.records...), repository.listErr
+}
+
+func (repository *registrationRepositoryFake) OwnedRegistrations(context.Context) ([]githubsource.Registration, error) {
+	owned := repository.owned
+	if owned == nil {
+		owned = repository.records
+	}
+	return append([]githubsource.Registration(nil), owned...), repository.ownedErr
+}
+
+func (repository *registrationRepositoryFake) DeleteActiveRegistration(
+	_ context.Context,
+	record githubsource.Registration,
+) error {
+	repository.records = removeExactRecord(repository.records, record)
+	return repository.deleteErr
+}
+
+func (repository *registrationRepositoryFake) DeleteOwnedRegistration(
+	_ context.Context,
+	record githubsource.Registration,
+) error {
+	repository.owned = removeExactRecord(repository.owned, record)
+	return repository.deleteErr
+}
+
+func (repository *registrationRepositoryFake) DeleteRegistrationState(
+	ctx context.Context,
+	record githubsource.Registration,
+) error {
+	if err := repository.DeleteActiveRegistration(ctx, record); err != nil {
+		return err
+	}
+	return repository.DeleteOwnedRegistration(ctx, record)
+}
+
+func (repository *registrationRepositoryFake) DeleteRepositoryRegistrationState(
+	_ context.Context,
+	repositoryURL string,
+	installationID transport.InstallationID,
+) error {
+	repository.records = removeRepositoryRecords(repository.records, repositoryURL, installationID)
+	repository.owned = removeRepositoryRecords(repository.owned, repositoryURL, installationID)
+	return repository.deleteErr
 }
 
 func (repository *registrationRepositoryFake) DeleteRegistration(
@@ -413,6 +543,13 @@ func (factory *managerFactoryFake) Client(
 	}
 	return githubsource.ManagerClient{
 		EnsureRunnerPool: client.EnsureRunnerPool,
+		ResolveRunnerGroup: func(context.Context, string) (transport.RunnerGroupID, error) {
+			runnerGroupID := client.runnerGroupID
+			if runnerGroupID == 0 {
+				runnerGroupID = 1
+			}
+			return transport.RunnerGroupID(runnerGroupID), nil
+		},
 		OpenSession: func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error) {
 			if client.session == nil {
 				return nil, client.openErr

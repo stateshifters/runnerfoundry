@@ -20,19 +20,23 @@ func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {
 	}
 }
 
-func TestEmbeddedMigrationCatalogIncludesReversibleQueueNotificationMigration(t *testing.T) {
+func TestEmbeddedMigrationCatalogIncludesReversibleQueueNotificationAndGitHubDeclarationMigrations(t *testing.T) {
 	catalog, err := NewStore(postgresconfig.Settings{Role: "runnerfoundry"}).migrationCatalog()
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if target := migrationTarget(catalog); target != 4 {
-		t.Fatalf("embedded migration target = %d, want 4", target)
+	if target := migrationTarget(catalog); target != 5 {
+		t.Fatalf("embedded migration target = %d, want 5", target)
 	}
 	queueNotifications := catalog.Migrations[3]
-	if len(catalog.Migrations) != 4 || strings.TrimSpace(queueNotifications.DownSQL) == "" ||
+	declarations := catalog.Migrations[4]
+	if len(catalog.Migrations) != 5 || strings.TrimSpace(queueNotifications.DownSQL) == "" ||
 		!strings.Contains(queueNotifications.UpSQL, "pg_notify('runnerfoundry_queued_jobs', NEW.runner_pool)") ||
-		!strings.Contains(queueNotifications.UpSQL, "AFTER INSERT ON public.runnerfoundry_queued_jobs") {
-		t.Fatalf("embedded migration catalog = %#v, want reversible queue notifications", catalog.Migrations)
+		!strings.Contains(queueNotifications.UpSQL, "AFTER INSERT ON public.runnerfoundry_queued_jobs") ||
+		strings.TrimSpace(declarations.DownSQL) == "" ||
+		!strings.Contains(declarations.UpSQL, "runnerfoundry_github_member_runner_pools") ||
+		!strings.Contains(declarations.UpSQL, "ON DELETE CASCADE") {
+		t.Fatalf("embedded migration catalog = %#v, want reversible queue notifications and GitHub declarations", catalog.Migrations)
 	}
 }
 

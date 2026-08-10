@@ -233,7 +233,7 @@ func TestManagerReportsCompletedReconciliationStages(t *testing.T) {
 			prunedRepository = activity.Repository
 		}
 	}
-	want := []string{"load_registration_snapshot", "discover_repositories", "configure_repositories", "prune_registrations", "persist_registrations", "reconciliation"}
+	want := []string{"discover_repositories", "configure_repositories", "prune_registrations", "reconciliation"}
 	if !reflect.DeepEqual(completed, want) {
 		t.Fatalf("completed stages = %#v, want %#v", completed, want)
 	}

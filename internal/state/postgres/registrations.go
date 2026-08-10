@@ -20,96 +20,73 @@ const registrationSQL = `SELECT repository_url, runner_pool, installation_id, ru
 const registrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM public.runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
 const deleteRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations WHERE repository_url = $1 AND runner_pool = $2`
-const deleteAllRegistrationsSQL = `DELETE FROM public.runnerfoundry_github_registrations`
+const deleteActiveRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations
+	WHERE repository_url = $1 AND runner_pool = $2 AND installation_id = $3 AND runner_group_id = $4 AND scale_set_id = $5`
 const upsertOwnedRegistrationSQL = `INSERT INTO public.runnerfoundry_github_scale_set_ownership
 	(repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5)
 	ON CONFLICT(repository_url, scale_set_id) DO UPDATE SET runner_pool = excluded.runner_pool,
 		installation_id = excluded.installation_id, runner_group_id = excluded.runner_group_id`
 const ownedRegistrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM public.runnerfoundry_github_scale_set_ownership ORDER BY repository_url, scale_set_id`
-const deleteAllOwnedRegistrationsSQL = `DELETE FROM public.runnerfoundry_github_scale_set_ownership`
+const deleteOwnedRegistrationSQL = `DELETE FROM public.runnerfoundry_github_scale_set_ownership
+	WHERE repository_url = $1 AND runner_pool = $2 AND installation_id = $3 AND runner_group_id = $4 AND scale_set_id = $5`
 
 var _ githubsource.RegistrationRepository = (*Store)(nil)
 
-func (store *Store) UpsertRegistration(ctx context.Context, registration githubsource.Registration) error {
-	return store.executeTransaction(ctx, "upsert registration", upsertRegistrationSQL, registration.RepositoryURL,
-		string(registration.RunnerPool), registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID)
+func (store *Store) UpsertRegistration(
+	ctx context.Context,
+	registration githubsource.Registration,
+) error {
+	return store.mutateRegistrationPair(ctx, "upsert registration", upsertRegistrationSQL,
+		upsertOwnedRegistrationSQL, registration)
 }
 
-func (store *Store) ReplaceRegistrationSnapshot(
+func (store *Store) mutateRegistrationPair(
 	ctx context.Context,
-	snapshot githubsource.RegistrationSnapshot,
+	operation, activeStatement, ownedStatement string,
+	registration githubsource.Registration,
 ) (resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin registration snapshot replacement: %w", err)
+		return fmt.Errorf("begin %s: %w", operation, err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, deleteAllRegistrationsSQL); err != nil {
-		return fmt.Errorf("clear active registration snapshot: %w", err)
+	arguments := registrationArguments(registration)
+	if _, err = transaction.Execute(ctx, activeStatement, arguments...); err != nil {
+		return fmt.Errorf("%s active state: %w", operation, err)
 	}
-	if _, err = transaction.Execute(ctx, deleteAllOwnedRegistrationsSQL); err != nil {
-		return fmt.Errorf("clear owned registration snapshot: %w", err)
-	}
-	if err = insertRegistrationSnapshot(ctx, transaction, upsertRegistrationSQL, snapshot.Active); err != nil {
-		return fmt.Errorf("insert active registration snapshot: %w", err)
-	}
-	if err = insertRegistrationSnapshot(ctx, transaction, upsertOwnedRegistrationSQL, snapshot.Owned); err != nil {
-		return fmt.Errorf("insert owned registration snapshot: %w", err)
+	if _, err = transaction.Execute(ctx, ownedStatement, arguments...); err != nil {
+		return fmt.Errorf("%s ownership state: %w", operation, err)
 	}
 	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit registration snapshot replacement: %w", err)
+		return fmt.Errorf("commit %s: %w", operation, err)
 	}
 	open = false
 	return nil
 }
 
-func insertRegistrationSnapshot(
+func registrationArguments(registration githubsource.Registration) []any {
+	return []any{registration.RepositoryURL, string(registration.RunnerPool), registration.InstallationID,
+		registration.RunnerGroupID, registration.ScaleSetID}
+}
+
+func (store *Store) DeleteRegistrationState(
 	ctx context.Context,
-	transaction Transaction,
-	statement string,
-	registrations []githubsource.Registration,
+	registration githubsource.Registration,
 ) error {
-	for _, registration := range registrations {
-		if _, err := transaction.Execute(ctx, statement, registration.RepositoryURL, string(registration.RunnerPool),
-			registration.InstallationID, registration.RunnerGroupID, registration.ScaleSetID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return store.mutateRegistrationPair(ctx, "delete registration", deleteActiveRegistrationSQL,
+		deleteOwnedRegistrationSQL, registration)
 }
 
-func (store *Store) RegistrationSnapshot(
-	ctx context.Context,
-) (_ githubsource.RegistrationSnapshot, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return githubsource.RegistrationSnapshot{}, fmt.Errorf("begin registration snapshot lookup: %w", err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	active, err := queryRegistrations(ctx, transaction, registrationsSQL)
-	if err != nil {
-		return githubsource.RegistrationSnapshot{}, fmt.Errorf("query active registrations: %w", err)
-	}
-	owned, err := queryRegistrations(ctx, transaction, ownedRegistrationsSQL)
-	if err != nil {
-		return githubsource.RegistrationSnapshot{}, fmt.Errorf("query owned registrations: %w", err)
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return githubsource.RegistrationSnapshot{}, fmt.Errorf("commit registration snapshot lookup: %w", err)
-	}
-	open = false
-	return githubsource.RegistrationSnapshot{Active: active, Owned: owned}, nil
+func (store *Store) DeleteActiveRegistration(ctx context.Context, registration githubsource.Registration) error {
+	return store.executeTransaction(ctx, "delete active registration", deleteActiveRegistrationSQL,
+		registrationArguments(registration)...)
 }
 
-func queryRegistrations(ctx context.Context, transaction Transaction, statement string) ([]githubsource.Registration, error) {
-	rows, err := transaction.Query(ctx, statement)
-	if err != nil {
-		return nil, err
-	}
-	return scanRegistrations(rows)
+func (store *Store) DeleteOwnedRegistration(ctx context.Context, registration githubsource.Registration) error {
+	return store.executeTransaction(ctx, "delete owned registration", deleteOwnedRegistrationSQL,
+		registrationArguments(registration)...)
 }
 
 func (store *Store) Registration(
@@ -128,22 +105,33 @@ func (store *Store) Registration(
 }
 
 func (store *Store) Registrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
+	return store.listRegistrations(ctx, "registrations", registrationsSQL)
+}
+
+func (store *Store) OwnedRegistrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
+	return store.listRegistrations(ctx, "owned registrations", ownedRegistrationsSQL)
+}
+
+func (store *Store) listRegistrations(
+	ctx context.Context,
+	description, statement string,
+) (_ []githubsource.Registration, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin registrations lookup: %w", err)
+		return nil, fmt.Errorf("begin %s lookup: %w", description, err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	rows, err := transaction.Query(ctx, registrationsSQL)
+	rows, err := transaction.Query(ctx, statement)
 	if err != nil {
-		return nil, fmt.Errorf("query registrations: %w", err)
+		return nil, fmt.Errorf("query %s: %w", description, err)
 	}
 	registrations, err := scanRegistrations(rows)
 	if err != nil {
 		return nil, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit registrations lookup: %w", err)
+		return nil, fmt.Errorf("commit %s lookup: %w", description, err)
 	}
 	open = false
 	return registrations, nil

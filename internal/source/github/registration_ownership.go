@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/meza/RunnerFoundry/internal/core"
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
@@ -17,6 +18,25 @@ func pruneRepository(ctx context.Context, client ManagerClient, active, owned []
 		return nil, err
 	}
 	return retainOwnedRegistrations(owned, removed), nil
+}
+
+func (manager *Manager) pruneReconciledRegistrations(
+	ctx context.Context,
+	repositories []transport.Repository,
+	active []Registration,
+) error {
+	owned, err := manager.registrations.OwnedRegistrations(ctx)
+	if err != nil {
+		return PruneFailure{Err: fmt.Errorf("load owned GitHub registrations: %w", err)}
+	}
+	canonical, err := canonicalRegistrationSnapshot(RegistrationSnapshot{Owned: owned})
+	if err != nil {
+		return PruneFailure{Err: fmt.Errorf("validate owned GitHub registrations: %w", err)}
+	}
+	if _, err = manager.pruneOwnedRegistrations(ctx, repositories, active, canonical.Owned); err != nil {
+		return PruneFailure{Err: err}
+	}
+	return nil
 }
 
 func groupOwnedRunnerPools(registrations []Registration) map[transport.RunnerGroupID][]transport.OwnedRunnerPool {
@@ -76,27 +96,65 @@ func registrationGroupIDs(current, owned map[transport.RunnerGroupID][]transport
 	return groupIDs
 }
 
-func mergeOwnedRegistrations(previous, active []Registration) []Registration {
-	owned := append([]Registration(nil), previous...)
-	indices := make(map[registrationIdentity]int, len(owned))
-	for index, registration := range owned {
-		indices[registrationIdentity{repositoryURL: registration.RepositoryURL, scaleSetID: registration.ScaleSetID}] = index
-	}
-	for _, registration := range active {
-		identity := registrationIdentity{repositoryURL: registration.RepositoryURL, scaleSetID: registration.ScaleSetID}
-		if index, exists := indices[identity]; exists {
-			owned[index] = registration
-			continue
-		}
-		indices[identity] = len(owned)
-		owned = append(owned, registration)
-	}
-	return owned
-}
-
 type registrationIdentity struct {
 	repositoryURL string
 	scaleSetID    transport.ScaleSetID
+}
+
+type activeRegistrationIdentity struct {
+	repositoryURL string
+	runnerPool    core.RunnerPool
+}
+
+func (manager *Manager) deleteInactiveRegistrations(
+	ctx context.Context,
+	previous []Registration,
+	active []Registration,
+) error {
+	absent := absentRegistrations(previous, active, func(registration Registration) activeRegistrationIdentity {
+		return activeRegistrationIdentity{repositoryURL: registration.RepositoryURL, runnerPool: registration.RunnerPool}
+	})
+	for _, registration := range absent {
+		if err := manager.registrations.DeleteActiveRegistration(ctx, registration); err != nil {
+			return fmt.Errorf("delete inactive GitHub registration for repository %q and Runner Pool %q: %w",
+				registration.RepositoryURL, registration.RunnerPool, err)
+		}
+	}
+	return nil
+}
+
+func (manager *Manager) deletePrunedOwnership(
+	ctx context.Context,
+	previous []Registration,
+	retained []Registration,
+) error {
+	absent := absentRegistrations(previous, retained, func(registration Registration) registrationIdentity {
+		return registrationIdentity{repositoryURL: registration.RepositoryURL, scaleSetID: registration.ScaleSetID}
+	})
+	for _, registration := range absent {
+		if err := manager.registrations.DeleteOwnedRegistration(ctx, registration); err != nil {
+			return fmt.Errorf("delete pruned GitHub ownership for repository %q and scale set %d: %w",
+				registration.RepositoryURL, registration.ScaleSetID, err)
+		}
+	}
+	return nil
+}
+
+func absentRegistrations[Identity comparable](
+	previous, current []Registration,
+	identity func(Registration) Identity,
+) []Registration {
+	currentIdentities := make(map[Identity]struct{}, len(current))
+	for _, registration := range current {
+		currentIdentities[identity(registration)] = struct{}{}
+	}
+	absent := make([]Registration, 0)
+	for _, registration := range previous {
+		if _, exists := currentIdentities[identity(registration)]; !exists {
+			absent = append(absent, registration)
+		}
+	}
+	return absent
 }
 
 func (manager *Manager) pruneRegistrations(

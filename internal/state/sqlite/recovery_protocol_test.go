@@ -101,21 +101,25 @@ func TestNamedQueueAndTerminalResults(t *testing.T) {
 	}
 }
 
-func TestReplaceRegistrationsRequestsOneCommittedSnapshot(t *testing.T) {
+func TestUpsertRegistrationCommitsActiveAndOwnershipTogether(t *testing.T) {
 	statements := make([]string, 0, 2)
-	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+	arguments := make([][]any, 0, 2)
+	commits := 0
+	transaction := Transaction{execute: func(_ context.Context, statement string, args ...any) (Result, error) {
 		statements = append(statements, statement)
+		arguments = append(arguments, args)
 		return successfulResult(), nil
-	}, commit: successfulCompletion, rollback: successfulCompletion}
-	records := []githubsource.Registration{{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
-		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}}
-	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		ReplaceRegistrationSnapshot(context.Background(), githubsource.RegistrationSnapshot{Active: records, Owned: records}); err != nil {
-		t.Fatalf("replace registrations: %v", err)
+	}, commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
+	record := githubsource.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
+	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).UpsertRegistration(context.Background(), record); err != nil {
+		t.Fatalf("upsert registration: %v", err)
 	}
-	if len(statements) != 4 || !strings.HasPrefix(statements[0], "DELETE FROM") ||
-		!strings.HasPrefix(statements[1], "DELETE FROM") {
-		t.Fatalf("replacement statements = %#v", statements)
+	if commits != 1 || len(statements) != 2 ||
+		!strings.Contains(statements[0], "runnerfoundry_github_registrations") ||
+		!strings.Contains(statements[1], "runnerfoundry_github_scale_set_ownership") ||
+		len(arguments[0]) != 5 || len(arguments[1]) != 5 {
+		t.Fatalf("upsert protocol = %#v %#v", statements, arguments)
 	}
 }
 
@@ -177,77 +181,94 @@ func TestRecoverUnstartedReportsEveryTransactionFailure(t *testing.T) {
 	}
 }
 
-func TestReplaceRegistrationSnapshotRollsBackEveryFailure(t *testing.T) {
+func TestUpsertRegistrationRollsBackEveryFailure(t *testing.T) {
+	assertRegistrationPairFailures(t, (*Store).UpsertRegistration)
+}
+
+func TestDeleteRegistrationStateRollsBackEveryFailure(t *testing.T) {
+	assertRegistrationPairFailures(t, (*Store).DeleteRegistrationState)
+}
+
+func assertRegistrationPairFailures(
+	t *testing.T,
+	operation func(*Store, context.Context, githubsource.Registration) error,
+) {
+	t.Helper()
 	wantErr := errors.New("protocol")
 	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
 		RunnerGroupID: 2, ScaleSetID: 3}
-	snapshot := githubsource.RegistrationSnapshot{Active: []githubsource.Registration{record}, Owned: []githubsource.Registration{record}}
 	tests := []struct {
 		name     string
 		executor Executor
 	}{
 		{name: "begin", executor: Executor{begin: failingBegin(wantErr)}},
-		{name: "clear active", executor: Executor{begin: transactionBeginning(transactionFailingExecute(1, wantErr))}},
-		{name: "clear ownership", executor: Executor{begin: transactionBeginning(transactionFailingExecute(2, wantErr))}},
-		{name: "insert active", executor: Executor{begin: transactionBeginning(transactionFailingExecute(3, wantErr))}},
-		{name: "insert ownership", executor: Executor{begin: transactionBeginning(transactionFailingExecute(4, wantErr))}},
+		{name: "active", executor: Executor{begin: transactionBeginning(transactionFailingExecute(1, wantErr))}},
+		{name: "ownership", executor: Executor{begin: transactionBeginning(transactionFailingExecute(2, wantErr))}},
 		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{
 			execute: successfulExecute, commit: failingCompletion(wantErr), rollback: successfulCompletion,
 		})}},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := NewStore(testCase.executor).ReplaceRegistrationSnapshot(context.Background(), snapshot); err == nil {
+			if err := operation(NewStore(testCase.executor), context.Background(), record); err == nil {
 				t.Fatal("failure was ignored")
 			}
 		})
 	}
 }
 
-func TestRegistrationSnapshotReadsActiveAndOwnedAtomically(t *testing.T) {
-	active := []any{"repo", "linux", int64(1), int64(2), int64(3)}
-	owned := []any{"repo", "old", int64(1), int64(4), int64(5)}
-	transaction := Transaction{
-		query: func(_ context.Context, statement string, _ ...any) (Rows, error) {
-			if statement == registrationsSQL {
-				return rowsFromValues([][]any{active}), nil
-			}
-			return rowsFromValues([][]any{owned}), nil
-		},
-		commit: successfulCompletion, rollback: successfulCompletion,
-	}
-	snapshot, err := NewStore(Executor{begin: transactionBeginning(transaction)}).RegistrationSnapshot(context.Background())
-	if err != nil || len(snapshot.Active) != 1 || len(snapshot.Owned) != 1 || snapshot.Owned[0].ScaleSetID != 5 {
-		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
+func TestOwnedRegistrationsReturnsDurableOwnership(t *testing.T) {
+	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
+		return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+	registrations, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		OwnedRegistrations(context.Background())
+	if err != nil || len(registrations) != 1 || registrations[0].ScaleSetID != 3 {
+		t.Fatalf("owned registrations = (%#v, %v)", registrations, err)
 	}
 }
 
-func TestRegistrationSnapshotReportsTransactionFailures(t *testing.T) {
+func TestOwnedRegistrationsReportsTransactionFailures(t *testing.T) {
 	wantErr := errors.New("protocol")
-	successfulRows := func() Rows { return rowsFromValues(nil) }
 	tests := []namedTransaction{
-		{name: "active query", transaction: Transaction{query: func(context.Context, string, ...any) (Rows, error) { return Rows{}, wantErr }, rollback: successfulCompletion}},
-		{name: "ownership query", transaction: Transaction{query: func() func(context.Context, string, ...any) (Rows, error) {
-			calls := 0
-			return func(context.Context, string, ...any) (Rows, error) {
-				calls++
-				if calls == 2 {
-					return Rows{}, wantErr
-				}
-				return successfulRows(), nil
-			}
-		}(), rollback: successfulCompletion}},
-		{name: "commit", transaction: Transaction{query: func(context.Context, string, ...any) (Rows, error) { return successfulRows(), nil },
+		{name: "query", transaction: Transaction{query: func(context.Context, string, ...any) (Rows, error) {
+			return Rows{}, wantErr
+		}, rollback: successfulCompletion}},
+		{name: "commit", transaction: Transaction{query: func(context.Context, string, ...any) (Rows, error) {
+			return rowsFromValues(nil), nil
+		},
 			commit: failingCompletion(wantErr), rollback: successfulCompletion}},
 	}
-	if _, err := NewStore(Executor{begin: failingBegin(wantErr)}).RegistrationSnapshot(context.Background()); err == nil {
+	if _, err := NewStore(Executor{begin: failingBegin(wantErr)}).OwnedRegistrations(context.Background()); err == nil {
 		t.Fatal("begin failure was ignored")
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).RegistrationSnapshot(context.Background()); err == nil {
+			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
+				OwnedRegistrations(context.Background()); err == nil {
 				t.Fatal("failure was ignored")
 			}
 		})
+	}
+}
+
+func TestDeleteRegistrationStateGuardsAndCommitsBothRecords(t *testing.T) {
+	statements := make([]string, 0, 2)
+	arguments := make([][]any, 0, 2)
+	transaction := Transaction{execute: func(_ context.Context, statement string, args ...any) (Result, error) {
+		statements = append(statements, statement)
+		arguments = append(arguments, args)
+		return successfulResult(), nil
+	}, commit: successfulCompletion, rollback: successfulCompletion}
+	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
+		RunnerGroupID: 2, ScaleSetID: 3}
+	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+		DeleteRegistrationState(context.Background(), record); err != nil {
+		t.Fatalf("delete registration state: %v", err)
+	}
+	if len(statements) != 2 || !strings.Contains(statements[0], "runnerfoundry_github_registrations") ||
+		!strings.Contains(statements[1], "runnerfoundry_github_scale_set_ownership") ||
+		len(arguments[0]) != 5 || len(arguments[1]) != 5 {
+		t.Fatalf("delete protocol = %#v %#v", statements, arguments)
 	}
 }

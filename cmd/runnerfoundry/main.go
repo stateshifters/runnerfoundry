@@ -28,8 +28,10 @@ type processRuntime struct {
 }
 
 func main() {
-	runProcess(newProductionProcess())
+	runProcess(productionProcessFactory())
 }
+
+var productionProcessFactory = newProductionProcess
 
 func newProductionProcess() processRuntime {
 	daemonApplication := daemon.NewApplication()

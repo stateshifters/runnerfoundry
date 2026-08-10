@@ -165,9 +165,9 @@ func TestGitHubSourceRuntimeIgnoresDuplicateDiscoveryAndSessionScheduling(t *tes
 	source.startDiscovery(context.Background(), nil)
 	source.startDiscovery(context.Background(), term)
 
-	source.desired[record.RepositoryURL] = []githubsource.Registration{record}
-	source.opening[record.RepositoryURL] = []githubsource.Registration{record}
-	source.scheduleRequiredRepositoryGenerations(context.Background(), term)
+	source.desired[registrationKey(record)] = record
+	source.opening[registrationKey(record)] = record
+	source.scheduleRequiredRegistrationSessions(context.Background(), term)
 	if len(term.operations) != 0 {
 		t.Fatalf("duplicate schedule started %d operations", len(term.operations))
 	}

@@ -181,6 +181,9 @@ func runtimeSnapshotClientFactory(
 	var opened sync.Once
 	return func(context.Context, transport.Repository) (githubsource.ManagerClient, error) {
 		return githubsource.ManagerClient{
+			ResolveRunnerGroup: func(context.Context, string) (transport.RunnerGroupID, error) {
+				return 7, nil
+			},
 			EnsureRunnerPool: func(context.Context, string, string) (transport.Registration, error) {
 				return transport.Registration{ID: 11, Name: "linux", RunnerGroupID: 7}, nil
 			},

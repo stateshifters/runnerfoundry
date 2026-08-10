@@ -25,7 +25,7 @@ A source adapter owns everything specific to a Git hosting or CI system:
 
 The adapter translates those details into the core terms and transitions defined by the product contract. Core ingestion, queueing, execution, and persistence contracts use jobs, Runner Pools, runner acceptance, and terminal source signals; they do not expose source-specific types.
 
-Source-specific registration and ownership persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding source-specific types or methods to the source-neutral state contract. Active registrations publish current routes; durable ownership records exist only to verify safe source cleanup and do not create jobs or capacity.
+Source-specific declaration, registration, and ownership persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding source-specific types or methods to the source-neutral state contract. For a clustered source, live-member declarations establish shared reconciliation intent independently of which member holds leadership. Active registrations publish current routes; durable ownership records exist only to verify safe source cleanup and do not create jobs or capacity.
 
 An adapter accepts only actionable source observations and maps them to durable core state changes. Source redelivery must be idempotent. A stale or redelivered observation cannot recreate terminal demand or bypass the core cleanup and retry rules.
 
@@ -67,7 +67,7 @@ The state store calculates one shared value for each Runner Pool:
 
 Moving a job from the queue into processing does not change availability. Cancelling queued work or removing completed processing releases capacity. Capacity queries observe current work but cannot create, claim, reorder, move, or remove it.
 
-Source leadership and durable queue processing are separate responsibilities. A source leadership term is fenced: losing leadership cancels source operations, and late results cannot mutate core state or restore the old term. Cleanup failure from an old term cannot prevent a new term from starting.
+Source leadership and durable queue processing are separate responsibilities. Durable source registrations survive leadership changes and are restored without filtering through the new leader's local provider configuration. Discovery may reconcile shared live-member declarations independently, but it cannot replace unchanged registrations merely because leadership moved. A source leadership term is fenced: losing leadership cancels source operations, and late results cannot mutate core state or restore the old term. Cleanup failure from an old term cannot prevent a new term from starting.
 
 Every active member owns one member-local durable-queue processor, independent of source leadership. It starts with the runtime generation and waits for successful local inventory refresh and reconciliation before claiming from an eligible Runner Pool. SQLite enqueues cause an immediate coalesced local wake after persistence. PostgreSQL queue inserts broadcast a best-effort wake after commit to every member listening through its primary pool; members still discover durable work during maintenance when notifications are unavailable or missed. Provider-facing maintenance and processing attempts share one gate, and the processor releases it after every attempt so maintenance cannot be starved.
 

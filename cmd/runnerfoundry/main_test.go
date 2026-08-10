@@ -128,6 +128,25 @@ func TestRunProcessExitsWithCommandResult(t *testing.T) {
 	}
 }
 
+func TestMainRunsProductionProcessFactory(t *testing.T) {
+	originalFactory := productionProcessFactory
+	t.Cleanup(func() { productionProcessFactory = originalFactory })
+	exitCode := -1
+	productionProcessFactory = func() processRuntime {
+		runtime := newProductionProcess()
+		runtime.args = []string{"--unsupported"}
+		runtime.stdout = io.Discard
+		runtime.stderr = io.Discard
+		runtime.lifecycle = testProcessLifecycle()
+		runtime.exit = func(code int) { exitCode = code }
+		return runtime
+	}
+	main()
+	if exitCode != 1 {
+		t.Fatalf("process exit code = %d, want 1", exitCode)
+	}
+}
+
 func testProcessLifecycle() processLifecycle {
 	return processLifecycle{
 		notifyContext: func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {

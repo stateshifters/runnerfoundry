@@ -136,7 +136,7 @@ func TestManagerRefreshMembersReportsFailures(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("refresh failed")
 	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, &registrationRepositoryFake{listErr: wantErr})
-	if err := manager.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); !errors.Is(err, wantErr) {
 		t.Fatalf("list error = %v", err)
 	}
 
@@ -144,23 +144,24 @@ func TestManagerRefreshMembersReportsFailures(t *testing.T) {
 	factory := newManagerFactoryFake(nil)
 	factory.err = wantErr
 	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []githubsource.Registration{record}})
-	if err := manager.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); !errors.Is(err, wantErr) {
 		t.Fatalf("factory error = %v", err)
 	}
 
 	factory = newManagerFactoryFake([]transport.Repository{managerTransportRepository(record)})
 	manager = newManagerFixture(t, &managerDiscovererFake{}, factory.Client, &registrationRepositoryFake{records: []githubsource.Registration{record, record}})
-	if err := manager.RefreshMembers(context.Background()); err == nil {
+	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err == nil {
 		t.Fatal("duplicate member routes accepted")
 	}
 }
 
 func TestManagerRegistrationSnapshotReportsRepositoryFailure(t *testing.T) {
 	wantErr := errors.New("snapshot failed")
-	manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client,
-		&registrationRepositoryFake{listErr: wantErr})
-	if _, err := manager.RegistrationSnapshot(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("RegistrationSnapshot() error = %v, want %v", err, wantErr)
+	for _, repository := range []*registrationRepositoryFake{{listErr: wantErr}, {ownedErr: wantErr}} {
+		manager := newManagerFixture(t, &managerDiscovererFake{}, newManagerFactoryFake(nil).Client, repository)
+		if _, err := manager.RegistrationSnapshot(context.Background()); !errors.Is(err, wantErr) {
+			t.Fatalf("RegistrationSnapshot() error = %v, want %v", err, wantErr)
+		}
 	}
 }
 

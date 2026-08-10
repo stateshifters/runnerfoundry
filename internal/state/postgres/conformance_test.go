@@ -152,13 +152,21 @@ func exercisePostgresRemoval(t *testing.T, scenario storetest.Scenario) storetes
 func exercisePostgresSnapshot(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
 	if scenario == storetest.Capacity {
-		store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row { return rowFromValues([]any{5, 2, 1}) }})
-		capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", storetest.FixedTime())
-		if err != nil {
-			t.Fatalf("capacity: %v", err)
-		}
-		return storetest.Observation{Capacity: capacity}
+		return exercisePostgresCapacity(t)
 	}
+	return exercisePostgresRegistrationRecords(t)
+}
+
+func exercisePostgresCapacity(t *testing.T) storetest.Observation {
+	t.Helper()
+	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row { return rowFromValues([]any{5, 2, 1}) }})
+	capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", storetest.FixedTime())
+	requirePostgresConformanceSuccess(t, "capacity", err)
+	return storetest.Observation{Capacity: capacity}
+}
+
+func exercisePostgresRegistrationRecords(t *testing.T) storetest.Observation {
+	t.Helper()
 	want := storetest.ExpectedRegistrations()
 	queryCalls := 0
 	transaction := Transaction{execute: successfulExecute, query: func(context.Context, string, ...any) (Rows, error) {
@@ -170,14 +178,26 @@ func exercisePostgresSnapshot(t *testing.T, scenario storetest.Scenario) storete
 		return rowsFromValues(registrationValues(registrations)), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	if err := store.ReplaceRegistrationSnapshot(context.Background(), want); err != nil {
-		t.Fatalf("replace registrations: %v", err)
+	for _, registration := range append(want.Active, want.Owned...) {
+		requirePostgresConformanceSuccess(t, "upsert registration",
+			store.UpsertRegistration(context.Background(), registration))
 	}
-	got, err := store.RegistrationSnapshot(context.Background())
+	requirePostgresConformanceSuccess(t, "delete active ownership",
+		store.DeleteOwnedRegistration(context.Background(), want.Active[0]))
+	requirePostgresConformanceSuccess(t, "delete owned route",
+		store.DeleteActiveRegistration(context.Background(), want.Owned[0]))
+	active, err := store.Registrations(context.Background())
+	requirePostgresConformanceSuccess(t, "read active registrations", err)
+	owned, err := store.OwnedRegistrations(context.Background())
+	requirePostgresConformanceSuccess(t, "read owned registrations", err)
+	return storetest.Observation{Registrations: githubsource.RegistrationSnapshot{Active: active, Owned: owned}}
+}
+
+func requirePostgresConformanceSuccess(t *testing.T, operation string, err error) {
+	t.Helper()
 	if err != nil {
-		t.Fatalf("read registrations: %v", err)
+		t.Fatalf("%s: %v", operation, err)
 	}
-	return storetest.Observation{Registrations: got}
 }
 
 func registrationValues(registrations []githubsource.Registration) [][]any {

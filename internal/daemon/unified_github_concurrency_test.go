@@ -24,7 +24,7 @@ func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}},
-		"member-1", eventHandlerFake{}, githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, firstClient.started, 7, "first repository")
@@ -79,7 +79,7 @@ func TestGitHubSourceRuntimeDoesNotRefreshPeerCapacityAfterUnhandledMessage(t *t
 	manager := &githubManagerFake{adapters: adapters}
 	source := newGitHubSourceRuntime(manager, capacities, "member-1",
 		failingQueueEventHandler{err: errors.New("durable enqueue failed")},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		managerConfigForAdapters(adapters), time.Minute, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, failedClient.started, 7, "failed repository")
@@ -127,7 +127,7 @@ func newIgnoredLifecyclePollingFixture() *ignoredLifecyclePollingFixture {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1}},
-		"member-1", handler, githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		"member-1", handler, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	return &ignoredLifecyclePollingFixture{source: source, lifecycleClient: lifecycleClient,
 		demandClient: demandClient, handler: handler, now: now}
 }
@@ -201,7 +201,7 @@ func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
 		{Client: secondClient, Handler: eventHandlerFake{}, RunnerPool: "second"},
 	}}
 	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)
 	}
@@ -224,7 +224,7 @@ func awaitInstalledGitHubAdapters(t *testing.T, source *githubSourceRuntime, wan
 	t.Helper()
 	for attempts := 0; len(source.opening) != 0 && attempts < 10_000; attempts++ {
 		runtime.Gosched()
-		_ = source.harvestRepositoryOpenResults(context.Background(), source.term)
+		_ = source.harvestRegistrationOpenResults(context.Background(), source.term)
 	}
 	if len(source.adapters) != want {
 		t.Fatalf("installed adapters = %d, want %d", len(source.adapters), want)

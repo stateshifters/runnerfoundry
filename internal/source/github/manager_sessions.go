@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	upstream "github.com/actions/scaleset"
@@ -12,138 +11,150 @@ import (
 	"github.com/meza/RunnerFoundry/internal/source/github/transport"
 )
 
-// RepositorySessionGeneration owns the complete set of message sessions for
-// one repository snapshot. Its views are defensive copies. Close attempts all
-// sessions in registration order and retains failed sessions for a later retry.
-type RepositorySessionGeneration struct {
-	repository    string
-	registrations []Registration
-	adapters      []*Adapter
-	sessions      []ManagedSession
-	retire        func(context.Context, ManagedSession, int, int) error
-	closeMu       sync.Mutex
+// RegistrationSession owns one admitted registration's GitHub message session
+// and adapter. Registration returns the immutable route admitted at open time.
+type RegistrationSession struct {
+	registration Registration
+	session      ManagedSession
+	adapter      *Adapter
 }
 
-func (generation *RepositorySessionGeneration) Repository() string {
-	return generation.repository
-}
+// ErrRegistrationNotAdmitted marks a definitive rejection that callers should
+// detect with errors.Is. OpenRegistrationSession returns no session with this
+// error after any required exact guarded cleanup succeeds; callers should stop
+// retrying that registration without reporting an operational failure.
+var ErrRegistrationNotAdmitted = errors.New("GitHub registration was not admitted")
 
-func (generation *RepositorySessionGeneration) Registrations() []Registration {
-	return append([]Registration(nil), generation.registrations...)
-}
+func (session *RegistrationSession) Registration() Registration { return session.registration }
 
-func (generation *RepositorySessionGeneration) Adapters() []*Adapter {
-	return append([]*Adapter(nil), generation.adapters...)
-}
+func (session *RegistrationSession) Adapter() *Adapter { return session.adapter }
 
-// Close releases every session in the generation. Sessions that fail to close
-// remain owned by the generation and are retried on the next call.
-func (generation *RepositorySessionGeneration) Close(ctx context.Context) error {
-	generation.closeMu.Lock()
-	defer generation.closeMu.Unlock()
-	remaining := make([]ManagedSession, 0)
-	var joined error
-	for index, session := range generation.sessions {
-		if err := generation.retire(ctx, session, index+1, len(generation.sessions)); err != nil {
-			remaining = append(remaining, session)
-			joined = errors.Join(joined, fmt.Errorf("close GitHub message session: %w", err))
+func (session *RegistrationSession) Close(ctx context.Context) error {
+	if err := session.session.Close(ctx); err != nil {
+		if errors.Is(err, upstream.BadRequestError) || errors.Is(err, upstream.NotFoundError) {
+			return nil
 		}
+		return fmt.Errorf("close GitHub registration session: %w", err)
 	}
-	generation.sessions = remaining
-	return joined
+	return nil
 }
 
-// OpenRepositorySessions opens an all-or-nothing message-session generation
-// for the supplied committed registrations. Records must be non-empty and all
-// belong to the same repository. Runner Pool sessions open sequentially in
-// record order; any partial generation is closed before an error is returned.
-func (manager *Manager) OpenRepositorySessions(
+// OpenRegistrationSession restores one durable registration directly from its
+// committed identity. A terminal repository or scale-set absence deletes only
+// the exact guarded active and ownership state. Inconclusive failures retain
+// registration state for retry. On success, the caller owns the returned
+// session and must close it.
+func (manager *Manager) OpenRegistrationSession(
 	ctx context.Context,
-	records []Registration,
+	record Registration,
+	runnerPool RunnerPoolConfig,
 	owner string,
 	handler EventHandler,
-) (*RepositorySessionGeneration, error) {
-	repository, err := validateRepositorySessionRecords(records, owner, handler)
+) (*RegistrationSession, error) {
+	if err := validateRegistrationSessionRequest(record, owner, handler); err != nil {
+		return nil, err
+	}
+	client, err := manager.registrationSessionClient(ctx, record)
 	if err != nil {
 		return nil, err
 	}
-	client, err := manager.factory(ctx, repositoryFromRegistration(records[0]))
-	if err != nil {
-		return nil, fmt.Errorf("create GitHub session client for repository %q: %w", repository, err)
-	}
-	generation := &RepositorySessionGeneration{
-		repository: repository, registrations: append([]Registration(nil), records...),
-		adapters: make([]*Adapter, 0, len(records)), sessions: make([]ManagedSession, 0, len(records)),
-		retire: manager.retireRepositorySession,
-	}
-	for index, record := range records {
-		if openErr := manager.openRepositorySession(ctx, generation, client, record, owner, handler, index, len(records)); openErr != nil {
-			return failedRepositoryGeneration(ctx, generation, record, openErr)
+	if runnerPool.RunnerGroup != "" {
+		admitted, matchErr := manager.registrationMatchesRunnerGroup(ctx, client, record, runnerPool.RunnerGroup)
+		if matchErr != nil || !admitted {
+			return nil, matchErr
 		}
 	}
-	return generation, nil
+	return manager.openAdmittedRegistration(ctx, client, record, owner, handler)
 }
 
-func (manager *Manager) openRepositorySession(
+func (manager *Manager) registrationSessionClient(ctx context.Context, record Registration) (ManagerClient, error) {
+	client, err := manager.factory(ctx, repositoryFromRegistration(record))
+	if err == nil {
+		return client, nil
+	}
+	if errors.Is(err, upstream.NotFoundError) {
+		if deleteErr := manager.deleteMissingRegistration(ctx, record); deleteErr != nil {
+			return ManagerClient{}, deleteErr
+		}
+		return ManagerClient{}, fmt.Errorf("GitHub repository %q was not found: %w",
+			record.RepositoryURL, ErrRegistrationNotAdmitted)
+	}
+	return ManagerClient{}, fmt.Errorf("create GitHub session client for repository %q: %w", record.RepositoryURL, err)
+}
+
+func (manager *Manager) registrationMatchesRunnerGroup(
 	ctx context.Context,
-	generation *RepositorySessionGeneration,
+	client ManagerClient,
+	record Registration,
+	runnerGroupName string,
+) (bool, error) {
+	if client.ResolveRunnerGroup == nil {
+		return false, errors.New("GitHub runner-group resolution is required")
+	}
+	runnerGroupID, err := client.ResolveRunnerGroup(ctx, runnerGroupName)
+	if err != nil {
+		return false, fmt.Errorf("resolve GitHub runner group %q: %w", runnerGroupName, err)
+	}
+	if runnerGroupID == record.RunnerGroupID {
+		return true, nil
+	}
+	if err = manager.registrations.DeleteActiveRegistration(ctx, record); err != nil {
+		return false, fmt.Errorf("forget stale GitHub registration for Runner Pool %q: %w", record.RunnerPool, err)
+	}
+	return false, fmt.Errorf("runner group %q no longer matches registration: %w",
+		runnerGroupName, ErrRegistrationNotAdmitted)
+}
+
+func (manager *Manager) openAdmittedRegistration(
+	ctx context.Context,
 	client ManagerClient,
 	record Registration,
 	owner string,
 	handler EventHandler,
-	index int,
-	total int,
-) error {
+) (*RegistrationSession, error) {
 	started := manager.observer.currentTime()
-	manager.reportSessionActivity(record, index+1, total, "started", started, nil)
+	manager.reportSessionActivity(record, 1, 1, "started", started, nil)
 	opened, err := manager.openLeaderRecordWithClient(ctx, client, record, owner, handler)
-	outcome := "completed"
 	if err != nil {
-		outcome = "failed"
-	} else {
-		generation.sessions = append(generation.sessions, opened.session)
-		generation.adapters = append(generation.adapters, opened.adapter)
+		resultErr := manager.registrationOpenFailure(ctx, record, err)
+		manager.reportSessionActivity(record, 1, 1, "failed", started, resultErr)
+		return nil, resultErr
 	}
-	manager.reportSessionActivity(record, index+1, total, outcome, started, err)
-	return err
+	manager.reportSessionActivity(record, 1, 1, "completed", started, nil)
+	return &RegistrationSession{registration: record, session: opened.session, adapter: opened.adapter}, nil
 }
 
-func failedRepositoryGeneration(
-	ctx context.Context,
-	generation *RepositorySessionGeneration,
+func (manager *Manager) registrationOpenFailure(ctx context.Context, record Registration, err error) error {
+	if !errors.Is(err, upstream.NotFoundError) {
+		return fmt.Errorf("open GitHub session for repository %q Runner Pool %q: %w",
+			record.RepositoryURL, record.RunnerPool, err)
+	}
+	if deleteErr := manager.deleteMissingRegistration(ctx, record); deleteErr != nil {
+		return deleteErr
+	}
+	return fmt.Errorf("GitHub runner scale set %d was not found: %w",
+		record.ScaleSetID, ErrRegistrationNotAdmitted)
+}
+
+func validateRegistrationSessionRequest(
 	record Registration,
-	openErr error,
-) (*RepositorySessionGeneration, error) {
-	cleanupErr := generation.Close(ctx)
-	resultErr := errors.Join(
-		fmt.Errorf("open GitHub session for repository %q Runner Pool %q: %w",
-			generation.Repository(), record.RunnerPool, openErr),
-		cleanupErr,
-	)
-	if cleanupErr != nil {
-		return generation, resultErr
-	}
-	return nil, resultErr
-}
-
-func validateRepositorySessionRecords(
-	records []Registration,
 	owner string,
 	handler EventHandler,
-) (string, error) {
-	if len(records) == 0 || owner == "" || handler == nil {
-		return "", errors.New("GitHub repository registrations, leader owner, and event handler are required")
+) error {
+	if record.RepositoryURL == "" || record.InstallationID == 0 || record.RunnerGroupID == 0 || record.ScaleSetID == 0 {
+		return errors.New("complete GitHub registration identity is required")
 	}
-	repository := records[0].RepositoryURL
-	if repository == "" {
-		return "", errors.New("GitHub repository registration URL is required")
+	if record.RunnerPool == "" || owner == "" || handler == nil {
+		return errors.New("GitHub Runner Pool, leader owner, and event handler are required")
 	}
-	for _, record := range records[1:] {
-		if record.RepositoryURL != repository {
-			return "", errors.New("GitHub repository session registrations must belong to one repository")
-		}
+	return nil
+}
+
+func (manager *Manager) deleteMissingRegistration(ctx context.Context, record Registration) error {
+	if err := manager.registrations.DeleteRegistrationState(ctx, record); err != nil {
+		return fmt.Errorf("forget missing GitHub registration for Runner Pool %q: %w", record.RunnerPool, err)
 	}
-	return repository, nil
+	return nil
 }
 
 func (manager *Manager) reportSessionActivity(record Registration, current, total int, outcome string,
@@ -158,29 +169,6 @@ func (manager *Manager) reportSessionActivity(record Registration, current, tota
 		InstallationID: int64(record.InstallationID), RunnerGroupID: int64(record.RunnerGroupID),
 		ScaleSetID: int64(record.ScaleSetID),
 		Current:    current, Total: total, Duration: duration, Err: err})
-}
-
-func (manager *Manager) retireRepositorySession(
-	ctx context.Context,
-	session ManagedSession,
-	current int,
-	total int,
-) error {
-	started := manager.observer.currentTime()
-	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
-		Stage: "retire_session", Outcome: "started", Current: current, Total: total})
-	err := session.Close(ctx)
-	outcome := "completed"
-	if err != nil {
-		outcome = "failed"
-	}
-	manager.report(ManagerActivity{Visibility: ActivityDebug, Operation: "source_sessions",
-		Stage: "retire_session", Outcome: outcome, Current: current, Total: total,
-		Duration: manager.observer.currentTime().Sub(started), Err: err})
-	if err != nil {
-		return fmt.Errorf("retire GitHub session: %w", err)
-	}
-	return nil
 }
 
 func (manager *Manager) openLeaderRecordWithClient(

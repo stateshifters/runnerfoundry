@@ -69,6 +69,24 @@ func TestRegistrationBehavior(t *testing.T) {
 	}
 }
 
+func TestGitHubRunnerPoolDeclarationBehavior(t *testing.T) {
+	t.Parallel()
+	declarationValues := [][]any{{"serenity", "windows-latest", "default"}}
+	transaction := Transaction{execute: successfulExecute,
+		query:  func(context.Context, string, ...any) (Rows, error) { return rowsFromValues(declarationValues), nil },
+		commit: successfulCompletion, rollback: successfulCompletion}
+	store := NewStore(Executor{begin: transactionBeginning(transaction)})
+	declarations := []githubsource.RunnerPoolDeclaration{{RunnerPool: "windows-latest", RunnerGroup: "default"}}
+	if err := store.ReplaceGitHubRunnerPoolDeclarations(context.Background(), "serenity", declarations); err != nil {
+		t.Fatalf("replace declarations: %v", err)
+	}
+	actual, err := store.LiveGitHubRunnerPoolDeclarations(context.Background(), fixedTime())
+	if err != nil || len(actual) != 1 || actual[0].MemberID != "serenity" ||
+		actual[0].RunnerPool != "windows-latest" || actual[0].RunnerGroup != "default" {
+		t.Fatalf("declarations = %#v, %v", actual, err)
+	}
+}
+
 func TestRegistrationLookupHandlesMissingRow(t *testing.T) {
 	t.Parallel()
 	store := registrationLookupErrorStore(sql.ErrNoRows)

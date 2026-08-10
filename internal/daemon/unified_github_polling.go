@@ -27,6 +27,8 @@ type runnerPoolPublication struct {
 	count    int
 }
 
+const githubSessionRetirementLimit = 4
+
 // Poll advances leader-owned GitHub message polling without waiting for an
 // upstream long poll. Calls must remain serialized with OpenLeader and
 // CloseLeader; each adapter has at most one in-flight request.
@@ -35,46 +37,97 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 		return nil
 	}
 	term := source.term
-	pollErrors := source.harvestRepositoryOpenResults(ctx, term)
+	pollErrors := source.harvestRegistrationOpenResults(ctx, term)
 	pollErrors = append(pollErrors, source.harvestDiscovery(ctx, term)...)
-	pollErrors = append(pollErrors, source.retireRemovedRepositories(ctx)...)
-	source.collectAbandonedGenerations()
-	if cleanupErr := source.retryRetiringGenerations(ctx); cleanupErr != nil {
-		pollErrors = append(pollErrors, cleanupErr)
-	}
+	pollErrors = append(pollErrors, source.retireRemovedRegistrationSessions(ctx)...)
+	source.collectAbandonedSessions()
 	harvestedPollErrors, changedPools := source.harvestPolls()
 	pollErrors = append(pollErrors, harvestedPollErrors...)
 	if err := source.stopChangedPools(ctx, changedPools); err != nil {
 		pollErrors = append(pollErrors, err)
 	}
-	if !source.currentTime().Before(source.nextDiscovery) && !term.discoveryActive {
-		source.startDiscovery(ctx, term)
-	}
+	pollErrors = append(pollErrors, source.startDueDiscovery(ctx, term, liveMemberCutoff)...)
 	pollErrors = append(pollErrors, source.launchIdlePolls(ctx, liveMemberCutoff)...)
+	if cleanupErr := source.retryRetiringSessions(ctx); cleanupErr != nil {
+		pollErrors = append(pollErrors, cleanupErr)
+	}
 	return errors.Join(pollErrors...)
 }
 
-func (source *githubSourceRuntime) harvestRepositoryOpenResults(
+func (source *githubSourceRuntime) startDueDiscovery(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	liveMemberCutoff time.Time,
+) []error {
+	if source.currentTime().Before(source.nextDiscovery) || term.discoveryActive {
+		return nil
+	}
+	config, resultErrors, ready := source.clusterReconciliationConfig(ctx, liveMemberCutoff)
+	if ready {
+		source.startDiscovery(ctx, term, config)
+	}
+	return resultErrors
+}
+
+func (source *githubSourceRuntime) clusterReconciliationConfig(
+	ctx context.Context,
+	liveMemberCutoff time.Time,
+) (githubsource.ManagerConfig, []error, bool) {
+	declarationReader, available := source.manager.(interface {
+		ClusterRunnerPools(
+			ctx context.Context,
+			liveMemberCutoff time.Time,
+		) (githubsource.RunnerPoolDeclarationSnapshot, error)
+	})
+	if !available {
+		return source.config, nil, true
+	}
+	declarations, err := declarationReader.ClusterRunnerPools(ctx, liveMemberCutoff)
+	if errors.Is(err, githubsource.ErrRunnerPoolDeclarationPersistenceUnavailable) {
+		return source.config, nil, true
+	}
+	if err != nil {
+		return githubsource.ManagerConfig{}, []error{markOperationallyReported(err)}, false
+	}
+	config := source.config
+	config.RunnerPools = declarations.RunnerPools
+	config.PreserveRunnerPools = declarations.ConflictedRunnerPools
+	return config, declarationConflictErrors(declarations.ConflictedRunnerPools), true
+}
+
+func declarationConflictErrors(runnerPools []core.RunnerPool) []error {
+	resultErrors := make([]error, 0, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		resultErrors = append(resultErrors, markOperationallyReported(fmt.Errorf(
+			"live members declare conflicting GitHub runner groups for Runner Pool %q", runnerPool)))
+	}
+	return resultErrors
+}
+
+func (source *githubSourceRuntime) harvestRegistrationOpenResults(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 ) []error {
-	results := source.drainRepositoryOpenResults(term)
+	results := source.drainRegistrationOpenResults(term)
 	sort.SliceStable(results, func(first, second int) bool {
-		return results[first].repository < results[second].repository
+		if results[first].key.repository != results[second].key.repository {
+			return results[first].key.repository < results[second].key.repository
+		}
+		return results[first].key.runnerPool < results[second].key.runnerPool
 	})
 	resultErrors := make([]error, 0, len(results))
 	for _, result := range results {
-		if err := source.installRepositoryGeneration(ctx, term, result); err != nil {
+		if err := source.installRegistrationSession(ctx, term, result); err != nil {
 			resultErrors = append(resultErrors, err)
 		}
 	}
 	return resultErrors
 }
 
-func (*githubSourceRuntime) drainRepositoryOpenResults(
+func (*githubSourceRuntime) drainRegistrationOpenResults(
 	term *githubLeadershipTerm,
-) []githubRepositoryOpenResult {
-	results := make([]githubRepositoryOpenResult, 0)
+) []githubRegistrationOpenResult {
+	results := make([]githubRegistrationOpenResult, 0)
 	for {
 		select {
 		case result := <-term.openResults:
@@ -85,84 +138,106 @@ func (*githubSourceRuntime) drainRepositoryOpenResults(
 	}
 }
 
-func (source *githubSourceRuntime) installRepositoryGeneration(
+func (source *githubSourceRuntime) installRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
-	result githubRepositoryOpenResult,
+	result githubRegistrationOpenResult,
 ) error {
-	if pending, expected := source.opening[result.repository]; expected && sameRegistrations(pending, result.records) {
-		delete(source.opening, result.repository)
+	if pending, expected := source.opening[result.key]; expected && pending == result.requested {
+		delete(source.opening, result.key)
 	}
-	if !source.acceptsRepositoryResult(term, result) {
-		return source.closeRepositoryGeneration(ctx, result.generation, "discard stale GitHub repository sessions")
+	if !source.acceptsRegistrationResult(term, result) {
+		return source.closeRegistrationSession(ctx, result.session, "discard stale GitHub registration session")
+	}
+	if errors.Is(result.err, githubsource.ErrRegistrationNotAdmitted) {
+		source.removeDesiredRegistration(result.key)
+		return source.closeRegistrationSession(ctx, result.session, "retire unadmitted GitHub registration session")
 	}
 	if result.err != nil {
-		return markOperationallyReported(source.handleRepositoryOpenFailure(ctx, term, result))
+		cleanupErr := source.closeRegistrationSession(ctx, result.session, "retire failed GitHub registration session")
+		source.scheduleRequiredRegistrationSessions(ctx, term)
+		return markOperationallyReported(errors.Join(
+			fmt.Errorf("open GitHub registration session for Runner Pool %q in %q: %w",
+				result.key.runnerPool, result.key.repository, result.err), cleanupErr,
+		))
 	}
-	if result.generation == nil {
-		return fmt.Errorf("open GitHub repository sessions for %q: manager returned nil generation", result.repository)
+	if result.session == nil {
+		source.scheduleRequiredRegistrationSessions(ctx, term)
+		return markOperationallyReported(fmt.Errorf(
+			"open GitHub registration session for Runner Pool %q in %q: manager returned nil session",
+			result.key.runnerPool, result.key.repository,
+		))
 	}
-	previous := source.generations[result.repository]
-	if err := source.stopRepositoryGenerationPolls(ctx, previous); err != nil {
-		cleanupErr := source.closeRepositoryGeneration(ctx, result.generation, "retire rejected GitHub repository sessions")
-		source.scheduleRequiredRepositoryGenerations(ctx, term)
+	return source.installOpenedRegistrationSession(ctx, term, result)
+}
+
+func (source *githubSourceRuntime) removeDesiredRegistration(key githubRegistrationKey) {
+	delete(source.desired, key)
+	if !source.sessionActivationActive {
+		return
+	}
+	source.sessionActivationTotal = len(source.desired)
+	source.reportSessionActivationProgress()
+}
+
+func (source *githubSourceRuntime) installOpenedRegistrationSession(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	result githubRegistrationOpenResult,
+) error {
+	registration := result.session.Registration()
+	if registrationKey(registration) != result.key {
+		return errors.Join(
+			fmt.Errorf("open GitHub registration session for Runner Pool %q in %q: manager changed route identity",
+				result.key.runnerPool, result.key.repository),
+			source.closeRegistrationSession(ctx, result.session, "retire invalid GitHub registration session"),
+		)
+	}
+	previous := source.sessions[result.key]
+	if err := source.stopRegistrationSessionPoll(ctx, previous); err != nil {
+		cleanupErr := source.closeRegistrationSession(ctx, result.session, "retire rejected GitHub registration session")
+		source.scheduleRequiredRegistrationSessions(ctx, term)
 		return errors.Join(err, cleanupErr)
 	}
-	source.generations[result.repository] = result.generation
+	source.desired[result.key] = registration
+	source.sessions[result.key] = result.session
 	source.rebuildAdapters()
 	source.reportSessionActivationProgress()
-	return source.closeRepositoryGeneration(ctx, previous,
-		fmt.Sprintf("retire replaced GitHub repository sessions for %q", result.repository))
+	return source.closeRegistrationSession(ctx, previous,
+		fmt.Sprintf("retire replaced GitHub registration session for Runner Pool %q in %q",
+			result.key.runnerPool, result.key.repository))
 }
 
-func (source *githubSourceRuntime) acceptsRepositoryResult(
+func (source *githubSourceRuntime) acceptsRegistrationResult(
 	term *githubLeadershipTerm,
-	result githubRepositoryOpenResult,
+	result githubRegistrationOpenResult,
 ) bool {
 	return result.epoch == term.epoch && source.term == term && source.leaderInstalled &&
-		sameRegistrations(source.desired[result.repository], result.records)
+		source.desired[result.key] == result.requested
 }
 
-func (source *githubSourceRuntime) handleRepositoryOpenFailure(
+func (source *githubSourceRuntime) stopRegistrationSessionPoll(
 	ctx context.Context,
-	term *githubLeadershipTerm,
-	result githubRepositoryOpenResult,
+	session *githubsource.RegistrationSession,
 ) error {
-	cleanupErr := source.closeRepositoryGeneration(ctx, result.generation, "retire partial GitHub repository sessions")
-	source.scheduleRequiredRepositoryGenerations(ctx, term)
-	return errors.Join(
-		fmt.Errorf("open GitHub repository sessions for %q: %w", result.repository, result.err),
-		cleanupErr,
-	)
-}
-
-func (source *githubSourceRuntime) stopRepositoryGenerationPolls(
-	ctx context.Context,
-	generation *githubsource.RepositorySessionGeneration,
-) error {
-	if generation == nil {
+	if session == nil {
 		return nil
 	}
-	adapters := make(map[*githubsource.Adapter]struct{})
-	for _, adapter := range generation.Adapters() {
-		adapters[adapter] = struct{}{}
-	}
 	return source.stopPolls(ctx, func(adapter *githubsource.Adapter) bool {
-		_, found := adapters[adapter]
-		return found
+		return adapter == session.Adapter()
 	})
 }
 
-func (source *githubSourceRuntime) closeRepositoryGeneration(
+func (source *githubSourceRuntime) closeRegistrationSession(
 	ctx context.Context,
-	generation *githubsource.RepositorySessionGeneration,
+	session *githubsource.RegistrationSession,
 	description string,
 ) error {
-	if generation == nil {
+	if session == nil {
 		return nil
 	}
-	if err := generation.Close(ctx); err != nil {
-		source.retiring = append(source.retiring, generation)
+	if err := session.Close(ctx); err != nil {
+		source.retiring = append(source.retiring, session)
 		return fmt.Errorf("%s: %w", description, err)
 	}
 	return nil
@@ -180,71 +255,74 @@ func (source *githubSourceRuntime) harvestDiscovery(
 		}
 		source.nextDiscovery = result.completedAt.Add(source.discoveryInterval)
 		if result.err != nil {
-			return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
-		}
-		source.desired = groupActiveRegistrations(result.snapshot.Active)
-		resultErrors := make([]error, 0)
-		source.beginSessionActivation()
-		source.scheduleRequiredRepositoryGenerations(ctx, term)
-		if err := source.manager.RefreshMembers(ctx); err != nil {
-			resultErrors = append(resultErrors, markOperationallyReported(
-				fmt.Errorf("refresh GitHub member routes: %w", err),
+			if !githubsource.IsPruneFailure(result.err) {
+				return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
+			}
+			resultErrors := source.applyDiscoveredRegistrations(ctx, term, result.registrations)
+			return append(resultErrors, markOperationallyReported(
+				fmt.Errorf("prune GitHub registrations: %w", result.err),
 			))
-		} else {
-			source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
 		}
-		return resultErrors
+		return source.applyDiscoveredRegistrations(ctx, term, result.registrations)
 	default:
 		return nil
 	}
 }
 
-func (source *githubSourceRuntime) retireRemovedRepositories(ctx context.Context) []error {
+func (source *githubSourceRuntime) applyDiscoveredRegistrations(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	registrations []githubsource.Registration,
+) []error {
+	source.desired = configuredGitHubRegistrationRoutes(registrations)
+	source.beginSessionActivation()
+	source.scheduleRequiredRegistrationSessions(ctx, term)
+	if err := source.manager.RefreshMembers(ctx, source.config); err != nil {
+		return []error{markOperationallyReported(fmt.Errorf("refresh GitHub member routes: %w", err))}
+	}
+	source.nextMemberRefresh = source.currentTime().Add(source.discoveryInterval)
+	return nil
+}
+
+func (source *githubSourceRuntime) retireRemovedRegistrationSessions(ctx context.Context) []error {
 	resultErrors := make([]error, 0)
-	for _, repository := range sortedGenerationRepositories(source.generations) {
-		if _, retained := source.desired[repository]; retained {
+	for _, key := range sortedGitHubRegistrationKeys(source.sessions) {
+		if _, retained := source.desired[key]; retained {
 			continue
 		}
-		generation := source.generations[repository]
-		generationAdapters := make(map[*githubsource.Adapter]struct{})
-		for _, adapter := range generation.Adapters() {
-			generationAdapters[adapter] = struct{}{}
-		}
+		session := source.sessions[key]
 		if err := source.stopPolls(ctx, func(adapter *githubsource.Adapter) bool {
-			_, found := generationAdapters[adapter]
-			return found
+			return adapter == session.Adapter()
 		}); err != nil {
 			resultErrors = append(resultErrors, err)
 			continue
 		}
-		delete(source.generations, repository)
-		if err := generation.Close(ctx); err != nil {
-			source.retiring = append(source.retiring, generation)
-			resultErrors = append(resultErrors,
-				fmt.Errorf("retire removed GitHub repository sessions for %q: %w", repository, err))
-		}
+		delete(source.sessions, key)
+		source.retiring = append(source.retiring, session)
 	}
 	source.rebuildAdapters()
 	return resultErrors
 }
 
-func (source *githubSourceRuntime) retryRetiringGenerations(ctx context.Context) error {
+func (source *githubSourceRuntime) retryRetiringSessions(ctx context.Context) error {
 	retiring := source.retiring
 	source.retiring = nil
+	limit := min(githubSessionRetirementLimit, len(retiring))
 	var joined error
-	for _, generation := range retiring {
-		if err := generation.Close(ctx); err != nil {
-			source.retiring = append(source.retiring, generation)
+	for _, session := range retiring[:limit] {
+		if err := session.Close(ctx); err != nil {
+			source.retiring = append(source.retiring, session)
 			joined = errors.Join(joined, err)
 		}
 	}
+	source.retiring = append(source.retiring, retiring[limit:]...)
 	return joined
 }
 
 func (source *githubSourceRuntime) rebuildAdapters() {
-	adapters := make([]*githubsource.Adapter, 0)
-	for _, repository := range sortedGenerationRepositories(source.generations) {
-		adapters = append(adapters, source.generations[repository].Adapters()...)
+	adapters := make([]*githubsource.Adapter, 0, len(source.sessions))
+	for _, key := range sortedGitHubRegistrationKeys(source.sessions) {
+		adapters = append(adapters, source.sessions[key].Adapter())
 	}
 	source.adapters = adapters
 }

@@ -184,6 +184,9 @@ func TestDockerComposeEndpointRecognizesLegacyProcessingIdentity(t *testing.T) {
 	if !provider.KnowsEndpoint(legacyEndpoint) || !provider.CanInspectEndpointForMember(legacyEndpoint, "member-a") {
 		t.Fatalf("legacy endpoint %q is not inspectable", legacyEndpoint)
 	}
+	if provider.KnowsEndpoint("docker-compose:member-a") {
+		t.Fatal("legacy endpoint without its configuration identity was accepted")
+	}
 }
 
 type recordingDockerTransport struct {

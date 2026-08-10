@@ -142,6 +142,15 @@ func (client *Client) EnsureRunnerPool(
 }
 
 func (client *Client) runnerGroupID(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
+	return client.ResolveRunnerGroup(ctx, runnerGroupName)
+}
+
+// ResolveRunnerGroup resolves a configured GitHub runner-group name to its
+// stable numeric identity for registration admission checks.
+func (client *Client) ResolveRunnerGroup(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
+	if client == nil || client.registrations == nil {
+		return 0, errors.New("GitHub registration API is required")
+	}
 	runnerGroup, err := client.registrations.GetRunnerGroupByName(ctx, runnerGroupName)
 	if err != nil {
 		return 0, fmt.Errorf("get runner group %q: %w", runnerGroupName, err)

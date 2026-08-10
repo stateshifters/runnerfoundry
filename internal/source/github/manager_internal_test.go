@@ -16,6 +16,7 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 	session := &transport.Session{}
 	success := composeTransportManagerClient(
 		func(context.Context, string, string) (transport.Registration, error) { return registration, nil },
+		func(context.Context, string) (transport.RunnerGroupID, error) { return 1, nil },
 		func(context.Context, transport.Registration, string) (*transport.Session, error) { return session, nil },
 		func(context.Context, transport.Registration, string) ([]byte, error) { return []byte("opaque"), nil },
 		func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
@@ -29,6 +30,7 @@ func TestTransportManagerClientWrapsSuccessAndFailure(t *testing.T) {
 		func(context.Context, string, string) (transport.Registration, error) {
 			return transport.Registration{}, wantErr
 		},
+		func(context.Context, string) (transport.RunnerGroupID, error) { return 0, wantErr },
 		func(context.Context, transport.Registration, string) (*transport.Session, error) { return nil, wantErr },
 		func(context.Context, transport.Registration, string) ([]byte, error) { return nil, wantErr },
 		func(context.Context, transport.RunnerGroupID, []transport.OwnedRunnerPool, []transport.OwnedRunnerPool) (transport.PruneResult, error) {
