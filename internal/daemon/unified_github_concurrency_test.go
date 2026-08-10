@@ -35,7 +35,7 @@ func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t 
 	mustCloseGitHubSource(t, source)
 }
 
-func TestGitHubSourceRuntimeRefreshesPeerCapacityAfterMessage(t *testing.T) {
+func TestGitHubSourceRuntimeLeavesPeerPollRunningAfterMessage(t *testing.T) {
 	t.Parallel()
 
 	messageClient := newMessageThenBlockingClient()
@@ -60,9 +60,82 @@ func TestGitHubSourceRuntimeRefreshesPeerCapacityAfterMessage(t *testing.T) {
 	capacities.capacities["linux"] = 6
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, messageClient.started, 6, "refreshed message repository")
-	assertPolledCapacity(t, peerClient.started, 6, "refreshed peer repository")
+	assertNoPolledCapacity(t, peerClient.started, "peer repository")
 	assertNoPolledCapacity(t, unrelatedClient.started, "unrelated repository")
 	mustCloseGitHubSource(t, source)
+}
+
+func TestGitHubSourceRuntimeRefreshesPeerCapacityAfterPollReturns(t *testing.T) {
+	t.Parallel()
+
+	fixture := newPeerCapacityRefreshFixture()
+	fixture.open(t)
+	fixture.completeMessagePoll()
+	fixture.refreshCompletedRepositoryWithoutWaitingForPeer(t)
+	fixture.completePeerPoll(t)
+	mustCloseGitHubSource(t, fixture.source)
+}
+
+type peerCapacityRefreshFixture struct {
+	source        *githubSourceRuntime
+	messageClient *messageThenBlockingClient
+	peerClient    *stubbornCapacityMessageClient
+	capacities    *capacityAggregatorFake
+	now           time.Time
+}
+
+func newPeerCapacityRefreshFixture() *peerCapacityRefreshFixture {
+	messageClient := newMessageThenBlockingClient()
+	peerClient := newStubbornCapacityMessageClient()
+	adapters := []*githubsource.Adapter{
+		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+	}
+	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}}
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
+	return &peerCapacityRefreshFixture{source: source, messageClient: messageClient, peerClient: peerClient,
+		capacities: capacities, now: now}
+}
+
+func (fixture *peerCapacityRefreshFixture) open(t *testing.T) {
+	t.Helper()
+	mustOpenGitHubSource(t, fixture.source)
+	mustPollGitHubSource(t, fixture.source, fixture.now.Add(-time.Minute))
+	assertPolledCapacity(t, fixture.messageClient.started, 7, "message repository")
+	assertPolledCapacity(t, fixture.peerClient.started, 7, "peer repository")
+}
+
+func (fixture *peerCapacityRefreshFixture) completeMessagePoll() {
+	<-fixture.messageClient.firstReturned
+	preserveCompletedPollResult(fixture.source, fixture.source.adapters[0])
+}
+
+func (fixture *peerCapacityRefreshFixture) refreshCompletedRepositoryWithoutWaitingForPeer(t *testing.T) {
+	t.Helper()
+	fixture.capacities.capacities["linux"] = 6
+	pollFinished := make(chan error, 1)
+	go func() { pollFinished <- fixture.source.Poll(context.Background(), fixture.now.Add(-time.Minute)) }()
+	select {
+	case err := <-pollFinished:
+		if err != nil {
+			t.Fatalf("poll GitHub source: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(fixture.peerClient.release)
+		<-pollFinished
+		t.Fatal("peer repository blocked GitHub source maintenance")
+	}
+	assertPolledCapacity(t, fixture.messageClient.started, 6, "refreshed message repository")
+	assertNoPolledCapacity(t, fixture.peerClient.started, "peer repository")
+}
+
+func (fixture *peerCapacityRefreshFixture) completePeerPoll(t *testing.T) {
+	t.Helper()
+	close(fixture.peerClient.release)
+	preserveCompletedPollResult(fixture.source, fixture.source.adapters[1])
+	mustPollGitHubSource(t, fixture.source, fixture.now.Add(-time.Minute))
+	assertPolledCapacity(t, fixture.peerClient.started, 6, "refreshed peer repository")
 }
 
 func TestGitHubSourceRuntimeDoesNotRefreshPeerCapacityAfterUnhandledMessage(t *testing.T) {
@@ -155,7 +228,7 @@ func (fixture *ignoredLifecyclePollingFixture) processIgnoredLifecycle(t *testin
 	preserveCompletedPollResult(fixture.source, fixture.source.adapters[0])
 	mustPollGitHubSource(t, fixture.source, fixture.now.Add(-time.Minute))
 	assertPolledCapacity(t, fixture.lifecycleClient.started, 1, "restarted lifecycle repository")
-	assertPolledCapacity(t, fixture.demandClient.started, 1, "restarted demand repository")
+	assertNoPolledCapacity(t, fixture.demandClient.started, "demand repository")
 }
 
 func (fixture *ignoredLifecyclePollingFixture) processValidDemand(t *testing.T) {

@@ -253,38 +253,6 @@ func TestGitHubSourceRuntimeRetainsPollsWhenCancellationDeadlineExpires(t *testi
 	mustCloseGitHubSource(t, source)
 }
 
-func TestGitHubSourceRuntimeReportsPeerInvalidationDeadline(t *testing.T) {
-	t.Parallel()
-
-	messageClient := newMessageThenBlockingClient()
-	peerClient := newStubbornCapacityMessageClient()
-	unrelatedClient := newStubbornCapacityMessageClient()
-	adapters := []*githubsource.Adapter{
-		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "message", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "peer", RunnerPool: "linux"},
-		{Client: unrelatedClient, Handler: eventHandlerFake{}, Repository: "other", RunnerPool: "windows"},
-	}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 2, "windows": 1}}
-	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
-	mustOpenGitHubSource(t, source)
-	mustPollGitHubSource(t, source, now.Add(-time.Minute))
-	assertPolledCapacity(t, messageClient.started, 2, "message repository")
-	assertPolledCapacity(t, peerClient.started, 2, "peer repository")
-	assertPolledCapacity(t, unrelatedClient.started, 1, "unrelated repository")
-	<-messageClient.firstReturned
-	preserveCompletedPollResult(source, source.adapters[0])
-
-	cancelledContext, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := source.Poll(cancelledContext, now.Add(-time.Minute)); err == nil {
-		t.Fatal("peer invalidation ignored cancellation deadline")
-	}
-	close(peerClient.release)
-	close(unrelatedClient.release)
-	mustCloseGitHubSource(t, source)
-}
-
 func TestGitHubSourceRuntimeKeepsInstalledAdaptersWhenOldSessionCloseFails(t *testing.T) {
 	t.Parallel()
 

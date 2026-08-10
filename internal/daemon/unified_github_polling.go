@@ -41,11 +41,7 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 	pollErrors = append(pollErrors, source.harvestDiscovery(ctx, term)...)
 	pollErrors = append(pollErrors, source.retireRemovedRegistrationSessions(ctx)...)
 	source.collectAbandonedSessions()
-	harvestedPollErrors, changedPools := source.harvestPolls()
-	pollErrors = append(pollErrors, harvestedPollErrors...)
-	if err := source.stopChangedPools(ctx, changedPools); err != nil {
-		pollErrors = append(pollErrors, err)
-	}
+	pollErrors = append(pollErrors, source.harvestPolls()...)
 	pollErrors = append(pollErrors, source.startDueDiscovery(ctx, term, liveMemberCutoff)...)
 	pollErrors = append(pollErrors, source.launchIdlePolls(ctx, liveMemberCutoff)...)
 	if cleanupErr := source.retryRetiringSessions(ctx); cleanupErr != nil {
@@ -327,9 +323,8 @@ func (source *githubSourceRuntime) rebuildAdapters() {
 	source.adapters = adapters
 }
 
-func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]struct{}) {
+func (source *githubSourceRuntime) harvestPolls() []error {
 	pollErrors := make([]error, 0)
-	changedPools := make(map[core.RunnerPool]struct{})
 	for _, adapter := range source.adapters {
 		attempt, exists := source.polls[adapter]
 		if !exists {
@@ -340,14 +335,11 @@ func (source *githubSourceRuntime) harvestPolls() ([]error, map[core.RunnerPool]
 			continue
 		}
 		delete(source.polls, adapter)
-		if result.poll.Handled || result.poll.DemandChanged {
-			changedPools[adapter.RunnerPool] = struct{}{}
-		}
 		if result.err != nil {
 			pollErrors = append(pollErrors, markOperationallyReported(describeGitHubPollError(adapter, result.err)))
 		}
 	}
-	return pollErrors, changedPools
+	return pollErrors
 }
 
 func completedPoll(attempt *githubPollAttempt) (githubPollResult, bool) {
@@ -357,19 +349,6 @@ func completedPoll(attempt *githubPollAttempt) (githubPollResult, bool) {
 	default:
 		return githubPollResult{}, false
 	}
-}
-
-func (source *githubSourceRuntime) stopChangedPools(
-	ctx context.Context,
-	changedPools map[core.RunnerPool]struct{},
-) error {
-	if len(changedPools) == 0 {
-		return nil
-	}
-	return source.stopPolls(ctx, func(adapter *githubsource.Adapter) bool {
-		_, changed := changedPools[adapter.RunnerPool]
-		return changed
-	})
 }
 
 func (source *githubSourceRuntime) launchIdlePolls(
