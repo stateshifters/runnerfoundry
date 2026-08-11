@@ -14,6 +14,7 @@ const stopListeningForQueuedJobsSQL = `UNLISTEN runnerfoundry_queued_jobs`
 
 type acquiredPGXConnection interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Ping(ctx context.Context) error
 	Conn() *pgx.Conn
 	Release()
 }
@@ -42,6 +43,7 @@ func adaptPGXQueueNotificationConnection(connection acquiredPGXConnection) queue
 	rawConnection := connection.Conn()
 	return queueNotificationConnection{
 		listen:   queueNotificationStatement(connection.Exec, listenForQueuedJobsSQL),
+		ping:     connection.Ping,
 		wait:     queueNotificationWait(rawConnection.WaitForNotification),
 		unlisten: queueNotificationStatement(connection.Exec, stopListeningForQueuedJobsSQL),
 		release:  connection.Release,
@@ -64,10 +66,10 @@ func queueNotificationWait(
 ) func(context.Context) (core.RunnerPool, error) {
 	return func(ctx context.Context) (core.RunnerPool, error) {
 		notification, err := wait(ctx)
-		if err != nil {
-			return "", err
+		if notification != nil {
+			return core.RunnerPool(notification.Payload), nil
 		}
-		return core.RunnerPool(notification.Payload), nil
+		return "", err
 	}
 }
 

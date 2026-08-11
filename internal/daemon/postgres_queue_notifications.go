@@ -11,10 +11,13 @@ import (
 )
 
 const queueNotificationAcquireTimeout = time.Second
+const queueNotificationKeepaliveInterval = time.Minute
+const queueNotificationPingTimeout = 5 * time.Second
 const queueNotificationRetryDelay = time.Second
 
 type queueNotificationConnection struct {
 	listen   func(context.Context) error
+	ping     func(context.Context) error
 	wait     func(context.Context) (core.RunnerPool, error)
 	unlisten func(context.Context) error
 	release  func()
@@ -26,12 +29,21 @@ type queueNotificationPool struct {
 	acquire        func(context.Context) (queueNotificationConnection, error)
 }
 
+type queueNotificationAction uint8
+
+const (
+	continueQueueNotifications queueNotificationAction = iota
+	retryQueueNotifications
+	stopQueueNotifications
+)
+
 type postgreSQLQueueNotificationListener struct {
-	pool   queueNotificationPool
-	wake   func(core.RunnerPool)
-	report func(error)
-	retry  func(context.Context) bool
-	failed bool
+	pool              queueNotificationPool
+	wake              func(core.RunnerPool)
+	report            func(error)
+	retry             func(context.Context) bool
+	failed            bool
+	keepaliveInterval time.Duration
 
 	mutex  sync.Mutex
 	cancel context.CancelFunc
@@ -41,6 +53,7 @@ type postgreSQLQueueNotificationListener struct {
 func newPostgreSQLQueueNotificationListener(pool queueNotificationPool) *postgreSQLQueueNotificationListener {
 	return &postgreSQLQueueNotificationListener{
 		pool: pool, wake: func(core.RunnerPool) {}, report: func(error) {}, retry: waitForQueueNotificationRetry,
+		keepaliveInterval: queueNotificationKeepaliveInterval,
 	}
 }
 
@@ -82,40 +95,82 @@ func (listener *postgreSQLQueueNotificationListener) run(ctx context.Context, do
 		return
 	}
 	for ctx.Err() == nil {
-		if listener.listenOnce(ctx) || !listener.retry(ctx) {
+		action := listener.listenOnce(ctx)
+		if action == stopQueueNotifications || action == retryQueueNotifications && !listener.retry(ctx) {
 			return
 		}
 	}
 }
 
-func (listener *postgreSQLQueueNotificationListener) listenOnce(ctx context.Context) bool {
+func (listener *postgreSQLQueueNotificationListener) listenOnce(ctx context.Context) queueNotificationAction {
 	acquireContext, cancel := context.WithTimeout(ctx, queueNotificationAcquireTimeout)
 	connection, err := listener.pool.acquire(acquireContext)
 	cancel()
 	if err != nil {
 		listener.reportFailure(fmt.Errorf("acquire PostgreSQL queue notification connection: %w", err))
-		return false
+		return retryQueueNotifications
 	}
 	if err = connection.listen(ctx); err != nil {
 		err = discardQueueNotificationConnection(ctx, connection, err)
 		listener.reportFailure(fmt.Errorf("listen for PostgreSQL queue notifications: %w", err))
-		return false
+		return retryQueueNotifications
 	}
 	listener.reportRecovery()
+	return listener.receiveNotifications(ctx, connection)
+}
+
+func (listener *postgreSQLQueueNotificationListener) receiveNotifications(
+	ctx context.Context,
+	connection queueNotificationConnection,
+) queueNotificationAction {
 	for {
-		runnerPool, waitErr := connection.wait(ctx)
-		if waitErr == nil {
-			listener.wake(runnerPool)
-			continue
+		if action := listener.receiveNotification(ctx, connection); action != continueQueueNotifications {
+			return action
 		}
-		if ctx.Err() != nil {
-			listener.releaseHealthyConnection(ctx, connection)
-			return true
-		}
-		waitErr = discardQueueNotificationConnection(ctx, connection, waitErr)
-		listener.reportFailure(fmt.Errorf("wait for PostgreSQL queue notification: %w", waitErr))
-		return false
 	}
+}
+
+func (listener *postgreSQLQueueNotificationListener) receiveNotification(
+	ctx context.Context,
+	connection queueNotificationConnection,
+) queueNotificationAction {
+	waitContext, cancelWait := context.WithTimeout(ctx, listener.keepaliveInterval)
+	runnerPool, waitErr := connection.wait(waitContext)
+	waitExpired := errors.Is(waitContext.Err(), context.DeadlineExceeded) &&
+		errors.Is(waitErr, context.DeadlineExceeded)
+	cancelWait()
+	if waitErr == nil {
+		listener.wake(runnerPool)
+		return continueQueueNotifications
+	}
+	if ctx.Err() != nil {
+		listener.releaseHealthyConnection(ctx, connection)
+		return stopQueueNotifications
+	}
+	if waitExpired {
+		return listener.pingNotificationConnection(ctx, connection)
+	}
+	waitErr = discardQueueNotificationConnection(ctx, connection, waitErr)
+	listener.reportFailure(fmt.Errorf("wait for PostgreSQL queue notification: %w", waitErr))
+	return retryQueueNotifications
+}
+
+func (listener *postgreSQLQueueNotificationListener) pingNotificationConnection(
+	ctx context.Context,
+	connection queueNotificationConnection,
+) queueNotificationAction {
+	pingContext, cancelPing := context.WithTimeout(ctx, queueNotificationPingTimeout)
+	pingErr := connection.ping(pingContext)
+	cancelPing()
+	if pingErr == nil {
+		return continueQueueNotifications
+	}
+	pingErr = discardQueueNotificationConnection(ctx, connection, pingErr)
+	if ctx.Err() != nil {
+		return stopQueueNotifications
+	}
+	listener.reportFailure(fmt.Errorf("ping PostgreSQL queue notification connection: %w", pingErr))
+	return retryQueueNotifications
 }
 
 func (listener *postgreSQLQueueNotificationListener) releaseHealthyConnection(

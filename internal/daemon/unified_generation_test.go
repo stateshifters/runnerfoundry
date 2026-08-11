@@ -174,6 +174,34 @@ func TestUnifiedGenerationOwnsQueueNotificationLifecycle(t *testing.T) {
 	mustCloseGeneration(t, generation)
 }
 
+func TestUnifiedGenerationRunsMaintenanceWhileQueueNotificationPingIsBlocked(t *testing.T) {
+	connection := newQueueNotificationConnectionFake()
+	pingStarted := make(chan struct{})
+	protocol := connection.protocol()
+	protocol.ping = func(ctx context.Context) error {
+		close(pingStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
+		maxConnections: 2,
+		acquire:        func(context.Context) (queueNotificationConnection, error) { return protocol, nil },
+	})
+	listener.keepaliveInterval = time.Millisecond
+	cycles := make(chan struct{}, 1)
+	generation := newMaintenanceGeneration(
+		&cycleEngineFake{cycles: cycles},
+		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	generation.notifications = listener
+
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
+	<-pingStarted
+	waitForCycle(t, cycles)
+	mustCloseGeneration(t, generation)
+}
+
 func TestUnifiedGenerationReportsQueueNotificationStopFailure(t *testing.T) {
 	wantErr := errors.New("notification stop failed")
 	notifications := &queueNotificationRuntimeFake{

@@ -35,6 +35,56 @@ func TestPostgreSQLQueueNotificationsWakeEveryReceivedRunnerPool(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLQueueNotificationsPingIdleSessionAndContinueWaiting(t *testing.T) {
+	connection := newQueueNotificationConnectionFake()
+	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
+		maxConnections: 2,
+		acquire:        func(context.Context) (queueNotificationConnection, error) { return connection.protocol(), nil },
+	})
+	listener.keepaliveInterval = time.Millisecond
+	reported := make(chan error, 1)
+	listener.report = func(err error) { reported <- err }
+	woken := make(chan core.RunnerPool, 1)
+	listener.wake = func(runnerPool core.RunnerPool) { woken <- runnerPool }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listener.Start(ctx)
+	<-connection.pinged
+	connection.notifications <- queueNotificationResult{runnerPool: "windows"}
+	assertWokenRunnerPool(t, woken, "windows")
+	assertNoQueueNotificationReport(t, reported, "idle keepalive")
+	cancel()
+	stopQueueNotificationListener(t, listener)
+}
+
+func TestPostgreSQLQueueNotificationsCancelAndJoinBlockedPing(t *testing.T) {
+	connection := newQueueNotificationConnectionFake()
+	pingStarted := make(chan context.Context)
+	protocol := connection.protocol()
+	protocol.ping = func(ctx context.Context) error {
+		pingStarted <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
+		maxConnections: 2,
+		acquire:        func(context.Context) (queueNotificationConnection, error) { return protocol, nil },
+	})
+	listener.keepaliveInterval = time.Millisecond
+	reported := make(chan error, 1)
+	listener.report = func(err error) { reported <- err }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listener.Start(ctx)
+	if _, bounded := (<-pingStarted).Deadline(); !bounded {
+		t.Fatal("notification ping was not bounded")
+	}
+	cancel()
+	stopQueueNotificationListener(t, listener)
+	assertDiscardedQueueNotificationConnection(t, connection, "canceled ping")
+	assertNoQueueNotificationReport(t, reported, "canceled ping")
+}
+
 func TestPostgreSQLQueueNotificationsRemainBestEffort(t *testing.T) {
 	wantErr := errors.New("notifications unavailable")
 	reports := make(chan error, 1)
@@ -70,21 +120,32 @@ func TestPostgreSQLQueueNotificationsReconnectAfterListenerFailure(t *testing.T)
 	failed.notifications <- queueNotificationResult{err: wantErr}
 	recovered := newQueueNotificationConnectionFake()
 	recovered.notifications <- queueNotificationResult{runnerPool: "windows"}
-	connections := []queueNotificationConnection{failed.protocol(), recovered.protocol()}
-	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
-		maxConnections: 2,
-		acquire: func(context.Context) (queueNotificationConnection, error) {
-			connection := connections[0]
-			connections = connections[1:]
-			return connection, nil
-		},
-	})
-	retries := 0
-	listener.retry = func(context.Context) bool { retries++; return retries == 1 }
-	reported := make(chan error, 1)
-	listener.report = func(err error) { reported <- err }
-	woken := make(chan core.RunnerPool, 1)
-	listener.wake = func(runnerPool core.RunnerPool) { woken <- runnerPool }
+	listener, reported, woken := newReconnectingQueueNotificationListener(
+		failed.protocol(), recovered.protocol(),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listener.Start(ctx)
+	assertReportedQueueNotificationError(t, reported, wantErr)
+	assertWokenRunnerPool(t, woken, "windows")
+	assertQueueNotificationRecovery(t, reported)
+	cancel()
+	stopQueueNotificationListener(t, listener)
+	if failed.discardCalls != 1 || recovered.releaseCalls != 1 {
+		t.Fatalf("connection outcomes = discarded:%d released:%d", failed.discardCalls, recovered.releaseCalls)
+	}
+}
+
+func TestPostgreSQLQueueNotificationsReconnectAfterPingFailure(t *testing.T) {
+	wantErr := errors.New("ping failed")
+	failed := newQueueNotificationConnectionFake()
+	failed.pingErr = wantErr
+	recovered := newQueueNotificationConnectionFake()
+	recovered.notifications <- queueNotificationResult{runnerPool: "windows"}
+	listener, reported, woken := newReconnectingQueueNotificationListener(
+		failed.protocol(), recovered.protocol(),
+	)
+	listener.keepaliveInterval = time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	listener.Start(ctx)
@@ -153,6 +214,47 @@ func assertQueueNotificationRecovery(t *testing.T, reported <-chan error) {
 	if err := <-reported; err != nil {
 		t.Fatalf("recovery report = %v, want nil", err)
 	}
+}
+
+func assertNoQueueNotificationReport(t *testing.T, reported <-chan error, operation string) {
+	t.Helper()
+	select {
+	case err := <-reported:
+		t.Fatalf("%s report = %v, want none", operation, err)
+	default:
+	}
+}
+
+func assertDiscardedQueueNotificationConnection(
+	t *testing.T,
+	connection *queueNotificationConnectionFake,
+	operation string,
+) {
+	t.Helper()
+	if connection.discardCalls != 1 || connection.unlistenCalls != 0 || connection.releaseCalls != 0 {
+		t.Fatalf("%s = discarded:%d unlistened:%d released:%d", operation,
+			connection.discardCalls, connection.unlistenCalls, connection.releaseCalls)
+	}
+}
+
+func newReconnectingQueueNotificationListener(
+	connections ...queueNotificationConnection,
+) (*postgreSQLQueueNotificationListener, <-chan error, <-chan core.RunnerPool) {
+	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
+		maxConnections: 2,
+		acquire: func(context.Context) (queueNotificationConnection, error) {
+			connection := connections[0]
+			connections = connections[1:]
+			return connection, nil
+		},
+	})
+	retries := 0
+	listener.retry = func(context.Context) bool { retries++; return retries == 1 }
+	reported := make(chan error, 2)
+	listener.report = func(err error) { reported <- err }
+	woken := make(chan core.RunnerPool, 1)
+	listener.wake = func(runnerPool core.RunnerPool) { woken <- runnerPool }
+	return listener, reported, woken
 }
 
 func stopQueueNotificationListener(t *testing.T, listener *postgreSQLQueueNotificationListener) {
@@ -234,19 +336,33 @@ type queueNotificationResult struct {
 
 type queueNotificationConnectionFake struct {
 	notifications chan queueNotificationResult
+	pinged        chan struct{}
+	pingErr       error
 	listenCalls   int
+	pingCalls     int
 	unlistenCalls int
 	releaseCalls  int
 	discardCalls  int
 }
 
 func newQueueNotificationConnectionFake() *queueNotificationConnectionFake {
-	return &queueNotificationConnectionFake{notifications: make(chan queueNotificationResult, 1)}
+	return &queueNotificationConnectionFake{
+		notifications: make(chan queueNotificationResult, 1),
+		pinged:        make(chan struct{}, 1),
+	}
 }
 
 func (connection *queueNotificationConnectionFake) protocol() queueNotificationConnection {
 	return queueNotificationConnection{
 		listen: func(context.Context) error { connection.listenCalls++; return nil },
+		ping: func(context.Context) error {
+			connection.pingCalls++
+			select {
+			case connection.pinged <- struct{}{}:
+			default:
+			}
+			return connection.pingErr
+		},
 		wait: func(ctx context.Context) (core.RunnerPool, error) {
 			select {
 			case <-ctx.Done():

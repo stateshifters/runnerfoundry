@@ -33,6 +33,12 @@ func TestPGXQueueNotificationWaitAdapter(t *testing.T) {
 	if _, err := failedWait(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("wait error = %v, want %v", err, wantErr)
 	}
+	racingWait := queueNotificationWait(func(context.Context) (*pgconn.Notification, error) {
+		return &pgconn.Notification{Payload: "linux"}, context.DeadlineExceeded
+	})
+	if runnerPool, err := racingWait(context.Background()); err != nil || runnerPool != "linux" {
+		t.Fatalf("notification racing with deadline = (%q, %v), want linux", runnerPool, err)
+	}
 }
 
 func TestPGXQueueNotificationDiscardAdapter(t *testing.T) {
@@ -76,9 +82,15 @@ func TestPGXQueueNotificationAcquireAdaptsSuccessAndFailure(t *testing.T) {
 func TestPGXQueueNotificationConnectionBuildsOwnedProtocol(t *testing.T) {
 	connection := &acquiredPGXConnectionFake{}
 	protocol := adaptPGXQueueNotificationConnection(connection)
-	if protocol.listen == nil || protocol.wait == nil || protocol.unlisten == nil ||
+	if protocol.listen == nil || protocol.ping == nil || protocol.wait == nil || protocol.unlisten == nil ||
 		protocol.release == nil || protocol.discard == nil {
 		t.Fatal("PGX notification connection has an incomplete protocol")
+	}
+	if err := protocol.ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if connection.pingCalls != 1 {
+		t.Fatalf("native connection pings = %d, want 1", connection.pingCalls)
 	}
 }
 
@@ -99,10 +111,16 @@ func TestPGXQueueNotificationPoolUsesConfiguredPrimaryCapacity(t *testing.T) {
 	}
 }
 
-type acquiredPGXConnectionFake struct{}
+type acquiredPGXConnectionFake struct {
+	pingCalls int
+}
 
 func (*acquiredPGXConnectionFake) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
+}
+func (connection *acquiredPGXConnectionFake) Ping(context.Context) error {
+	connection.pingCalls++
+	return nil
 }
 func (*acquiredPGXConnectionFake) Conn() *pgx.Conn { return nil }
 func (*acquiredPGXConnectionFake) Release()        {}
