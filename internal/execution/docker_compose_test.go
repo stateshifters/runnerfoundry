@@ -46,7 +46,7 @@ func TestDockerComposeInspectReturnsOwnedRunnerState(t *testing.T) {
 	}
 	expected := []RunnerInstance{
 		{ID: "container-1", RunnerName: "linux-1", RunnerPool: "linux", State: RunnerStateRunning},
-		{ID: "container-2", RunnerName: "linux-2", RunnerPool: "linux", State: RunnerStateCompleted},
+		{ID: "container-2", RunnerName: "linux-2", RunnerPool: "linux", State: RunnerStateUnknown},
 	}
 	if len(instances) != len(expected) {
 		t.Fatalf("instances = %#v, want %#v", instances, expected)
@@ -70,8 +70,8 @@ func TestDockerComposeDestroyTranslatesRunnerIdentityAndState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destroy Docker Compose runner: %v", err)
 	}
-	if transport.removedID != "container-1" {
-		t.Fatalf("removed ID = %q, want container-1", transport.removedID)
+	if transport.removedID != "" {
+		t.Fatalf("completed runner removal ID = %q, want Docker-owned cleanup", transport.removedID)
 	}
 }
 
@@ -135,12 +135,16 @@ func TestDockerComposeStartPreservesTransportFailure(t *testing.T) {
 func TestDockerComposeDestroyPreservesTransportFailure(t *testing.T) {
 	expectedErr := errors.New("destroy failed")
 	provider := NewDockerComposeProvider(
-		&recordingDockerTransport{removeErr: expectedErr},
+		&recordingDockerTransport{
+			removeErr: expectedErr,
+			listOutput: `{"ID":"container-1","State":"running",` +
+				`"Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=linux-1"}`,
+		},
 		providerdocker.ComposeConfig{},
 		"local",
 	)
 
-	err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning})
+	err := provider.Destroy(context.Background(), RunnerInstance{ID: "container-1", State: RunnerStateRunning})
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("destroy error = %v, want wrapped %v", err, expectedErr)
 	}

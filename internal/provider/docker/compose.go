@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -233,13 +234,47 @@ func runnerInstance(container dockerContainer, requestedPools []string) (RunnerI
 	}, true
 }
 
-// Destroy forcibly removes instance by its provider ID.
+// Destroy confirms cleanup for one Docker runner. Completed instances are left
+// to Docker's automatic --rm lifecycle; running and unknown instances are
+// force-removed. If forced removal fails, Destroy refreshes owned inventory and
+// succeeds only when the exact container is absent or completed. A failed
+// refresh is joined with the original removal failure.
 func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
-	if err != nil {
-		return fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err)
+	if instance.State == RunnerStateCompleted {
+		return nil
 	}
-	return nil
+	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
+	if err == nil {
+		return nil
+	}
+	return provider.confirmRemoval(ctx, instance, fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err))
+}
+
+func (provider ComposeProvider) confirmRemoval(
+	ctx context.Context,
+	instance RunnerInstance,
+	removalFailure error,
+) error {
+	instances, confirmationErr := provider.List(ctx)
+	if confirmationErr != nil {
+		return errors.Join(
+			removalFailure,
+			fmt.Errorf("confirm docker runner %q removal: %w", instance.RunnerName, confirmationErr),
+		)
+	}
+	if dockerCleanupComplete(instances, instance.ID) {
+		return nil
+	}
+	return removalFailure
+}
+
+func dockerCleanupComplete(instances []RunnerInstance, containerID string) bool {
+	for _, instance := range instances {
+		if instance.ID == containerID {
+			return instance.State == RunnerStateCompleted
+		}
+	}
+	return true
 }
 
 // Validate resolves the Compose model and requires Config.Service to exist.
@@ -293,7 +328,7 @@ func dockerState(state string) RunnerState {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "running":
 		return RunnerStateRunning
-	case "dead":
+	case "exited", "removing":
 		return RunnerStateCompleted
 	default:
 		return RunnerStateUnknown

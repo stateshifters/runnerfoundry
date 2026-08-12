@@ -63,9 +63,9 @@ func TestListRecognizesCurrentAndLegacyOwnershipMarkers(t *testing.T) {
 		t.Fatalf("expected 4 owned instances, got %#v", instances)
 	}
 	if instances[0].State != RunnerStateRunning ||
-		instances[1].State != RunnerStateUnknown ||
-		instances[2].State != RunnerStateUnknown ||
-		instances[3].State != RunnerStateCompleted {
+		instances[1].State != RunnerStateCompleted ||
+		instances[2].State != RunnerStateCompleted ||
+		instances[3].State != RunnerStateUnknown {
 		t.Fatalf("unexpected states: %#v", instances)
 	}
 }
@@ -223,7 +223,34 @@ func TestDestroyRemovesTransitionalOrUnknownRunner(t *testing.T) {
 	}
 }
 
-func TestDestroyRemovesDeadRunner(t *testing.T) {
+func TestDestroyForceRemovesEveryActionableDockerState(t *testing.T) {
+	for _, state := range []string{"running", "dead", "created", "paused", "restarting", "unexpected"} {
+		t.Run(state, func(t *testing.T) { assertActionableDockerStateIsForceRemoved(t, state) })
+	}
+}
+
+func assertActionableDockerStateIsForceRemoved(t *testing.T, state string) {
+	t.Helper()
+	commandRunner := &recordingCommandRunner{
+		output: `{"ID":"runner-id","Names":"linux-1","State":"` + state +
+			`","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=linux-1"}`,
+	}
+	provider := ComposeProvider{CommandRunner: commandRunner}
+
+	instances, err := provider.List(context.Background(), "linux")
+	if err != nil || len(instances) != 1 {
+		t.Fatalf("expected one %s runner, got %#v and error %v", state, instances, err)
+	}
+	if err := provider.Destroy(context.Background(), instances[0]); err != nil {
+		t.Fatalf("expected %s runner destroy to succeed, got %v", state, err)
+	}
+	expectedRemoval := []string{"rm", "--force", "runner-id"}
+	if len(commandRunner.commands) != 2 || !reflect.DeepEqual(commandRunner.commands[1].Args, expectedRemoval) {
+		t.Fatalf("expected %s runner removal command %#v, got %#v", state, expectedRemoval, commandRunner.commands)
+	}
+}
+
+func TestDestroyLeavesCompletedRunnerToDocker(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := ComposeProvider{CommandRunner: commandRunner}
 
@@ -232,17 +259,101 @@ func TestDestroyRemovesDeadRunner(t *testing.T) {
 		RunnerName: "linux-1",
 		State:      RunnerStateCompleted,
 	}); err != nil {
-		t.Fatalf("expected dead runner destroy to succeed, got %v", err)
+		t.Fatalf("expected completed runner destroy to succeed, got %v", err)
 	}
-	expected := []string{"rm", "--force", "runner-id"}
-	if len(commandRunner.commands) != 1 || !reflect.DeepEqual(commandRunner.commands[0].Args, expected) {
-		t.Fatalf("expected dead runner removal command %#v, got %#v", expected, commandRunner.commands)
+	if len(commandRunner.commands) != 0 {
+		t.Fatalf("expected Docker to own completed runner removal, got commands %#v", commandRunner.commands)
+	}
+}
+
+func TestDestroyConfirmsRemovalWhenContainerIsAbsentAfterCommandFailure(t *testing.T) {
+	commandRunner := &recordingCommandRunner{removeError: errors.New("removal already in progress")}
+	provider := ComposeProvider{CommandRunner: commandRunner}
+
+	err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         "runner-id",
+		RunnerName: "linux-1",
+		State:      RunnerStateRunning,
+	})
+	if err != nil {
+		t.Fatalf("expected absent container to confirm removal, got %v", err)
+	}
+	expectedCommands := []Command{
+		{Args: []string{"rm", "--force", "runner-id"}},
+		{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipRunnerPool + "="}},
+	}
+	if !reflect.DeepEqual(commandRunner.commands, expectedCommands) {
+		t.Fatalf("unexpected cleanup commands: %#v", commandRunner.commands)
+	}
+}
+
+func TestDestroyConfirmsRemovalWhenDockerOwnsContainerCleanup(t *testing.T) {
+	for _, dockerState := range []string{"exited", "removing"} {
+		t.Run(dockerState, func(t *testing.T) {
+			commandRunner := &recordingCommandRunner{
+				removeError: errors.New("removal already in progress"),
+				output: `{"ID":"runner-id","Names":"linux-1","State":"` + dockerState +
+					`","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=linux-1"}`,
+			}
+			provider := ComposeProvider{CommandRunner: commandRunner}
+
+			err := provider.Destroy(context.Background(), RunnerInstance{
+				ID:         "runner-id",
+				RunnerName: "linux-1",
+				State:      RunnerStateRunning,
+			})
+			if err != nil {
+				t.Fatalf("expected %s container to confirm Docker-owned cleanup, got %v", dockerState, err)
+			}
+		})
+	}
+}
+
+func TestDestroyRetainsRemovalFailureWhenContainerRemainsActionable(t *testing.T) {
+	removalFailure := errors.New("permission denied")
+	commandRunner := &recordingCommandRunner{
+		removeError: removalFailure,
+		output: `{"ID":"runner-id","Names":"linux-1","State":"running",` +
+			`"Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=linux-1"}`,
+	}
+	provider := ComposeProvider{CommandRunner: commandRunner}
+
+	err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         "runner-id",
+		RunnerName: "linux-1",
+		State:      RunnerStateRunning,
+	})
+	if !errors.Is(err, removalFailure) {
+		t.Fatalf("expected original removal failure, got %v", err)
+	}
+}
+
+func TestDestroyReportsRemovalAndConfirmationFailures(t *testing.T) {
+	removalFailure := errors.New("permission denied")
+	confirmationFailure := errors.New("docker unavailable")
+	provider := ComposeProvider{CommandRunner: &recordingCommandRunner{
+		removeError: removalFailure,
+		listError:   confirmationFailure,
+	}}
+
+	err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         "runner-id",
+		RunnerName: "linux-1",
+		State:      RunnerStateRunning,
+	})
+	if !errors.Is(err, removalFailure) {
+		t.Fatalf("expected removal failure, got %v", err)
+	}
+	if !errors.Is(err, confirmationFailure) {
+		t.Fatalf("expected confirmation failure, got %v", err)
 	}
 }
 
 type recordingCommandRunner struct {
 	commands     []Command
 	output       string
+	listError    error
+	removeError  error
 	startConfig  ComposeConfig
 	startRequest StartRequest
 }
@@ -251,9 +362,9 @@ type Command struct {
 	Args []string
 }
 
-func (runner *recordingCommandRunner) record(command Command) (string, error) {
+func (runner *recordingCommandRunner) record(command Command) string {
 	runner.commands = append(runner.commands, command)
-	return runner.output, nil
+	return runner.output
 }
 
 func (runner *recordingCommandRunner) StartComposeRunner(_ context.Context, config ComposeConfig, request StartRequest) error {
@@ -263,16 +374,17 @@ func (runner *recordingCommandRunner) StartComposeRunner(_ context.Context, conf
 }
 
 func (runner *recordingCommandRunner) ListComposeRunners(_ context.Context, runnerPoolName string) (string, error) {
-	return runner.record(Command{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipRunnerPool + "=" + runnerPoolName}})
+	output := runner.record(Command{Args: []string{"ps", "--all", "--format", "json", "--filter", "label=" + contract.OwnershipRunnerPool + "=" + runnerPoolName}})
+	return output, runner.listError
 }
 
 func (runner *recordingCommandRunner) RemoveComposeRunner(_ context.Context, containerID string) error {
-	_, err := runner.record(Command{Args: []string{"rm", "--force", containerID}})
-	return err
+	runner.record(Command{Args: []string{"rm", "--force", containerID}})
+	return runner.removeError
 }
 
 func (runner *recordingCommandRunner) ListComposeServices(_ context.Context, config ComposeConfig) (string, error) {
-	return runner.record(Command{Args: append(composeArgs(config), "config", "--services")})
+	return runner.record(Command{Args: append(composeArgs(config), "config", "--services")}), nil
 }
 
 type failingCommandRunner struct{}

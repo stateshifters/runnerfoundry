@@ -320,7 +320,7 @@ scale_sets:
       service: runner
 ```
 
-RunnerFoundry validates the service with `docker compose config --services` and supplies JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`.
+RunnerFoundry validates the service with `docker compose config --services` and supplies JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`. Runner containers are launched with `--rm`, so Docker removes normally exited runners while RunnerFoundry force-removes resources that require exceptional cleanup.
 
 See the [minimal Docker example](examples/docker-runner/README.md).
 
