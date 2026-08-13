@@ -84,7 +84,7 @@ func TestExecutionMaintenanceMakesEachPoolEligibleWithoutWaitingForSiblings(t *t
 		if runnerPool != "windows" {
 			t.Fatalf("first eligible Runner Pool = %q, want windows", runnerPool)
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("Windows was not woken immediately after its reconciliation")
 	}
 	close(releaseLinux)

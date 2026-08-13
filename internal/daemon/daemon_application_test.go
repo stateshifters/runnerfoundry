@@ -112,6 +112,47 @@ func (store *shutdownStoreFake) WithdrawMemberCapacity(_ context.Context, member
 	return store.withdrawErr
 }
 
+type blockingShutdownStore struct {
+	*builderStoreFake
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func successfulSupervisor(
+	context.Context,
+	<-chan struct{},
+	func() (config.Config, error),
+	generationBuilder,
+	serviceNotifier,
+	func(error),
+	ActiveRunnerPolicy,
+) error {
+	return nil
+}
+
+func blockingSupervisor(started chan<- struct{}, release <-chan struct{}, resultErr error) daemonSupervisor {
+	return func(
+		ctx context.Context,
+		_ <-chan struct{},
+		_ func() (config.Config, error),
+		_ generationBuilder,
+		_ serviceNotifier,
+		_ func(error),
+		_ ActiveRunnerPolicy,
+	) error {
+		<-ctx.Done()
+		close(started)
+		<-release
+		return resultErr
+	}
+}
+
+func (store *blockingShutdownStore) WithdrawMemberCapacity(context.Context, core.MemberID) error {
+	close(store.started)
+	<-store.release
+	return nil
+}
+
 func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {
 	runtime, _ := newTestProductionRuntime(t)
 	dependencies, loads := testRunBoundaries(t, runtime)
@@ -120,6 +161,16 @@ func TestRunUsesInjectedApplicationBoundaries(t *testing.T) {
 	if err := application.Run(context.Background(), Options{ConfigPath: "config.yml"}); err != nil || *loads != 2 {
 		t.Fatalf("Run = %v, loads %d", err, *loads)
 	}
+}
+
+func TestProductionShutdownTimerCanBeStoppedWithoutWaiting(t *testing.T) {
+	t.Parallel()
+
+	timer := productionDaemonApplicationDependencies().newShutdownTimer(time.Hour)
+	if timer.expired == nil || timer.stop == nil {
+		t.Fatal("production shutdown timer is incomplete")
+	}
+	timer.stop()
 }
 
 func TestRunRejectsInvalidActiveRunnerPolicyBeforeLoadingConfiguration(t *testing.T) {
@@ -172,6 +223,132 @@ func TestRunReportsSupervisorFailure(t *testing.T) {
 	}
 	if err := runDaemon(context.Background(), Options{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("supervise error = %v", err)
+	}
+}
+
+func TestLeaveShutdownReturnsSuccessfullyWhenRuntimeCleanupExceedsBudget(t *testing.T) {
+	t.Parallel()
+
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	store := &blockingShutdownStore{
+		builderStoreFake: newBuilderStoreFake(),
+		started:          cleanupStarted,
+		release:          releaseCleanup,
+	}
+	runtime, _ := newTestProductionRuntime(t)
+	runtime.state.store = store
+	dependencies, _ := testRunBoundaries(t, runtime)
+	expired := make(chan time.Time, 1)
+	timerCreated := make(chan time.Duration, 1)
+	dependencies.newShutdownTimer = func(duration time.Duration) shutdownTimer {
+		timerCreated <- duration
+		return shutdownTimer{expired: expired, stop: func() {}}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- runDaemon(ctx, Options{}, dependencies) }()
+	<-cleanupStarted
+	cancel()
+	if duration := <-timerCreated; duration != 30*time.Second {
+		t.Fatalf("leave shutdown budget = %s, want 30s", duration)
+	}
+	expired <- time.Time{}
+	if err := <-result; err != nil {
+		t.Fatalf("leave shutdown timeout = %v, want success", err)
+	}
+	close(releaseCleanup)
+}
+
+func TestLeaveShutdownReturnsSuccessfullyWhenSupervisorCleanupExceedsBudget(t *testing.T) {
+	t.Parallel()
+
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	runtime, _ := newTestProductionRuntime(t)
+	dependencies, _ := testRunBoundaries(t, runtime)
+	dependencies.supervise = blockingSupervisor(cleanupStarted, releaseCleanup, nil)
+	expired := make(chan time.Time, 1)
+	dependencies.newShutdownTimer = func(time.Duration) shutdownTimer {
+		return shutdownTimer{expired: expired, stop: func() {}}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- runDaemon(ctx, Options{}, dependencies) }()
+	cancel()
+	<-cleanupStarted
+	expired <- time.Time{}
+	if err := <-result; err != nil {
+		t.Fatalf("leave shutdown timeout = %v, want success", err)
+	}
+	close(releaseCleanup)
+}
+
+func TestLeaveShutdownReturnsCleanupErrorBeforeBudgetExpires(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("cleanup failed")
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	timerCreated := make(chan struct{})
+	timerStopped := make(chan struct{})
+	runtime, _ := newTestProductionRuntime(t)
+	dependencies, _ := testRunBoundaries(t, runtime)
+	dependencies.supervise = blockingSupervisor(cleanupStarted, releaseCleanup, wantErr)
+	dependencies.newShutdownTimer = func(time.Duration) shutdownTimer {
+		close(timerCreated)
+		return shutdownTimer{expired: make(chan time.Time), stop: func() { close(timerStopped) }}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- runDaemon(ctx, Options{}, dependencies) }()
+	cancel()
+	<-cleanupStarted
+	<-timerCreated
+	close(releaseCleanup)
+	if err := <-result; !errors.Is(err, wantErr) {
+		t.Fatalf("leave shutdown cleanup = %v, want %v", err, wantErr)
+	}
+	<-timerStopped
+}
+
+func TestTerminateShutdownDoesNotUseLeaveBudget(t *testing.T) {
+	t.Parallel()
+
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	store := &blockingShutdownStore{
+		builderStoreFake: newBuilderStoreFake(),
+		started:          cleanupStarted,
+		release:          releaseCleanup,
+	}
+	runtime, _ := newTestProductionRuntime(t)
+	runtime.state.store = store
+	dependencies, _ := testRunBoundaries(t, runtime)
+	dependencies.supervise = successfulSupervisor
+	dependencies.newShutdownTimer = func(time.Duration) shutdownTimer {
+		t.Fatal("terminate shutdown created the leave timer")
+		return shutdownTimer{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- runDaemon(ctx, Options{ActiveRunnerPolicy: TerminateActiveRunners}, dependencies)
+	}()
+	<-cleanupStarted
+	cancel()
+	select {
+	case err := <-result:
+		t.Fatalf("terminate shutdown returned before cleanup completed: %v", err)
+	default:
+	}
+	close(releaseCleanup)
+	if err := <-result; err != nil {
+		t.Fatalf("terminate shutdown = %v", err)
 	}
 }
 

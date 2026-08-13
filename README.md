@@ -225,7 +225,9 @@ runnerfoundry --config /etc/runnerfoundry/config.yaml \
   --active-runner-policy=terminate
 ```
 
-`leave` preserves active runners and processing. `terminate` destroys affected resources and returns only unstarted jobs to the queue after cleanup succeeds. Started jobs remain in processing until GitHub sends `JobCompleted`.
+`leave` preserves active runners and processing and never waits for those runners to finish. On process shutdown, RunnerFoundry allows up to 30 seconds for process-local cleanup before exiting successfully. Cleanup that does not finish within that window is left to operating-system resource release and startup reconciliation; published capacity expires through the normal member-liveness cutoff when it cannot be withdrawn first.
+
+`terminate` destroys affected resources and returns only unstarted jobs to the queue after cleanup succeeds. Started jobs remain in processing until GitHub sends `JobCompleted`. This explicit policy is not subject to the 30-second `leave` shutdown window and can therefore take substantially longer.
 
 ### Logging settings
 

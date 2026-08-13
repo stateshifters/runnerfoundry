@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/meza/RunnerFoundry/internal/config"
 )
+
+const leaveShutdownTimeout = 30 * time.Second
 
 type Options struct {
 	ConfigPath         string
@@ -21,11 +24,27 @@ type serviceNotifier interface {
 	Status(ctx context.Context, status operationalStatus) error
 }
 
+type daemonSupervisor func(
+	context.Context,
+	<-chan struct{},
+	func() (config.Config, error),
+	generationBuilder,
+	serviceNotifier,
+	func(error),
+	ActiveRunnerPolicy,
+) error
+
 type daemonApplicationDependencies struct {
-	production  productionDependencies
-	loadConfig  func(string, config.ReadFile) (config.Config, error)
-	openRuntime func(context.Context, config.Config, productionDependencies) (*productionRuntime, error)
-	supervise   func(context.Context, <-chan struct{}, func() (config.Config, error), generationBuilder, serviceNotifier, func(error), ActiveRunnerPolicy) error
+	production       productionDependencies
+	loadConfig       func(string, config.ReadFile) (config.Config, error)
+	openRuntime      func(context.Context, config.Config, productionDependencies) (*productionRuntime, error)
+	supervise        daemonSupervisor
+	newShutdownTimer func(time.Duration) shutdownTimer
+}
+
+type shutdownTimer struct {
+	expired <-chan time.Time
+	stop    func()
 }
 
 func productionDaemonApplicationDependencies() daemonApplicationDependencies {
@@ -33,6 +52,10 @@ func productionDaemonApplicationDependencies() daemonApplicationDependencies {
 	return daemonApplicationDependencies{
 		production: production, loadConfig: loadConfigWithReader,
 		openRuntime: openProductionRuntimeWithDependencies, supervise: supervise,
+		newShutdownTimer: func(duration time.Duration) shutdownTimer {
+			timer := time.NewTimer(duration)
+			return shutdownTimer{expired: timer.C, stop: func() { timer.Stop() }}
+		},
 	}
 }
 
@@ -51,7 +74,7 @@ func (application Application) Run(ctx context.Context, options Options) error {
 	return runDaemon(ctx, options, application.dependencies)
 }
 
-func runDaemon(ctx context.Context, options Options, dependencies daemonApplicationDependencies) (resultErr error) {
+func runDaemon(ctx context.Context, options Options, dependencies daemonApplicationDependencies) error {
 	policy, err := resolveActiveRunnerPolicy(options.ActiveRunnerPolicy)
 	if err != nil {
 		return err
@@ -64,7 +87,18 @@ func runDaemon(ctx context.Context, options Options, dependencies daemonApplicat
 	if err != nil {
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, runtime.Close(context.WithoutCancel(ctx))) }()
+	completed := superviseRuntime(ctx, options, initial, runtime, policy, dependencies)
+	return waitForRuntimeShutdown(ctx, policy, dependencies.newShutdownTimer, completed)
+}
+
+func superviseRuntime(
+	ctx context.Context,
+	options Options,
+	initial config.Config,
+	runtime *productionRuntime,
+	policy ActiveRunnerPolicy,
+	dependencies daemonApplicationDependencies,
+) <-chan error {
 	load := newGenerationConfigLoader(initial, func() (config.Config, error) {
 		return dependencies.loadConfig(options.ConfigPath, dependencies.production.readFile)
 	})
@@ -75,7 +109,38 @@ func runDaemon(ctx context.Context, options Options, dependencies daemonApplicat
 	if runtime.reporter != nil {
 		runtime.reporter.notifier = notifier
 	}
-	return dependencies.supervise(ctx, options.ReloadRequests, load, build, notifier, runtime.report, policy)
+	completed := make(chan error, 1)
+	go func() {
+		superviseErr := dependencies.supervise(
+			ctx, options.ReloadRequests, load, build, notifier, runtime.report, policy,
+		)
+		completed <- errors.Join(superviseErr, runtime.Close(context.WithoutCancel(ctx)))
+	}()
+	return completed
+}
+
+func waitForRuntimeShutdown(
+	ctx context.Context,
+	policy ActiveRunnerPolicy,
+	newTimer func(time.Duration) shutdownTimer,
+	completed <-chan error,
+) error {
+	if policy == TerminateActiveRunners {
+		return <-completed
+	}
+	select {
+	case err := <-completed:
+		return err
+	case <-ctx.Done():
+	}
+	timer := newTimer(leaveShutdownTimeout)
+	defer timer.stop()
+	select {
+	case err := <-completed:
+		return err
+	case <-timer.expired:
+		return nil
+	}
 }
 
 type productionRuntime struct {
