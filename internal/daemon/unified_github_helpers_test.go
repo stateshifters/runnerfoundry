@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"runtime"
 	"testing"
 	"time"
 
@@ -16,14 +15,10 @@ func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open GitHub source: %v", err)
 	}
-	for attempts := 0; len(source.opening) != 0 && attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		if failures := source.harvestRegistrationOpenResults(context.Background(), source.term); len(failures) != 0 {
+	for len(source.opening) != 0 {
+		if failures := awaitAllGitHubRegistrationOpenResults(source); len(failures) != 0 {
 			t.Fatalf("install GitHub repository sessions: %v", errors.Join(failures...))
 		}
-	}
-	if len(source.opening) != 0 {
-		t.Fatalf("GitHub repository sessions did not open: %#v", source.opening)
 	}
 	awaitGitHubDiscovery(t, source)
 }
@@ -66,22 +61,17 @@ func preserveCompletedPollResult(source *githubSourceRuntime, adapter *githubsou
 
 func awaitGitHubDiscovery(t *testing.T, source *githubSourceRuntime) {
 	t.Helper()
-	for attempts := 0; source.term.discoveryActive && attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		if failures := source.harvestDiscovery(context.Background(), source.term); len(failures) != 0 {
+	for source.term.discoveryActive {
+		if failures := awaitGitHubDiscoveryProgress(source); len(failures) != 0 {
 			t.Fatalf("harvest GitHub discovery: %v", errors.Join(failures...))
 		}
-	}
-	if source.term.discoveryActive {
-		t.Fatal("GitHub discovery did not complete")
 	}
 }
 
 func awaitGitHubDiscoveryError(t *testing.T, source *githubSourceRuntime, wantErr error) {
 	t.Helper()
-	for attempts := 0; attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		failures := source.harvestDiscovery(context.Background(), source.term)
+	for source.term.discoveryActive {
+		failures := awaitGitHubDiscoveryProgress(source)
 		if len(failures) != 0 {
 			if !errors.Is(errors.Join(failures...), wantErr) {
 				t.Fatalf("discovery error = %v, want %v", errors.Join(failures...), wantErr)
@@ -94,9 +84,8 @@ func awaitGitHubDiscoveryError(t *testing.T, source *githubSourceRuntime, wantEr
 
 func awaitGitHubOpeningError(t *testing.T, source *githubSourceRuntime, wantErr error) {
 	t.Helper()
-	for attempts := 0; attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		failures := source.harvestRegistrationOpenResults(context.Background(), source.term)
+	for len(source.opening) != 0 {
+		failures := awaitGitHubRegistrationOpenProgress(source)
 		if len(failures) != 0 {
 			if !errors.Is(errors.Join(failures...), wantErr) {
 				t.Fatalf("repository opening error = %v, want %v", errors.Join(failures...), wantErr)
@@ -105,6 +94,29 @@ func awaitGitHubOpeningError(t *testing.T, source *githubSourceRuntime, wantErr 
 		}
 	}
 	t.Fatalf("GitHub repository opening did not report %v", wantErr)
+}
+
+func awaitGitHubRegistrationOpenProgress(source *githubSourceRuntime) []error {
+	result := <-source.term.openResults
+	source.term.openResults <- result
+	return source.harvestRegistrationOpenResults(context.Background(), source.term)
+}
+
+func awaitAllGitHubRegistrationOpenResults(source *githubSourceRuntime) []error {
+	results := make([]githubRegistrationOpenResult, 0, len(source.opening))
+	for range len(source.opening) {
+		results = append(results, <-source.term.openResults)
+	}
+	for _, result := range results {
+		source.term.openResults <- result
+	}
+	return source.harvestRegistrationOpenResults(context.Background(), source.term)
+}
+
+func awaitGitHubDiscoveryProgress(source *githubSourceRuntime) []error {
+	result := <-source.term.discoveryResult
+	source.term.discoveryResult <- result
+	return source.harvestDiscovery(context.Background(), source.term)
 }
 
 func newGitHubPollingTestSource(

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -341,9 +340,10 @@ func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
 
 func awaitInstalledGitHubAdapters(t *testing.T, source *githubSourceRuntime, want int) {
 	t.Helper()
-	for attempts := 0; len(source.opening) != 0 && attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		_ = source.harvestRegistrationOpenResults(context.Background(), source.term)
+	for len(source.opening) != 0 {
+		if failures := awaitAllGitHubRegistrationOpenResults(source); len(failures) != 0 {
+			t.Fatalf("install GitHub repository sessions: %v", errors.Join(failures...))
+		}
 	}
 	if len(source.adapters) != want {
 		t.Fatalf("installed adapters = %d, want %d", len(source.adapters), want)
@@ -351,11 +351,9 @@ func awaitInstalledGitHubAdapters(t *testing.T, source *githubSourceRuntime, wan
 }
 
 func awaitGitHubPollError(source *githubSourceRuntime) error {
-	for attempts := 0; attempts < 10_000; attempts++ {
-		runtime.Gosched()
-		if err := source.Poll(context.Background(), time.Time{}); err != nil {
-			return err
-		}
+	for _, attempt := range source.polls {
+		result := <-attempt.result
+		attempt.result <- result
 	}
-	return nil
+	return source.Poll(context.Background(), time.Time{})
 }
