@@ -31,6 +31,70 @@ func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
 	assertDockerArguments(t, recording.arguments, "rm", "--force", "runner-id")
 }
 
+func TestExecCommandRunnerAcceptsDockerOwnedRemoval(t *testing.T) {
+	const containerID = "runner-id"
+	recording := &recordingDockerExecution{
+		output: []byte("removal of container " + containerID + " is already in progress"),
+		err:    errors.New("exit status 1"),
+	}
+
+	err := recording.runner().RemoveComposeRunner(context.Background(), containerID)
+	if err != nil {
+		t.Fatalf("Docker-owned removal returned an error: %v", err)
+	}
+}
+
+func TestExecCommandRunnerAcceptsPrefixedDockerOwnedRemoval(t *testing.T) {
+	const containerID = "runner-id"
+	recording := &recordingDockerExecution{
+		output: []byte("Error response from daemon: removal of container " + containerID + " is already in progress"),
+		err:    errors.New("exit status 1"),
+	}
+
+	err := recording.runner().RemoveComposeRunner(context.Background(), containerID)
+	if err != nil {
+		t.Fatalf("Docker-owned removal returned an error: %v", err)
+	}
+}
+
+func TestExecCommandRunnerRejectsNonExactRemovalDiagnostics(t *testing.T) {
+	const containerID = "runner-id"
+	diagnostics := map[string]string{
+		"different container": "removal of container other-id is already in progress",
+		"partial":             "removal of container " + containerID,
+		"extended":            "removal of container " + containerID + " is already in progress; retry later",
+		"permission failure":  "permission denied",
+	}
+
+	for name, diagnostic := range diagnostics {
+		t.Run(name, func(t *testing.T) {
+			recording := &recordingDockerExecution{output: []byte(diagnostic), err: errors.New("exit status 1")}
+			if err := recording.runner().RemoveComposeRunner(context.Background(), containerID); err == nil {
+				t.Fatalf("non-exact Docker diagnostic %q was accepted", diagnostic)
+			}
+		})
+	}
+}
+
+func TestComposeProviderDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
+	const containerID = "runner-id"
+	recording := &recordingDockerExecution{
+		output: []byte("Error response from daemon: removal of container " + containerID + " is already in progress"),
+		err:    errors.New("exit status 1"),
+	}
+	provider := ComposeProvider{CommandRunner: recording.runner()}
+
+	err := provider.Destroy(context.Background(), RunnerInstance{
+		ID:         containerID,
+		RunnerName: "linux-1",
+		State:      RunnerStateRunning,
+	})
+	if err != nil {
+		t.Fatalf("Docker-owned removal returned an error: %v", err)
+	}
+	assertDockerArguments(t, recording.arguments, "rm", "--force", containerID)
+}
+
 func TestExecCommandRunnerKeepsJITConfigPrivate(t *testing.T) {
 	testCases := []jitPrivacyTestCase{
 		{name: "ordinary", jitConfig: "opaque-jit-value"},

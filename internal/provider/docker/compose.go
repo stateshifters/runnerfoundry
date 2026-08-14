@@ -94,9 +94,19 @@ func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, runnerPo
 	return runner.runDocker(ctx, dockerInvocation{arguments: arguments})
 }
 
+// RemoveComposeRunner requests forced cleanup and treats Docker's exact
+// removal-in-progress response as a successful handoff to the daemon.
 func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
-	_, err := runner.runDocker(ctx, dockerInvocation{arguments: []string{"rm", "--force", containerID}})
+	diagnostic, err := runner.runDocker(ctx, dockerInvocation{arguments: []string{"rm", "--force", containerID}})
+	if err != nil && dockerOwnsRemoval(diagnostic, containerID) {
+		return nil
+	}
 	return err
+}
+
+func dockerOwnsRemoval(diagnostic string, containerID string) bool {
+	diagnostic = strings.TrimPrefix(diagnostic, "Error response from daemon: ")
+	return diagnostic == "removal of container "+containerID+" is already in progress"
 }
 
 func (runner ExecCommandRunner) ListComposeServices(ctx context.Context, config ComposeConfig) (string, error) {
@@ -113,7 +123,7 @@ func (runner ExecCommandRunner) runDocker(ctx context.Context, invocation docker
 		diagnostic := redactPrivateValues(strings.TrimSpace(string(outputBytes)), invocation.privateEnvironment)
 		executionError := redactCommandError(err, invocation.privateEnvironment)
 		if diagnostic != "" {
-			return "", fmt.Errorf("docker command failed: %w: %s", executionError, diagnostic)
+			return diagnostic, fmt.Errorf("docker command failed: %w: %s", executionError, diagnostic)
 		}
 		return "", fmt.Errorf("docker command failed: %w", executionError)
 	}
