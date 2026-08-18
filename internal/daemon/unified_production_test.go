@@ -51,6 +51,14 @@ func TestProductionAdaptersUseInjectedBoundaries(t *testing.T) {
 	}
 }
 
+func TestProductionDependenciesProvideUsableTicker(t *testing.T) {
+	ticker := newProductionDependencies().newTicker(time.Hour)
+	if ticker.Ticks() == nil {
+		t.Fatal("production ticker channel is nil")
+	}
+	ticker.Stop()
+}
+
 func TestProductionStateUsesTrimmedHostnameIdentity(t *testing.T) {
 	dependencies := testProductionStateDependencies()
 	calls := 0
@@ -274,7 +282,13 @@ func assertProductionManagerFailure(t *testing.T, configured config.Config, stor
 
 func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	dependencies := newProductionDependencies()
-	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
+	dependencies.newTicker = func(time.Duration) cycleTicker {
+		return &manualCycleTicker{ticks: make(chan time.Time)}
+	}
+	completed := make(chan string, 1)
+	dependencies.maintenanceLaneCompleted = func(laneName string, _ cycleTicker) {
+		completed <- laneName
+	}
 	dependencies.currentTime = builderTime
 	store := newBuilderStoreFake()
 	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
@@ -290,12 +304,30 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	if err != nil || generation == nil {
 		t.Fatalf("timed generation = (%v, %v)", generation, err)
 	}
+	assertTimedProductionLaneObserver(t, generation, completed)
 	generation.reportCycle(errors.New("ignored report"))
+}
+
+func assertTimedProductionLaneObserver(
+	t *testing.T,
+	generation *maintenanceGeneration,
+	completed <-chan string,
+) {
+	t.Helper()
+	generation.runCycle(context.Background(), scheduledMaintenanceLane{
+		name: "source", ticker: &manualCycleTicker{ticks: make(chan time.Time)},
+		run: func(context.Context) error { return nil },
+	}, "scheduled", 0)
+	if laneName := <-completed; laneName != "source" {
+		t.Fatalf("completed maintenance lane = %q, want source", laneName)
+	}
 }
 
 func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) {
 	dependencies := newProductionDependencies()
-	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{} }
+	dependencies.newTicker = func(time.Duration) cycleTicker {
+		return &manualCycleTicker{ticks: make(chan time.Time)}
+	}
 	store := newBuilderStoreFake()
 	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
@@ -346,7 +378,9 @@ func productionGenerationDependencies(manager *githubsource.Manager) productionD
 		inventory := execution.NewAggregateRunnerInventory(provider)
 		return map[core.RunnerPool]execution.ExecutionProvider{"linux": provider}, inventory, nil
 	}
-	dependencies.newTicker = func(time.Duration) *time.Ticker { return &time.Ticker{C: make(chan time.Time)} }
+	dependencies.newTicker = func(time.Duration) cycleTicker {
+		return &manualCycleTicker{ticks: make(chan time.Time)}
+	}
 	dependencies.currentTime = builderTime
 	return dependencies
 }

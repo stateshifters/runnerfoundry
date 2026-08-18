@@ -9,6 +9,10 @@ SOURCE_INFO_FILE := $(METADATA_DIR)/SOURCE.txt
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 GOLANGCI_LINT_TOOLCHAIN = go$(shell go list -m -f '{{.GoVersion}}')
+E2E_POSTGRES_ROOT ?= $(abspath $(BUILD_DIR)/e2e/postgres)
+E2E_POSTGRES_VERSION ?=
+E2E_BACKEND ?= all
+E2E_PACKAGES := ./internal/daemon
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
@@ -24,7 +28,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race build notices sbom sbom-license source-info package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race prepare-e2e test-e2e build notices sbom sbom-license source-info package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -73,6 +77,20 @@ endif
 
 race:
 	go test -race ./... -count=1 -timeout=60s
+
+prepare-e2e:
+ifeq ($(OSFAMILY),Windows)
+	@$$env:E2E_POSTGRES_ROOT = '$(E2E_POSTGRES_ROOT)'; $$env:E2E_POSTGRES_VERSION = '$(E2E_POSTGRES_VERSION)'; & ./scripts/prepare-e2e-postgres.ps1; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }
+else
+	@E2E_POSTGRES_ROOT='$(E2E_POSTGRES_ROOT)' E2E_POSTGRES_VERSION='$(E2E_POSTGRES_VERSION)' bash ./scripts/prepare-e2e-postgres.sh
+endif
+
+test-e2e:
+ifeq ($(OSFAMILY),Windows)
+	@$$env:E2E_POSTGRES_ROOT = '$(E2E_POSTGRES_ROOT)'; $$env:E2E_POSTGRES_VERSION = '$(E2E_POSTGRES_VERSION)'; $$env:E2E_BACKEND = '$(E2E_BACKEND)'; $$env:E2E_PACKAGES = '$(E2E_PACKAGES)'; & ./scripts/test-e2e.ps1; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }
+else
+	@E2E_POSTGRES_ROOT='$(E2E_POSTGRES_ROOT)' E2E_POSTGRES_VERSION='$(E2E_POSTGRES_VERSION)' E2E_BACKEND='$(E2E_BACKEND)' E2E_PACKAGES='$(E2E_PACKAGES)' bash ./scripts/test-e2e.sh
+endif
 
 build: export GOOS := linux
 build: export GOARCH := amd64

@@ -126,14 +126,15 @@ func (engine *gatedCycleEngine) Close(ctx context.Context) error {
 // resources. Activation commits after the local generation gate is acquired;
 // maintenance begins immediately in the background.
 type maintenanceGeneration struct {
-	engine        generationLifecycleEngine
-	lanes         []scheduledMaintenanceLane
-	report        func(error)
-	currentTime   func() time.Time
-	closers       []runtimeCloser
-	finalizers    []runtimeFinalizer
-	processor     *queuedJobProcessor
-	notifications queuedJobNotificationRuntime
+	engine                   generationLifecycleEngine
+	lanes                    []scheduledMaintenanceLane
+	report                   func(error)
+	currentTime              func() time.Time
+	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
+	closers                  []runtimeCloser
+	finalizers               []runtimeFinalizer
+	processor                *queuedJobProcessor
+	notifications            queuedJobNotificationRuntime
 
 	mutex         sync.Mutex
 	closeMutex    sync.Mutex
@@ -328,6 +329,9 @@ func (generation *maintenanceGeneration) runCycle(
 		operation: "maintenance_" + lane.name, stage: stage, outcome: "started",
 	})
 	err := lane.run(ctx)
+	if generation.maintenanceLaneCompleted != nil {
+		generation.maintenanceLaneCompleted(lane.name, lane.ticker)
+	}
 	outcome := "completed"
 	if err != nil {
 		outcome = "failed"

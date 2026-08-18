@@ -8,10 +8,83 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
 )
+
+func TestTransportClientSerializesUpstreamSessionConstruction(t *testing.T) {
+	api := &sessionConstructionAPIFake{release: make(chan struct{})}
+	client := clientFromUpstream("https://github.com/acme/widgets", api)
+	sessionErrors := runConcurrentSessionConstruction(client, api.release)
+	for err := range sessionErrors {
+		if err != nil {
+			t.Fatalf("construct upstream session: %v", err)
+		}
+	}
+	if maximum := api.maximumActive.Load(); maximum != 1 {
+		t.Fatalf("concurrent upstream session constructions = %d, want 1", maximum)
+	}
+}
+
+func runConcurrentSessionConstruction(client *Client, release chan struct{}) <-chan error {
+	const callers = 32
+	start := make(chan struct{})
+	sessionErrors := make(chan error, callers)
+	var started sync.WaitGroup
+	var completed sync.WaitGroup
+	started.Add(callers)
+	completed.Add(callers)
+	for index := 0; index < callers; index++ {
+		go func() {
+			defer completed.Done()
+			<-start
+			started.Done()
+			_, err := client.openSession(context.Background(), 29, "member")
+			sessionErrors <- err
+		}()
+	}
+	close(start)
+	started.Wait()
+	yieldToSessionConstructors(callers)
+	close(release)
+	completed.Wait()
+	close(sessionErrors)
+	return sessionErrors
+}
+
+func yieldToSessionConstructors(callers int) {
+	for attempt := 0; attempt < callers; attempt++ {
+		runtime.Gosched()
+	}
+}
+
+type sessionConstructionAPIFake struct {
+	upstreamAPIFake
+	release       chan struct{}
+	active        atomic.Int64
+	maximumActive atomic.Int64
+}
+
+func (api *sessionConstructionAPIFake) MessageSessionClient(
+	context.Context,
+	int,
+	string,
+	...upstream.HTTPOption,
+) (*upstream.MessageSessionClient, error) {
+	active := api.active.Add(1)
+	for maximum := api.maximumActive.Load(); active > maximum; maximum = api.maximumActive.Load() {
+		if api.maximumActive.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	<-api.release
+	api.active.Add(-1)
+	return &upstream.MessageSessionClient{}, nil
+}
 
 func TestEnsureRunnerPoolCreatesMissingScaleSetWithRequiredSettings(t *testing.T) {
 	t.Parallel()

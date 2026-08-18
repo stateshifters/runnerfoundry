@@ -80,6 +80,34 @@ For a behavior change, completion means the tests prove the production behavior.
 code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
 documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
 
+#### E2E tests
+
+Ordinary tests prohibit external I/O. Tests tagged `e2e` are the sole exception: they may use isolated in-memory or
+temporary-file SQLite databases and locally embedded PostgreSQL. E2E tests may start PostgreSQL subprocesses, use loopback
+database connections, and create database files under test-owned temporary directories. They MUST NOT contact Git hosts,
+execution providers, or other external services; inject scripted implementations at those boundaries.
+
+The E2E suite is intentionally separate from the everyday verification gates. Prepare the pinned PostgreSQL 17.5 and 18.3
+binaries before running it:
+
+```sh
+make prepare-e2e
+make test-e2e
+```
+
+`prepare-e2e` is the only step that downloads PostgreSQL binaries. `test-e2e` requires the prepared binaries and fails rather
+than downloading them. Prepared PostgreSQL files are stored under the ignored `build/e2e/postgres` directory by default. The
+following variables support focused diagnosis:
+
+```sh
+make test-e2e E2E_BACKEND=sqlite
+make prepare-e2e E2E_POSTGRES_VERSION=18
+make test-e2e E2E_BACKEND=postgres E2E_POSTGRES_VERSION=18
+```
+
+Set `E2E_POSTGRES_ROOT` to use a different binary directory. PostgreSQL 17 uses its amd64 binary on Apple Silicon and therefore
+requires Rosetta; PostgreSQL 18 is the native Apple Silicon default for focused local runs.
+
 ### Code philosophy
 
 - Simplicity first: implement the smallest change that satisfies the requirement.
@@ -107,9 +135,10 @@ PostgreSQL schema changes must also follow the authoritative [migration contribu
 
 ### Test isolation
 
-All tests MUST be hermetic. Tests MUST NOT perform real filesystem, network, database, subprocess, application, or other
-external I/O. Inject those boundaries and use fakes in tests. Build tags do not provide exceptions. Production Go files
-MUST NOT use build tags.
+All ordinary tests MUST be hermetic. They MUST NOT perform real filesystem, network, database, subprocess, application, or
+other external I/O. Inject those boundaries and use fakes in ordinary tests. The build-tagged E2E suite described above is the
+only exception and its allowed I/O remains limited to isolated local databases, embedded PostgreSQL processes, and database
+files in test-owned temporary directories. Production Go files MUST NOT use build tags.
 
 ### Available verification gates
 
@@ -123,6 +152,8 @@ make test
 make coverage
 make race
 ```
+
+`make test-e2e` is a separate, rare product-contract gate. It is not invoked by `make test`, `make coverage`, or `make race`.
 
 - `make lint` runs the pinned `scc` aggregate-complexity check. Every non-generated Go file, including tests, must remain at
   or below 100; the command reports each violating path and value.

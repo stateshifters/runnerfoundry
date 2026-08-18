@@ -24,17 +24,19 @@ func TestGitHubLeadershipReconnectsCommittedRepositoryWhileDiscoveryIsBlocked(t 
 			RunnerPool: "linux", RunnerGroup: "default",
 		}}}, time.Minute, func() time.Time { return time.Time{} })
 
+	openContext, cancelOpen := context.WithTimeout(context.Background(), time.Second)
+	defer cancelOpen()
 	opened := make(chan error, 1)
-	go func() { opened <- source.OpenLeader(context.Background()) }()
+	go func() { opened <- source.OpenLeader(openContext) }()
 	<-manager.reconcileStarted
 	select {
 	case err := <-opened:
 		if err != nil {
 			t.Fatalf("OpenLeader() error = %v", err)
 		}
-	default:
+	case <-openContext.Done():
 		close(manager.releaseReconcile)
-		t.Fatal("OpenLeader() waited for discovery")
+		t.Fatalf("OpenLeader() waited for discovery: %v", openContext.Err())
 	}
 	<-manager.sessionOpened
 	close(manager.releaseReconcile)

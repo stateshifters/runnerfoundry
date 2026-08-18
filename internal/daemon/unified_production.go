@@ -46,8 +46,11 @@ type productionDependencies struct {
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
 	newClient                func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
-	newTicker                func(time.Duration) *time.Ticker
+	dockerCommands           dockerprovider.CommandRunner
+	libvirtCommands          libvirtprovider.CommandRunner
+	newTicker                func(time.Duration) cycleTicker
 	currentTime              func() time.Time
+	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
 	openSQLite               func(context.Context, string) (*sqlitestate.Store, error)
 	closeSQLite              func(*sqlitestate.Store) error
 	newClusterStore          func(postgresconfig.Settings) *cluster.Store
@@ -70,7 +73,11 @@ func newProductionDependencies() productionDependencies {
 	return productionDependencies{
 		readFile: os.ReadFile, httpTransport: http.DefaultTransport,
 		newDiscoverer: transport.NewDiscoverer, newClient: transport.NewClient, newManager: githubsource.NewManager,
-		newTicker: time.NewTicker, currentTime: time.Now,
+		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
+		newTicker: func(duration time.Duration) cycleTicker {
+			operatingSystemTicker := time.NewTicker(duration)
+			return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
+		}, currentTime: time.Now,
 		openSQLite: sqlitestate.Open, closeSQLite: (*sqlitestate.Store).Close,
 		newClusterStore: cluster.NewStore, migrateCluster: (*cluster.Store).Migrate,
 		openClusterPool: (*cluster.Store).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
@@ -174,13 +181,13 @@ func buildTimedProductionGeneration(
 		stopMaintenanceLaneTickers(tickers)
 		return nil, err
 	}
+	generation.maintenanceLaneCompleted = dependencies.maintenanceLaneCompleted
 	return generation, nil
 }
 
-func newProductionMaintenanceLaneTickers(newTicker func(time.Duration) *time.Ticker) maintenanceLaneTickers {
+func newProductionMaintenanceLaneTickers(newTicker func(time.Duration) cycleTicker) maintenanceLaneTickers {
 	build := func() cycleTicker {
-		operatingSystemTicker := newTicker(runtimeCycleInterval)
-		return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
+		return newTicker(runtimeCycleInterval)
 	}
 	return maintenanceLaneTickers{membership: build(), source: build(), execution: build()}
 }
@@ -302,7 +309,7 @@ func buildProductionProvidersWithDependencies(
 		return nil, execution.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
 	}
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
-		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
+		dockerCommands: dependencies.dockerCommands, libvirtCommands: dependencies.libvirtCommands,
 		readTemplate: dependencies.readFile, memberHostname: hostname,
 		providerObserver: dependencies.providerObserver,
 	})

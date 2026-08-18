@@ -98,6 +98,36 @@ func TestMaintenanceLaneCancellationDoesNotReportFailure(t *testing.T) {
 	}
 }
 
+func TestMaintenanceLaneCompletionObserverRunsAfterFailedLane(t *testing.T) {
+	wantErr := errors.New("source unavailable")
+	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
+	laneReturned := false
+	observerCalls := 0
+	generation := &maintenanceGeneration{
+		currentTime: time.Now,
+		report:      func(error) {},
+		maintenanceLaneCompleted: func(laneName string, observedTicker cycleTicker) {
+			observerCalls++
+			if !laneReturned {
+				t.Error("maintenance completion was observed before the lane returned")
+			}
+			if laneName != "source" || observedTicker != ticker {
+				t.Errorf("observed lane = (%q, %T), want source and its configured ticker", laneName, observedTicker)
+			}
+		},
+	}
+	lane := scheduledMaintenanceLane{name: "source", ticker: ticker, run: func(context.Context) error {
+		laneReturned = true
+		return wantErr
+	}}
+
+	generation.runCycle(context.Background(), lane, "scheduled", 0)
+
+	if observerCalls != 1 {
+		t.Fatalf("maintenance completion observer calls = %d, want 1", observerCalls)
+	}
+}
+
 type blockedMembershipFixture struct {
 	generation        *maintenanceGeneration
 	membershipStarted <-chan struct{}

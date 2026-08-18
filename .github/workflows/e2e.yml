@@ -1,0 +1,189 @@
+name: Product-contract E2E
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite:
+    name: SQLite (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            runner: ubuntu-latest
+            prepare_postgres: false
+          - platform: Windows
+            runner: windows-latest
+            prepare_postgres: true
+          - platform: macOS
+            runner: macos-15
+            prepare_postgres: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Cache embedded PostgreSQL 18 binaries
+        if: matrix.prepare_postgres
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/e2e/postgres/18.3.0
+          key: embedded-postgres-v1.34.0-checksums-v1-${{ runner.os }}-${{ runner.arch }}-18.3.0
+
+      - name: Exercise platform PostgreSQL preparation
+        if: matrix.prepare_postgres
+        run: make prepare-e2e E2E_POSTGRES_VERSION=18.3.0
+
+      - name: Run SQLite E2E tests
+        run: make test-e2e E2E_BACKEND=sqlite
+
+  tagged-static-analysis:
+    name: Tagged E2E static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Lint tagged E2E code
+        run: go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --build-tags=e2e
+
+      - name: Vet tagged E2E code
+        run: go vet -tags=e2e ./...
+
+  sqlite-race:
+    name: SQLite (race detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Run tagged SQLite E2E tests with the race detector
+        env:
+          E2E_BACKEND: sqlite
+        run: go test -race -tags=e2e ./internal/daemon -count=1 -timeout=10m
+
+  postgres-race:
+    name: PostgreSQL 18 (focused race detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Cache embedded PostgreSQL 18 binaries
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/e2e/postgres/18.3.0/linux-amd64
+          key: embedded-postgres-v1.34.0-checksums-v1-${{ runner.os }}-${{ runner.arch }}-18.3.0
+
+      - name: Prepare embedded PostgreSQL 18 binaries
+        run: make prepare-e2e E2E_POSTGRES_VERSION=18.3.0
+
+      - name: Run focused clustered E2E tests with the race detector
+        env:
+          E2E_BACKEND: postgres
+          E2E_POSTGRES_VERSION: 18.3.0
+          E2E_POSTGRES_BINARIES: ${{ github.workspace }}/build/e2e/postgres/18.3.0/linux-amd64
+        run: >-
+          go test -race -tags=e2e ./internal/daemon
+          -run '^(TestProductContractPostgresNotificationWakesDurableQueue|TestProductContractPostgresMaintenanceRecoversMissedNotification|TestProductContractTwoMemberPostgresApplicationsFailOverWithoutLosingDemand|TestProductContractPostgresLeaderFailoverPreservesLifecycle|TestProductContractPostgresLeadershipFencesLateGitHostSession|TestProductContractHeterogeneousPostgresFollowerRestoresCommittedSourceSessionsBeforeDiscovery|TestProductContractRunnerAcceptanceWinsRecoveryRacePostgres|TestProductContractTerminalObservationWinsRecoveryRacePostgres|TestProductContractPostgresClusterReloadRecoversThenTerminatesObservedRunner)$'
+          -count=1 -timeout=15m
+
+  postgres-platform:
+    name: PostgreSQL 18 (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            runner: windows-latest
+          - platform: macOS arm64
+            runner: macos-15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Cache embedded PostgreSQL 18 binaries
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/e2e/postgres/18.3.0
+          key: embedded-postgres-v1.34.0-checksums-v1-${{ runner.os }}-${{ runner.arch }}-18.3.0
+
+      - name: Prepare embedded PostgreSQL 18 binaries
+        run: make prepare-e2e E2E_POSTGRES_VERSION=18.3.0
+
+      - name: Run PostgreSQL 18 E2E tests offline
+        run: make test-e2e E2E_BACKEND=postgres E2E_POSTGRES_VERSION=18.3.0
+
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres:
+          - 17.5.0
+          - 18.3.0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Cache embedded PostgreSQL binaries
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/e2e/postgres/${{ matrix.postgres }}/linux-amd64
+          key: embedded-postgres-v1.34.0-checksums-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.postgres }}
+
+      - name: Prepare embedded PostgreSQL binaries
+        run: make prepare-e2e E2E_POSTGRES_VERSION=${{ matrix.postgres }}
+
+      - name: Run PostgreSQL E2E tests offline
+        run: make test-e2e E2E_BACKEND=postgres E2E_POSTGRES_VERSION=${{ matrix.postgres }}

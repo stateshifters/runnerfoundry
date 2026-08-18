@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/hashicorp/go-retryablehttp"
@@ -94,9 +95,14 @@ func NewClient(repository Repository, credentials Credentials, baseTransport htt
 }
 
 func clientFromUpstream(repositoryURL string, api upstreamClientAPI) *Client {
+	// actions/scaleset derives each session client by mutating shared HTTP
+	// options, so construction must not overlap across Runner Pools.
+	var sessionClientMutex sync.Mutex
 	return &Client{
 		registrations: api,
 		openSession: func(ctx context.Context, runnerScaleSetID int, owner string) (messageSessionAPI, error) {
+			sessionClientMutex.Lock()
+			defer sessionClientMutex.Unlock()
 			session, sessionErr := api.MessageSessionClient(ctx, runnerScaleSetID, owner)
 			if sessionErr != nil {
 				return nil, fmt.Errorf("create upstream message session: %w", sessionErr)
