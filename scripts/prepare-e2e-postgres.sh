@@ -51,8 +51,10 @@ validate_installation() {
   local operating_system="$1"
   local destination="$2"
   local executable_suffix=''
+  local share_directory='share/postgresql'
   if [[ "$operating_system" == 'windows' ]]; then
     executable_suffix='.exe'
+    share_directory='share'
   fi
 
   local required_path
@@ -60,8 +62,8 @@ validate_installation() {
     "bin/pg_ctl${executable_suffix}" \
     "bin/initdb${executable_suffix}" \
     "bin/postgres${executable_suffix}" \
-    'share/postgres.bki' \
-    'share/postgresql.conf.sample'; do
+    "${share_directory}/postgres.bki" \
+    "${share_directory}/postgresql.conf.sample"; do
     if [[ ! -f "${destination}/${required_path}" ]]; then
       return 1
     fi

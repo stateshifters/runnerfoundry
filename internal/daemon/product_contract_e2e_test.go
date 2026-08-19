@@ -206,13 +206,22 @@ func assertPublishedCapacity(t *testing.T, session *e2eGitHubSession, want int, 
 	t.Helper()
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
-	select {
-	case published := <-session.capacities:
-		if published != want {
-			t.Fatalf("%s publication = %d, want %d", phase, published, want)
+	for {
+		observation := session.observeCapacity()
+		if observation.tick > observation.read && observation.published == want {
+			session.markCapacityRead(observation.tick)
+			return
 		}
-	case <-timer.C:
-		t.Fatalf("timed out waiting for %s publication", phase)
+		select {
+		case <-observation.changed:
+			continue
+		case <-timer.C:
+			if observation.tick > observation.read {
+				t.Fatalf("timed out waiting for %s publication; latest = %d, want %d",
+					phase, observation.published, want)
+			}
+			t.Fatalf("timed out waiting for %s publication", phase)
+		}
 	}
 }
 

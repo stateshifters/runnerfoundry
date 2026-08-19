@@ -134,8 +134,9 @@ func assertReloadingStateRendered(t *testing.T, state string) {
 		return
 	}
 	const prefix = "MONOTONIC_USEC="
-	value := strings.TrimPrefix(monotonic, prefix)
-	if value == monotonic {
+	line := strings.TrimSuffix(monotonic, "\n")
+	value := strings.TrimPrefix(line, prefix)
+	if value == line {
 		t.Fatalf("reloading notification = %q, want %s field", state, prefix)
 	}
 	if _, err := strconv.ParseUint(value, 10, 64); err != nil {

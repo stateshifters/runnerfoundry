@@ -363,6 +363,10 @@ type e2eGitHubSession struct {
 	closed         chan struct{}
 	closeStarted   chan struct{}
 	closeRelease   <-chan struct{}
+	capacityValue  int
+	capacityTick   uint64
+	capacityRead   uint64
+	capacityChange chan struct{}
 	mutex          sync.Mutex
 	closeStartOnce sync.Once
 	closeOnce      sync.Once
@@ -371,6 +375,13 @@ type e2eGitHubSession struct {
 type e2eAcquisitionScript struct {
 	acquired []int64
 	err      error
+}
+
+type e2eCapacityObservation struct {
+	published int
+	tick      uint64
+	read      uint64
+	changed   <-chan struct{}
 }
 
 func (session *e2eGitHubSession) assignMessageID(message *upstream.RunnerScaleSetMessage) int {
@@ -438,9 +449,10 @@ func newE2EGitHubSession() *e2eGitHubSession {
 		deliveries:  make(chan *upstream.RunnerScaleSetMessage),
 		capacities:  make(chan int, 16),
 		ackAttempts: make(chan int, 8), ackEffects: make(map[int]chan struct{}),
-		pollEffects:  make(map[int]chan struct{}),
-		acquisitions: make(chan []int64, 16),
-		closed:       make(chan struct{}), closeStarted: make(chan struct{}),
+		pollEffects:    make(map[int]chan struct{}),
+		acquisitions:   make(chan []int64, 16),
+		capacityChange: make(chan struct{}),
+		closed:         make(chan struct{}), closeStarted: make(chan struct{}),
 	}
 }
 
@@ -458,7 +470,7 @@ func (session *e2eGitHubSession) GetMessage(
 	_ int,
 	maxCapacity int,
 ) (*upstream.RunnerScaleSetMessage, error) {
-	session.capacities <- maxCapacity
+	session.recordCapacity(maxCapacity)
 	select {
 	case session.pollRequested <- struct{}{}:
 	default:
@@ -471,6 +483,38 @@ func (session *e2eGitHubSession) GetMessage(
 	case <-ctx.Done():
 		return nil, fmt.Errorf("wait for scripted GitHub message: %w", ctx.Err())
 	}
+}
+
+func (session *e2eGitHubSession) recordCapacity(capacity int) {
+	session.mutex.Lock()
+	session.capacityValue = capacity
+	session.capacityTick++
+	close(session.capacityChange)
+	session.capacityChange = make(chan struct{})
+	session.mutex.Unlock()
+	select {
+	case session.capacities <- capacity:
+	default:
+	}
+}
+
+func (session *e2eGitHubSession) observeCapacity() e2eCapacityObservation {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	return e2eCapacityObservation{
+		published: session.capacityValue,
+		tick:      session.capacityTick,
+		read:      session.capacityRead,
+		changed:   session.capacityChange,
+	}
+}
+
+func (session *e2eGitHubSession) markCapacityRead(tick uint64) {
+	session.mutex.Lock()
+	if tick > session.capacityRead {
+		session.capacityRead = tick
+	}
+	session.mutex.Unlock()
 }
 
 func (session *e2eGitHubSession) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
