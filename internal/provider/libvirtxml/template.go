@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 	upstream "libvirt.org/go/libvirtxml"
 )
 

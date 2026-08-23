@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 const assignedDemandJobsSQL = `SELECT job_id, source_name, source_reference, runner_pool, enqueued_at, 0

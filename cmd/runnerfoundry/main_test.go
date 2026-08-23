@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/daemon"
+	"github.com/stateshifters/runnerfoundry/internal/daemon"
 )
 
 func TestRunMainWritesExecutionErrorsToStderr(t *testing.T) {

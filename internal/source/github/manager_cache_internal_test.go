@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestRepositoryClientLoadValueRejectsInvalidValue(t *testing.T) {

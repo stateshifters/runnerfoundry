@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/provider/contract"
-	"github.com/meza/RunnerFoundry/internal/provider/libvirtxml"
+	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/provider/libvirtxml"
 )
 
 // RunnerState is libvirt's normalized lifecycle observation.

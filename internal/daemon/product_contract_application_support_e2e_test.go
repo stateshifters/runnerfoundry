@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	"github.com/meza/RunnerFoundry/internal/state/sqlite"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 func (application *e2eApplication) buildProviderSet(

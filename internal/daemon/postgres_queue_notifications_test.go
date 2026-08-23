@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func TestPostgreSQLQueueNotificationsWakeEveryReceivedRunnerPool(t *testing.T) {

@@ -50,7 +50,7 @@ You need:
 - Docker Engine and Docker Compose;
 - permission to create and install a GitHub App;
 - outbound HTTPS access to GitHub Actions; and
-- a RunnerFoundry Debian package from [GitHub Releases](https://github.com/meza/RunnerFoundry/releases).
+- a RunnerFoundry Debian package from [GitHub Releases](https://github.com/stateshifters/runnerfoundry/releases).
 
 Self-hosted runners execute repository workflow code on your infrastructure. Review GitHub's [secure-use guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners) before serving untrusted workflows.
 
@@ -439,11 +439,11 @@ Never commit or publish GitHub App keys, PostgreSQL credentials, JIT configurati
 - [Contributing](CONTRIBUTING.md): development, verification, and contributor licensing terms.
 - [Licensing](LICENSING.md): public, commercial, and source-availability terms.
 - [Trademark policy](TRADEMARKS.md): permitted uses of the RunnerFoundry name and branding.
-- [Releases](https://github.com/meza/RunnerFoundry/releases): packages and release notes.
+- [Releases](https://github.com/stateshifters/runnerfoundry/releases): packages and release notes.
 
 ## Support
 
-Use [GitHub Issues](https://github.com/meza/RunnerFoundry/issues) for reproducible bugs and operator questions. Include the RunnerFoundry version, host operating system, deployment mode, provider, redacted configuration, expected result, observed result, and relevant non-secret logs.
+Use [GitHub Issues](https://github.com/stateshifters/runnerfoundry/issues) for reproducible bugs and operator questions. Include the RunnerFoundry version, host operating system, deployment mode, provider, redacted configuration, expected result, observed result, and relevant non-secret logs.
 
 ## License
 

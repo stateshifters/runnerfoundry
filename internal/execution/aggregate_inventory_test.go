@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	providerdocker "github.com/meza/RunnerFoundry/internal/provider/docker"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	providerdocker "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestAggregateRunnerInventoryMergesActiveBackendsAndRoutesDestruction(t *testing.T) {

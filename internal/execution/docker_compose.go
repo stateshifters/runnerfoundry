@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	providerdocker "github.com/meza/RunnerFoundry/internal/provider/docker"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	providerdocker "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 // DockerComposeProvider adapts one validated Compose service to the

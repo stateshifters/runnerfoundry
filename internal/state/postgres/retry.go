@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobID core.JobID) (core.RetryOutcome, error) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func TestDeadlineProviderAppliesValidationDeadline(t *testing.T) {

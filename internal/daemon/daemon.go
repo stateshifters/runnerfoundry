@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/config"
 )
 
 const leaveShutdownTimeout = 30 * time.Second

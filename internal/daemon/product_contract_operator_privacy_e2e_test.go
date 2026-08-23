@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/config"
 )
 
 func TestProductContractOperatorLogsDescribeLifecycleWithoutPrivateBoundaryValues(t *testing.T) {

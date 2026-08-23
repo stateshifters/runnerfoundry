@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/core"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 func TestProductContractPostgresRollbackRefusesActiveLeaderLease(t *testing.T) {

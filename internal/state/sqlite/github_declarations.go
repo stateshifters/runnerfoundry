@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 const deleteGitHubRunnerPoolDeclarationsSQL = `DELETE FROM runnerfoundry_github_member_runner_pools WHERE member_id = ?`

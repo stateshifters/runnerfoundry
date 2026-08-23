@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/core"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 func TestQueueHandlerPersistsAssignment(t *testing.T) {

@@ -11,11 +11,11 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/runtime"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	"github.com/meza/RunnerFoundry/internal/state/sqlite"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/runtime"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 func TestProductContractGitHubRepositoriesReconcileAndPollIndependently(t *testing.T) {

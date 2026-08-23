@@ -2,7 +2,7 @@
 
 RunnerFoundry is free and open-source software licensed under the
 [GNU Affero General Public License version 3 or later](LICENSE). Personal, internal, and commercial use is welcome, including
-managed services.
+managed services. Stateshifter Labs Limited is the RunnerFoundry copyright holder and licensing entity.
 
 ## Public license
 
@@ -33,9 +33,10 @@ commercial terms. It requires no separate signature or automated agreement check
 
 ## Commercial licensing and custom work
 
-Alternative commercial licensing, custom engineering, integrations, and support are available by request. Start a
-[GitHub issue](https://github.com/meza/RunnerFoundry/issues) with a non-confidential summary and ask the maintainer to establish a
-private contact channel. Do not include confidential, personal, credential, or security-sensitive information in an issue.
+Stateshifter Labs Limited offers alternative commercial licensing, custom engineering, integrations, and support by request.
+Start a [GitHub issue](https://github.com/stateshifters/runnerfoundry/issues) with a non-confidential summary and ask the
+maintainer to establish a private contact channel. Do not include confidential, personal, credential, or security-sensitive
+information in an issue.
 
 Commercial terms provide an alternative to AGPL obligations when agreed in writing. They are not required for ordinary
 commercial use that complies with the AGPL.
@@ -45,11 +46,11 @@ commercial use that complies with the AGPL.
 Attribution is appreciated but not required beyond the notices required by the AGPL. Projects may use this acknowledgement:
 
 ```markdown
-Powered by [RunnerFoundry](https://github.com/meza/RunnerFoundry)
+Powered by [RunnerFoundry](https://github.com/stateshifters/runnerfoundry)
 ```
 
-Sponsorship helps fund maintenance, releases, security work, and contributor support. It does not buy governance control,
-preferential technical decisions, or different public rights. Support the maintainer through
-[Buy Me a Coffee](https://buymeacoffee.com/meza).
+Personal sponsorship through Meza helps fund maintenance, releases, security work, and contributor support. It is separate from
+Stateshifter Labs Limited's ownership and licensing of RunnerFoundry and does not buy governance control, preferential technical
+decisions, or different public rights. Support Meza through [Buy Me a Coffee](https://buymeacoffee.com/meza).
 
 Use of the RunnerFoundry name and branding is governed separately by the [trademark policy](TRADEMARKS.md).

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // RefreshMembers rebuilds member bootstrap routes from committed registrations

@@ -10,9 +10,9 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T) {

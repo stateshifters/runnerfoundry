@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 // githubDemandHandler keeps source event translation separate from durable

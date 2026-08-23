@@ -3,7 +3,7 @@ package execution
 import (
 	"context"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // InventoryEndpointID identifies one concrete provider endpoint. It is stable

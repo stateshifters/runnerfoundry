@@ -97,11 +97,11 @@ build: export GOARCH := amd64
 build: export CGO_ENABLED := 0
 build:
 	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
-	go build -ldflags "-X github.com/meza/RunnerFoundry/internal/buildinfo.version=$(VERSION)" -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
+	go build -ldflags "-X github.com/stateshifters/runnerfoundry/internal/buildinfo.version=$(VERSION)" -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
 
 notices:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
-	go run github.com/google/go-licenses@v1.6.0 report --ignore github.com/meza/RunnerFoundry ./... > "$(NOTICES_FILE)"
+	go run github.com/google/go-licenses@v1.6.0 report --ignore github.com/stateshifters/runnerfoundry ./... > "$(NOTICES_FILE)"
 
 sbom:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
@@ -117,9 +117,9 @@ endif
 source-info:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
 ifeq ($(OSFAMILY),Windows)
-	@$$content = "RunnerFoundry $(VERSION)`nCorresponding source: https://github.com/meza/RunnerFoundry/tree/v$(VERSION)`n"; Set-Content -NoNewline -Path "$(SOURCE_INFO_FILE)" -Value $$content
+	@$$content = "RunnerFoundry $(VERSION)`nCorresponding source: https://github.com/stateshifters/runnerfoundry/tree/v$(VERSION)`n"; Set-Content -NoNewline -Path "$(SOURCE_INFO_FILE)" -Value $$content
 else
-	@printf 'RunnerFoundry %s\nCorresponding source: https://github.com/meza/RunnerFoundry/tree/v%s\n' "$(VERSION)" "$(VERSION)" > "$(SOURCE_INFO_FILE)"
+	@printf 'RunnerFoundry %s\nCorresponding source: https://github.com/stateshifters/runnerfoundry/tree/v%s\n' "$(VERSION)" "$(VERSION)" > "$(SOURCE_INFO_FILE)"
 endif
 
 package-deb: export VERSION := $(VERSION)

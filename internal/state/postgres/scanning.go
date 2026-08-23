@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func scanQueuedJob(row scanner) (core.Job, error) {

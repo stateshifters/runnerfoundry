@@ -11,9 +11,9 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 func TestProductContractSQLiteCapacityReadFailurePublishesZero(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestCanonicalRegistrationsOrdersEveryMaterialRegistrationFact(t *testing.T) {

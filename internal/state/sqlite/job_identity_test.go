@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 var sqliteLifecycleSource = core.SourceReference{Adapter: "github", ID: "request-3"}

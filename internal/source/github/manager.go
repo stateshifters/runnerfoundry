@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )

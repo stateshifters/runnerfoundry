@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 // BootstrapClient generates runner bootstrap data through an ordinary

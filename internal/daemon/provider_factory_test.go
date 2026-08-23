@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
-	libvirtprovider "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
+	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
 func TestBuildExecutionProviderValidatesConfiguredDockerComposeService(t *testing.T) {

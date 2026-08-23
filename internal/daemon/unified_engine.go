@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 type membershipRuntime interface {

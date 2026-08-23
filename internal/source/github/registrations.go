@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 // RunnerPoolDeclaration is one member's configured GitHub Runner Pool and

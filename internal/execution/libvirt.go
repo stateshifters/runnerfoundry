@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	providerlibvirt "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	providerlibvirt "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
 // LibvirtProvider adapts one libvirt connection to the source-neutral execution

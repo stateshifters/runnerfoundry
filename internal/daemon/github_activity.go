@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"time"
 
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func newGitHubManagerObserver(report func(error), currentTime func() time.Time) githubsource.ManagerObserver {

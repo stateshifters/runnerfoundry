@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductContractApplicationReadinessWaitsForProviderValidation(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // AggregateRunnerInventory provides one fail-closed view of all active runner

@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"runtime"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func (reporter *productionRuntimeReporter) writeEvent(

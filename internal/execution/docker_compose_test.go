@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	providerdocker "github.com/meza/RunnerFoundry/internal/provider/docker"
+	providerdocker "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestDockerComposeStartTranslatesSourceNeutralRequest(t *testing.T) {

@@ -2,7 +2,7 @@ package sqlite
 
 import (
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 const (

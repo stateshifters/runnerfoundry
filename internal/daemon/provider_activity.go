@@ -3,7 +3,7 @@ package daemon
 import (
 	"log/slog"
 
-	"github.com/meza/RunnerFoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func newProviderObserver(report func(error)) func(execution.ProviderActivity) {

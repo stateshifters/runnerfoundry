@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
-	libvirtprovider "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
+	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
 type executionDependencies struct {

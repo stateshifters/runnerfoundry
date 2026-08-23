@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // AssignedDemand is GitHub's authoritative desired active-job count for one

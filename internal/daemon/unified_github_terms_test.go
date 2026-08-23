@@ -9,8 +9,8 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestGitHubLeadershipReconnectsCommittedRepositoryWhileDiscoveryIsBlocked(t *testing.T) {

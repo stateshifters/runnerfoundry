@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 )
 
 // RunnerState is Docker's normalized lifecycle observation.

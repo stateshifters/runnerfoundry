@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestGitHubSourceRuntimeReportsAggregateCapacityOnlyWhenItChanges(t *testing.T) {

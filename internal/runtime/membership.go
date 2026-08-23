@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 type MembershipStore interface {

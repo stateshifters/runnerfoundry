@@ -10,17 +10,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
-	libvirtprovider "github.com/meza/RunnerFoundry/internal/provider/libvirt"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
-	sqlitestate "github.com/meza/RunnerFoundry/internal/state/sqlite"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
+	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
+	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 const (

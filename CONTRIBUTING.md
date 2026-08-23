@@ -10,14 +10,14 @@ Please note we have a code of conduct, please follow it in all your interactions
 A contribution is any code, documentation, design, or other material intentionally submitted for inclusion in RunnerFoundry.
 Material conspicuously marked "Not a Contribution" is excluded.
 
-By submitting a contribution, you confirm that you created it or otherwise have authority to grant these rights. You grant the
-RunnerFoundry copyright holder identified in [COPYRIGHT](COPYRIGHT), and its successors and assigns, a perpetual, worldwide,
-non-exclusive, royalty-free, irrevocable, transferable, and sublicensable license to use, reproduce, modify, prepare derivative
-works of, publicly display, publicly perform, distribute, sublicense, and relicense the contribution, in whole or in part, under
-`AGPL-3.0-or-later` or other terms. You also grant a perpetual, worldwide, non-exclusive, royalty-free, irrevocable,
-transferable, and sublicensable license under patent claims you control that are necessarily infringed by the contribution to
-make, have made, use, offer to sell, sell, import, and otherwise transfer the contribution, alone or in combination with
-RunnerFoundry as submitted.
+By submitting a contribution, you confirm that you created it or otherwise have authority to grant these rights. You grant
+Stateshifter Labs Limited, the RunnerFoundry copyright holder identified in [COPYRIGHT](COPYRIGHT), and its successors and
+assigns, a perpetual, worldwide, non-exclusive, royalty-free, irrevocable, transferable, and sublicensable license to use,
+reproduce, modify, prepare derivative works of, publicly display, publicly perform, distribute, sublicense, and relicense the
+contribution, in whole or in part, under `AGPL-3.0-or-later` or other terms. You also grant a perpetual, worldwide, non-exclusive,
+royalty-free, irrevocable, transferable, and sublicensable license under patent claims you control that are necessarily infringed
+by the contribution to make, have made, use, offer to sell, sell, import, and otherwise transfer the contribution, alone or in
+combination with RunnerFoundry as submitted.
 
 You retain copyright ownership of your contribution. If it is accepted, it remains available as part of the public
 `AGPL-3.0-or-later` edition. Submission does not create any entitlement to compensation, royalties, revenue sharing, ownership

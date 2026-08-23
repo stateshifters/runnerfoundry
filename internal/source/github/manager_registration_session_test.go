@@ -7,8 +7,8 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestActiveRegistrationsReadsActiveStateIndependently(t *testing.T) {
