@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
-	"github.com/meza/RunnerFoundry/internal/state/sqlite"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 func TestProductContractRegistrationConvergenceSQLite(t *testing.T) {

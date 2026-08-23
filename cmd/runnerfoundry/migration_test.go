@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {

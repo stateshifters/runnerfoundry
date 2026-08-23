@@ -16,10 +16,10 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	githubtransport "github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestProductContractGitHubPruningDeletesOnlyExactSafeStaleOwnership(t *testing.T) {

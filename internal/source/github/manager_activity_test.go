@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func TestManagerReportsRunnerPoolFailureOnceWithRepositoryContext(t *testing.T) {

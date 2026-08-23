@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 func primaryConnectionConfigWithResolver(

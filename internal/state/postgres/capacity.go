@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 var _ statecontract.MemberRegistry = (*Store)(nil)

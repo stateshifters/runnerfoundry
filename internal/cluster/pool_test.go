@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 func TestOpenPoolBuildsPrimaryRoleScopedPoolWithoutConnectingInTest(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 var aggregateDemandNamespace = uuid.MustParse("07f30a90-34fe-5df8-a86c-b3c7d2a50904")

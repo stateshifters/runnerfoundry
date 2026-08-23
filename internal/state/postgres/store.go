@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`

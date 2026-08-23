@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	providerlibvirt "github.com/meza/RunnerFoundry/internal/provider/libvirt"
+	providerlibvirt "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
 func TestLibvirtStartTransportsOpaqueBootstrapInGuestConfiguration(t *testing.T) {

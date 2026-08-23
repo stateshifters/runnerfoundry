@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/core"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestRunnerNameRedeliveryDoesNotBlockFollowingDurableDemand(t *testing.T) {

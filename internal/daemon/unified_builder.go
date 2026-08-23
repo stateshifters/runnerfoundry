@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	statecontract "github.com/meza/RunnerFoundry/internal/state"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 type unifiedStore interface {

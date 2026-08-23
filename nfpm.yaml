@@ -5,10 +5,10 @@ version: ${VERSION}
 version_schema: semver
 section: utils
 priority: optional
-maintainer: Meza <meza@users.noreply.github.com>
+maintainer: Stateshifter Labs Limited <hello@stateshifterlabs.com>
 description: Runner Foundry shared control plane for self-hosted ephemeral CI runners
-vendor: meza
-homepage: https://github.com/meza/RunnerFoundry
+vendor: Stateshifter Labs Limited
+homepage: https://github.com/stateshifters/runnerfoundry
 license: AGPL-3.0-or-later
 
 contents:

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 const (

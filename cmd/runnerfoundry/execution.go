@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/meza/RunnerFoundry/internal/buildinfo"
-	"github.com/meza/RunnerFoundry/internal/daemon"
+	"github.com/stateshifters/runnerfoundry/internal/buildinfo"
+	"github.com/stateshifters/runnerfoundry/internal/daemon"
 )
 
 type daemonCommand func(context.Context, daemon.Options) error

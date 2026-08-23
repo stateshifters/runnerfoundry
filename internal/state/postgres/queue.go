@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.EnqueueResult, resultErr error) {

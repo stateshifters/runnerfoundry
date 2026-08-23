@@ -9,8 +9,8 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/config"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestProductContractGitHubStalePruneResultCannotDeleteNewerRegistrationSQLite(t *testing.T) {

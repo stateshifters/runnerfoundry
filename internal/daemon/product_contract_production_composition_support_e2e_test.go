@@ -22,9 +22,9 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/golang-jwt/jwt/v4"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/provider/contract"
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 type productionCompositionLogDestination struct {

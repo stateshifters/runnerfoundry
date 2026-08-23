@@ -18,7 +18,7 @@ import (
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 const (

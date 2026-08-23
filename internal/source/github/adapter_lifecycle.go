@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 type identifiedObservation struct {

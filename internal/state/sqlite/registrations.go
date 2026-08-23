@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	githubtransport "github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 const upsertRegistrationSQL = `INSERT INTO runnerfoundry_github_registrations

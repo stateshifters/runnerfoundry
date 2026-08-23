@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	upstream "github.com/actions/scaleset"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestPollOnceValidatesDependenciesAndTransportResults(t *testing.T) {

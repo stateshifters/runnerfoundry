@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	"gopkg.in/yaml.v3"
 )
 

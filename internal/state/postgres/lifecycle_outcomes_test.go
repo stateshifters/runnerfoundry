@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func TestQueueClassifiesProcessingAndTerminalSources(t *testing.T) {

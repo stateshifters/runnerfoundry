@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 func TestProductContractHeterogeneousPostgresFollowerRestoresCommittedSourceSessionsBeforeDiscovery(t *testing.T) {

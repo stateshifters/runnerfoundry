@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestPublishAndWithdrawMemberCapacity(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func TestProductContractApplicationLeaveShutdownBudget(t *testing.T) {

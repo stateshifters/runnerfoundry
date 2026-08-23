@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/config"
 )
 
 func loadConfigWithReader(configPath string, readFile config.ReadFile) (config.Config, error) {

@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 const selectGitHubActiveDemandSQL = `SELECT job_id, source_name, source_reference, 'queued' AS job_state,

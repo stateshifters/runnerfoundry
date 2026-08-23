@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	dockerprovider "github.com/meza/RunnerFoundry/internal/provider/docker"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductionCompositionHTTPTransportFailsClosed(t *testing.T) {

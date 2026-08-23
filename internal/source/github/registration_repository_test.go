@@ -1,8 +1,8 @@
 package github_test
 
 import (
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func upsertActiveRecord(records []githubsource.Registration, replacement githubsource.Registration) []githubsource.Registration {

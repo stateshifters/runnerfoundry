@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/meza/RunnerFoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // QueueHandler translates durable source assignments and cancellations into

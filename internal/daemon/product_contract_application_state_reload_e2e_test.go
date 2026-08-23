@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestProductContractApplicationRejectsSQLiteToPostgresReload(t *testing.T) {

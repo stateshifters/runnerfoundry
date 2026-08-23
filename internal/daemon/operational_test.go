@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 func closeTestLogging(t *testing.T, logging *loggingManager) {
@@ -524,7 +524,7 @@ func TestDebugLoggingIdentifiesTheEventProducer(t *testing.T) {
 	emitDebugProvenance(reporter.reportMaintenance)
 
 	assertLogFragments(t, destination.String(), []string{
-		"source.file=", "source.line=", "source.function=github.com/meza/RunnerFoundry/internal/daemon.emitDebugProvenance",
+		"source.file=", "source.line=", "source.function=github.com/stateshifters/runnerfoundry/internal/daemon.emitDebugProvenance",
 	})
 }
 

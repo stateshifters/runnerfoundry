@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 func TestProductContractPostgresMigrationsRoundTripOnIsolatedDatabase(t *testing.T) {

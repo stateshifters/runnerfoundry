@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/meza/RunnerFoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 )
 
 func TestStartDelegatesComposeConfigAndRunnerRequest(t *testing.T) {

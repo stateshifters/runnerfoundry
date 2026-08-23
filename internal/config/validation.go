@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 // ProviderKind identifies the single execution backend configured for a

@@ -15,11 +15,11 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 const e2eWaitLimit = 10 * time.Second

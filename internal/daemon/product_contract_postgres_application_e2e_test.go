@@ -9,12 +9,12 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/config"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 func TestProductContractPostgresApplicationLifecycle(t *testing.T) {

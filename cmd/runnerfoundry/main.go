@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/meza/RunnerFoundry/internal/daemon"
+	"github.com/stateshifters/runnerfoundry/internal/daemon"
 )
 
 type processLifecycle struct {

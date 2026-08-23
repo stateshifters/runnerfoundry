@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/libtnb/logrotate"
-	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/config"
 )
 
 func TestProductionLogFactoryDelegatesRotatingWriterConstruction(t *testing.T) {

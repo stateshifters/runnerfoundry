@@ -7,7 +7,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/meza/RunnerFoundry/internal/daemon"
+	"github.com/stateshifters/runnerfoundry/internal/daemon"
 )
 
 type migrationAction string

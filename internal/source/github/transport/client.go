@@ -10,7 +10,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/hashicorp/go-retryablehttp"
-	"github.com/meza/RunnerFoundry/internal/buildinfo"
+	"github.com/stateshifters/runnerfoundry/internal/buildinfo"
 )
 
 type Registration struct {

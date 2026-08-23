@@ -10,8 +10,8 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/meza/RunnerFoundry/internal/core"
-	"github.com/meza/RunnerFoundry/internal/execution"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func TestProductContractGitHubAcquisitionRejectionSQLite(t *testing.T) {

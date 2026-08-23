@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestUnadmittedRegistrationRemovesDesiredRoute(t *testing.T) {

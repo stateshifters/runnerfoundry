@@ -8,7 +8,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
-	"github.com/meza/RunnerFoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
 // RegistrationSession owns one admitted registration's GitHub message session

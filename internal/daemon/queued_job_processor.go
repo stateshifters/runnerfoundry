@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/meza/RunnerFoundry/internal/core"
-	runtimeengine "github.com/meza/RunnerFoundry/internal/runtime"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 type queuedJobRequester interface {

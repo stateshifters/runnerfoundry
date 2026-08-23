@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/meza/RunnerFoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/config"
 )
 
 type logDestinationFactory interface {

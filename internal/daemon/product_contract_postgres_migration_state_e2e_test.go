@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meza/RunnerFoundry/internal/cluster"
-	"github.com/meza/RunnerFoundry/internal/core"
-	githubsource "github.com/meza/RunnerFoundry/internal/source/github"
-	githubtransport "github.com/meza/RunnerFoundry/internal/source/github/transport"
-	postgresstate "github.com/meza/RunnerFoundry/internal/state/postgres"
+	"github.com/stateshifters/runnerfoundry/internal/cluster"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 type migrationRepresentativeState struct {

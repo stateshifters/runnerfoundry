@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/tern/v2/migrate"
-	"github.com/meza/RunnerFoundry/internal/postgresconfig"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 func TestEmptyMigrationCatalogTargetsVersionZero(t *testing.T) {

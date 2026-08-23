@@ -1,4 +1,4 @@
-module github.com/meza/RunnerFoundry
+module github.com/stateshifters/runnerfoundry
 
 go 1.26.5
 
