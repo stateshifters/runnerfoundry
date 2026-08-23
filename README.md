@@ -1,81 +1,125 @@
 # RunnerFoundry
 
-RunnerFoundry turns job demand from a Git source into ephemeral self-hosted runners. It queues each job for a Runner Pool, gives the oldest matching job to that pool, and owns the ephemeral runner until provider cleanup completes. The provisioned runner reports the workflow result directly to the source.
+**Shared, ephemeral GitHub Actions runners for personal accounts.**
 
-GitHub Actions is the only supported Git source. RunnerFoundry is designed for personal GitHub accounts that need to share self-hosted capacity across repositories without organization-level runners. Docker Compose and libvirt are the supported execution providers.
+If your repositories live under a personal GitHub account, GitHub gives you no organization-level runner pool to share self-hosted capacity between them. RunnerFoundry fills that gap without requiring you to move those repositories into an organization.
 
-RunnerFoundry integrates directly with GitHub Actions through the standalone [`github.com/actions/scaleset`](https://github.com/actions/scaleset) Go library. It does not run or integrate with Actions Runner Controller (ARC); ARC's Kubernetes controllers and behavior are not part of RunnerFoundry. See [GitHub runner scale-set mechanics](docs/references/github-scaleset-mechanics.md) for the upstream protocol RunnerFoundry consumes.
+Define a pool once, use its name from any repository you want it to serve, and let RunnerFoundry create disposable runners on your own infrastructure as work arrives.
 
-RunnerFoundry publishes supported pre-1.0 releases. PostgreSQL state advances through forward migrations. SQLite state may require recreation when release notes identify a schema change; recreation discards the existing durable state.
+Docker and full virtual machines are supported today. Start with one host or spread capacity across several. No Kubernetes or Actions Runner Controller required.
 
-The normative behavior and terminology live in the [product contract](docs/PRD.md). The [architecture](docs/architecture.md) explains the source-neutral system boundaries, and the [GitHub adapter](docs/github-adapter.md) owns GitHub-specific protocol behavior.
+[Quick start](#quick-start) | [Standalone](#standalone-deployment) | [Clustered](#clustered-deployment) | [Runner providers](#runner-providers) | [Configuration](#configuration-reference) | [Operations](#operations) | [Contributing](CONTRIBUTING.md) | [Licensing](LICENSING.md)
 
-[Quick start](#quick-start) | [Installation](#installation) | [Configuration](#configuration) | [PostgreSQL](#use-postgresql) | [Providers](#prepare-runner-capacity) | [Operations](#operations) | [Contributing](CONTRIBUTING.md) | [Licensing](LICENSING.md)
+## Is RunnerFoundry for you?
+
+RunnerFoundry exists for a fairly specific problem.
+
+Suppose you have several repositories under your personal GitHub account and some machines you want to use for GitHub Actions. GitHub lets you attach self-hosted runners to individual repositories, but personal accounts do not get the organization-level runner infrastructure normally used to share capacity across repositories.
+
+RunnerFoundry gives those repositories a shared pool instead.
+
+A pool called `linux-docker`, for example, can be used from every repository you choose to serve:
+
+```yaml
+jobs:
+  test:
+    runs-on: linux-docker
+    steps:
+      - run: uname -a
+```
+
+Those repositories do not each need their own permanently registered runner. RunnerFoundry makes the pool available to GitHub, creates a runner when a job needs one, and removes it afterwards.
+
+RunnerFoundry is a good fit when:
+
+* your repositories live under a personal GitHub account;
+* you want several repositories to share self-hosted capacity;
+* you prefer disposable runners over permanently registered machines;
+* you want to run jobs in Docker containers or libvirt virtual machines; and
+* you are comfortable operating the infrastructure those runners use.
+
+RunnerFoundry is probably unnecessary if GitHub-hosted runners already meet your needs, or if attaching a permanent self-hosted runner to a single repository solves your problem.
+
+GitHub Actions is currently the only supported Git source.
 
 ## How it works
 
-1. GitHub requests jobs for capacity published by the GitHub adapter.
-2. The adapter translates GitHub's exact requests and authoritative assigned-job count into internal jobs associated with a Runner Pool.
-3. The job remains in that Runner Pool's FIFO queue until a member picks it up.
-4. Pickup atomically moves the oldest queued job into member-owned processing.
-5. RunnerFoundry provisions one ephemeral runner. A failed provisioning attempt is cleaned up and moves the same job to the queue tail.
-6. GitHub's `JobStarted` message durably ends provisioning retries for that job.
-7. The runner reports the workflow result directly to GitHub.
-8. Every `JobCompleted` message terminalizes the job, after which RunnerFoundry finishes provider cleanup and removes processing.
+The useful mental model is small:
 
-Runner registration and capacity publication are separate from this job flow. Before `JobStarted`, RunnerFoundry retries provisioning indefinitely from the queue tail after successful cleanup, without a retry count, delay, backoff, or timeout. After `JobStarted`, missing or failed runner resources never cause an internal retry. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
+```mermaid
+flowchart LR
+    Repos["Your GitHub repositories"] --> GitHub["GitHub Actions"]
+    GitHub --> RF["RunnerFoundry"]
+    RF --> Pool["Runner Pool"]
+    Pool --> Docker["Docker Compose"]
+    Pool --> Libvirt["libvirt"]
+    Docker --> Runner["Ephemeral runner"]
+    Libvirt --> Runner
+    Runner --> GitHub
+```
 
-Every repository gets its own GitHub runner scale set, but scale sets with the same Runner Pool name share one availability value. RunnerFoundry subtracts queued jobs and every processing job from the capacity contributed by live members. Moving a job from queued to processing does not change availability.
+A **Runner Pool** is a named collection of capacity. The pool name is what your workflows use in `runs-on`.
 
-`available = max(0, live configured capacity - queued jobs - all processing jobs)`
+When GitHub has work for a pool, RunnerFoundry queues it. Jobs are handled in FIFO order within each Runner Pool. When capacity is available, RunnerFoundry creates an ephemeral runner using the provider configured for that pool.
 
-GitHub does not expose a supported operation for reporting a provisioning failure for an individual job. RunnerFoundry therefore cleans up and retries the same job without inventing a GitHub result. If a future source supports such reporting, it remains inside that source adapter and does not create a persisted result lifecycle.
+If creating the runner fails before it accepts the job, RunnerFoundry cleans up the failed attempt and returns the job to the back of the queue. It keeps trying while GitHub still considers that job active.
 
-## Deployment choices
+Once a runner accepts the job, it behaves like a normal GitHub Actions runner. The runner communicates the workflow result directly to GitHub. RunnerFoundry remains responsible for cleaning up the runner resource afterwards.
 
-- **Standalone with SQLite:** one RunnerFoundry member and one SQLite database.
-- **Standalone with PostgreSQL:** one RunnerFoundry member and one PostgreSQL database.
-- **Clustered with PostgreSQL:** multiple RunnerFoundry members sharing PostgreSQL.
-
-SQLite supports one member only. While RunnerFoundry is running, it holds the SQLite database in exclusive locking mode: a second daemon and external SQLite readers cannot access the live database until RunnerFoundry stops. PostgreSQL supports both standalone and clustered operation.
+RunnerFoundry is therefore a control plane for runner capacity. It is not another workflow engine and it does not replace the GitHub Actions runner.
 
 ## Quick start
 
-This example creates one standalone Docker-backed Runner Pool on a Debian or Ubuntu AMD64 host.
+This is the shortest path to a working RunnerFoundry installation.
 
-### Prerequisites
+It creates one RunnerFoundry member on a Debian or Ubuntu AMD64 host, stores its state in SQLite, and runs jobs in Docker containers.
+
+If you already know that you want to operate several RunnerFoundry hosts, skip to [Clustered deployment](#clustered-deployment).
+
+### What you need
 
 You need:
 
-- Docker Engine and Docker Compose;
-- permission to create and install a GitHub App;
-- outbound HTTPS access to GitHub Actions; and
-- a RunnerFoundry Debian package from [GitHub Releases](https://github.com/stateshifters/runnerfoundry/releases).
+* a Debian or Ubuntu AMD64 host;
+* Docker Engine with Docker Compose;
+* permission to create and install a GitHub App;
+* outbound HTTPS access to GitHub; and
+* a RunnerFoundry Debian package from [GitHub Releases](https://github.com/stateshifters/runnerfoundry/releases).
 
-Self-hosted runners execute repository workflow code on your infrastructure. Review GitHub's [secure-use guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners) before serving untrusted workflows.
+Self-hosted runners execute workflow code on your infrastructure. If repositories can run untrusted code, read GitHub's [secure use guidance](https://docs.github.com/en/actions/reference/security/secure-use#hardening-for-self-hosted-runners) before exposing host resources or credentials.
 
-### Install RunnerFoundry
+### 1. Install RunnerFoundry
+
+Install the downloaded package:
 
 ```sh
-sudo apt install ./runnerfoundry.deb
+sudo apt install ./runnerfoundry_*.deb
 ```
 
-The package installs the executable and systemd unit and creates the `runnerfoundry` service account. It does not start the service before valid configuration and credentials exist.
+The package installs RunnerFoundry as a systemd service and creates a dedicated `runnerfoundry` account.
 
-### Configure the GitHub adapter
+It does not start a usable service until you provide valid configuration and GitHub credentials.
 
-Create a GitHub App, grant repository **Administration: Read and write** permission, and install it on the repositories RunnerFoundry should serve. Record its numeric App ID and install its private key:
+### 2. Create a GitHub App
+
+Create a GitHub App for RunnerFoundry and grant it repository **Administration: Read and write** permission.
+
+Install the App on the personal-account repositories that should have access to your runners. You can limit the installation to selected repositories.
+
+Record the App's numeric App ID and generate a private key.
+
+Install the private key on the RunnerFoundry host:
 
 ```sh
 sudo install -m 0640 -o root -g runnerfoundry \
   github-app.pem /etc/runnerfoundry/github-app.pem
 ```
 
-The GitHub adapter represents Runner Pools as repository-scoped GitHub runner scale sets. `scale_sets[].name` is therefore both the Runner Pool name inside RunnerFoundry and the `runs-on` value exposed by GitHub. Install the App on each personal-account repository that should share that Runner Pool.
+RunnerFoundry discovers repositories through the GitHub App installation. You do not need to maintain a repository list in its configuration.
 
-### Prepare Docker capacity
+### 3. Create a Docker runner
 
-Save this file as `/etc/runnerfoundry/compose.yaml`:
+Create `/etc/runnerfoundry/compose.yaml`:
 
 ```yaml
 services:
@@ -86,164 +130,121 @@ services:
     command: ["/home/runner/run.sh"]
 ```
 
-Pin a reviewed image tag or digest for maintained environments and add the tools, volumes, networks, and security controls required by your workflows.
+This is enough for a simple evaluation.
 
-### Configure RunnerFoundry
+For a maintained environment, use an image containing the tools your workflows need and pin that image to a reviewed version or digest.
 
-Save this file as `/etc/runnerfoundry/config.yaml`, replacing the App ID:
+### 4. Configure RunnerFoundry
+
+Replace `/etc/runnerfoundry/config.yaml` with:
 
 ```yaml
 github:
   app:
     app_id: 123456
     private_key_file: /etc/runnerfoundry/github-app.pem
-  discovery_interval: 5m
-
-log:
-  format: text
-  level: info
 
 state:
   path: /var/lib/runnerfoundry/state.db
 
-prune: false
-
 scale_sets:
   - name: linux-docker
-    runner_group: default
     max_runners: 2
     docker:
       compose_file: /etc/runnerfoundry/compose.yaml
       service: runner
 ```
 
-Protect the configuration and confirm that the service account can read its inputs:
+Replace `123456` with your GitHub App ID.
 
-```sh
-sudo chown root:runnerfoundry /etc/runnerfoundry/config.yaml
-sudo chmod 0640 /etc/runnerfoundry/config.yaml
-sudo -u runnerfoundry test -r /etc/runnerfoundry/config.yaml
-sudo -u runnerfoundry test -r /etc/runnerfoundry/github-app.pem
-```
+This creates a Runner Pool called `linux-docker` with capacity for two concurrent runners.
 
-### Start the service
+### 5. Start RunnerFoundry
 
 ```sh
 sudo systemctl enable --now runnerfoundry
+```
+
+Check its status:
+
+```sh
 sudo systemctl status runnerfoundry
 sudo journalctl -u runnerfoundry -f
 ```
 
-Run a workflow using the configured Runner Pool name:
+### 6. Run a job
+
+In one of the repositories on which the GitHub App is installed:
 
 ```yaml
+name: RunnerFoundry test
+
+on:
+  workflow_dispatch:
+
 jobs:
   verify:
     runs-on: linux-docker
     steps:
-      - uses: actions/checkout@v7
       - run: uname -a
 ```
 
-The expected result is one ephemeral runner for that job and a result reported to GitHub when the attempt finishes.
+Start the workflow from GitHub Actions.
 
-## Installation
+RunnerFoundry should create a container for the job. The runner executes it, reports the result to GitHub, and the container is removed afterwards.
 
-### Debian package
+Install the same GitHub App on another personal repository and that repository can use `runs-on: linux-docker` too.
 
-The AMD64 package installs:
+## Standalone deployment
 
-- `/usr/bin/runnerfoundry`;
-- `/lib/systemd/system/runnerfoundry.service`;
-- `/etc/runnerfoundry/config.yaml`;
-- `/var/lib/runnerfoundry` for packaged SQLite state; and
-- notices and an SBOM under `/usr/share/doc/runnerfoundry`.
+A standalone deployment is one RunnerFoundry member.
 
-Package upgrades and `apt remove` preserve packaged state. `apt purge runnerfoundry` removes the package-managed SQLite database and its sidecar files. Custom state paths remain operator-owned.
+It can use either SQLite or PostgreSQL for its durable state. The choice of database does not change the runner model.
 
-### Source-built executable
+For most single-host installations, SQLite is the simplest choice.
 
-Build the Linux AMD64 executable with Go 1.26.5 and GNU Make:
+### Standalone with SQLite
 
-```sh
-make build
-./build/linux/amd64/runnerfoundry --version
+SQLite needs no separate database service.
+
+A complete standalone configuration can be as small as:
+
+```yaml
+github:
+  app:
+    app_id: 123456
+    private_key_file: /etc/runnerfoundry/github-app.pem
+
+state:
+  path: /var/lib/runnerfoundry/state.db
+
+scale_sets:
+  - name: linux-docker
+    max_runners: 4
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
 ```
 
-`make build` sets `GOOS=linux`, `GOARCH=amd64`, and `CGO_ENABLED=0`. A successful version command prints `runnerfoundry <version>`. Install that executable and create a dedicated account with access to the selected execution provider:
+Start the member normally:
 
 ```sh
-sudo install -m 0755 build/linux/amd64/runnerfoundry /usr/local/bin/runnerfoundry
-sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin runnerfoundry
-sudo install -d -m 0750 -o root -g runnerfoundry /etc/runnerfoundry
-sudo install -d -m 0750 -o runnerfoundry -g runnerfoundry /var/lib/runnerfoundry
+sudo systemctl enable --now runnerfoundry
 ```
 
-Use the packaged systemd unit as a starting point and supply `--config <path>`.
+Only one RunnerFoundry member may use a SQLite database. RunnerFoundry exclusively owns the live database while it is running.
 
-## Configuration
+If all of your capacity lives on one machine, this is usually the right deployment.
 
-RunnerFoundry reads one strict YAML document at startup and on explicit reload. Unknown fields and invalid combinations fail validation.
+### Standalone with PostgreSQL
 
-### GitHub adapter settings
+A single RunnerFoundry member can also use PostgreSQL.
 
-These settings belong to the GitHub adapter. GitHub runner scale-set terminology does not define core queue or execution contracts.
+This can be useful when PostgreSQL already fits your operational environment, when you want PostgreSQL-backed state, or when you expect to add more RunnerFoundry hosts later.
 
-| Setting | Requirement | Purpose |
-| --- | --- | --- |
-| `github.app.app_id` | Required positive integer | Numeric GitHub App ID. |
-| `github.app.private_key_file` | Required | Path to the App private key. |
-| `github.discovery_interval` | Optional; default `5m`, minimum `1m` | GitHub repository and capacity discovery interval. |
-| `scale_sets[].name` | Required and unique | Runner Pool name and GitHub `runs-on` value. |
-| `scale_sets[].runner_group` | Optional; default `default` | GitHub runner group used for the published capacity. |
-| `scale_sets[].max_runners` | Required positive integer | Capacity contributed by this member. |
-| `prune` | Optional; default `false` | Remove owned GitHub runner scale sets only after no live cluster member declares their Runner Pool. |
+PostgreSQL 17 and 18 are the currently supported versions.
 
-Each `scale_sets` entry configures exactly one execution provider: `docker` or `libvirt`.
-
-In a PostgreSQL cluster, each member publishes its configured Runner Pools and runner-group names to shared state. GitHub reconciliation uses the union declared by members that have heartbeated within the liveness cutoff; it does not treat the leader's local `scale_sets` as cluster-wide configuration. Members may therefore contribute different pools. A Runner Pool must use one runner-group name across the cluster. A disagreement preserves existing registrations and degrades reconciliation for that pool without affecting other pools.
-
-### State settings
-
-Configure exactly one state backend:
-
-| Setting | Requirement | Purpose |
-| --- | --- | --- |
-| `state.path` | Required for SQLite | SQLite database path. RunnerFoundry exclusively owns the live database until it stops. |
-| `state.postgres` | Required for PostgreSQL | PostgreSQL connection and stable-role settings. |
-
-One member using `state.postgres` is standalone. Multiple members sharing it form a cluster. Changing backends or PostgreSQL settings requires a restart.
-
-Each member uses its trimmed operating-system hostname as its stable identity. Hostnames must be unique within a cluster, and only one RunnerFoundry daemon may run for a hostname. A member that has not heartbeated for 30 seconds contributes no advertised capacity. That cutoff does not requeue its work. The leader can recover an unstarted claim only after five minutes and only with cleanup or positive absence proof from the claim's exact inventory endpoint. Started jobs never return to the queue.
-
-### Active runner policy
-
-`--active-runner-policy` controls active resources during configuration reload and graceful shutdown. It is a daemon option, not a YAML setting, and accepts `leave` or `terminate`. The default is `leave`.
-
-```sh
-runnerfoundry --config /etc/runnerfoundry/config.yaml \
-  --active-runner-policy=terminate
-```
-
-`leave` preserves active runners and processing and never waits for those runners to finish. On process shutdown, RunnerFoundry allows up to 30 seconds for process-local cleanup before exiting successfully. Cleanup that does not finish within that window is left to operating-system resource release and startup reconciliation; published capacity expires through the normal member-liveness cutoff when it cannot be withdrawn first.
-
-`terminate` destroys affected resources and returns only unstarted jobs to the queue after cleanup succeeds. Started jobs remain in processing until GitHub sends `JobCompleted`. This explicit policy is not subject to the 30-second `leave` shutdown window and can therefore take substantially longer.
-
-### Logging settings
-
-| Setting | Default | Accepted values |
-| --- | --- | --- |
-| `log.format` | `text` | `text`, `json` |
-| `log.level` | `info` | `debug`, `info`, `warn`, `error` |
-| `log.file.path` | unset | Absolute path for file-only daemon logs |
-| `log.file.max_size_mb` | `100` | Positive MiB limit |
-| `log.file.max_backups` | `5` | Positive retained-file count |
-
-When `log.file` is omitted, logs go to standard output. Do not configure multiple members to write to the same file.
-
-## Use PostgreSQL
-
-RunnerFoundry requires PostgreSQL 17 or later. Create a stable non-login role and a separate login identity. RunnerFoundry assumes the stable role on each connection and does not manage PostgreSQL roles or grants.
+Create a stable role and a login identity:
 
 ```sql
 CREATE ROLE runnerfoundry
@@ -257,9 +258,117 @@ GRANT runnerfoundry TO runnerfoundry_login;
 CREATE DATABASE runnerfoundry OWNER runnerfoundry;
 ```
 
-Configure authentication for `runnerfoundry_login` through the PostgreSQL mechanism used by the deployment. The primary and direct endpoints may use different login identities, but every identity must be a member of `runnerfoundry` so RunnerFoundry can execute `SET ROLE runnerfoundry`. Store login names and passwords in protected environment or file references rather than the YAML document.
+Configure authentication for `runnerfoundry_login` according to your PostgreSQL environment.
 
-Configure the backend:
+Store the credentials somewhere readable by the RunnerFoundry service account. For example:
+
+```sh
+sudo install -d -m 0750 -o root -g runnerfoundry /etc/runnerfoundry/secrets
+
+printf '%s' 'runnerfoundry_login' | \
+  sudo tee /etc/runnerfoundry/secrets/postgres-user >/dev/null
+
+printf '%s' 'your-password' | \
+  sudo tee /etc/runnerfoundry/secrets/postgres-password >/dev/null
+
+sudo chown root:runnerfoundry /etc/runnerfoundry/secrets/*
+sudo chmod 0640 /etc/runnerfoundry/secrets/*
+```
+
+Then use PostgreSQL instead of `state.path`:
+
+```yaml
+github:
+  app:
+    app_id: 123456
+    private_key_file: /etc/runnerfoundry/github-app.pem
+
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: file:///etc/runnerfoundry/secrets/postgres-user
+    password: file:///etc/runnerfoundry/secrets/postgres-password
+
+scale_sets:
+  - name: linux-docker
+    max_runners: 4
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
+```
+
+Start RunnerFoundry normally:
+
+```sh
+sudo systemctl enable --now runnerfoundry
+```
+
+RunnerFoundry applies its known forward PostgreSQL migrations during startup.
+
+One member using PostgreSQL is still a standalone deployment. It becomes clustered only when several RunnerFoundry members share that PostgreSQL state.
+
+## Clustered deployment
+
+A clustered deployment consists of two or more RunnerFoundry members sharing the same PostgreSQL database.
+
+Clustering lets you spread runner capacity across machines.
+
+For example, you might have:
+
+* one host providing Linux Docker runners;
+* another providing Windows virtual machines;
+* several identical hosts contributing to one large Linux pool; or
+* a mixture of pools spread across whichever machines are suited to run them.
+
+There is no separate cluster service and there is no leader address to configure. The members coordinate through PostgreSQL.
+
+### 1. Prepare PostgreSQL
+
+Use PostgreSQL 17 or 18.
+
+Create the database and stable role:
+
+```sql
+CREATE ROLE runnerfoundry
+  NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+CREATE ROLE runnerfoundry_login
+  LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+GRANT runnerfoundry TO runnerfoundry_login;
+
+CREATE DATABASE runnerfoundry OWNER runnerfoundry;
+```
+
+You may use one login identity for all members or separate login identities for different hosts.
+
+Every login used by RunnerFoundry must be able to assume the stable `runnerfoundry` role.
+
+### 2. Give every member a unique hostname
+
+RunnerFoundry uses the operating-system hostname as the stable identity of a cluster member.
+
+Each host must therefore have a stable, unique hostname.
+
+Do not run two RunnerFoundry daemons using the same hostname against the same cluster.
+
+### 3. Use the same GitHub App
+
+Every cluster member uses the same GitHub App and the same PostgreSQL database.
+
+Install the private key on each member:
+
+```sh
+sudo install -m 0640 -o root -g runnerfoundry \
+  github-app.pem /etc/runnerfoundry/github-app.pem
+```
+
+### 4. Configure the shared PostgreSQL state
+
+Each member points at the same database:
 
 ```yaml
 state:
@@ -268,119 +377,1004 @@ state:
     host: postgresql.example.net
     port: "5432"
     name: runnerfoundry
-    user: file:///run/secrets/runnerfoundry-postgres-user
-    password: file:///run/secrets/runnerfoundry-postgres-password
+    user: env://RUNNERFOUNDRY_POSTGRES_USER
+    password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+```
+
+The credentials do not have to be identical if you use separate PostgreSQL login identities. They only need access to the same database and permission to assume the configured stable role.
+
+If your primary PostgreSQL endpoint cannot preserve the sessions required by RunnerFoundry, configure a separate session-affine endpoint:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql-pool.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: env://RUNNERFOUNDRY_POSTGRES_USER
+    password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+
     direct:
       host: postgresql-direct.example.net
-      port: "5432"
 ```
 
-Connection values may be literals, `env://VARIABLE` references, or absolute `file:///path` references. `dsn` may replace structured primary fields. Use `direct` for a session-affine endpoint when the primary endpoint cannot preserve sessions.
+The remaining `direct` fields inherit the primary structured connection settings when omitted.
 
-Session pooling on the primary endpoint is recommended for the best job-pickup performance. In PostgreSQL deployments, each member attempts to reserve one primary pooled connection for `LISTEN`, while queue inserts publish best-effort `NOTIFY` wakes so members can compete for newly queued work immediately. While the listener is idle, RunnerFoundry periodically validates that same pooled session so infrastructure inactivity timeouts do not unnecessarily recycle it. Deployments where `LISTEN` or the session keepalive is unavailable remain supported; members discover the same durable work during the next maintenance cycle. Do not configure or use `state.postgres.direct` merely to enable queue notifications. The direct endpoint is reserved for operations that cannot work through the primary pool.
+See [PostgreSQL configuration](#postgresql-configuration) for the complete rules.
 
-Every member in a cluster uses the same GitHub App and PostgreSQL database. Members may declare different Runner Pools and contribute different local providers and capacity. Members that declare the same Runner Pool must use the same GitHub runner-group name.
+### 5. Configure the capacity on each member
 
-### Migrate PostgreSQL
+Members do not need identical Runner Pool configuration.
 
-Every daemon startup acquires the migration lock and applies all known forward migrations before opening the runtime connection pool. Use the migration commands to inspect or apply the same migrations explicitly during a controlled maintenance window:
+Host `runner01` might provide Docker capacity:
+
+```yaml
+github:
+  app:
+    app_id: 123456
+    private_key_file: /etc/runnerfoundry/github-app.pem
+
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: env://RUNNERFOUNDRY_POSTGRES_USER
+    password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+
+scale_sets:
+  - name: linux
+    max_runners: 8
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
+```
+
+Host `runner02` might provide Windows capacity:
+
+```yaml
+github:
+  app:
+    app_id: 123456
+    private_key_file: /etc/runnerfoundry/github-app.pem
+
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: env://RUNNERFOUNDRY_POSTGRES_USER
+    password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+
+scale_sets:
+  - name: windows
+    max_runners: 2
+    libvirt:
+      connection_uri: qemu:///system
+      domain_xml_template: /etc/runnerfoundry/windows-domain.xml
+```
+
+Those two pools are both available through the cluster.
+
+Members can also contribute capacity to the same pool:
+
+```yaml
+scale_sets:
+  - name: linux
+    max_runners: 4
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
+```
+
+If two live members each contribute four runners to `linux`, the cluster has eight configured runners of capacity for that pool before queued or active work is accounted for.
+
+Members declaring the same Runner Pool must use the same GitHub `runner_group`.
+
+They may technically use different local providers for the same pool, but jobs in that pool can then land on either environment. Only do this when those environments are intentionally interchangeable.
+
+### 6. Start the members
+
+Start RunnerFoundry on each host:
 
 ```sh
-runnerfoundry migrate status --config /etc/runnerfoundry/config.yaml
-runnerfoundry migrate up --config /etc/runnerfoundry/config.yaml
+sudo systemctl enable --now runnerfoundry
 ```
 
-For an upgrade, back up PostgreSQL, stop every member, install the new executable or package on every host, and run `migrate status` followed by `migrate up` from one host before restarting the members. Starting a member before the explicit `migrate up` applies the same forward migrations automatically.
+No member needs to be designated as leader.
 
-For a rollback, back up PostgreSQL, stop every member, and wait more than 30 seconds for the last published heartbeat to expire. Inspect the current and known versions before selecting the rollback target:
+The cluster coordinates shared state, GitHub-facing responsibilities, and available capacity automatically.
 
-```sh
-runnerfoundry migrate status --config /etc/runnerfoundry/config.yaml
-runnerfoundry migrate down --to <version> \
-  --config /etc/runnerfoundry/config.yaml
-```
+## Runner providers
 
-After the rollback, install the older executable whose target schema matches `<version>`, run its `migrate status`, and only then restart the members. Restarting the newer executable would apply its forward migrations again. Rollback refuses to run while a leader lease is active or a member heartbeat is still live.
+Every Runner Pool uses exactly one execution provider on each member that declares it.
 
-Operate PostgreSQL availability, backups, transport security, and database restoration separately from RunnerFoundry.
+RunnerFoundry currently supports Docker Compose and libvirt.
 
-## Prepare runner capacity
+RunnerFoundry owns creation and cleanup of runner instances. You own the environment inside those instances.
 
-Runner starts are bounded by five minutes. Provider validation, inventory refresh, inspection, and destruction are each bounded by 30 seconds. An earlier caller deadline is preserved. A start deadline is one failed provisioning attempt; after cleanup, the job follows the lifecycle's unlimited retry rule. The per-call deadlines do not add a retry count, backoff, or overall lifecycle timeout.
+### Docker Compose
 
-### Prepare Docker Compose capacity
+Docker is the easiest provider for Linux jobs that fit comfortably inside a container.
 
-The operator owns the Compose service, image, command, tools, volumes, networks, and security policy. Configure a Docker-backed Runner Pool with:
+A Docker-backed Runner Pool looks like:
 
 ```yaml
 scale_sets:
   - name: linux-docker
-    runner_group: default
     max_runners: 2
     docker:
       compose_file: /etc/runnerfoundry/compose.yaml
       service: runner
 ```
 
-RunnerFoundry validates the service with `docker compose config --services` and supplies JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`. Runner containers are launched with `--rm`, so Docker removes normally exited runners while RunnerFoundry force-removes resources that require exceptional cleanup.
+The Compose file might contain:
 
-See the [minimal Docker example](examples/docker-runner/README.md).
+```yaml
+services:
+  runner:
+    image: ghcr.io/actions/actions-runner:latest
+    user: runner
+    working_dir: /home/runner
+    command: ["/home/runner/run.sh"]
+```
 
-### Prepare libvirt capacity
+RunnerFoundry validates that the configured Compose service exists before activating the pool.
 
-The operator owns the guest image, domain XML, firmware, storage, networking, workflow tools, guest cleanup, and shutdown. Configure a libvirt-backed Runner Pool with:
+When a job needs a runner, RunnerFoundry starts a detached one-job container and supplies the GitHub JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`.
+
+The container uses Docker's `--rm` lifecycle. RunnerFoundry also tracks it so failed or interrupted provisioning can be cleaned up.
+
+The image, tools, command, volumes, networks and security policy remain yours to define.
+
+See [`examples/docker-runner`](examples/docker-runner/README.md) for the minimal example included with the repository.
+
+### libvirt
+
+Use libvirt when a job needs a complete virtual machine.
+
+Typical reasons include:
+
+* Windows runners;
+* workloads that require a full operating system;
+* VM-specific networking, firmware or storage behavior; or
+* cases where a VM boundary is preferable to a container boundary.
+
+A libvirt-backed pool looks like:
 
 ```yaml
 scale_sets:
   - name: linux-vm
-    runner_group: default
     max_runners: 2
     libvirt:
       connection_uri: qemu:///system
       domain_xml_template: /etc/runnerfoundry/domain.xml
 ```
 
-RunnerFoundry passes the JIT configuration in an SMBIOS type 11 value named `runnerfoundry.jit`. Keep that value out of logs and persistent guest state.
+RunnerFoundry renders and starts a transient domain from the supplied XML.
 
-#### Prepare the guest image
+The GitHub JIT configuration is made available to the guest through an SMBIOS type 11 value named `runnerfoundry.jit`.
 
-The guest must:
+The guest is responsible for:
 
-1. read the `runnerfoundry.jit` value without logging it;
-2. expose that value only to the runner process as `ACTIONS_RUNNER_INPUT_JITCONFIG`, inherited through the child environment and absent from command-line arguments;
-3. start the unregistered GitHub Actions runner once;
-4. remove transient runner and work data; and
-5. shut down after the attempt.
+1. reading that value without logging or persisting it;
+2. exposing it to the GitHub Actions runner as `ACTIONS_RUNNER_INPUT_JITCONFIG`;
+3. starting the unregistered runner once;
+4. cleaning up transient runner and work state; and
+5. shutting down after the attempt.
 
-Optional examples are available for [Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows Server](examples/libvirt-windows-runner/README.md).
+RunnerFoundry does not build or maintain your VM images.
+
+The repository contains working examples for:
+
+* [Ubuntu](examples/libvirt-ubuntu-runner/README.md)
+* [Windows Server](examples/libvirt-windows-runner/README.md)
+
+Those examples use Packer, but Packer is not required by RunnerFoundry. Any image-building process is fine as long as the resulting guest satisfies the runner contract.
+
+## Configuration reference
+
+RunnerFoundry reads YAML from the file supplied with `--config`.
+
+The packaged systemd service uses:
+
+```text
+/etc/runnerfoundry/config.yaml
+```
+
+Configuration is strict. Unknown fields are rejected instead of being silently ignored.
+
+The keys documented in this section are the complete valid YAML configuration surface.
+
+### Top-level settings
+
+| Setting      | Type    | Default          | Requirements                 |
+| ------------ | ------- | ---------------- | ---------------------------- |
+| `github`     | mapping | none             | Required                     |
+| `log`        | mapping | defaults applied | Optional                     |
+| `state`      | mapping | none             | Required                     |
+| `prune`      | boolean | `false`          | `true` or `false`            |
+| `scale_sets` | list    | none             | Required, at least one entry |
+
+A complete PostgreSQL-backed example showing all major configuration areas looks like:
+
+```yaml
+github:
+  app:
+    app_id: 123456
+    private_key_file: /etc/runnerfoundry/github-app.pem
+  discovery_interval: 5m
+
+log:
+  format: text
+  level: info
+  file:
+    path: /var/log/runnerfoundry/runnerfoundry.log
+    max_size_mb: 100
+    max_backups: 5
+
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: env://RUNNERFOUNDRY_POSTGRES_USER
+    password: file:///run/secrets/runnerfoundry-postgres-password
+    direct:
+      host: postgresql-direct.example.net
+      port: "5432"
+      name: runnerfoundry
+      user: env://RUNNERFOUNDRY_POSTGRES_USER
+      password: file:///run/secrets/runnerfoundry-postgres-password
+
+prune: false
+
+scale_sets:
+  - name: linux
+    runner_group: default
+    max_runners: 4
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
+```
+
+### GitHub configuration
+
+#### `github.app.app_id`
+
+```yaml
+github:
+  app:
+    app_id: 123456
+```
+
+Required.
+
+Must be a positive integer containing the numeric GitHub App ID.
+
+#### `github.app.private_key_file`
+
+```yaml
+github:
+  app:
+    private_key_file: /etc/runnerfoundry/github-app.pem
+```
+
+Required.
+
+A filesystem path to the GitHub App private key.
+
+The file must be readable by RunnerFoundry and contain non-empty private-key material.
+
+Inline private keys are not supported.
+
+#### `github.discovery_interval`
+
+```yaml
+github:
+  discovery_interval: 5m
+```
+
+Optional.
+
+Default:
+
+```text
+5m
+```
+
+The value is a Go duration string and must resolve to at least one minute.
+
+Examples:
+
+```text
+1m
+5m
+30m
+1h
+1h30m
+```
+
+RunnerFoundry uses this interval when rediscovering repositories available through the configured GitHub App.
+
+#### Unsupported GitHub authentication settings
+
+RunnerFoundry supports GitHub App authentication only.
+
+These older or unsafe fields are explicitly rejected:
+
+```yaml
+github:
+  token: ...
+  token_env: ...
+  token_file: ...
+
+  app:
+    private_key: ...
+```
+
+Use `github.app.app_id` together with `github.app.private_key_file`.
+
+### Logging configuration
+
+If `log` is omitted entirely, RunnerFoundry behaves as if you configured:
+
+```yaml
+log:
+  format: text
+  level: info
+```
+
+Without `log.file`, logs are written to standard output.
+
+#### `log.format`
+
+Allowed values:
+
+```text
+text
+json
+```
+
+Default:
+
+```text
+text
+```
+
+#### `log.level`
+
+Allowed values:
+
+```text
+debug
+info
+warn
+error
+```
+
+Default:
+
+```text
+info
+```
+
+#### `log.file`
+
+Optional.
+
+When present, RunnerFoundry writes daemon logs to the configured rotating file instead of standard output.
+
+```yaml
+log:
+  file:
+    path: /var/log/runnerfoundry/runnerfoundry.log
+    max_size_mb: 100
+    max_backups: 5
+```
+
+#### `log.file.path`
+
+Required when `log.file` is present.
+
+Must be an absolute filesystem path.
+
+#### `log.file.max_size_mb`
+
+Optional.
+
+Default:
+
+```text
+100
+```
+
+Must be a positive integer.
+
+The value controls the maximum size of a log file in MiB before rotation.
+
+#### `log.file.max_backups`
+
+Optional.
+
+Default:
+
+```text
+5
+```
+
+Must be a positive integer.
+
+Controls how many rotated log files are retained.
+
+Do not configure multiple RunnerFoundry members to write to the same file.
+
+### State configuration
+
+Exactly one state backend must be configured:
+
+* SQLite through `state.path`; or
+* PostgreSQL through `state.postgres`.
+
+These are mutually exclusive.
+
+This is valid:
+
+```yaml
+state:
+  path: /var/lib/runnerfoundry/state.db
+```
+
+This is also valid:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql.example.net
+```
+
+This is not valid:
+
+```yaml
+state:
+  path: /var/lib/runnerfoundry/state.db
+  postgres:
+    role: runnerfoundry
+```
+
+### SQLite configuration
+
+#### `state.path`
+
+```yaml
+state:
+  path: /var/lib/runnerfoundry/state.db
+```
+
+Required when PostgreSQL is not configured.
+
+Must be a non-empty filesystem path.
+
+SQLite supports one RunnerFoundry member only.
+
+### PostgreSQL configuration
+
+The PostgreSQL form is:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    dsn: ...
+    host: ...
+    port: ...
+    name: ...
+    user: ...
+    password: ...
+    direct:
+      dsn: ...
+      host: ...
+      port: ...
+      name: ...
+      user: ...
+      password: ...
+```
+
+`role` is required.
+
+The connection itself can be supplied either through `dsn` or through the structured connection fields.
+
+#### PostgreSQL value sources
+
+Every non-empty PostgreSQL configuration value can be supplied in one of three ways.
+
+A literal value:
+
+```yaml
+user: runnerfoundry_login
+```
+
+An environment variable:
+
+```yaml
+user: env://RUNNERFOUNDRY_POSTGRES_USER
+```
+
+Or a file:
+
+```yaml
+password: file:///run/secrets/runnerfoundry-postgres-password
+```
+
+This applies to:
+
+* `state.postgres.role`
+* `state.postgres.dsn`
+* `state.postgres.host`
+* `state.postgres.port`
+* `state.postgres.name`
+* `state.postgres.user`
+* `state.postgres.password`
+* `state.postgres.direct.dsn`
+* `state.postgres.direct.host`
+* `state.postgres.direct.port`
+* `state.postgres.direct.name`
+* `state.postgres.direct.user`
+* `state.postgres.direct.password`
+
+An `env://` reference must name an existing, non-empty environment variable.
+
+A `file://` reference must resolve to an absolute filesystem path. The file must exist, be readable and contain a non-empty value. Surrounding whitespace is removed from file contents.
+
+For example:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    host: env://RUNNERFOUNDRY_POSTGRES_HOST
+    port: "5432"
+    name: runnerfoundry
+    user: file:///run/secrets/postgres-user
+    password: file:///run/secrets/postgres-password
+```
+
+#### `state.postgres.role`
+
+Required.
+
+The PostgreSQL role RunnerFoundry assumes after connecting.
+
+For example:
+
+```yaml
+role: runnerfoundry
+```
+
+The login identity used by `user` must have permission to assume this role.
+
+The role is configured separately even when a DSN is used. Do not rely on a `role` connection parameter embedded in the DSN.
+
+#### `state.postgres.dsn`
+
+Optional.
+
+Provides the primary PostgreSQL connection as a DSN instead of separate connection fields.
+
+For example:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    dsn: env://RUNNERFOUNDRY_DATABASE_URL
+```
+
+When `dsn` is used, it cannot be combined with these primary structured settings:
+
+* `host`
+* `port`
+* `name`
+* `user`
+* `password`
+
+`role` remains required.
+
+#### `state.postgres.host`
+
+Optional structured connection field.
+
+```yaml
+host: postgresql.example.net
+```
+
+#### `state.postgres.port`
+
+Optional structured connection field.
+
+```yaml
+port: "5432"
+```
+
+The resolved value must be a positive valid TCP port number from 1 through 65535.
+
+#### `state.postgres.name`
+
+Optional structured connection field containing the database name.
+
+```yaml
+name: runnerfoundry
+```
+
+#### `state.postgres.user`
+
+Optional structured connection field containing the PostgreSQL login identity.
+
+```yaml
+user: runnerfoundry_login
+```
+
+Literal, environment and file values are supported.
+
+#### `state.postgres.password`
+
+Optional structured connection field containing the PostgreSQL login password.
+
+```yaml
+password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+```
+
+Literal values are supported, but an environment or protected file reference is preferable for credentials.
+
+#### Omitted PostgreSQL connection fields
+
+RunnerFoundry itself does not require every structured connection field to be populated.
+
+Values not supplied by RunnerFoundry are left to the underlying PostgreSQL client configuration.
+
+For predictable production configuration, explicitly provide the connection information your environment requires rather than depending on ambient PostgreSQL client defaults.
+
+### Direct PostgreSQL connection
+
+`state.postgres.direct` is optional.
+
+It provides a separate session-affine PostgreSQL endpoint for operations that cannot safely use a primary endpoint which does not preserve sessions.
+
+If `direct` is omitted, RunnerFoundry uses the primary connection settings for those operations too.
+
+#### Structured primary connection
+
+When the primary connection uses structured fields:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    host: postgresql-pool.example.net
+    port: "5432"
+    name: runnerfoundry
+    user: runnerfoundry_login
+    password: env://RUNNERFOUNDRY_POSTGRES_PASSWORD
+
+    direct:
+      host: postgresql-direct.example.net
+```
+
+Any omitted structured `direct` field inherits its primary value.
+
+The effective direct connection above therefore uses:
+
+```text
+host     = postgresql-direct.example.net
+port     = 5432
+name     = runnerfoundry
+user     = runnerfoundry_login
+password = primary password
+role     = runnerfoundry
+```
+
+The role always comes from `state.postgres.role`.
+
+#### DSN primary connection
+
+If the primary connection uses a DSN:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    dsn: env://RUNNERFOUNDRY_DATABASE_URL
+```
+
+and the direct connection needs to be different, it must also use a DSN:
+
+```yaml
+state:
+  postgres:
+    role: runnerfoundry
+    dsn: env://RUNNERFOUNDRY_DATABASE_URL
+
+    direct:
+      dsn: env://RUNNERFOUNDRY_DIRECT_DATABASE_URL
+```
+
+You cannot use structured direct overrides such as `direct.host` on top of a primary DSN.
+
+#### `state.postgres.direct.dsn`
+
+Optional.
+
+Cannot be combined with:
+
+* `state.postgres.direct.host`
+* `state.postgres.direct.port`
+* `state.postgres.direct.name`
+* `state.postgres.direct.user`
+* `state.postgres.direct.password`
+
+#### `state.postgres.direct.host`
+
+Optional.
+
+Overrides or inherits the primary structured `host`.
+
+#### `state.postgres.direct.port`
+
+Optional.
+
+Overrides or inherits the primary structured `port`.
+
+The resolved value must be from 1 through 65535.
+
+#### `state.postgres.direct.name`
+
+Optional.
+
+Overrides or inherits the primary structured database name.
+
+#### `state.postgres.direct.user`
+
+Optional.
+
+Overrides or inherits the primary structured login identity.
+
+The direct login may differ from the primary login, but it must still be able to assume `state.postgres.role`.
+
+#### `state.postgres.direct.password`
+
+Optional.
+
+Overrides or inherits the primary structured password.
+
+### Runner Pool configuration
+
+Runner Pools are configured through the top-level `scale_sets` list.
+
+At least one entry is required.
+
+```yaml
+scale_sets:
+  - name: linux
+    runner_group: default
+    max_runners: 4
+    docker:
+      compose_file: /etc/runnerfoundry/compose.yaml
+      service: runner
+```
+
+Each entry must configure exactly one provider:
+
+* `docker`; or
+* `libvirt`.
+
+#### `scale_sets[].name`
+
+Required.
+
+Must be a non-empty string and unique within the member's configuration.
+
+```yaml
+name: linux
+```
+
+This is the Runner Pool name inside RunnerFoundry and the value workflows use through GitHub:
+
+```yaml
+runs-on: linux
+```
+
+#### `scale_sets[].runner_group`
+
+Optional.
+
+Default:
+
+```text
+default
+```
+
+Example:
+
+```yaml
+runner_group: default
+```
+
+The value is the GitHub runner-group name used when publishing the pool.
+
+Members in the same PostgreSQL cluster that declare the same Runner Pool must use the same `runner_group`.
+
+#### `scale_sets[].max_runners`
+
+Required.
+
+Must be a positive integer.
+
+```yaml
+max_runners: 4
+```
+
+This is the amount of capacity contributed by this RunnerFoundry member.
+
+In a standalone deployment it is the member's full configured capacity for that pool.
+
+In a cluster, live members declaring the same pool contribute their capacities to the shared pool.
+
+### Docker provider configuration
+
+The Docker provider has exactly two settings:
+
+```yaml
+docker:
+  compose_file: /etc/runnerfoundry/compose.yaml
+  service: runner
+```
+
+#### `scale_sets[].docker.compose_file`
+
+Required for a Docker-backed pool.
+
+Must be a non-empty string identifying the Docker Compose file.
+
+#### `scale_sets[].docker.service`
+
+Required for a Docker-backed pool.
+
+Must be a non-empty Compose service name.
+
+RunnerFoundry validates that this service exists in the configured Compose model before activating the provider.
+
+### libvirt provider configuration
+
+The libvirt provider has exactly two settings:
+
+```yaml
+libvirt:
+  connection_uri: qemu:///system
+  domain_xml_template: /etc/runnerfoundry/domain.xml
+```
+
+#### `scale_sets[].libvirt.connection_uri`
+
+Required for a libvirt-backed pool.
+
+Must be a non-empty libvirt connection URI.
+
+Example:
+
+```text
+qemu:///system
+```
+
+#### `scale_sets[].libvirt.domain_xml_template`
+
+Required for a libvirt-backed pool.
+
+Must be a non-empty path to the domain XML template used to create runner VMs.
+
+### Pruning
+
+#### `prune`
+
+Optional boolean.
+
+Default:
+
+```yaml
+prune: false
+```
+
+Allowed values:
+
+```yaml
+prune: false
+```
+
+or:
+
+```yaml
+prune: true
+```
+
+With pruning disabled, removing a Runner Pool from configuration does not cause RunnerFoundry to remove the GitHub runner scale sets it previously created.
+
+With pruning enabled, a previously owned scale set becomes eligible for removal once no live RunnerFoundry cluster member declares that Runner Pool.
+
+The default is intentionally conservative.
+
+### Daemon command-line configuration
+
+Some runtime behavior is deliberately not part of the YAML document.
+
+#### `--config`
+
+Required when running the daemon:
+
+```sh
+runnerfoundry --config /etc/runnerfoundry/config.yaml
+```
+
+The packaged systemd service already supplies this argument.
+
+#### `--active-runner-policy`
+
+Optional.
+
+Allowed values:
+
+```text
+leave
+terminate
+```
+
+Default:
+
+```text
+leave
+```
+
+Example:
+
+```sh
+runnerfoundry \
+  --config /etc/runnerfoundry/config.yaml \
+  --active-runner-policy=terminate
+```
+
+`leave` preserves active runner resources during graceful shutdown and configuration replacement.
+
+`terminate` actively destroys affected runner resources. Unstarted jobs return to their Runner Pool only after cleanup succeeds. Jobs already accepted by a runner remain part of the GitHub lifecycle rather than becoming provisioning retries.
+
+This is a daemon option rather than a YAML setting so a replacement configuration cannot change the policy governing resources created by the configuration it is replacing.
 
 ## Operations
 
-### Inspect the service
+### Check the service
 
 ```sh
 sudo systemctl status runnerfoundry
+```
+
+Follow the logs:
+
+```sh
 sudo journalctl -u runnerfoundry -f
 ```
 
-`READY=1` means RunnerFoundry accepted its configuration, opened its required local and durable-state resources, validated its providers, and activated the runtime generation. It does not wait for Git source discovery, message sessions, inventory, reconciliation, recovery, or provisioning. While the first maintenance cycle is pending, `systemctl status` reports `ready` with unknown leadership. Maintenance then reports source-neutral runtime health as `operational` or `degraded`; cluster leadership is shown separately as `unknown`, `standby`, or `leader`. A rejected reload that restores or preserves the active generation does not make the service degraded.
+At the default `info` level, RunnerFoundry reports the operational events needed to understand discovery, available capacity, queued work, runner provisioning, cleanup and failures.
 
-Text and JSON logs use the same structured fields and domain terminology. The `msg` field describes the specific activity or failure and names its principal subject, such as `Reconciling GitHub repositories: 23/150`, `Recovered 12 assigned GitHub jobs for https://github.com/example/project in Runner Pool linux`, or `Failed to configure GitHub runner scale set for Runner Pool linux in https://github.com/example/project`. Queryable context is carried separately in `type`, `component`, `operation`, `stage`, and `outcome`. Resource-specific records also include every available identity needed to correlate the work.
+Use:
 
-At `info`, operators see generation and leadership transitions, the immediate maintenance cycle, bounded GitHub reconciliation and session checkpoints, changed aggregate Runner Pool capacity, durable job ingestion, claims, runner starts, and provisioning retries. Repository and session progress is emitted for the first item, each 5% boundary, and the final item, so normal output remains bounded as an installation grows. Failures are emitted at `error` by the subsystem that owns the failed operation. Recovery records include `failure_duration`.
-
-Set the existing `log.level` to `debug` to add every scheduled maintenance cycle and serialized phase; the exact repository URL, Runner Pool, session, endpoint, source request, and external operation; per-repository capacity and poll outcomes; and the producing `source.file`, `source.line`, and `source.function`. Debug output does not include message payloads, request headers, provider commands, environment variables, domain XML, Compose content, or JIT input. GitHub boundary errors may include upstream diagnostics. Provider diagnostics are logged only after provider-specific protection. PostgreSQL and SQLite records identify the backend and state operation without including driver-supplied connection details.
-
-Progress records use `current`, `total`, and `duration_ms` when applicable. Discovery completion includes `repository_count` and `installation_count`. Assigned-demand reconciliation includes `desired_jobs`, `available_jobs`, `acquired_jobs`, `running_jobs`, `registered_runners`, `busy_runners`, `idle_runners`, `active_jobs`, `queued_jobs`, `processing_jobs`, `jobs_added`, and `jobs_removed`. Other stable context includes `member`, `repository`, `installation_id`, `runner_pool`, `runner_group_id`, `scale_set_id`, `message_id`, `github_event_type`, `github_job_id`, `workflow_run_id`, `github_runner_id`, `source_request_id`, `runner_name`, `identity_reason`, `job_id`, `provider`, `endpoint`, `state_backend`, `state_operation`, `capacity`, and `count`. Protect three value classes when collecting or sharing logs: GitHub App private keys, PostgreSQL credentials or DSNs, and JIT configuration.
-
-Example OpenSearch query-string filters (adjust the service field to match the collector):
-
-```text
-service.name:runnerfoundry AND type:progress_event AND outcome:started AND stage:*
-service.name:runnerfoundry AND type:operational_event AND outcome:failed AND component:*
-service.name:runnerfoundry AND repository:"https://github.com/example/project"
-service.name:runnerfoundry AND operation:assigned_demand AND runner_pool:linux
+```yaml
+log:
+  level: debug
 ```
+
+when diagnosing a problem that is not clear at `info`.
 
 ### Reload configuration
 
@@ -388,69 +1382,261 @@ service.name:runnerfoundry AND operation:assigned_demand AND runner_pool:linux
 sudo systemctl reload runnerfoundry
 ```
 
-Reload validates and prepares the replacement configuration before applying it. The replacement becomes active and the service reports `READY` after it acquires the local work gate. Its first maintenance cycle starts immediately in the background. An external dependency or maintenance failure degrades the replacement but does not reject it or reactivate the previous generation. A configuration, preparation, provider-validation, durable-state, or local-activation failure rejects the replacement, rolls back prepared resources, and preserves or reactivates the previous generation. State-backend changes require a restart.
+RunnerFoundry validates and prepares the replacement configuration before activating it.
 
-Runner reconciliation is provider-agnostic. Docker inventory endpoint identity is the member's Docker host; the configured Compose mechanism remains specific to provisioning. Libvirt endpoint identity uses the normalized connection URI. Each endpoint returns all observable RunnerFoundry resources with their Runner Pool, is queried once per maintenance cycle, and is then partitioned by pool. Duplicate configured endpoints are queried once. Inventory errors retain processing because absence was not established. Failed provisioning triggers a fresh inspection of the exact endpoint recorded with the claim.
+A configuration or provider-validation failure rejects the replacement instead of partially applying invalid configuration.
 
-GitHub discovery persists each successful registration independently. Each upsert atomically stores the active route and its ownership evidence; unchanged registrations cause no table-wide rewrite. When `prune` is enabled, RunnerFoundry deletes only scale-set IDs whose current ID, name, and runner group still match durable ownership. Similar labels or update settings do not establish ownership.
+Changing the state backend requires a restart rather than a reload.
 
-The source leader restores every committed registration immediately while discovery runs independently. Restoration does not filter registrations through the new leader's local Runner Pools, so a leadership change does not alter registration IDs or counts. Local configuration controls only the bootstrap routes and provider capacity available on that member. Successful repository and Runner Pool routes activate even when another route fails.
+### PostgreSQL migrations
 
-GitHub message sessions remain process-local because the pinned `github.com/actions/scaleset` library creates sessions but does not expose session adoption. Graceful leadership loss cancels polling and best-effort closes those sessions. After an ungraceful handoff, an individual restored route may receive `409 Conflict` until GitHub expires the former session lease; that route retries without blocking discovery, queue processing, leadership, or sibling routes. Initial session statistics restore assigned demand when its replacement session opens.
+RunnerFoundry applies known forward migrations automatically when a PostgreSQL-backed daemon starts.
 
-GitHub installation IDs are opaque, and records with different installation IDs may coexist while routes converge. Discovery through an accessible installation replaces the active record for each route it confirms. Inability to discover access is inconclusive: RunnerFoundry retains the exact record for retry and does not infer an installation remap. A definitive repository or session not-found through an old installation is terminal and deletes only the exact persisted fingerprint under a guard, so it cannot erase a newer replacement. Pruning remains separate cleanup and is the explicit gate for cluster-wide Runner Pool removal: with pruning disabled, absent declarations do not remove registrations; with pruning enabled, a pool is eligible only after no live member declares it. A pruning failure retains ownership and does not prevent newly reconciled routes from activating. Leadership loss is a hard fence: polling stops immediately, late results cannot be installed or acknowledged, and cleanup failure cannot resume the old term or block a new leader.
+You can inspect the database explicitly:
 
-Durable queue processing is member-local and does not depend on source leadership. Every active member starts its queue processor with the runtime generation. Claims begin only after that member has refreshed inventory and reconciled the affected Runner Pool successfully. SQLite wakes the local pool after an enqueue is durable. PostgreSQL broadcasts a best-effort wake after commit so every listening member can enter the claim race; maintenance still discovers jobs when a notification is unavailable or missed.
+```sh
+runnerfoundry migrate status \
+  --config /etc/runnerfoundry/config.yaml
+```
 
-For a removed Runner Pool or one changed between Docker and libvirt, `leave` applies the replacement without destroying its active runners. Processing recorded against a removed or unavailable endpoint is retained; invisibility is not absence proof. With `terminate`, RunnerFoundry uses the old provider after replacement activation commits to destroy affected resources, requeues cleaned-up unstarted jobs, and leaves started jobs awaiting `JobCompleted`. Cleanup failures retain processing without rejecting the otherwise-valid replacement.
+Apply known forward migrations:
 
-On graceful shutdown, `leave` withdraws capacity and preserves all active runners and processing. `terminate` destroys owned runners, requeues unstarted jobs only after successful cleanup, and preserves started processing until GitHub terminalizes it.
+```sh
+runnerfoundry migrate up \
+  --config /etc/runnerfoundry/config.yaml
+```
+
+For a controlled cluster upgrade:
+
+1. back up PostgreSQL;
+2. stop all RunnerFoundry members;
+3. install the new RunnerFoundry version on every host;
+4. run `migrate status`;
+5. run `migrate up` from one host; and
+6. restart the members.
+
+Starting a new member before the explicit `migrate up` will apply those same forward migrations automatically.
+
+A rollback to a known schema version is available through:
+
+```sh
+runnerfoundry migrate down --to <version> \
+  --config /etc/runnerfoundry/config.yaml
+```
+
+Stop all cluster members and back up PostgreSQL before rolling the schema backwards. Install the RunnerFoundry release that matches the selected schema version before bringing the cluster back online.
 
 ### Upgrade
 
-Review the release notes and back up the selected state backend before installing a new pre-1.0 release.
+RunnerFoundry is currently pre-1.0. Read the release notes before upgrading.
 
-For PostgreSQL, follow the [migration procedure](#migrate-postgresql). Forward migrations preserve supported PostgreSQL state; do not recreate the PostgreSQL schema for an ordinary upgrade.
+PostgreSQL deployments use the migration system described above.
 
-For SQLite, stop the member before installing the package. Reuse the existing database unless the release notes explicitly require recreation for that schema change. Recreation is destructive: it discards queued jobs, processing ownership, source tombstones, member capacity, and GitHub adapter registration and ownership state. Preserve a backup and accept or resolve that state loss before starting with a new database.
+For SQLite, reuse the existing database unless the release notes explicitly say that a particular schema change requires recreation.
 
-### Troubleshooting
+Recreating the SQLite database discards RunnerFoundry's durable state. Back it up before doing so.
 
-- **Service is degraded:** Filter the service log by `outcome=failed`, then use `operation` and `error_category` to identify the failing boundary. An `outcome=recovered` event clears that operation's active failure; `systemctl status` returns to `operational` after every active operation has recovered.
-- **Configuration rejected:** Read the first validation error in the service log. Check unknown fields, App credentials, state-backend selection, positive capacity, and exactly one provider per Runner Pool.
-- **GitHub capacity missing:** Verify App permissions, installation scope, the configured GitHub runner group, and the private-key file.
-- **GitHub capacity is zero:** Confirm at least one member is heartbeating, then check whether queued jobs or any processing jobs already consume the Runner Pool's configured capacity. A state-read failure deliberately advertises zero rather than stale capacity.
-- **Jobs remain queued:** Confirm that workflow `runs-on` matches `scale_sets[].name`, provider validation succeeds, and the Runner Pool has capacity.
-- **Docker unavailable:** Run `docker compose -f <file> config --services` as the service account.
-- **libvirt unavailable:** Run `virsh --connect <uri> list --all` as the service account and validate the domain XML and referenced storage.
-- **PostgreSQL unavailable:** Verify login membership in the stable role, referenced-secret permissions, and session affinity for the direct endpoint.
+## Troubleshooting
+
+### RunnerFoundry does not start
+
+Check:
+
+```sh
+sudo journalctl -u runnerfoundry
+```
+
+Configuration is strict, so RunnerFoundry will reject problems such as:
+
+* unknown fields;
+* a missing or invalid GitHub App ID;
+* an unreadable private key;
+* both SQLite and PostgreSQL being configured;
+* no Runner Pools;
+* duplicate Runner Pool names;
+* non-positive capacity;
+* both providers or neither provider being configured for a pool; or
+* invalid provider settings.
+
+### My Runner Pool does not appear in GitHub
+
+Check that:
+
+* the GitHub App is installed on the repository;
+* the App has repository Administration read/write permission;
+* the configured App ID matches the private key;
+* the private-key file is readable by RunnerFoundry;
+* the configured runner group exists; and
+* RunnerFoundry can reach GitHub.
+
+Then inspect the logs for discovery or registration failures.
+
+### Jobs stay queued
+
+Check that:
+
+* the workflow's `runs-on` value exactly matches the Runner Pool name;
+* the pool has available capacity;
+* the provider is healthy; and
+* the RunnerFoundry service account can access that provider.
+
+For Docker:
+
+```sh
+sudo -u runnerfoundry \
+  docker compose -f /etc/runnerfoundry/compose.yaml config --services
+```
+
+For libvirt:
+
+```sh
+sudo -u runnerfoundry \
+  virsh --connect qemu:///system list --all
+```
+
+### Docker works as my user but not RunnerFoundry
+
+The daemon runs as the `runnerfoundry` service account.
+
+The Debian package adds that account to the `docker` group when the group already exists during package installation.
+
+If Docker was installed afterwards:
+
+```sh
+sudo usermod -aG docker runnerfoundry
+sudo systemctl restart runnerfoundry
+```
+
+### libvirt works as my user but not RunnerFoundry
+
+Make sure the `runnerfoundry` account has access to the configured libvirt connection and to any host resources referenced by the domain template.
+
+If the `libvirt` group was created after RunnerFoundry was installed, add the account manually:
+
+```sh
+sudo usermod -aG libvirt runnerfoundry
+sudo systemctl restart runnerfoundry
+```
+
+The QEMU process may also need filesystem, ACL, SELinux or AppArmor access to VM images and their parent directories.
+
+### A provisioning attempt keeps being retried
+
+Before a GitHub Actions runner accepts a job, RunnerFoundry treats a failed runner start as a provisioning problem.
+
+It cleans up the failed resource and returns the same job to the end of its Runner Pool queue.
+
+This is intentional. GitHub does not provide RunnerFoundry with an operation for reporting an individual provisioning failure as the workflow result.
+
+Once a runner accepts the job, execution failures belong to the normal GitHub Actions lifecycle and are not provisioning retries.
+
+### PostgreSQL will not connect
+
+Check:
+
+* the configured login identity;
+* its password or credential reference;
+* the host and port;
+* the database name;
+* permission for the login identity to assume `state.postgres.role`; and
+* whether a separate `direct` endpoint is needed for session-affine operations.
+
+If a value uses `env://`, make sure the variable exists in the RunnerFoundry service environment, not only in your interactive shell.
+
+If a value uses `file://`, make sure the path is absolute and readable by the service account.
 
 ## Security
 
-Self-hosted runners execute workflow code on operator-controlled infrastructure. Ephemeral execution does not make untrusted code safe. Isolate runner networks and credentials according to repository trust and avoid privileged host access unless a workflow explicitly requires it.
+Self-hosted runners execute repository workflow code on infrastructure you control.
 
-Never commit or publish GitHub App keys, PostgreSQL credentials, JIT configuration, or sensitive logs.
+An ephemeral runner is easier to clean up than a long-lived runner, but ephemerality is not a security boundary by itself.
 
-## Documentation
+Treat runner images, networks, credentials, mounted volumes, Docker access, libvirt access and host permissions as part of your security model.
 
-- [Product contract](docs/PRD.md): normative behavior and terminology.
-- [Architecture](docs/architecture.md): source-neutral component and adapter boundaries.
-- [GitHub adapter](docs/github-adapter.md): GitHub protocol, discovery, session, and persistence behavior.
-- [Contributing](CONTRIBUTING.md): development, verification, and contributor licensing terms.
-- [Licensing](LICENSING.md): public, commercial, and source-availability terms.
-- [Trademark policy](TRADEMARKS.md): permitted uses of the RunnerFoundry name and branding.
-- [Releases](https://github.com/stateshifters/runnerfoundry/releases): packages and release notes.
+In particular:
+
+* do not expose sensitive host resources to workflows that do not need them;
+* isolate untrusted repositories from trusted infrastructure;
+* avoid privileged containers unless they are genuinely required;
+* protect the GitHub App private key;
+* protect PostgreSQL credentials;
+* do not log or persist GitHub JIT configuration; and
+* review what software and credentials are built into runner images.
+
+RunnerFoundry passes JIT configuration to Docker runners through their environment rather than command-line arguments. The libvirt guest contract requires the same treatment inside virtual machines.
+
+The environment you create around the runner remains your responsibility.
+
+## Building from source
+
+The official build currently targets Linux AMD64.
+
+The required Go version is declared in [`go.mod`](go.mod).
+
+Build with:
+
+```sh
+make build
+```
+
+The resulting executable is:
+
+```text
+build/linux/amd64/runnerfoundry
+```
+
+Check it with:
+
+```sh
+./build/linux/amd64/runnerfoundry --version
+```
+
+Build the Debian package and release metadata with:
+
+```sh
+make package-deb VERSION=<version>
+```
+
+Development, testing, linting and contribution requirements are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Deeper documentation
+
+This README is intended to take you from "what is RunnerFoundry?" through choosing, configuring and operating a deployment.
+
+The repository also contains documentation for people who need to understand or change the implementation:
+
+* [Product contract](docs/PRD.md) defines RunnerFoundry's job lifecycle and terminology.
+* [Architecture](docs/architecture.md) describes the source-neutral system boundaries.
+* [GitHub adapter](docs/github-adapter.md) documents GitHub-specific discovery, runner scale sets, message handling and persistence.
+* [GitHub runner scale-set mechanics](docs/references/github-scaleset-mechanics.md) documents the upstream protocol used by the GitHub integration.
+* [Docker runner example](examples/docker-runner/README.md) provides a minimal container setup.
+* [Ubuntu libvirt example](examples/libvirt-ubuntu-runner/README.md) provides an example Linux VM image.
+* [Windows libvirt example](examples/libvirt-windows-runner/README.md) provides an example Windows VM image.
+
+You do not need to understand those internals to operate a normal RunnerFoundry installation.
 
 ## Support
 
-Use [GitHub Issues](https://github.com/stateshifters/runnerfoundry/issues) for reproducible bugs and operator questions. Include the RunnerFoundry version, host operating system, deployment mode, provider, redacted configuration, expected result, observed result, and relevant non-secret logs.
+Use [GitHub Issues](https://github.com/stateshifters/runnerfoundry/issues) for bugs and operator questions.
+
+For a useful bug report, include:
+
+* the RunnerFoundry version;
+* deployment mode;
+* runner provider;
+* host operating system;
+* expected behavior;
+* observed behavior; and
+* relevant logs.
+
+Remove private keys, passwords, PostgreSQL DSNs, JIT configuration and other credentials before posting configuration or logs publicly.
 
 ## License
 
-RunnerFoundry is free and open-source software licensed under
-[AGPL-3.0-or-later](LICENSE). Personal, internal, and commercial use, including managed services, is
-welcome. If you improve RunnerFoundry, contributing those improvements upstream helps maintain one strong implementation.
-Contributions, attribution, and sponsorship are appreciated but not required.
+RunnerFoundry is free and open-source software licensed under [AGPL-3.0-or-later](LICENSE).
 
-See [Licensing](LICENSING.md) for source-availability obligations, commercial licensing, custom work, voluntary attribution,
-and sponsorship.
+Personal, internal and commercial use is welcome, including managed services.
+
+See [LICENSING.md](LICENSING.md) for source-availability obligations, commercial licensing, custom work, attribution and sponsorship.
+
+Use of the RunnerFoundry name and branding is covered separately by [TRADEMARKS.md](TRADEMARKS.md).
