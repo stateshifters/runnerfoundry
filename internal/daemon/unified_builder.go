@@ -398,7 +398,7 @@ func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerP
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
 	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
 	if err != nil {
-		return result.RemainingProcessing, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
+		return 0, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
 	return result.RemainingProcessing, nil
 }

@@ -333,6 +333,9 @@ func (harness *e2eHarness) establishSourceSession() {
 	for _, runnerPool := range []string{"linux", "windows"} {
 		harness.await("GitHub message poll for "+runnerPool, harness.host.sessions[runnerPool].pollRequested)
 	}
+	if harness.configured.State.Postgres != nil && !harness.disableQueueNotifications {
+		harness.await("PostgreSQL queue listener readiness", harness.notificationReady)
+	}
 }
 
 func (harness *e2eHarness) reconcileSourceAfterMembership() {

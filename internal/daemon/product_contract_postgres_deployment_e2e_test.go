@@ -78,7 +78,6 @@ func TestProductContractPostgresNotificationWakesDurableQueue(t *testing.T) {
 	}
 	harness := newPostgresE2EHarness(t)
 	harness.establishSourceSession()
-	harness.await("PostgreSQL queue listener readiness", harness.notificationReady)
 	harness.deliver(&upstream.RunnerScaleSetMessage{
 		Statistics: e2eMessageStatistics(1),
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{

@@ -136,8 +136,9 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 		t.Fatalf("clean up empty pool: %v", err)
 	}
 	store.operationErr = wantErr
-	if _, err := pool.Terminate(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("cleanup error = %v, want %v", err, wantErr)
+	if remaining, err := pool.Terminate(context.Background()); !errors.Is(err, wantErr) || remaining != 0 {
+		t.Fatalf("cleanup failure = remaining:%d error:%v, want no completion result and error %v",
+			remaining, err, wantErr)
 	}
 	closers := configuredClosers(unifiedBuilderDependencies{
 		leadership: newExclusiveLeadership(errors.New("not leader"), nil),

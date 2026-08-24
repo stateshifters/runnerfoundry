@@ -184,7 +184,16 @@ func awaitInstalledSiblingSessions(
 	want int,
 ) {
 	t.Helper()
-	for attempts := 0; len(source.adapters) < want && attempts < 10_000; attempts++ {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for len(source.adapters) < want {
+		select {
+		case result := <-source.term.openResults:
+			source.term.openResults <- result
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %d active sibling sessions; active=%d opening=%d desired=%d",
+				want, len(source.adapters), len(source.opening), len(source.desired))
+		}
 		err := source.Poll(context.Background(), time.Time{})
 		if err != nil && !errors.Is(err, wantErr) {
 			t.Fatalf("Poll() error = %v, want retry failure %v", err, wantErr)
