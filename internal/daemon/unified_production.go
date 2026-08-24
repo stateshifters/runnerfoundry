@@ -118,27 +118,51 @@ func buildProductionGitHubManagerWithDependencies(
 	store unifiedStore,
 	report func(error),
 	dependencies productionDependencies,
-) (*githubsource.Manager, error) {
+) (*githubsource.MultiAppCoordinator, error) {
 	credentials, err := configured.GitHub.AppCredentials(dependencies.readFile)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub App credentials: %w", err)
 	}
-	transportCredentials := transport.Credentials{AppID: credentials.AppID, PrivateKey: credentials.PrivateKey}
-	discoverer, err := dependencies.newDiscoverer(transportCredentials, dependencies.httpTransport)
+	managers, err := buildGitHubAppManagers(credentials, store, report, dependencies)
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub discoverer: %w", err)
+		return nil, err
 	}
+	coordinator, err := githubsource.NewMultiAppCoordinator(store, managers...)
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App coordinator: %w", err)
+	}
+	return coordinator, nil
+}
 
-	manager, err := dependencies.newManager(
-		discoverer,
-		productionManagerClientFactory(transportCredentials, dependencies),
-		store,
-		newGitHubManagerObserver(report, dependencies.currentTime),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create GitHub lifecycle manager: %w", err)
+func buildGitHubAppManagers(
+	credentials []config.GitHubAppCredentials,
+	store unifiedStore,
+	report func(error),
+	dependencies productionDependencies,
+) ([]*githubsource.Manager, error) {
+	managers := make([]*githubsource.Manager, 0, len(credentials))
+	for _, appCredentials := range credentials {
+		transportCredentials := transport.Credentials{AppID: appCredentials.AppID, PrivateKey: appCredentials.PrivateKey}
+		discoverer, discoverErr := dependencies.newDiscoverer(transportCredentials, dependencies.httpTransport)
+		if discoverErr != nil {
+			return nil, fmt.Errorf("create GitHub discoverer for App %d: %w", appCredentials.AppID, discoverErr)
+		}
+		scopedStore, scopeErr := githubsource.ScopeRegistrationRepository(store, githubsource.AppID(appCredentials.AppID))
+		if scopeErr != nil {
+			return nil, fmt.Errorf("scope GitHub state for App %d: %w", appCredentials.AppID, scopeErr)
+		}
+		manager, managerErr := dependencies.newManager(
+			discoverer,
+			productionManagerClientFactory(transportCredentials, dependencies),
+			scopedStore,
+			newGitHubManagerObserverForApp(report, dependencies.currentTime, githubsource.AppID(appCredentials.AppID)),
+		)
+		if managerErr != nil {
+			return nil, fmt.Errorf("create GitHub lifecycle manager for App %d: %w", appCredentials.AppID, managerErr)
+		}
+		managers = append(managers, manager)
 	}
-	return manager, nil
+	return managers, nil
 }
 
 func productionManagerClientFactory(
@@ -155,7 +179,7 @@ func productionManagerClientFactory(
 }
 
 type productionGenerationComponents struct {
-	manager   *githubsource.Manager
+	manager   githubManagerComposition
 	providers map[core.RunnerPool]execution.ExecutionProvider
 	inventory execution.RunnerInventory
 	member    core.MemberID

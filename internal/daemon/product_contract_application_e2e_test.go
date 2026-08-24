@@ -163,8 +163,7 @@ func newE2EApplicationWithState(
 	configured := e2eConfiguration(state)
 	configured.Log.Format = "json"
 	configured.Log.Level = "debug"
-	configured.GitHub.App.PrivateKey = ""
-	configured.GitHub.App.PrivateKeyFile = "e2e-private-key.pem"
+	configured.GitHub.Apps[0].PrivateKeyFile = "e2e-private-key.pem"
 	configured.GitHub.DiscoveryInterval = "1m"
 	application := &e2eApplication{
 		databasePath: configured.State.Path, memberName: memberName, host: newE2EGitHost(),

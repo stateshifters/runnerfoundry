@@ -33,6 +33,7 @@ type ManagerActivity struct {
 	IdentityReason     string
 	JobID              core.JobID
 	InstallationID     int64
+	GitHubAppID        AppID
 	RunnerGroupID      int64
 	ScaleSetID         int64
 	MessageID          int64

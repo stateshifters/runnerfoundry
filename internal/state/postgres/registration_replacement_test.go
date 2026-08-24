@@ -23,7 +23,7 @@ func assertRegistrationPairProtocol(
 ) {
 	t.Helper()
 	protocol := &recordedTransaction{}
-	record := githubsource.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+	record := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
 	if err := operation(NewStore(protocol.executor()), context.Background(), record); err != nil {
 		t.Fatalf("registration pair operation: %v", err)
@@ -31,14 +31,14 @@ func assertRegistrationPairProtocol(
 	if protocol.commitCalls != 1 || len(protocol.statements) != 2 ||
 		!strings.Contains(protocol.statements[0], "runnerfoundry_github_registrations") ||
 		!strings.Contains(protocol.statements[1], "runnerfoundry_github_scale_set_ownership") ||
-		len(protocol.arguments[0]) != 5 || len(protocol.arguments[1]) != 5 {
+		len(protocol.arguments[0]) != 6 || len(protocol.arguments[1]) != 6 {
 		t.Fatalf("registration pair protocol = %#v %#v", protocol.statements, protocol.arguments)
 	}
 }
 
 func TestOwnedRegistrationsReturnsDurableOwnership(t *testing.T) {
 	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
-		return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
+		return rowsFromValues([][]any{{int64(7), "repo", "linux", int64(1), int64(2), int64(3)}}), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	registrations, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		OwnedRegistrations(context.Background())
@@ -48,7 +48,7 @@ func TestOwnedRegistrationsReturnsDurableOwnership(t *testing.T) {
 }
 
 func TestRegistrationDeletionOperationsUseGuardedKeys(t *testing.T) {
-	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
+	record := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
 		RunnerGroupID: 2, ScaleSetID: 3}
 	assertGuardedRegistrationDelete(t, record, (*Store).DeleteActiveRegistration)
 	assertGuardedRegistrationDelete(t, record, (*Store).DeleteOwnedRegistration)
@@ -62,7 +62,7 @@ func assertGuardedRegistrationDelete(t *testing.T, record githubsource.Registrat
 	if err := operation(NewStore(protocol.executor()), context.Background(), record); err != nil {
 		t.Fatalf("delete registration: %v", err)
 	}
-	if protocol.commitCalls != 1 || len(protocol.statements) != 1 || len(protocol.arguments[0]) != 5 {
+	if protocol.commitCalls != 1 || len(protocol.statements) != 1 || len(protocol.arguments[0]) != 6 {
 		t.Fatalf("statements = %#v, arguments = %#v, commits = %d",
 			protocol.statements, protocol.arguments, protocol.commitCalls)
 	}

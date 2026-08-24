@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stateshifters/runnerfoundry/internal/cluster"
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
@@ -143,9 +142,12 @@ func assertVersionOnePostgresDurableState(ctx context.Context, t *testing.T, poo
 	t.Helper()
 	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
 	assertMigratedQueueClassifications(ctx, t, store)
-	registrations, registrationErr := store.Registrations(ctx)
-	if registrationErr != nil || len(registrations) != 1 || registrations[0].RepositoryURL != "https://github.example/upgrade" {
-		t.Fatalf("version-one registrations after rollback = %+v, error = %v", registrations, registrationErr)
+	var registrations int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.runnerfoundry_github_registrations`).Scan(&registrations); err != nil {
+		t.Fatalf("count version-one registrations after rollback: %v", err)
+	}
+	if registrations != 0 {
+		t.Fatalf("version-one registrations after rollback = %d, want 0", registrations)
 	}
 	capacity, capacityErr := store.AvailableRunnerPoolCapacity(
 		ctx, "linux", time.Date(2026, time.August, 16, 11, 59, 30, 0, time.UTC),
@@ -170,7 +172,7 @@ func assertMigratedPostgresState(
 	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
 	assertMigratedQueueClassifications(ctx, t, store)
 	assertRemigratedProcessing(ctx, t, store, representative.processingJobID)
-	assertRemigratedGitHubState(ctx, t, store, representative.registration)
+	assertRemigratedGitHubState(ctx, t, store)
 	assertRemigratedCapacity(ctx, t, store)
 }
 
@@ -187,13 +189,11 @@ func assertRemigratedGitHubState(
 	ctx context.Context,
 	t *testing.T,
 	store *postgresstate.Store,
-	registration githubsource.Registration,
 ) {
 	t.Helper()
 	registrations, registrationErr := store.Registrations(ctx)
 	owned, ownershipErr := store.OwnedRegistrations(ctx)
-	if registrationErr != nil || ownershipErr != nil || len(registrations) != 1 || len(owned) != 1 ||
-		registrations[0] != registration || owned[0] != registration {
+	if registrationErr != nil || ownershipErr != nil || len(registrations) != 0 || len(owned) != 0 {
 		t.Fatalf("migrated registrations = %+v, owned = %+v, errors = (%v, %v)", registrations, owned, registrationErr, ownershipErr)
 	}
 }

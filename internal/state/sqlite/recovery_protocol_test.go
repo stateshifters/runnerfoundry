@@ -110,7 +110,7 @@ func TestUpsertRegistrationCommitsActiveAndOwnershipTogether(t *testing.T) {
 		arguments = append(arguments, args)
 		return successfulResult(), nil
 	}, commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
-	record := githubsource.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
+	record := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
 	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).UpsertRegistration(context.Background(), record); err != nil {
 		t.Fatalf("upsert registration: %v", err)
@@ -118,7 +118,7 @@ func TestUpsertRegistrationCommitsActiveAndOwnershipTogether(t *testing.T) {
 	if commits != 1 || len(statements) != 2 ||
 		!strings.Contains(statements[0], "runnerfoundry_github_registrations") ||
 		!strings.Contains(statements[1], "runnerfoundry_github_scale_set_ownership") ||
-		len(arguments[0]) != 5 || len(arguments[1]) != 5 {
+		len(arguments[0]) != 6 || len(arguments[1]) != 6 {
 		t.Fatalf("upsert protocol = %#v %#v", statements, arguments)
 	}
 }
@@ -219,7 +219,7 @@ func assertRegistrationPairFailures(
 
 func TestOwnedRegistrationsReturnsDurableOwnership(t *testing.T) {
 	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
-		return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
+		return rowsFromValues([][]any{{int64(7), "repo", "linux", int64(1), int64(2), int64(3)}}), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	registrations, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		OwnedRegistrations(context.Background())
@@ -260,7 +260,7 @@ func TestDeleteRegistrationStateGuardsAndCommitsBothRecords(t *testing.T) {
 		arguments = append(arguments, args)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
-	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
+	record := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
 		RunnerGroupID: 2, ScaleSetID: 3}
 	if err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		DeleteRegistrationState(context.Background(), record); err != nil {
@@ -268,7 +268,7 @@ func TestDeleteRegistrationStateGuardsAndCommitsBothRecords(t *testing.T) {
 	}
 	if len(statements) != 2 || !strings.Contains(statements[0], "runnerfoundry_github_registrations") ||
 		!strings.Contains(statements[1], "runnerfoundry_github_scale_set_ownership") ||
-		len(arguments[0]) != 5 || len(arguments[1]) != 5 {
+		len(arguments[0]) != 6 || len(arguments[1]) != 6 {
 		t.Fatalf("delete protocol = %#v %#v", statements, arguments)
 	}
 }

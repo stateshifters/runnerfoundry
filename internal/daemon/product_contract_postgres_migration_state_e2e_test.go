@@ -155,7 +155,7 @@ func populateMigrationGitHubState(
 ) githubsource.Registration {
 	t.Helper()
 	registration := githubsource.Registration{
-		RepositoryURL: "https://github.example/upgrade", RunnerPool: "linux",
+		GitHubAppID: 7, RepositoryURL: "https://github.example/upgrade", RunnerPool: "linux",
 		InstallationID: githubtransport.InstallationID(1), RunnerGroupID: githubtransport.RunnerGroupID(2),
 		ScaleSetID: githubtransport.ScaleSetID(3),
 	}

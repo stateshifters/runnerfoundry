@@ -105,9 +105,9 @@ func ExpectedProcessing() core.ProcessingJob {
 }
 
 func ExpectedRegistrations() githubsource.RegistrationSnapshot {
-	active := githubsource.Registration{RepositoryURL: "https://example.test/active", RunnerPool: "linux",
+	active := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/active", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	owned := githubsource.Registration{RepositoryURL: "https://example.test/owned", RunnerPool: "linux",
+	owned := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/owned", RunnerPool: "linux",
 		InstallationID: 4, RunnerGroupID: 5, ScaleSetID: 6}
 	return githubsource.RegistrationSnapshot{Active: []githubsource.Registration{active}, Owned: []githubsource.Registration{owned}}
 }

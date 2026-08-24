@@ -60,7 +60,7 @@ func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 	fixture := &multiRepositoryFixture{store: store, host: newMultiRepositoryGitHost(6)}
 	fixture.discovery = newPaginatedRepositoryDiscovery(fixture.host.repositories)
 	manager, err := githubsource.NewManager(
-		transport.Discoverer{API: fixture.discovery}, fixture.host.Client, store,
+		transport.Discoverer{API: fixture.discovery}, fixture.host.Client, e2eAppRegistrations(t, store),
 		githubsource.ManagerObserver{CurrentTime: time.Now},
 	)
 	if err != nil {

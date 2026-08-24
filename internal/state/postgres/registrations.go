@@ -12,24 +12,24 @@ import (
 )
 
 const upsertRegistrationSQL = `INSERT INTO public.runnerfoundry_github_registrations
-	(repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5)
-	ON CONFLICT(repository_url, runner_pool) DO UPDATE SET installation_id = excluded.installation_id,
+	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5, $6)
+	ON CONFLICT(repository_url, runner_pool) DO UPDATE SET github_app_id = excluded.github_app_id, installation_id = excluded.installation_id,
 		runner_group_id = excluded.runner_group_id, scale_set_id = excluded.scale_set_id`
-const registrationSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
+const registrationSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM public.runnerfoundry_github_registrations WHERE repository_url = $1 AND runner_pool = $2`
-const registrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
+const registrationsSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM public.runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
 const deleteRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations WHERE repository_url = $1 AND runner_pool = $2`
 const deleteActiveRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations
-	WHERE repository_url = $1 AND runner_pool = $2 AND installation_id = $3 AND runner_group_id = $4 AND scale_set_id = $5`
+	WHERE github_app_id = $1 AND repository_url = $2 AND runner_pool = $3 AND installation_id = $4 AND runner_group_id = $5 AND scale_set_id = $6`
 const upsertOwnedRegistrationSQL = `INSERT INTO public.runnerfoundry_github_scale_set_ownership
-	(repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5)
-	ON CONFLICT(repository_url, scale_set_id) DO UPDATE SET runner_pool = excluded.runner_pool,
+	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5, $6)
+	ON CONFLICT(repository_url, scale_set_id) DO UPDATE SET github_app_id = excluded.github_app_id, runner_pool = excluded.runner_pool,
 		installation_id = excluded.installation_id, runner_group_id = excluded.runner_group_id`
-const ownedRegistrationsSQL = `SELECT repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
+const ownedRegistrationsSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
 	FROM public.runnerfoundry_github_scale_set_ownership ORDER BY repository_url, scale_set_id`
 const deleteOwnedRegistrationSQL = `DELETE FROM public.runnerfoundry_github_scale_set_ownership
-	WHERE repository_url = $1 AND runner_pool = $2 AND installation_id = $3 AND runner_group_id = $4 AND scale_set_id = $5`
+	WHERE github_app_id = $1 AND repository_url = $2 AND runner_pool = $3 AND installation_id = $4 AND runner_group_id = $5 AND scale_set_id = $6`
 
 var _ githubsource.RegistrationRepository = (*Store)(nil)
 
@@ -67,7 +67,7 @@ func (store *Store) mutateRegistrationPair(
 }
 
 func registrationArguments(registration githubsource.Registration) []any {
-	return []any{registration.RepositoryURL, string(registration.RunnerPool), registration.InstallationID,
+	return []any{registration.GitHubAppID, registration.RepositoryURL, string(registration.RunnerPool), registration.InstallationID,
 		registration.RunnerGroupID, registration.ScaleSetID}
 }
 
@@ -145,11 +145,13 @@ func scanRegistration(row scanner) (githubsource.Registration, error) {
 	var registration githubsource.Registration
 	var runnerPool string
 	var installationID, runnerGroupID, scaleSetID int64
-	if err := row.Scan(&registration.RepositoryURL, &runnerPool, &installationID,
+	var githubAppID int64
+	if err := row.Scan(&githubAppID, &registration.RepositoryURL, &runnerPool, &installationID,
 		&runnerGroupID, &scaleSetID); err != nil {
 		return githubsource.Registration{}, fmt.Errorf("scan registration: %w", err)
 	}
 	registration.RunnerPool = core.RunnerPool(runnerPool)
+	registration.GitHubAppID = githubsource.AppID(githubAppID)
 	registration.InstallationID = githubtransport.InstallationID(installationID)
 	registration.RunnerGroupID = githubtransport.RunnerGroupID(runnerGroupID)
 	registration.ScaleSetID = githubtransport.ScaleSetID(scaleSetID)

@@ -7,7 +7,7 @@ import (
 )
 
 func TestConfigurationLoadingUsesConfiguredReader(t *testing.T) {
-	contents := []byte("github:\n  discovery_interval: 1m\n  app:\n    app_id: 1\n    private_key_file: key.pem\nstate:\n  path: state.db\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yml\n      service: runner\n")
+	contents := []byte("github:\n  discovery_interval: 1m\n  apps:\n    - app_id: 1\n      private_key_file: key.pem\nstate:\n  path: state.db\nscale_sets:\n  - name: linux\n    max_runners: 1\n    docker:\n      compose_file: compose.yml\n      service: runner\n")
 	readConfigFile := func(path string) ([]byte, error) {
 		if path != "config.yml" {
 			t.Fatalf("path = %q", path)

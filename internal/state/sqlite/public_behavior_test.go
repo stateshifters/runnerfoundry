@@ -71,7 +71,7 @@ func TestStorePublicRegistrationBehaviors(t *testing.T) {
 	t.Parallel()
 	store := NewStore(successfulBehaviorExecutor())
 	ctx := context.Background()
-	registration := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
+	registration := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
 		RunnerGroupID: 2, ScaleSetID: 3}
 	if err := store.UpsertRegistration(ctx, registration); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -107,7 +107,7 @@ func successfulBehaviorExecutor() Executor {
 		query: func(_ context.Context, statement string, _ ...any) (Rows, error) {
 			switch statement {
 			case registrationsSQL:
-				return rowsFromValues([][]any{{"repo", "linux", int64(1), int64(2), int64(3)}}), nil
+				return rowsFromValues([][]any{{int64(7), "repo", "linux", int64(1), int64(2), int64(3)}}), nil
 			case processingByMemberSQL:
 				return rowsFromValues([][]any{claimedProcessingJobValues()}), nil
 			default:
@@ -121,7 +121,7 @@ func successfulBehaviorExecutor() Executor {
 			case availableCapacitySQL:
 				return rowFromValues([]any{3, 0, 1})
 			case registrationSQL:
-				return rowFromValues([]any{"repo", "linux", int64(1), int64(2), int64(3)})
+				return rowFromValues([]any{int64(7), "repo", "linux", int64(1), int64(2), int64(3)})
 			default:
 				return rowFromValues(queuedJobValues())
 			}

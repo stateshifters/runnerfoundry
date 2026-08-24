@@ -73,6 +73,25 @@ func TestGitHubManagerObserverPublishesProgressAndFailureDetail(t *testing.T) {
 	})
 }
 
+func TestGitHubAppRecoveryDoesNotClearAnotherAppsFailure(t *testing.T) {
+	reporter := newDebugRuntimeReporter(t, &memoryLogDestination{})
+	first := newGitHubManagerObserverForApp(reporter.reportMaintenance, builderTime, 11)
+	second := newGitHubManagerObserverForApp(reporter.reportMaintenance, builderTime, 22)
+	failure := githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "reconciliation",
+		Outcome: "failed", Err: errors.New("unavailable")}
+	first.Report(failure)
+	second.Report(failure)
+	first.Report(githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "reconciliation", Outcome: "completed"})
+	if len(reporter.failures) != 1 {
+		t.Fatalf("remaining App failures = %#v", reporter.failures)
+	}
+	for _, remaining := range reporter.failures {
+		if remaining.event.githubAppID != 22 {
+			t.Fatalf("remaining failure belongs to App %d", remaining.event.githubAppID)
+		}
+	}
+}
+
 func TestGitHubAssignedDemandLoggingNamesChangeAndCarriesCounts(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
@@ -281,9 +300,9 @@ func TestLoggingProtectsOnlyTheKnownCredentialBoundaries(t *testing.T) {
 func assertGitHubPrivateKeyRemainsAtBoundary(t *testing.T, reporter *productionRuntimeReporter, privateKey string) {
 	t.Helper()
 	var captured transport.Credentials
-	_, err := buildProductionGitHubManagerWithDependencies(config.Config{GitHub: config.GitHubConfig{App: config.GitHubAppConfig{
+	_, err := buildProductionGitHubManagerWithDependencies(config.Config{GitHub: config.GitHubConfig{Apps: []config.GitHubAppConfig{{
 		AppID: 1, PrivateKeyFile: "in-memory-key",
-	}}}, newBuilderStoreFake(), reporter.reportMaintenance, productionDependencies{
+	}}}}, newBuilderStoreFake(), reporter.reportMaintenance, productionDependencies{
 		readFile: func(string) ([]byte, error) { return []byte(privateKey), nil },
 		newDiscoverer: func(credentials transport.Credentials, _ http.RoundTripper) (transport.Discoverer, error) {
 			captured = credentials
@@ -294,6 +313,17 @@ func assertGitHubPrivateKeyRemainsAtBoundary(t *testing.T, reporter *productionR
 	})
 	if err != nil || captured.PrivateKey != privateKey {
 		t.Fatalf("GitHub credential boundary = (%q, %v)", captured.PrivateKey, err)
+	}
+}
+
+func TestGitHubAppObserverAttachesCredentialIdentityWithoutSecrets(t *testing.T) {
+	var reported error
+	observer := newGitHubManagerObserverForApp(func(err error) { reported = err }, builderTime, 4273059)
+	observer.Report(githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "repository_overlap",
+		Outcome: "ignored", Repository: "https://github.com/stateshifters/runnerfoundry"})
+	var envelope operationalEventEnvelope
+	if !errors.As(reported, &envelope) || envelope.event.githubAppID != 4273059 || envelope.event.repository == "" {
+		t.Fatalf("App-scoped operational event = %#v", reported)
 	}
 }
 

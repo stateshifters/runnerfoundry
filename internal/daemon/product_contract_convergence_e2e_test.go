@@ -101,7 +101,7 @@ func establishRunnerGroupConflictFixture(
 		}
 	}
 	host := newE2EGitHost()
-	manager, err := githubsource.NewManager(host, host.Client, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(host, host.Client, e2eAppRegistrations(t, store), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build conflict manager: %v", err)
 	}
@@ -194,7 +194,7 @@ func newRegistrationConvergenceFixture(
 	if err := store.PublishMemberState(ctx, fixture.memberID, fixture.now, nil); err != nil {
 		t.Fatalf("publish convergence member: %v", err)
 	}
-	manager, err := githubsource.NewManager(fixture.host, fixture.host.Client, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(fixture.host, fixture.host.Client, e2eAppRegistrations(t, store), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build convergence manager: %v", err)
 	}

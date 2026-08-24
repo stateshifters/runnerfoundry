@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -177,48 +178,80 @@ func testProductionStateDependencies() productionDependencies {
 }
 
 func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
+	dependencies, observed := productionGitHubFactoryDependencies()
+	configured := builderConfig()
+	configured.GitHub.Apps = []config.GitHubAppConfig{
+		{AppID: 11, PrivateKeyFile: "first.pem"},
+		{AppID: 22, PrivateKeyFile: "second.pem"},
+	}
+	built, err := buildProductionGitHubManagerWithDependencies(configured, newBuilderStoreFake(), nil, dependencies)
+	if err != nil || built == nil {
+		t.Fatalf("GitHub manager = (%v, %v)", built, err)
+	}
+	if !reflect.DeepEqual(observed.discoverers, []int64{11, 22}) || !reflect.DeepEqual(observed.clients, []int64{11, 22}) {
+		t.Fatalf("credential factory order = discoverers %#v clients %#v", observed.discoverers, observed.clients)
+	}
+}
+
+type productionGitHubFactoryObservation struct {
+	discoverers []int64
+	clients     []int64
+}
+
+func productionGitHubFactoryDependencies() (productionDependencies, *productionGitHubFactoryObservation) {
 	dependencies := newProductionDependencies()
-	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+	observed := &productionGitHubFactoryObservation{}
+	dependencies.newDiscoverer = func(credentials transport.Credentials, _ http.RoundTripper) (transport.Discoverer, error) {
+		observed.discoverers = append(observed.discoverers, credentials.AppID)
 		return transport.Discoverer{}, nil
 	}
-	dependencies.newClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
+	dependencies.newClient = func(_ transport.Repository, credentials transport.Credentials, _ http.RoundTripper) (*transport.Client, error) {
+		observed.clients = append(observed.clients, credentials.AppID)
 		return &transport.Client{}, nil
 	}
-	store := newBuilderStoreFake()
-	manager := newBuilderManager(t, store)
 	dependencies.newManager = func(
-		_ githubsource.RepositoryDiscoverer,
+		discoverer githubsource.RepositoryDiscoverer,
 		factory githubsource.ManagerClientFactoryFunc,
-		_ githubsource.RegistrationRepository,
-		_ githubsource.ManagerObserver,
+		repository githubsource.RegistrationRepository,
+		observer githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
 		if _, err := factory(context.Background(), transport.Repository{}); err != nil {
 			return nil, err
 		}
-		return manager, nil
+		return githubsource.NewManager(discoverer, factory, repository, observer)
 	}
-	configured := builderConfig()
-	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
-	built, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies)
-	if err != nil || built != manager {
-		t.Fatalf("GitHub manager = (%p, %v)", built, err)
-	}
+	dependencies.readFile = func(path string) ([]byte, error) { return []byte("key-for-" + path), nil }
+	return dependencies, observed
 }
 
 func TestProductionGitHubManagerReportsBoundaryFailures(t *testing.T) {
 	wantErr := errors.New("GitHub failed")
 	store := newBuilderStoreFake()
 	configured := builderConfig()
-	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
+	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
 	assertProductionDiscovererFailure(t, configured, store, wantErr)
 	assertProductionClientFailure(t, configured, store, wantErr)
 	assertProductionManagerFailure(t, configured, store, wantErr)
-	configured.GitHub.App.PrivateKey = ""
-	configured.GitHub.App.PrivateKeyFile = "key.pem"
 	dependencies := newProductionDependencies()
 	dependencies.readFile = func(string) ([]byte, error) { return nil, wantErr }
 	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("credentials error = %v", err)
+	}
+}
+
+func TestProductionGitHubCoordinatorRejectsMissingAndInvalidAppScopes(t *testing.T) {
+	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
+	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
+		return transport.Discoverer{}, nil
+	}
+	store := newBuilderStoreFake()
+	if _, err := buildProductionGitHubManagerWithDependencies(config.Config{}, store, nil, dependencies); err == nil {
+		t.Fatal("missing GitHub Apps were accepted")
+	}
+	if _, err := buildGitHubAppManagers([]config.GitHubAppCredentials{{AppID: 0, PrivateKey: "key"}},
+		store, nil, dependencies); err == nil {
+		t.Fatal("invalid GitHub App scope was accepted")
 	}
 }
 
@@ -230,6 +263,7 @@ func assertProductionDiscovererFailure(
 ) {
 	t.Helper()
 	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, wantErr
 	}
@@ -241,6 +275,7 @@ func assertProductionDiscovererFailure(
 func assertProductionClientFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
 	t.Helper()
 	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
@@ -264,6 +299,7 @@ func assertProductionClientFailure(t *testing.T, configured config.Config, store
 func assertProductionManagerFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
 	t.Helper()
 	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
@@ -341,10 +377,10 @@ func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) 
 
 func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
 	store := newBuilderStoreFake()
-	manager := newBuilderManager(t, store)
-	dependencies := productionGenerationDependencies(manager)
+	dependencies := productionGenerationDependencies()
 	configured := builderConfig()
-	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
+	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildProductionGenerationWithDependencies(
@@ -355,18 +391,19 @@ func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
 	}
 }
 
-func productionGenerationDependencies(manager *githubsource.Manager) productionDependencies {
+func productionGenerationDependencies() productionDependencies {
 	dependencies := newProductionDependencies()
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 	dependencies.newDiscoverer = func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error) {
 		return transport.Discoverer{}, nil
 	}
 	dependencies.newManager = func(
-		githubsource.RepositoryDiscoverer,
-		githubsource.ManagerClientFactoryFunc,
-		githubsource.RegistrationRepository,
-		githubsource.ManagerObserver,
+		discoverer githubsource.RepositoryDiscoverer,
+		factory githubsource.ManagerClientFactoryFunc,
+		repository githubsource.RegistrationRepository,
+		observer githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
-		return manager, nil
+		return githubsource.NewManager(discoverer, factory, repository, observer)
 	}
 	dependencies.buildProviderSet = func(
 		context.Context,
@@ -402,11 +439,15 @@ type productionGenerationFailureFixture struct {
 func newProductionGenerationFailureFixture(t *testing.T) productionGenerationFailureFixture {
 	t.Helper()
 	configured := builderConfig()
-	configured.GitHub.App = config.GitHubAppConfig{AppID: 1, PrivateKey: "key"}
+	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
 	store := newBuilderStoreFake()
 	return productionGenerationFailureFixture{
 		configured: configured, state: &productionState{store: store, member: daemonTestID(1)}, manager: newBuilderManager(t, store),
-		wantErr: errors.New("composition failed"), dependencies: newProductionDependencies(),
+		wantErr: errors.New("composition failed"), dependencies: func() productionDependencies {
+			dependencies := newProductionDependencies()
+			dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
+			return dependencies
+		}(),
 	}
 }
 
@@ -427,12 +468,12 @@ func (fixture productionGenerationFailureFixture) managerDependencies() producti
 		return transport.Discoverer{}, nil
 	}
 	dependencies.newManager = func(
-		githubsource.RepositoryDiscoverer,
-		githubsource.ManagerClientFactoryFunc,
-		githubsource.RegistrationRepository,
-		githubsource.ManagerObserver,
+		discoverer githubsource.RepositoryDiscoverer,
+		factory githubsource.ManagerClientFactoryFunc,
+		repository githubsource.RegistrationRepository,
+		observer githubsource.ManagerObserver,
 	) (*githubsource.Manager, error) {
-		return fixture.manager, nil
+		return githubsource.NewManager(discoverer, factory, repository, observer)
 	}
 	return dependencies
 }

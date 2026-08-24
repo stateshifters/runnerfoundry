@@ -94,6 +94,34 @@ func TestGitHubSourceRuntimeActivatesReconciledRoutesWhenPruningFails(t *testing
 	mustCloseGitHubSource(t, source)
 }
 
+func TestGitHubSourceRuntimeActivatesTrustworthyRoutesWhenOneAppFails(t *testing.T) {
+	wantErr := errors.New("GitHub App unavailable")
+	record := githubsource.Registration{GitHubAppID: 22, RepositoryURL: "https://github.example/healthy",
+		RunnerPool: "linux", InstallationID: 2, RunnerGroupID: 3, ScaleSetID: 4}
+	source := newGitHubSourceRuntime(&githubManagerFake{}, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+	term := &githubLeadershipTerm{epoch: 1, openResults: make(chan githubRegistrationOpenResult, 1),
+		discoveryResult: make(chan githubDiscoveryResult, 1), openSlots: make(chan struct{}, 1),
+		operations: make(map[uint64]context.CancelFunc), discoveryActive: true}
+	source.term = term
+	source.epoch = 1
+	source.leaderInstalled = true
+	term.discoveryResult <- githubDiscoveryResult{epoch: 1, registrations: []githubsource.Registration{record},
+		err: trustworthyReconciliationError{Err: wantErr}}
+
+	failures := source.harvestDiscovery(context.Background(), term)
+	if !errors.Is(errors.Join(failures...), wantErr) || source.desired[registrationKey(record)] != record {
+		t.Fatalf("degraded reconciliation = %v, desired = %#v", errors.Join(failures...), source.desired)
+	}
+	mustCloseGitHubSource(t, source)
+}
+
+type trustworthyReconciliationError struct{ Err error }
+
+func (failure trustworthyReconciliationError) Error() string        { return failure.Err.Error() }
+func (failure trustworthyReconciliationError) Unwrap() error        { return failure.Err }
+func (trustworthyReconciliationError) RegistrationsAreUsable() bool { return true }
+
 func TestGitHubSourceRuntimePreservesPollsForReorderedEquivalentRegistrations(t *testing.T) {
 	t.Parallel()
 	fixture := newReorderedRegistrationFixture()

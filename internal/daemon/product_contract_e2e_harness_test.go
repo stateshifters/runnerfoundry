@@ -137,6 +137,7 @@ func (harness *e2eHarness) openAndActivate(ctx context.Context) {
 func (harness *e2eHarness) dependencies() productionDependencies {
 	dependencies := newProductionDependencies()
 	dependencies.logDestinationFactory = e2eLogFactory{}
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("e2e-private-key"), nil }
 	dependencies.readHostname = harness.readHostname
 	dependencies.currentTime = harness.now
 	dependencies.newDiscoverer = newE2EDiscoverer
@@ -299,7 +300,7 @@ func e2eConfiguration(state config.StateConfig) config.Config {
 	return config.Config{
 		State: state,
 		GitHub: config.GitHubConfig{
-			App: config.GitHubAppConfig{AppID: 1, PrivateKey: "e2e-private-key"}, DiscoveryInterval: "1ms",
+			Apps: []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "e2e-private-key.pem"}}, DiscoveryInterval: "1ms",
 		},
 		RunnerPools: []config.RunnerPoolConfig{
 			{
@@ -312,6 +313,15 @@ func e2eConfiguration(state config.StateConfig) config.Config {
 			},
 		},
 	}
+}
+
+func e2eAppRegistrations(t *testing.T, store githubsource.RegistrationRepository) githubsource.RegistrationRepository {
+	t.Helper()
+	scoped, err := githubsource.ScopeRegistrationRepository(store, 1)
+	if err != nil {
+		t.Fatalf("scope E2E GitHub registrations: %v", err)
+	}
+	return scoped
 }
 
 func e2eBackendEnabled(backend string) bool {

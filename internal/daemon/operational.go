@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 type operationalHealth string
@@ -43,6 +44,7 @@ type operationalEvent struct {
 	sourceRequestID    int64
 	sourceRequestIDSet bool
 	installationID     int64
+	githubAppID        githubsource.AppID
 	runnerGroupID      int64
 	scaleSetID         int64
 	messageID          int64
@@ -283,6 +285,9 @@ func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event
 		if failure.event.operation != event.operation {
 			continue
 		}
+		if event.githubAppID > 0 && failure.event.githubAppID != event.githubAppID {
+			continue
+		}
 		delete(reporter.failures, key)
 		recovery := failure.event
 		recovery.err = nil
@@ -294,8 +299,9 @@ func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event
 }
 
 func operationalFailureKey(event operationalEvent) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s", event.component, event.operation, event.stage,
-		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation)
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d", event.component, event.operation, event.stage,
+		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation,
+		event.githubAppID)
 }
 
 func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event operationalEvent, extra []slog.Attr) {

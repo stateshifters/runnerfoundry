@@ -168,7 +168,7 @@ func newProductionTransportPruningManager(
 		}
 		return githubsource.NewTransportManagerClient(client), nil
 	}
-	manager, err := githubsource.NewManager(discoverer, factory, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(discoverer, factory, e2eAppRegistrations(t, store), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build production transport manager: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestGitHubPruningHTTPTransportFailsClosed(t *testing.T) {
 
 func githubPruningRegistration() githubsource.Registration {
 	return githubsource.Registration{
-		RepositoryURL: "https://github.com/acme/widgets", RunnerPool: "linux",
+		GitHubAppID: 1, RepositoryURL: "https://github.com/acme/widgets", RunnerPool: "linux",
 		InstallationID: 71, RunnerGroupID: 11, ScaleSetID: 29,
 	}
 }

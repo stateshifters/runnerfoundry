@@ -250,19 +250,34 @@ func (source *githubSourceRuntime) harvestDiscovery(
 			return nil
 		}
 		source.nextDiscovery = result.completedAt.Add(source.discoveryInterval)
-		if result.err != nil {
-			if !githubsource.IsPruneFailure(result.err) {
-				return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
-			}
-			resultErrors := source.applyDiscoveredRegistrations(ctx, term, result.registrations)
-			return append(resultErrors, markOperationallyReported(
-				fmt.Errorf("prune GitHub registrations: %w", result.err),
-			))
+		if result.err == nil {
+			return source.applyDiscoveredRegistrations(ctx, term, result.registrations)
 		}
-		return source.applyDiscoveredRegistrations(ctx, term, result.registrations)
+		return source.handleFailedDiscovery(ctx, term, result)
 	default:
 		return nil
 	}
+}
+
+func (source *githubSourceRuntime) handleFailedDiscovery(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	result githubDiscoveryResult,
+) []error {
+	usable, registrationsAreUsable := result.err.(interface{ RegistrationsAreUsable() bool })
+	if registrationsAreUsable && usable.RegistrationsAreUsable() {
+		resultErrors := source.applyDiscoveredRegistrations(ctx, term, result.registrations)
+		return append(resultErrors, markOperationallyReported(
+			fmt.Errorf("reconcile GitHub registrations: %w", result.err),
+		))
+	}
+	if !githubsource.IsPruneFailure(result.err) {
+		return []error{markOperationallyReported(fmt.Errorf("reconcile GitHub registrations: %w", result.err))}
+	}
+	resultErrors := source.applyDiscoveredRegistrations(ctx, term, result.registrations)
+	return append(resultErrors, markOperationallyReported(
+		fmt.Errorf("prune GitHub registrations: %w", result.err),
+	))
 }
 
 func (source *githubSourceRuntime) applyDiscoveredRegistrations(

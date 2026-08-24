@@ -203,7 +203,7 @@ func requirePostgresConformanceSuccess(t *testing.T, operation string, err error
 func registrationValues(registrations []githubsource.Registration) [][]any {
 	values := make([][]any, 0, len(registrations))
 	for _, registration := range registrations {
-		values = append(values, []any{registration.RepositoryURL, string(registration.RunnerPool), int64(registration.InstallationID),
+		values = append(values, []any{int64(registration.GitHubAppID), registration.RepositoryURL, string(registration.RunnerPool), int64(registration.InstallationID),
 			int64(registration.RunnerGroupID), int64(registration.ScaleSetID)})
 	}
 	return values

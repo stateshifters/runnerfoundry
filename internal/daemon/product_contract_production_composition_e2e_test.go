@@ -499,9 +499,9 @@ func (tickers productionCompositionTickers) complete(t *testing.T, ticker *e2eMa
 func loadProductionCompositionConfig(t *testing.T) config.Config {
 	t.Helper()
 	document := `github:
-  app:
-    app_id: 12345
-    private_key_file: github.pem
+  apps:
+    - app_id: 12345
+      private_key_file: github.pem
   discovery_interval: 5m
 state:
   path: ":memory:"

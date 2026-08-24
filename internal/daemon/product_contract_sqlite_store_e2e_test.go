@@ -166,7 +166,7 @@ func newSQLiteDurabilityState() sqliteDurabilityState {
 		EnqueuedAt: state.publishedAt,
 	}
 	state.registration = githubsource.Registration{
-		RepositoryURL: "https://github.com/example/repository", RunnerPool: state.runnerPool,
+		GitHubAppID: 1, RepositoryURL: "https://github.com/example/repository", RunnerPool: state.runnerPool,
 		InstallationID: 11, RunnerGroupID: 22, ScaleSetID: 33,
 	}
 	return state

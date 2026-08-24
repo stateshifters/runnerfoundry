@@ -13,7 +13,10 @@ import (
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
-const githubRegistrationSessionConcurrency = 16
+const (
+	githubRegistrationSessionConcurrency = 16
+	githubRegistrationSessionOpenTimeout = time.Minute
+)
 
 type githubManagerRuntime interface {
 	ActiveRegistrations(ctx context.Context) ([]githubsource.Registration, error)
@@ -55,6 +58,9 @@ type githubLeadershipTerm struct {
 	discoveryActive bool
 	background      sync.WaitGroup
 	openSlots       chan struct{}
+	openSlotsByApp  map[githubsource.AppID]chan struct{}
+	openSlotMutex   sync.Mutex
+	openSlotsPerApp int
 	operationMutex  sync.Mutex
 	operations      map[uint64]context.CancelFunc
 	nextOperation   uint64
@@ -87,6 +93,7 @@ type githubSourceRuntime struct {
 	sessionActivationActive bool
 	sessionActivationTotal  int
 	sessionActivationLast   int
+	sessionOpenTimeout      time.Duration
 }
 
 func newGitHubSourceRuntime(
@@ -102,9 +109,10 @@ func newGitHubSourceRuntime(
 		manager: manager, capacities: capacities, owner: owner, handler: handler,
 		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
 		polls: make(map[*githubsource.Adapter]*githubPollAttempt), publishedCapacity: make(map[core.RunnerPool]int),
-		desired:  make(map[githubRegistrationKey]githubsource.Registration),
-		opening:  make(map[githubRegistrationKey]githubsource.Registration),
-		sessions: make(map[githubRegistrationKey]*githubsource.RegistrationSession),
+		desired:            make(map[githubRegistrationKey]githubsource.Registration),
+		opening:            make(map[githubRegistrationKey]githubsource.Registration),
+		sessions:           make(map[githubRegistrationKey]*githubsource.RegistrationSession),
+		sessionOpenTimeout: githubRegistrationSessionOpenTimeout,
 	}
 }
 
@@ -144,6 +152,8 @@ func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
 		epoch: source.epoch, openResults: make(chan githubRegistrationOpenResult, max(1, len(desired))),
 		discoveryResult: make(chan githubDiscoveryResult, 1),
 		openSlots:       make(chan struct{}, githubRegistrationSessionConcurrency),
+		openSlotsByApp:  make(map[githubsource.AppID]chan struct{}),
+		openSlotsPerApp: githubOpenSlotsPerApp(source.manager, registrations),
 		operations:      make(map[uint64]context.CancelFunc),
 	}
 	source.term = term
@@ -227,13 +237,14 @@ func (source *githubSourceRuntime) openRegistrationSession(
 	configured githubsource.RunnerPoolConfig,
 ) {
 	defer term.background.Done()
-	select {
-	case term.openSlots <- struct{}{}:
-		defer func() { <-term.openSlots }()
-	case <-ctx.Done():
+	release, acquired := term.acquireOpenSlot(ctx, record.GitHubAppID)
+	if !acquired {
 		return
 	}
-	session, err := source.manager.OpenRegistrationSession(ctx, record, configured, source.owner, source.handler)
+	defer release()
+	openContext, cancel := context.WithTimeout(ctx, source.sessionOpenTimeout)
+	defer cancel()
+	session, err := source.manager.OpenRegistrationSession(openContext, record, configured, source.owner, source.handler)
 	if ctx.Err() != nil {
 		if session != nil {
 			source.abandonSession(session)
@@ -247,6 +258,67 @@ func (source *githubSourceRuntime) openRegistrationSession(
 		if session != nil {
 			source.abandonSession(session)
 		}
+	}
+}
+
+func githubOpenSlotsPerApp(manager githubManagerRuntime, registrations []githubsource.Registration) int {
+	appIDs := make(map[githubsource.AppID]struct{})
+	if configured, available := manager.(interface{ GitHubAppIDs() []githubsource.AppID }); available {
+		for _, appID := range configured.GitHubAppIDs() {
+			appIDs[appID] = struct{}{}
+		}
+	}
+	for _, registration := range registrations {
+		appIDs[registration.GitHubAppID] = struct{}{}
+	}
+	appCount := max(1, len(appIDs))
+	return max(1, githubRegistrationSessionConcurrency/appCount)
+}
+
+func (term *githubLeadershipTerm) acquireOpenSlot(
+	ctx context.Context,
+	appID githubsource.AppID,
+) (func(), bool) {
+	appSlots := term.appOpenSlots(appID)
+	if !acquireGitHubOpenSlot(ctx, appSlots) {
+		return nil, false
+	}
+	if !acquireGitHubOpenSlot(ctx, term.openSlots) {
+		releaseGitHubOpenSlot(appSlots)
+		return nil, false
+	}
+	return func() {
+		releaseGitHubOpenSlot(term.openSlots)
+		releaseGitHubOpenSlot(appSlots)
+	}, true
+}
+
+func (term *githubLeadershipTerm) appOpenSlots(appID githubsource.AppID) chan struct{} {
+	term.openSlotMutex.Lock()
+	defer term.openSlotMutex.Unlock()
+	appSlots := term.openSlotsByApp[appID]
+	if appSlots == nil && term.openSlotsPerApp > 0 {
+		appSlots = make(chan struct{}, term.openSlotsPerApp)
+		term.openSlotsByApp[appID] = appSlots
+	}
+	return appSlots
+}
+
+func acquireGitHubOpenSlot(ctx context.Context, slots chan struct{}) bool {
+	if slots == nil {
+		return true
+	}
+	select {
+	case slots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func releaseGitHubOpenSlot(slots chan struct{}) {
+	if slots != nil {
+		<-slots
 	}
 }
 

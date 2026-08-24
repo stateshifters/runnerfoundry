@@ -25,7 +25,7 @@ type unifiedStore interface {
 type unifiedBuilderDependencies struct {
 	store              unifiedStore
 	demandStore        githubsource.AssignedDemandRepository
-	manager            *githubsource.Manager
+	manager            githubManagerComposition
 	member             core.MemberID
 	providers          map[core.RunnerPool]execution.ExecutionProvider
 	inventory          execution.RunnerInventory
@@ -38,6 +38,11 @@ type unifiedBuilderDependencies struct {
 	closers            []runtimeCloser
 	processGate        *localLeadershipGate
 	queueNotifications *queueNotificationPool
+}
+
+type githubManagerComposition interface {
+	githubManagerRuntime
+	Source() *githubsource.Source
 }
 
 func buildUnifiedGeneration(

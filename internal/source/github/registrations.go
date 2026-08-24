@@ -36,6 +36,9 @@ type RunnerPoolDeclarationRepository interface {
 var ErrRunnerPoolDeclarationPersistenceUnavailable = errors.New("GitHub Runner Pool declaration persistence is unavailable")
 
 func (manager *Manager) UsesSharedRunnerPoolDeclarations() bool {
+	if scoped, ok := manager.registrations.(interface{ usesSharedRunnerPoolDeclarations() bool }); ok {
+		return scoped.usesSharedRunnerPoolDeclarations()
+	}
 	_, available := manager.registrations.(RunnerPoolDeclarationRepository)
 	return available
 }
@@ -182,8 +185,12 @@ func lessOwnedRegistration(first, second Registration) bool {
 	return lessActiveRegistration(first, second)
 }
 
+// AppID is the stable credential identity of a configured GitHub App.
+type AppID int64
+
 // Registration is the durable GitHub routing record owned by this source.
 type Registration struct {
+	GitHubAppID    AppID
 	RepositoryURL  string
 	RunnerPool     core.RunnerPool
 	InstallationID transport.InstallationID
