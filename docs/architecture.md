@@ -1,144 +1,165 @@
 # Architecture
 
-The [product contract](PRD.md) is the authority for RunnerFoundry behavior. This document explains the system boundaries that keep that behavior source-neutral and consistent across deployment modes.
+This document is for maintainers and contributors changing RunnerFoundry's package structure or adding integrations. It defines code ownership, architectural boundaries and allowed dependency direction.
 
-## Components
+The [product contract](PRD.md) is the authority for job lifecycle and runtime behavior. The operator [README](../README.md) owns configuration and operating procedures. Source-specific documents own source protocols. This document does not redefine those contracts.
+
+## System responsibilities
 
 RunnerFoundry has four core responsibilities:
 
-1. **Ingestion** accepts a source request through an adapter and creates an internal job associated with a Runner Pool.
-2. **Queueing** stores jobs by Runner Pool and returns the oldest matching job when that pool requests work.
-3. **Execution** provisions one runner to attempt the selected job.
-4. **Cleanup** removes the ephemeral runner and its processing record after execution ends.
+1. **Ingestion** accepts source demand through an adapter and records it as a source-neutral job associated with a Runner Pool.
+2. **Queueing** durably orders pending jobs by Runner Pool and claims the oldest matching job through the lifecycle defined by the product contract.
+3. **Execution** provisions one ephemeral runner for claimed demand through a source-neutral provider contract.
+4. **Cleanup** reconciles runner resources and processing state through the product-contract lifecycle.
 
-The provisioned runner reports its workflow result directly to the Git source. The daemon does not observe or persist normal workflow results and has no result-delivery worker.
+The provisioned runner reports its workflow result directly to the Git source. RunnerFoundry does not introduce a persisted workflow-result lifecycle.
 
-## Source adapter boundary
+## Code ownership
 
-A source adapter owns everything specific to a Git hosting or CI system:
+| Area | Responsibility |
+| --- | --- |
+| `cmd/runnerfoundry` | CLI parsing and process entry only. |
+| `internal/daemon` | Composition root, startup, reload, shutdown and runtime wiring. |
+| `internal/core` | Source-neutral domain types, lifecycle contracts and source-boundary ports. |
+| `internal/runtime` | Application services that implement the existing lifecycle through ports. |
+| `internal/execution` | Source-neutral execution and inventory interfaces only. |
+| `internal/provider/*` | Concrete Docker and libvirt implementations and provider-specific translation. |
+| `internal/source/*` | A concrete Git source adapter. Each adapter owns its source policy, lifecycle translation, any source-specific sessions and auxiliary ports. |
+| `internal/source/*/transport` | The source's external API and client boundary. |
+| `internal/source/*/persistence/*` | Source-owned SQLite or PostgreSQL persistence adapters implementing that source's auxiliary ports. |
+| `internal/state` | Source-neutral persistence interfaces. |
+| `internal/state/sqlite` and `internal/state/postgres` | Source-neutral backend implementations and backend transaction mechanics. |
+| `internal/cluster` | PostgreSQL connection lifecycle, leadership, migration orchestration and cluster mechanics. |
+| `internal/config` | Configuration parsing and validation. |
 
-- authentication and API clients;
-- inbound request payloads;
-- observation validation and lifecycle translation;
-- capacity publication;
-- source-specific identifiers and terminology.
+Ownership follows responsibility rather than physical proximity. Shared code must remain source-neutral and depend on the ports of the areas it serves. Wiring that exists only to join concrete implementations belongs in `internal/daemon`.
 
-The adapter translates those details into the core terms and transitions defined by the product contract. Core ingestion, queueing, execution, and persistence contracts use jobs, Runner Pools, runner acceptance, and terminal source signals; they do not expose source-specific types.
+`internal/cluster` supplies PostgreSQL connection infrastructure and runs registered migrations. Migration definitions follow data ownership: neutral backend schema belongs to its state backend, and source-specific schema belongs to the source persistence adapter. SQLite migration execution belongs to `internal/state/sqlite`; PostgreSQL migration execution belongs to `internal/cluster`. `internal/state/postgres` uses cluster infrastructure to implement source-neutral persistence queries and transactions; it does not own connection lifecycle, migration execution or leadership.
 
-Source-specific declaration, registration, and ownership persistence is an adapter-owned auxiliary port. State backends implement that port at their adapter edges without adding source-specific types or methods to the source-neutral state contract. For a clustered source, live-member declarations establish shared reconciliation intent independently of which member holds leadership. Active registrations publish current routes; durable ownership records exist only to verify safe source cleanup and do not create jobs or capacity.
+## Architectural boundaries
 
-An adapter accepts only actionable source observations and maps them to durable core state changes. Source redelivery must be idempotent. A stale or redelivered observation cannot recreate terminal demand or bypass the core cleanup and retry rules.
+### Source adapters
 
-Provisioning-failure reporting is also adapter-owned. When a source supports that operation, its adapter reports the failure and terminalizes the job through the core contract. Otherwise, the core cleans up and retries the same job without manufacturing a result or adding a persisted result lifecycle.
+A source adapter owns authentication, source payloads, observation validation, lifecycle translation, capacity publication, source identifiers and source-specific persistence policy. It translates source behavior into the terms and transitions in the product contract. Source-specific types do not cross into core, runtime, execution or source-neutral state contracts.
 
-GitHub Actions is the only supported source today. The [GitHub adapter](github-adapter.md) owns its protocol, discovery, registration, capacity-publication, and cleanup details.
+The source-neutral ports in `internal/core` cover the complete source-to-runtime lifecycle boundary: demand ingestion; runner-acceptance and terminal observations; capacity snapshots supplied for source publication; optional provisioning-failure reporting; and opaque runner bootstrap generation and cleanup. Adapter-owned auxiliary persistence and coordination ports remain at the adapter edge rather than entering core. `internal/runtime` owns the lifecycle decisions behind the core ports. A source adapter translates its protocol on one side and implements or consumes each relevant port according to that direction; the daemon wires the two sides together.
 
-## Queue boundary
+Every job carries a stable source namespace and source-owned request reference. Together they form its globally unique, replay-safe source identity. A reference may be an upstream request identifier or a deterministic adapter-derived identifier when the source exposes demand without individual request identities. In either case, the adapter must correlate the same demand to the same reference across redelivery and reconciliation without exposing source payloads through that identity.
 
-The queue contains only jobs waiting to be picked up. FIFO ordering is local to each Runner Pool. A request for work selects the oldest queued job matching the requesting pool; jobs for other pools do not participate in that selection. Equal enqueue timestamps are equally eligible.
+Runner bootstrap data crosses the core boundary as an opaque artifact. The owning source adapter creates and cleans it up; the runtime passes it through the execution port; and the provider transports it without interpreting source-specific contents. The runtime obtains Runner Pool availability through neutral state ports and supplies the resulting capacity snapshot to the adapter. Adapters do not import state backends or calculate a competing capacity model.
 
-Pickup atomically removes the selected job from the queue and creates a processing record. The record includes the claiming member, claim time, exact inventory endpoint, and durable runner-acceptance boundary. It contains no workflow result or broader attempt-state machine.
+Every Git source is a peer implementation under `internal/source/<source>`. Adapter-owned persistence interfaces are declared by that adapter. Their backend-specific implementations live at the same adapter edge, such as `internal/source/<source>/persistence/sqlite`, and may use narrow transaction facilities supplied by the selected backend. Neutral state packages do not import source adapters or duplicate adapter decision policy.
 
-The queue represents source demand only. Each source adapter owns the translation from its exact or aggregate upstream demand signals into jobs. Provider inventory and published Runner Pool capacity cannot create jobs, and source translation cannot create a second scheduling model.
+GitHub is the first source adapter, not part of the source-neutral architecture. Its [GitHub adapter](github-adapter.md) owns GitHub protocol, discovery, registration, capacity publication and cleanup behavior, including its [runner scale-set mechanics](references/github-scaleset-mechanics.md). Future source adapters neither depend on nor conform to the GitHub adapter; they conform only to RunnerFoundry's source-neutral ports and product lifecycle. Source-specific operator configuration is likewise adapter-owned and does not define the configuration shape for future sources.
 
-## Execution boundary
+### Queue and state
 
-Execution providers supply ephemeral runner environments. Docker Compose and libvirt are the current providers. Launching uses the provider configured for the Runner Pool, while reconciliation uses one aggregate of every provider inventory represented by the active configuration. Docker endpoint identity is the member's Docker host, independent of the Compose mechanism used to provision a Runner Pool; libvirt endpoint identity uses the normalized connection URI. Duplicate endpoints are queried once per maintenance cycle. Each observation includes its Runner Pool, and the cycle snapshot is partitioned for pool reconciliation and occupied-capacity calculation.
+The queue contains source demand waiting to be claimed. Durable enqueue order and claim atomicity are state-port contracts; the runtime applies them per Runner Pool. State backends persist the existing core contracts and do not add a second scheduler or lifecycle.
 
-Inventory is fail-closed: every represented endpoint must answer before RunnerFoundry treats a runner as absent. An error means runner state is unknown and processing is retained. Failed provisioning performs a fresh inspection of the recorded endpoint before cleanup or absence confirmation. Removing an endpoint never turns invisibility into proof of absence; processing recorded against an unknown endpoint is retained for operator action.
+Backend transaction facilities stay behind narrow interfaces. A backend exposes only capabilities required by an owning interface; it does not retain destructive or unguarded entry points that bypass that interface.
 
-The provisioned runner communicates its normal workflow outcome directly to the Git source. Before runner acceptance, RunnerFoundry owns provisioning failures. After cleanup succeeds or resource absence is confirmed, it atomically moves the same unstarted job to the back of its Runner Pool queue and removes the processing record. A source tombstone or concurrent runner-acceptance observation prevents that retry. There is no retry count, delay, backoff, or timeout.
+### Execution providers
 
-Runner acceptance transfers outcome ownership to the runner and Git source. Once that boundary is durable, a missing, failed, or terminated provider resource never returns the job to the queue. RunnerFoundry retains processing while it awaits a terminal source signal, attempting cleanup when a resource may remain. A terminal source signal removes processing only after cleanup succeeds or absence is confirmed; cleanup failure retains processing for another cleanup attempt.
+Execution providers create, inspect and destroy ephemeral runner environments behind source-neutral execution and inventory ports. Docker Compose and libvirt are the current providers. Provider commands, payloads, endpoint handling and state translation remain inside their concrete packages.
 
-## Member ownership boundary
+The runtime owns lifecycle decisions. Providers report evidence through their ports and do not decide whether source demand is created, retried or terminal. The product contract remains authoritative for provisioning failure, runner acceptance, cleanup and retry behavior.
 
-A member is identified by its trimmed operating-system hostname. Hostnames must be stable and unique within the cluster, and only one daemon may run for a hostname. Ordinary processing remains member-local, but the leader may recover an unstarted claim after its fixed five-minute lease or clean terminal processing across members.
+### Clustering and capacity
 
-Members heartbeat to advertise liveness. The 30-second cutoff removes only advertised capacity. It does not authorize processing recovery. After five minutes, an unstarted, non-terminal claim is recoverable only when the leader can inspect its exact recorded endpoint and either destroy the deterministic runner or positively confirm absence. An unknown, unavailable, or incomplete endpoint retains processing. The guarded state transition loses to a concurrent runner-acceptance or terminal source signal, and started jobs never return to the queue.
+A standalone member may use SQLite or PostgreSQL. A cluster uses shared PostgreSQL for durable state, member coordination and leadership. Deployment mode does not change the job lifecycle.
 
-## Capacity boundary
+Cluster mechanics coordinate members but do not own source, runtime, provider or persistence policy. Capacity is derived from live configured capacity and existing queued and processing work; it cannot create or mutate jobs. Detailed clustering and operating behavior remains in the product contract and operator documentation.
 
-Runner Pool registration and capacity publication are orthogonal to the job lifecycle. Members atomically renew their heartbeat and publish their complete configured-capacity snapshot. Members that have not heartbeated within 30 seconds, or that have gracefully withdrawn, contribute no capacity.
+### Reload and shutdown
 
-The state store calculates one shared value for each Runner Pool:
+The daemon coordinates startup, runtime-generation replacement and shutdown. It composes source-adapter, runtime, provider, state, cluster and configuration components without taking ownership of their policy. Configuration options, including which source adapters a deployment may configure, are product and operator contracts documented outside this code-organisation boundary in the [README](../README.md).
 
-`available = max(0, live configured capacity - queued jobs - all processing jobs)`
+## Responsibility flows
 
-Moving a job from the queue into processing does not change availability. Cancelling queued work or removing completed processing releases capacity. Capacity queries observe current work but cannot create, claim, reorder, move, or remove it.
+The diagrams in this section show runtime control and data flow. They do not show Go import direction; compile-time dependency direction is defined separately below.
 
-Source leadership and durable queue processing are separate responsibilities. Durable source registrations survive leadership changes and are restored without filtering through the new leader's local provider configuration. Discovery may reconcile shared live-member declarations independently, but it cannot replace unchanged registrations merely because leadership moved. A source leadership term is fenced: losing leadership cancels source operations, and late results cannot mutate core state or restore the old term. Cleanup failure from an old term cannot prevent a new term from starting.
-
-Every active member owns one member-local durable-queue processor, independent of source leadership. It starts with the runtime generation and waits for successful local inventory refresh and reconciliation before claiming from an eligible Runner Pool. SQLite enqueues cause an immediate coalesced local wake after persistence. PostgreSQL queue inserts broadcast a best-effort wake after commit to every member listening through its primary pool; members still discover durable work during maintenance when notifications are unavailable or missed.
-
-Source-specific registration, observation, and capacity-publication behavior remains inside each adapter and cannot create another scheduler or job lifecycle.
-
-## Reload and shutdown boundary
-
-The daemon-wide `--active-runner-policy=leave|terminate` option controls active resources during reload and graceful shutdown. It defaults to `leave` and is intentionally not part of YAML configuration, so a replacement configuration cannot choose how resources created by the previous generation are handled.
-
-Reload validates and prepares the replacement without claiming work, then deactivates the old generation and activates the replacement. During reload, deactivation cancels and joins both maintenance and queued-job processing before releasing the local gate, so old and replacement generations cannot claim concurrently. Activation commits after the replacement acquires the gate and starts both loops, so `READY` certifies configuration validation, required local and durable-state initialization, provider validation, and local generation ownership. It does not certify Git source discovery or connectivity, inventory, reconciliation, recovery, claims, or provisioning. The first maintenance cycle starts immediately in the background and controls operational health; its failure degrades the active generation without rejecting it. A preparation or local-activation failure closes or rolls back the replacement and reactivates the old generation. The old generation is closed only after activation commits. Close timeouts leave unfinished resource cleanup retryable.
-
-With `leave`, the replacement is applied without explicitly destroying affected runners. Reconciliation then observes the provider-agnostic inventory defined by the replacement configuration. Visible running resources are retained. An unstarted job whose recorded endpoint proves absence can return to the queue after the five-minute recovery lease, while started processing waits for a terminal source signal. Processing tied to an operator-removed endpoint is retained for operator action.
-
-With `terminate`, the old provider destroys affected resources after replacement activation commits. An unstarted job returns to the queue only after cleanup succeeds; a started job remains in processing until the Git source terminalizes it. Cleanup failure retains processing, but does not prevent the otherwise-valid replacement configuration from taking effect.
-
-On graceful shutdown, `leave` stops claims and source activity and preserves all runners and processing without waiting for runners to finish. Process-local cleanup, including capacity withdrawal, has one 30-second budget. When that budget expires, the process exits successfully; the operating system releases remaining process-local resources, the member-liveness cutoff removes any capacity that could not be withdrawn, and startup reconciliation restores durable work. This bound applies only to final process shutdown, not to generation replacement during reload. `terminate` destroys owned resources, requeues successfully cleaned-up unstarted jobs, and leaves started jobs awaiting a terminal source signal without using the `leave` shutdown budget.
-
-## Deployment boundary
-
-One RunnerFoundry member is a standalone deployment. It may use SQLite or PostgreSQL. SQLite is exclusively owned by that one member.
-
-Two or more RunnerFoundry members form a cluster and share PostgreSQL. PostgreSQL provides the shared state needed by those members; it does not change the product lifecycle.
-
-The state relationships are:
+Source protocols cross their adapter boundary through core-owned source ports wired by the daemon. The two directions cover source observations entering the lifecycle and runtime-owned capacity, bootstrap and supported failure operations returning to the adapter:
 
 ```mermaid
-erDiagram
-    RUNNERFOUNDRY_MEMBERS ||--o{ RUNNERFOUNDRY_MEMBER_RUNNER_POOLS : advertises
-    RUNNERFOUNDRY_MEMBERS ||--o{ RUNNERFOUNDRY_PROCESSING_JOBS : owns
-
-    RUNNERFOUNDRY_MEMBERS {
-        text member_id PK
-        timestamptz heartbeat_at
-    }
-    RUNNERFOUNDRY_MEMBER_RUNNER_POOLS {
-        text member_id PK,FK
-        text runner_pool PK
-        integer capacity
-    }
-    RUNNERFOUNDRY_QUEUED_JOBS {
-        uuid job_id PK
-        text source_name
-        text source_reference
-        text runner_pool
-        timestamptz enqueued_at
-    }
-    RUNNERFOUNDRY_PROCESSING_JOBS {
-        uuid job_id PK
-        text source_name
-        text source_reference
-        text runner_pool
-        text member_id FK
-        timestamptz claimed_at
-        text inventory_endpoint_id
-        boolean runner_started
-    }
-    RUNNERFOUNDRY_SOURCE_TOMBSTONES {
-        text source_name PK
-        text source_reference PK
-    }
+flowchart LR
+    SourceProtocol["Git source protocol"] <--> SourceTransport["Source transport"]
+    SourceTransport <--> SourceAdapter["Source adapter"]
+    SourceAdapter --> Observations["Demand and lifecycle-observation ports"]
+    Observations --> Runtime["Source-neutral runtime"]
+    Runtime --> Operations["Capacity, bootstrap and failure-operation ports"]
+    Operations --> SourceAdapter
 ```
+
+The runtime calls a source-neutral execution port. The daemon supplies the selected concrete provider:
 
 ```mermaid
-flowchart TB
-    Adapter["Source adapter"] --> Core["Ingestion, Runner Pool queues, processing ownership"]
-    Core --> State["SQLite or PostgreSQL"]
-    Core --> Provider["Docker Compose or libvirt"]
-    Provider --> Source["Provisioned runner reports workflow result to Git source"]
-    Capacity["Runner service capacity"] --> Adapter
+flowchart LR
+    Runtime["Source-neutral runtime"] --> Execution["Execution and inventory port"]
+    Execution --> Docker["Docker provider"]
+    Execution --> Libvirt["libvirt provider"]
 ```
 
-## Dependency rule
+The runtime calls source-neutral persistence ports. The daemon supplies the selected backend:
 
-Dependencies point inward from adapters, state backends, and execution providers toward source-neutral core contracts. Adding a Git source, database backend, or execution provider must not add another job lifecycle.
+```mermaid
+flowchart LR
+    Runtime["Source-neutral runtime"] --> State["State ports"]
+    State --> SQLite["SQLite backend"]
+    State --> PostgreSQL["PostgreSQL backend"]
+```
+
+## Dependency rules
+
+The daemon is the composition root and the only package area permitted to import all concrete adapters and implementations. Every other compile-time dependency points from a concrete edge toward a source-neutral or adapter-owned contract:
+
+```text
+cmd
+ └─> daemon
+      ├─> runtime ─> core + execution/state ports
+      ├─> source/* ─> core + source-owned transport
+      ├─> source/*/persistence/* ─> source-owned ports + narrow backend facilities
+      ├─> provider/* ─> execution contracts
+      ├─> state/* ─> core/state contracts
+      └─> cluster/config
+```
+
+In this graph, `state/*` means source-neutral backend implementations. Source-specific persistence implementations remain part of their source-adapter edge and depend on adapter-owned ports plus narrow backend transaction facilities. Cluster leadership or coordination used by a source is supplied through a narrow port wired by the daemon; the adapter does not import cluster implementation packages.
+
+These rules apply:
+
+- `internal/core`, `internal/runtime`, `internal/execution` and source-neutral state contracts must not import any concrete Git source, Docker, libvirt, SQLite or PostgreSQL implementation.
+- Concrete providers depend on execution contracts. The execution-contract package does not depend on concrete providers.
+- Source-specific protocol and persistence policy belongs to its source adapter. No source adapter defines the contract that other sources must follow.
+- SQLite and PostgreSQL may support adapter-specific persistence only through implementations at the adapter edge that expose adapter-owned interfaces.
+- Concrete implementations expose only the capabilities required by their owning interfaces. They do not retain alternative destructive or unguarded entry points that bypass those interfaces.
+- New sources, providers and state backends plug into existing ports without changing or adding another job lifecycle.
+
+## Extension rules
+
+### Add a Git source
+
+- Add a peer package under `internal/source/<source>` that translates the source protocol into the existing core lifecycle.
+- Implement or consume each applicable core source-boundary port according to its documented direction, including stable identity, lifecycle observations, capacity publication, bootstrap handling and supported provisioning-failure reporting.
+- If the adapter owns auxiliary state, implement it for every supported state backend, define its migrations at the adapter edge and register them with the appropriate backend migration executor.
+- Keep authentication, protocol payloads, source identifiers, capacity publication and source-owned persistence ports inside the adapter.
+- Define and validate adapter-owned configuration and document it in the operator documentation without inheriting another source's configuration shape.
+- Wire the adapter, transport and persistence implementations in the daemon.
+- Do not change core lifecycle types or add source-specific types to neutral contracts.
+
+### Add an execution provider
+
+- Implement the existing execution and inventory ports in a concrete provider package.
+- Keep provider commands, payloads, state translation and validation inside that provider.
+- Wire the provider in the daemon without modifying neutral execution contracts.
+
+### Add a state backend
+
+- Implement the existing source-neutral state ports and their atomicity guarantees.
+- Supply narrow backend transaction facilities for explicitly adapter-owned persistence implementations when required.
+- Do not expand the core lifecycle or neutral state contracts to match backend-specific capabilities.
+
+### Change daemon wiring
+
+- Compose existing ports and implementations without moving domain, source, provider or persistence policy into the composition root.
+- Preserve the operator-visible startup, reload and shutdown interface and semantics documented in the [README](../README.md).
