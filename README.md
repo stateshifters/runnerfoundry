@@ -1593,12 +1593,6 @@ The resulting executable is:
 build/linux/amd64/runnerfoundry
 ```
 
-Check it with:
-
-```sh
-./build/linux/amd64/runnerfoundry --version
-```
-
 Build the Debian package and release metadata with:
 
 ```sh

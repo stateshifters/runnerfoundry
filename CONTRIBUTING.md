@@ -71,6 +71,11 @@ symbols, assert incidental file layout or implementation structure, or otherwise
 Checks that confirm an edit was completed are work verification, not software tests. Run searches, diff inspection, linters, and
 other appropriate commands as one-time verification evidence without adding them to the test suite.
 
+Choose work verification by deliverable. Documentation changes use content, link, and documentation-specific checks.
+Configuration changes use parser, schema, or tool-native static validation. Mechanical edits and removals use targeted searches,
+diff inspection, and applicable static checks. Analysis and plans use evidence reconciliation and internal-consistency review.
+Documentation, configuration, mechanical edits, removals, analysis, and plans MUST NOT use TDD or production software tests.
+
 - Write the test first.
   - If the behavior is user-facing, the test MUST be a snapshot test that captures the rendered user-visible output.
 - Verify the new test fails (prove the gap).
@@ -132,6 +137,8 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 ## Verification
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
+Any inspection or application of migrations through an installed RunnerFoundry executable described there is an operator procedure,
+not contributor or CI verification.
 
 ### Test isolation
 
@@ -141,6 +148,10 @@ only exception and its allowed I/O remains limited to isolated local databases, 
 files in test-owned temporary directories. Production Go files MUST NOT use build tags.
 
 ### Available verification gates
+
+RunnerFoundry behavior is proved by automated tests that exercise production code through the stable seams defined above. Contributor and CI verification MUST NOT execute a built RunnerFoundry executable, RunnerFoundry installed from a distribution package, a RunnerFoundry container, or a deployed RunnerFoundry instance to prove application behavior, startup, embedded build metadata, or toolchain output. The compiler, linker, packager, and deployment system are not RunnerFoundry software-test subjects.
+
+Building or packaging may produce a requested artifact, but executing that artifact is not a verification gate. The gates listed below are exhaustive unless the product and contribution contracts are explicitly changed. This restriction does not prevent operators from running RunnerFoundry for its intended purpose.
 
 V1 code MUST maintain 100% Go test coverage using hermetic tests.
 
