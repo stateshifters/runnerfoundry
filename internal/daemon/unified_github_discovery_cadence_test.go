@@ -44,7 +44,7 @@ func newDiscoveryCadenceFixture(reconcileErr error) *discoveryCadenceFixture {
 	}
 	manager := &githubManagerFake{reconcileStarted: fixture.started, reconcileRelease: fixture.release,
 		reconcileErr: reconcileErr}
-	fixture.source = newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	fixture.source = newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return fixture.now })
 	return fixture
 }

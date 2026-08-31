@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	"github.com/stateshifters/runnerfoundry/internal/execution"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
@@ -292,9 +291,13 @@ func assertSQLiteRecoveryOrdering(t *testing.T, reopened *sqlite.Store, state sq
 	ctx := context.Background()
 	recoveryTime := state.publishedAt.Add(10 * time.Minute)
 	provider := newE2EProvider()
-	orchestrator := runtimeengine.NewOrchestrator(
+	bootstrap := durabilityBootstrapGenerator{}
+	resolver := &sourceOperationsResolver{byAdapter: map[core.SourceAdapter]core.SourceOperations{
+		state.claimed.Job.Source.Adapter: {RunnerBootstrapProvider: bootstrap},
+	}}
+	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
 		reopened,
-		durabilityBootstrapGenerator{},
+		resolver,
 		provider,
 		provider,
 		"recovery-leader",
@@ -332,7 +335,7 @@ func assertDurableProcessingClaim(t *testing.T, actual, expected core.Processing
 		actual.Job.RunnerPool != expected.Job.RunnerPool || actual.RunnerName != expected.RunnerName ||
 		actual.MemberID != expected.MemberID || !actual.ClaimedAt.Equal(expected.ClaimedAt) ||
 		actual.InventoryEndpointID != expected.InventoryEndpointID ||
-		actual.RunnerStarted != expected.RunnerStarted || actual.SourceTerminal != expected.SourceTerminal {
+		actual.RunnerAccepted != expected.RunnerAccepted || actual.SourceTerminal != expected.SourceTerminal {
 		t.Fatalf("durable processing claim = %+v, want contract fields from %+v", actual, expected)
 	}
 }
@@ -343,8 +346,8 @@ func (durabilityBootstrapGenerator) GenerateBootstrap(
 	context.Context,
 	core.Job,
 	core.RunnerName,
-) (execution.Bootstrap, error) {
-	return execution.NewBootstrap(nil), nil
+) (core.Bootstrap, error) {
+	return core.NewBootstrap(nil), nil
 }
 
 func (durabilityBootstrapGenerator) CleanupBootstrap(context.Context, core.Job, core.RunnerName) error {

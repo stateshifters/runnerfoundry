@@ -15,7 +15,7 @@ func recoverProcessingClaim(
 	processing core.ProcessingJob,
 ) (core.RetryOutcome, error) {
 	_, err := scanQueuedJob(transaction.QueryRow(ctx, recoverProcessingSQL, processing.Job.ID,
-		processing.ClaimedAt, processing.InventoryEndpointID, processing.Job.EnqueuedAt))
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.Job.EnqueuedAt, processing.RunnerName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return classifyRecoveryFailure(ctx, transaction, processing)
 	}
@@ -23,7 +23,7 @@ func recoverProcessingClaim(
 		return "", fmt.Errorf("requeue expired processing: %w", err)
 	}
 	removal, err := transaction.Execute(ctx, deleteRecoveredProcessingSQL, processing.Job.ID,
-		processing.ClaimedAt, processing.InventoryEndpointID)
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.RunnerName)
 	if err != nil {
 		return "", fmt.Errorf("remove recovered processing: %w", err)
 	}
@@ -45,11 +45,20 @@ func classifyRecoveryFailure(ctx context.Context, transaction Transaction, expec
 	if err != nil {
 		return "", fmt.Errorf("classify processing recovery: %w", err)
 	}
+	if !samePostgresProcessingClaim(actual, expected) {
+		return core.RetryClaimChanged, nil
+	}
 	if actual.SourceTerminal {
 		return core.RetrySourceTerminal, nil
 	}
-	if actual.RunnerStarted {
-		return core.RetryRunnerStarted, nil
+	if actual.RunnerAccepted {
+		return core.RetryRunnerAccepted, nil
+	}
+	if actual.ProvisioningFailure == core.ProvisioningFailureReported {
+		return core.RetryFailureFinalizationPending, nil
+	}
+	if actual.ProvisioningFailure == core.ProvisioningFailureReporting {
+		return core.RetryFailureReportingPending, nil
 	}
 	return core.RetryClaimChanged, nil
 }

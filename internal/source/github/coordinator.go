@@ -261,18 +261,19 @@ func (coordinator *MultiAppCoordinator) RefreshMembers(ctx context.Context, conf
 	return resultErr
 }
 
-func (coordinator *MultiAppCoordinator) OpenRegistrationSession(
+func (coordinator *MultiAppCoordinator) OpenSourceRegistrationSession(
 	ctx context.Context,
 	record Registration,
 	configured RunnerPoolConfig,
 	owner string,
-	handler EventHandler,
+	sourceEvents core.SourceEventHandler,
+	assignedDemand AssignedDemandHandler,
 ) (*RegistrationSession, error) {
 	manager := coordinator.byAppID[record.GitHubAppID]
 	if manager == nil {
 		return nil, fmt.Errorf("GitHub App %d is not configured for repository %q", record.GitHubAppID, record.RepositoryURL)
 	}
-	return manager.OpenRegistrationSession(ctx, record, configured, owner, handler)
+	return manager.OpenSourceRegistrationSession(ctx, record, configured, owner, sourceEvents, assignedDemand)
 }
 
 func (coordinator *MultiAppCoordinator) UsesSharedRunnerPoolDeclarations() bool {

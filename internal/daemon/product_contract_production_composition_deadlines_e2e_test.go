@@ -112,7 +112,7 @@ func startProductionCompositionRunner(
 	go func() {
 		result <- provider.Start(ctx, execution.StartRequest{
 			JobID: uuid.New(), RunnerPool: runnerPool, EndpointID: provider.EndpointID(), RunnerName: runnerName,
-			Bootstrap: execution.NewBootstrap([]byte("opaque-bootstrap")),
+			Bootstrap: core.NewBootstrap([]byte("opaque-bootstrap")),
 		})
 	}()
 	return result
@@ -296,7 +296,7 @@ func requireProductionCompositionStart(
 	t.Helper()
 	err := provider.Start(ctx, execution.StartRequest{
 		JobID: uuid.New(), RunnerPool: runnerPool, EndpointID: provider.EndpointID(), RunnerName: runnerName,
-		Bootstrap: execution.NewBootstrap([]byte("opaque-bootstrap")),
+		Bootstrap: core.NewBootstrap([]byte("opaque-bootstrap")),
 	})
 	requireProductionCompositionOperation(t, fmt.Sprintf("start %s", runnerName), err)
 }

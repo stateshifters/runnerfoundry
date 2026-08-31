@@ -26,19 +26,19 @@ func (observation identifiedObservation) identity() string {
 	return fmt.Sprintf("runner %q", observation.Observation.RunnerName)
 }
 
-func (adapter *Adapter) persistStarted(ctx context.Context, started []identifiedObservation) error {
-	for _, observation := range started {
-		result, err := adapter.Handler.RunnerStarted(ctx, observation.Observation)
+func (adapter *Adapter) persistAccepted(ctx context.Context, accepted []identifiedObservation) error {
+	for _, observation := range accepted {
+		result, err := adapter.observeRunnerAcceptance(ctx, observation.Observation)
 		if err != nil {
-			wrapped := fmt.Errorf("durably record GitHub runner started observation (%s): %w", observation.identity(), err)
+			wrapped := fmt.Errorf("durably record GitHub runner acceptance observation (%s): %w", observation.identity(), err)
 			if ctx.Err() != nil {
 				return wrapped
 			}
-			adapter.reportObservationFailure("persist_runner_started", observation, wrapped)
+			adapter.reportObservationFailure("persist_runner_accepted", observation, wrapped)
 			return markManagerActivityReported(wrapped)
 		}
 		if result.Outcome == core.ObservationUnmatched {
-			adapter.reportUnmatchedObservation("runner_started", observation)
+			adapter.reportUnmatchedObservation("runner_accepted", observation)
 		}
 	}
 	return nil
@@ -46,7 +46,7 @@ func (adapter *Adapter) persistStarted(ctx context.Context, started []identified
 
 func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identifiedObservation) error {
 	for _, observation := range completed {
-		result, err := adapter.Handler.Terminalize(ctx, observation.Observation)
+		result, err := adapter.observeTerminal(ctx, observation.Observation)
 		if err != nil {
 			wrapped := fmt.Errorf("durably record GitHub runner completion observation (%s): %w", observation.identity(), err)
 			if ctx.Err() != nil {
@@ -60,6 +60,28 @@ func (adapter *Adapter) persistCompleted(ctx context.Context, completed []identi
 		}
 	}
 	return nil
+}
+
+func (adapter *Adapter) observeRunnerAcceptance(
+	ctx context.Context,
+	observation core.RunnerObservation,
+) (core.ObservationResult, error) {
+	result, err := adapter.SourceEvents.ObserveRunnerAcceptance(ctx, observation)
+	if err != nil {
+		return result, fmt.Errorf("observe source-neutral runner acceptance: %w", err)
+	}
+	return result, nil
+}
+
+func (adapter *Adapter) observeTerminal(
+	ctx context.Context,
+	observation core.RunnerObservation,
+) (core.ObservationResult, error) {
+	result, err := adapter.SourceEvents.ObserveTerminal(ctx, observation)
+	if err != nil {
+		return result, fmt.Errorf("observe source-neutral terminal state: %w", err)
+	}
+	return result, nil
 }
 
 func (adapter *Adapter) reportObservationFailure(stage string, observation identifiedObservation, err error) {

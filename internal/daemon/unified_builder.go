@@ -15,8 +15,8 @@ import (
 )
 
 type unifiedStore interface {
-	core.JobQueueStore
-	core.ProcessingJobStore
+	statecontract.JobQueueStore
+	statecontract.ProcessingJobStore
 	runtimeengine.MembershipStore
 	githubsource.RegistrationRepository
 	statecontract.RunnerPoolCapacityStore
@@ -148,8 +148,11 @@ func buildConfiguredEngine(
 ) *UnifiedEngine {
 	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, enqueueWake, stateBackend)
 	handler := newGitHubDemandHandler(queue, dependencies.demandStore, enqueueWake, stateBackend)
+	capacity := runtimeengine.NewCapacitySnapshotService(
+		dependencies.store, dependencies.currentTime, dependencies.memberTTL,
+	)
 	source := newGitHubSourceRuntime(
-		dependencies.manager, dependencies.store, string(dependencies.member),
+		dependencies.manager, capacity, string(dependencies.member),
 		handler,
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
 	)
@@ -188,23 +191,31 @@ func configuredClosers(dependencies unifiedBuilderDependencies) []runtimeCloser 
 }
 
 type assembledRuntime struct {
-	managerConfig githubsource.ManagerConfig
-	stateBackend  string
-	localCapacity []core.RunnerPoolCapacity
-	pools         []RunnerPoolRuntime
-	finalizers    []runtimeFinalizer
+	managerConfig    githubsource.ManagerConfig
+	stateBackend     string
+	localCapacity    []core.RunnerPoolCapacity
+	pools            []RunnerPoolRuntime
+	finalizers       []runtimeFinalizer
+	sourceOperations core.SourceOperationsResolver
 }
 
 func assembleConfiguredRuntime(
 	configured config.Config,
 	dependencies unifiedBuilderDependencies,
 ) (assembledRuntime, error) {
+	sourceOperations, err := newSourceOperationsResolver([]sourceOperationsRegistration{{
+		adapter: githubsource.AdapterName, operations: dependencies.manager.Source(),
+	}})
+	if err != nil {
+		return assembledRuntime{}, fmt.Errorf("register source operations: %w", err)
+	}
 	assembled := assembledRuntime{
-		managerConfig: githubsource.ManagerConfig{Prune: configured.Prune},
-		stateBackend:  stateBackendName(configured.State),
-		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
-		pools:         make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
-		finalizers:    make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
+		managerConfig:    githubsource.ManagerConfig{Prune: configured.Prune},
+		stateBackend:     stateBackendName(configured.State),
+		localCapacity:    make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
+		pools:            make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
+		finalizers:       make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
+		sourceOperations: sourceOperations,
 	}
 	for _, runnerPoolConfig := range configured.RunnerPools {
 		if err := assembled.appendRunnerPool(runnerPoolConfig, dependencies); err != nil {
@@ -230,8 +241,8 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
-	orchestrator := runtimeengine.NewOrchestrator(
-		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
+	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
+		dependencies.store, assembled.sourceOperations, provider, dependencies.inventory, dependencies.member,
 		dependencies.currentTime,
 	)
 	assembled.appendPoolConfiguration(runnerPoolConfig)
@@ -297,6 +308,11 @@ type orchestrationPool struct {
 	stateBackend string
 	report       func(error)
 }
+
+const (
+	provisioningFailureReportingStage    = "report"
+	provisioningFailureFinalizationStage = "finalize_provisioning_failure"
+)
 
 func (pool orchestrationPool) RequestWork(
 	ctx context.Context,
@@ -369,29 +385,129 @@ func reportProcessEvents(
 		reportOperational(report, started)
 	}
 	if result.Outcome == runtimeengine.ProcessRetry {
+		reportRetryOutcome(report, base, result, err)
+	}
+	reportProvisioningFailureOutcome(report, base, result, err)
+}
+
+func reportRetryOutcome(
+	report func(error),
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	event := retryOperationalEvent(base, result, err)
+	var diagnostic interface{ OperationalDiagnostic() string }
+	if errors.As(err, &diagnostic) {
+		event.diagnostic = diagnostic.OperationalDiagnostic()
+	}
+	reportOperational(report, event)
+}
+
+func retryOperationalEvent(
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) operationalEvent {
+	event := base
+	event.outcome = string(result.RetryOutcome)
+	event.err = err
+	if result.RetryOutcome == core.RetryFailureReportingPending {
+		event.operation = "provisioning_failure"
+		event.stage = provisioningFailureReportingStage
+		return event
+	}
+	if result.RetryOutcome == core.RetryFailureFinalizationPending {
+		event.operation = "job_processing"
+		event.stage = provisioningFailureFinalizationStage
+		return event
+	}
+	event.operation = "runner_retry"
+	event.stage = result.FailedStage
+	return event
+}
+
+func reportProvisioningFailureOutcome(
+	report func(error),
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	if result.Outcome == runtimeengine.ProcessClaimed && err != nil {
 		event := base
-		event.operation = "runner_retry"
+		event.operation = "job_processing"
 		event.stage = result.FailedStage
-		event.outcome = string(result.RetryOutcome)
+		event.outcome = "failed"
 		event.err = err
-		var diagnostic interface{ OperationalDiagnostic() string }
-		if errors.As(err, &diagnostic) {
-			event.diagnostic = diagnostic.OperationalDiagnostic()
-		}
+		reportOperational(report, event)
+	}
+	if result.Outcome == runtimeengine.ProcessProvisioningFailureReported ||
+		result.RetryOutcome == core.RetryFailureFinalizationPending {
+		event := base
+		event.operation = "provisioning_failure"
+		event.stage = provisioningFailureReportingStage
+		event.outcome = "reported"
 		reportOperational(report, event)
 	}
 }
 
 func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	result, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	reportReconciliationOutcome(pool.report, runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
 		return fmt.Errorf("reconcile pool work: %w", err)
 	}
 	return nil
 }
 
+func reportReconciliationOutcome(
+	report func(error),
+	runnerPool core.RunnerPool,
+	provider string,
+	endpoint string,
+	result runtimeengine.PoolReconciliation,
+) {
+	for _, job := range result.ReportedProvisioningFailures {
+		event := operationalEvent{
+			operation:  "provisioning_failure",
+			stage:      provisioningFailureReportingStage,
+			outcome:    "reported",
+			runnerPool: runnerPool,
+			jobID:      job.ID,
+			provider:   provider,
+			endpoint:   endpoint,
+			count:      1,
+		}
+		reportOperational(report, addGitHubJobContext(report, event, job))
+		reportProvisioningFailureFinalizationRecovery(report, runnerPool, provider, endpoint, job)
+	}
+	for _, job := range result.FinalizedTerminalJobs {
+		reportProvisioningFailureFinalizationRecovery(report, runnerPool, provider, endpoint, job)
+	}
+}
+
+func reportProvisioningFailureFinalizationRecovery(
+	report func(error),
+	runnerPool core.RunnerPool,
+	provider string,
+	endpoint string,
+	job core.Job,
+) {
+	event := operationalEvent{
+		operation:  "job_processing",
+		stage:      provisioningFailureFinalizationStage,
+		outcome:    "recovered",
+		runnerPool: runnerPool,
+		jobID:      job.ID,
+		provider:   provider,
+		endpoint:   endpoint,
+	}
+	reportOperational(report, addGitHubJobContext(report, event, job))
+}
+
 func (pool orchestrationPool) RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
+	result, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
+	reportReconciliationOutcome(pool.report, runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
 		return fmt.Errorf("recover foreign pool work: %w", err)
 	}
@@ -402,6 +518,7 @@ func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerP
 
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
 	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
+	reportReconciliationOutcome(pool.report, pool.runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
 		return 0, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}

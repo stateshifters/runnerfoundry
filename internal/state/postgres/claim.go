@@ -26,6 +26,9 @@ func claimOldestInTransaction(
 	if err != nil || !taken {
 		return core.ClaimResult{Outcome: core.ClaimEmpty}, err
 	}
+	if !claim.AttemptID.IsValid() {
+		claim.AttemptID = core.NewAttemptID()
+	}
 	runnerName := core.AttemptRunnerName(job.ID, claim.AttemptID)
 	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID, job.Source.Adapter,
 		job.Source.ID, string(job.RunnerPool), claim.MemberID, runnerName, claim.ClaimedAt, claim.InventoryEndpointID); err != nil {

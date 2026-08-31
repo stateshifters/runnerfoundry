@@ -545,9 +545,9 @@ func assertProductionCompositionObservation(
 ) {
 	t.Helper()
 	processing := assertProductionCompositionProcessing(t, runtime, runnerPool)
-	if processing.RunnerStarted != want.runnerStarted || processing.SourceTerminal != want.sourceTerminal {
+	if processing.RunnerAccepted != want.runnerStarted || processing.SourceTerminal != want.sourceTerminal {
 		t.Fatalf("production processing observation for %q = started:%t terminal:%t, want started:%t terminal:%t",
-			runnerPool, processing.RunnerStarted, processing.SourceTerminal, want.runnerStarted, want.sourceTerminal)
+			runnerPool, processing.RunnerAccepted, processing.SourceTerminal, want.runnerStarted, want.sourceTerminal)
 	}
 }
 

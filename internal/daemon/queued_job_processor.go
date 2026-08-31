@@ -29,8 +29,8 @@ func newQueuedJobEligibilityGate() *queuedJobEligibilityGate {
 	return &queuedJobEligibilityGate{pools: make(map[core.RunnerPool]*queuedJobPoolGate)}
 }
 
-// Maintain preserves the all-pool maintenance helper used by focused tests.
-// Production execution uses RefreshInventory followed by MaintainPool.
+// Maintain holds the inventory barrier across one all-pool maintenance action.
+// Runtime cycles normally refresh inventory before maintaining individual pools.
 func (gate *queuedJobEligibilityGate) Maintain(work func(*queuedJobMaintenance)) {
 	gate.inventoryBarrier.Lock()
 	defer gate.inventoryBarrier.Unlock()
@@ -278,6 +278,7 @@ func (processor *queuedJobProcessor) reportProcessingFailure(
 
 func shouldContinueQueuedJobPass(result runtimeengine.ProcessResult) bool {
 	return result.Outcome == runtimeengine.ProcessRunnerStarted ||
+		result.Outcome == runtimeengine.ProcessProvisioningFailureReported ||
 		(result.Outcome == runtimeengine.ProcessRetry && result.RetryOutcome == core.RetryRequeued)
 }
 

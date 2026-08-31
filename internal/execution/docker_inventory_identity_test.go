@@ -9,7 +9,7 @@ import (
 
 func TestDockerComposeServicesOnOneHostShareInventory(t *testing.T) {
 	t.Parallel()
-	const inventoryOutput = `{"ID":"container-1","State":"running","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=runnerfoundry-1"}`
+	const inventoryOutput = `{"ID":"container-1","State":"running","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=external-runner"}`
 	first := NewDockerComposeProvider(
 		&recordingDockerTransport{listOutput: inventoryOutput},
 		providerdocker.ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"},
@@ -33,7 +33,7 @@ func TestDockerComposeServicesOnOneHostShareInventory(t *testing.T) {
 
 func TestDockerInventoryRoutesLegacyProcessingEndpoint(t *testing.T) {
 	t.Parallel()
-	const inventoryOutput = `{"ID":"container-1","State":"running","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=runnerfoundry-1"}`
+	const inventoryOutput = `{"ID":"container-1","State":"running","Labels":"runnerfoundry.runner-pool=linux,runnerfoundry.runner=external-runner"}`
 	provider := NewDockerComposeProvider(
 		&recordingDockerTransport{listOutput: inventoryOutput},
 		providerdocker.ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"},

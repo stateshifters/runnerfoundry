@@ -90,7 +90,7 @@ func (provider DockerComposeProvider) Start(ctx context.Context, request StartRe
 	err := provider.provider.Start(ctx, providerdocker.StartRequest{
 		RunnerPoolName: string(request.RunnerPool),
 		RunnerName:     string(request.RunnerName),
-		JITConfig:      string(request.Bootstrap.content),
+		JITConfig:      string(request.Bootstrap.Content()),
 	})
 	if err != nil {
 		return fmt.Errorf("start Docker Compose runner: %w", err)

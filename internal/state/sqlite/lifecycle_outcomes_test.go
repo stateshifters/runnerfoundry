@@ -34,11 +34,15 @@ func TestRetryUnstartedClassifiesEveryGuardedNoOp(t *testing.T) {
 		rows int64
 		want core.RetryOutcome
 	}{
-		"missing":                    {row: Row{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
-		"runner started":             {row: rowFromValues(processingOutcomeValues(true, false)), want: core.RetryRunnerStarted},
-		"source terminal":            {row: rowFromValues(processingOutcomeValues(false, true)), want: core.RetrySourceTerminal},
-		"terminal wins over started": {row: rowFromValues(processingOutcomeValues(true, true)), want: core.RetrySourceTerminal},
-		"claim changed":              {row: rowFromValues(processingOutcomeValues(false, false)), rows: 0, want: core.RetryClaimChanged},
+		"missing":                     {row: Row{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
+		"runner accepted":             {row: rowFromValues(processingOutcomeValues(true, false)), want: core.RetryRunnerAccepted},
+		"source terminal":             {row: rowFromValues(processingOutcomeValues(false, true)), want: core.RetrySourceTerminal},
+		"terminal wins over accepted": {row: rowFromValues(processingOutcomeValues(true, true)), want: core.RetrySourceTerminal},
+		"claim changed":               {row: rowFromValues(processingOutcomeValues(false, false)), rows: 0, want: core.RetryClaimChanged},
+		"failure reporting pending": {row: rowFromValues(processingFailureStateValues(
+			core.ProvisioningFailureReporting)), want: core.RetryFailureReportingPending},
+		"failure finalization pending": {row: rowFromValues(processingFailureStateValues(
+			core.ProvisioningFailureReported)), want: core.RetryFailureFinalizationPending},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -46,7 +50,7 @@ func TestRetryUnstartedClassifiesEveryGuardedNoOp(t *testing.T) {
 			transaction := Transaction{queryRow: constantRow(test.row), execute: outcomeExecute(test.rows),
 				commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
 			result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-				RetryUnstarted(context.Background(), testJobID)
+				RetryUnstarted(context.Background(), retryProcessingJob())
 			if err != nil || result.Outcome != test.want || commits != 1 {
 				t.Fatalf("retry = (%#v, %v), commits=%d", result, err, commits)
 			}
@@ -56,21 +60,46 @@ func TestRetryUnstartedClassifiesEveryGuardedNoOp(t *testing.T) {
 
 func TestRecoverUnstartedClassifiesEveryLostGuard(t *testing.T) {
 	t.Parallel()
-	processing := core.ProcessingJob{Job: core.Job{ID: testJobID}, ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
+	processing := retryProcessingJob()
+	processing.InventoryEndpointID = "docker:member-a"
 	tests := map[string]struct {
 		row  Row
 		want core.RetryOutcome
 	}{
-		"missing":                    {row: Row{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
-		"runner started":             {row: rowFromValues(claimedOutcomeValues(true, false)), want: core.RetryRunnerStarted},
-		"source terminal":            {row: rowFromValues(claimedOutcomeValues(false, true)), want: core.RetrySourceTerminal},
-		"terminal wins over started": {row: rowFromValues(claimedOutcomeValues(true, true)), want: core.RetrySourceTerminal},
-		"claim changed":              {row: rowFromValues(claimedOutcomeValues(false, false)), want: core.RetryClaimChanged},
+		"missing":                     {row: Row{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
+		"runner accepted":             {row: rowFromValues(claimedOutcomeValues(true, false)), want: core.RetryRunnerAccepted},
+		"source terminal":             {row: rowFromValues(claimedOutcomeValues(false, true)), want: core.RetrySourceTerminal},
+		"terminal wins over accepted": {row: rowFromValues(claimedOutcomeValues(true, true)), want: core.RetrySourceTerminal},
+		"claim changed":               {row: rowFromValues(claimedOutcomeValues(false, false)), want: core.RetryClaimChanged},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			commits := 0
 			transaction := Transaction{execute: outcomeExecute(0), queryRow: constantRow(test.row),
+				commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
+			result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+				RecoverUnstartedProcessing(context.Background(), processing)
+			if err != nil || result.Outcome != test.want || commits != 1 {
+				t.Fatalf("recovery = (%#v, %v), commits=%d", result, err, commits)
+			}
+		})
+	}
+}
+
+func TestRecoverUnstartedPreservesProvisioningFailurePhase(t *testing.T) {
+	t.Parallel()
+	processing := retryProcessingJob()
+	processing.InventoryEndpointID = "docker:member-a"
+	for name, test := range map[string]struct {
+		state core.ProvisioningFailureState
+		want  core.RetryOutcome
+	}{
+		"reporting": {state: core.ProvisioningFailureReporting, want: core.RetryFailureReportingPending},
+		"reported":  {state: core.ProvisioningFailureReported, want: core.RetryFailureFinalizationPending},
+	} {
+		t.Run(name, func(t *testing.T) {
+			commits := 0
+			transaction := Transaction{execute: outcomeExecute(0), queryRow: constantRow(rowFromValues(claimedFailureStateValues(test.state))),
 				commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
 			result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 				RecoverUnstartedProcessing(context.Background(), processing)
@@ -113,7 +142,7 @@ func TestRetryRollsBackWhenProcessingOwnershipWasNotDeleted(t *testing.T) {
 			return Result{rowsAffected: func() (int64, error) { return rows, nil }}, nil
 		}, commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion}
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil || commits != 0 {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil || commits != 0 {
 		t.Fatalf("retry ownership deletion error = %v, commits=%d", err, commits)
 	}
 }
@@ -133,7 +162,7 @@ func TestRetryClassifiesSourceTerminalAfterGuardedRequeueLoses(t *testing.T) {
 		execute: outcomeExecute(0), commit: successfulCompletion, rollback: successfulCompletion,
 	}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID)
+		RetryUnstarted(context.Background(), retryProcessingJob())
 	if err != nil || result.Outcome != core.RetrySourceTerminal {
 		t.Fatalf("retry = (%#v, %v)", result, err)
 	}
@@ -157,16 +186,28 @@ func TestRecoveryRollsBackWhenProcessingOwnershipWasNotDeleted(t *testing.T) {
 	}
 }
 
-func processingOutcomeValues(started, terminal bool) []any {
-	values := processingJobValues()
-	values[6], values[7] = started, terminal
+func processingOutcomeValues(accepted, terminal bool) []any {
+	values := claimedProcessingJobValues()
+	values[8], values[9] = accepted, terminal
 	return values
 }
 
-func claimedOutcomeValues(started, terminal bool) []any {
+func claimedOutcomeValues(accepted, terminal bool) []any {
 	return []any{testJobIDText, "github", "request-3", "linux", string(testMemberID),
-		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(),
-		"docker:member-a", started, terminal}
+		string(core.AttemptRunnerName(testJobID, core.AttemptID{1})), fixedTime().UnixNano(),
+		"docker:member-a", accepted, terminal, ""}
+}
+
+func processingFailureStateValues(status core.ProvisioningFailureState) []any {
+	values := processingOutcomeValues(false, false)
+	values[10] = string(status)
+	return values
+}
+
+func claimedFailureStateValues(status core.ProvisioningFailureState) []any {
+	values := claimedOutcomeValues(false, false)
+	values[10] = string(status)
+	return values
 }
 
 func outcomeExecute(rows int64) func(context.Context, string, ...any) (Result, error) {

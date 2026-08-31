@@ -12,7 +12,7 @@ import (
 )
 
 func TestGitHubSourceRuntimeCoversInactiveCleanupPaths(t *testing.T) {
-	source := newGitHubSourceRuntime(branchGitHubManager(), &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(branchGitHubManager(), &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	if err := source.Poll(context.Background(), time.Time{}); err != nil {
 		t.Fatalf("inactive Poll() error = %v", err)
@@ -68,7 +68,7 @@ func TestGitHubSourceRuntimeStopsOnlySelectedPolls(t *testing.T) {
 
 func TestGitHubSourceRuntimeRetriesSessionRetirement(t *testing.T) {
 	manager := branchGitHubManager()
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	session := openBranchSession(t, manager)
 	manager.setCloseError(errors.New("close failed"))
@@ -102,7 +102,7 @@ func TestGitHubSourceRuntimeRejectsStaleOpenResult(t *testing.T) {
 	manager := branchGitHubManager()
 	record := manager.snapshotFacts().Active[0]
 	session := openBranchSession(t, manager)
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(2)
 	source.term = term
@@ -120,7 +120,7 @@ func TestGitHubSourceRuntimeRejectsChangedRouteIdentityAndRetainsFailedCleanup(t
 	requested := session.Registration()
 	requested.RunnerPool = "windows"
 	key := registrationKey(requested)
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	source.term = term
@@ -146,7 +146,7 @@ func TestGitHubSourceRuntimeRejectsReplacementWhenOldPollCannotStop(t *testing.T
 	record := manager.snapshotFacts().Active[0]
 	previous := openBranchSession(t, manager)
 	replacement := openBranchSession(t, manager)
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	source.term = term
@@ -172,7 +172,7 @@ func TestGitHubSourceRuntimeRetiresOnlyRemovedRegistration(t *testing.T) {
 	record := manager.snapshotFacts().Active[0]
 	retained := openBranchSession(t, manager)
 	removed := openBranchSession(t, manager)
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	retainedKey := githubRegistrationKey{repository: "retained", runnerPool: record.RunnerPool}
 	removedKey := githubRegistrationKey{repository: "removed", runnerPool: record.RunnerPool}
@@ -200,7 +200,7 @@ func TestGitHubSourceRuntimeRetiresOnlyRemovedRegistration(t *testing.T) {
 
 func TestGitHubSourceRuntimeBoundsSessionRetirementWork(t *testing.T) {
 	manager := branchGitHubManager()
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	for range githubSessionRetirementLimit + 2 {
 		source.retiring = append(source.retiring, openBranchSession(t, manager))
@@ -271,7 +271,7 @@ func TestGitHubSourceRuntimeReportsConflictsWithoutBlockingOtherDeclarations(t *
 func newDeclarationTestSource() (*declarationRuntimeFake, *githubSourceRuntime) {
 	base := &githubManagerFake{}
 	manager := &declarationRuntimeFake{githubManagerRuntime: base, base: base}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	return manager, source
 }
@@ -319,7 +319,7 @@ func TestGitHubSourceRuntimeRetainsRemovedSessionWhenPollCannotStop(t *testing.T
 	manager := branchGitHubManager()
 	session := openBranchSession(t, manager)
 	key := registrationKey(session.Registration())
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	source.sessions[key] = session
 	source.polls[session.Adapter()] = &githubPollAttempt{cancel: func() {}, result: make(chan githubPollResult)}
@@ -338,7 +338,7 @@ func TestGitHubSourceRuntimeRetainsRemovedSessionWhenPollCannotStop(t *testing.T
 
 func TestGitHubSourceRuntimeCoversStaleDiscoveryAndCanceledDrain(t *testing.T) {
 	manager := branchGitHubManager()
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(2)
 	source.term = term
@@ -364,7 +364,7 @@ func TestGitHubSourceRuntimeAbandonsSessionCanceledAfterOpening(t *testing.T) {
 	record := manager.snapshotFacts().Active[0]
 	session := openBranchSession(t, manager)
 	staticManager := &staticRegistrationSessionManager{githubManagerRuntime: manager, session: session}
-	source := newGitHubSourceRuntime(staticManager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(staticManager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	term.background.Add(1)
@@ -384,7 +384,7 @@ func TestGitHubSourceRuntimeAbandonsSessionCanceledDuringResultDelivery(t *testi
 	record := manager.snapshotFacts().Active[0]
 	session := openBranchSession(t, manager)
 	staticManager := &staticRegistrationSessionManager{githubManagerRuntime: manager, session: session}
-	source := newGitHubSourceRuntime(staticManager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(staticManager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	for range cap(term.openResults) {
@@ -407,7 +407,7 @@ func TestGitHubSourceRuntimeAbandonsSessionCanceledDuringResultDelivery(t *testi
 func TestGitHubSourceRuntimeStopsOpeningWhileWaitingForSlot(t *testing.T) {
 	manager := branchGitHubManager()
 	record := manager.snapshotFacts().Active[0]
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	term := branchLeadershipTerm(1)
 	for range cap(term.openSlots) {
@@ -428,7 +428,7 @@ func TestGitHubSourceRuntimeStopsOpeningWhileWaitingForSlot(t *testing.T) {
 
 func branchGitHubManager() *githubManagerFake {
 	return &githubManagerFake{adapters: []*githubsource.Adapter{{
-		Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{},
+		Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{},
 		Repository: "repository", RunnerPool: core.RunnerPool("linux"),
 	}}}
 }
@@ -443,7 +443,9 @@ func openBranchSession(t *testing.T, manager *githubManagerFake) *githubsource.R
 	t.Helper()
 	record := manager.snapshotFacts().Active[0]
 	configured := managerConfigForAdapters(manager.adapters).RunnerPools[0]
-	session, err := manager.OpenRegistrationSession(context.Background(), record, configured, "member", eventHandlerFake{})
+	session, err := manager.OpenSourceRegistrationSession(
+		context.Background(), record, configured, "member", eventHandlerFake{}, eventHandlerFake{},
+	)
 	if err != nil {
 		t.Fatalf("open test registration session: %v", err)
 	}
@@ -455,12 +457,13 @@ type staticRegistrationSessionManager struct {
 	session *githubsource.RegistrationSession
 }
 
-func (manager *staticRegistrationSessionManager) OpenRegistrationSession(
+func (manager *staticRegistrationSessionManager) OpenSourceRegistrationSession(
 	context.Context,
 	githubsource.Registration,
 	githubsource.RunnerPoolConfig,
 	string,
-	githubsource.EventHandler,
+	core.SourceEventHandler,
+	githubsource.AssignedDemandHandler,
 ) (*githubsource.RegistrationSession, error) {
 	return manager.session, nil
 }

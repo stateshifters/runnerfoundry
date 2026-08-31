@@ -18,7 +18,7 @@ func TestGitHubSourceRuntimeReportsAggregateCapacityOnlyWhenItChanges(t *testing
 	}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}},
 		"member", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	var events []progressEventEnvelope
 	source.report = func(err error) {

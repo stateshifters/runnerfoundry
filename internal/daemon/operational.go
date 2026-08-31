@@ -299,9 +299,14 @@ func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event
 }
 
 func operationalFailureKey(event operationalEvent) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d", event.component, event.operation, event.stage,
+	jobID := ""
+	if event.operation == "provisioning_failure" ||
+		(event.operation == "job_processing" && event.stage == provisioningFailureFinalizationStage) {
+		jobID = event.jobID.String()
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d|%s", event.component, event.operation, event.stage,
 		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation,
-		event.githubAppID)
+		event.githubAppID, jobID)
 }
 
 func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event operationalEvent, extra []slog.Attr) {

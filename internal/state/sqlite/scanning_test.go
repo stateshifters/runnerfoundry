@@ -19,7 +19,7 @@ func TestJobScannersRejectInvalidPersistedUUIDs(t *testing.T) {
 		t.Fatal("expected invalid processing job UUID")
 	}
 	invalidClaimedProcessingJob := []any{"invalid", "github", "request-3", "linux", testMemberIDText,
-		"runnerfoundry-invalid", fixedTime().UnixNano(), "docker:member-a", false, false}
+		"external-runner", fixedTime().UnixNano(), "docker:member-a", false, false, ""}
 	if _, err := scanClaimedProcessingJob(rowFromValues(invalidClaimedProcessingJob)); err == nil {
 		t.Fatal("expected invalid claimed processing job UUID")
 	}

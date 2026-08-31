@@ -306,7 +306,7 @@ func e2eAssertReloadPolicyOutcome(
 		t.Fatalf("%s reload destroys = %d, want %d; processing=%+v processing_error=%v instances=%+v inspect_error=%v",
 			policy, destroys, wantDestroys, processing, err, instances, inspectErr)
 	}
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted {
 		t.Fatalf("%s reload processing = %+v, error = %v", policy, processing, err)
 	}
 }
@@ -361,7 +361,7 @@ func e2eAssertApplicationUnstartedProcessing(
 ) {
 	t.Helper()
 	processing := e2eLoadSingleApplicationProcessing(t, application, jobID)
-	if processing.RunnerStarted {
+	if processing.RunnerAccepted {
 		t.Fatalf("reload processing unexpectedly records runner started: %+v", processing)
 	}
 }
@@ -373,7 +373,7 @@ func e2eAssertApplicationStartedProcessing(
 ) {
 	t.Helper()
 	processing := e2eLoadSingleApplicationProcessing(t, application, jobID)
-	if !processing.RunnerStarted {
+	if !processing.RunnerAccepted {
 		t.Fatalf("reload processing does not record runner started: %+v", processing)
 	}
 }

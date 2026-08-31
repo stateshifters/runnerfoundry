@@ -94,7 +94,7 @@ func assertTerminalProcessingRetained(t *testing.T, harness *e2eHarness, wantJob
 		"linux",
 	)
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID ||
-		!processing[0].RunnerStarted || !processing[0].SourceTerminal {
+		!processing[0].RunnerAccepted || !processing[0].SourceTerminal {
 		t.Fatalf("terminal processing retained after interrupted cleanup = %s, error = %v",
 			describeProcessing(processing), err)
 	}

@@ -61,7 +61,7 @@ func TestLifecycleObservationRejectsMismatchedSourceAndJobIDAtomically(t *testin
 	executions, commits, rollbacks := 0, 0, 0
 	transaction := mismatchedLifecycleTransaction(&executions, &commits, &rollbacks)
 	identity := core.JobIdentity{Source: core.SourceReference{Adapter: "github", ID: "different"}, JobID: testJobID}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(
 		context.Background(), identity,
 	)
 	if !errors.Is(err, core.ErrJobIdentityMismatch) || result.Outcome != "" {
@@ -88,8 +88,8 @@ func mismatchedLifecycleTransaction(executions, commits, rollbacks *int) Transac
 
 func TestLifecycleObservationsByMissingJobIDAreUnmatched(t *testing.T) {
 	t.Parallel()
-	assertMissingJobObservation(t, "started", func(store *Store) (core.ObservationResult, error) {
-		return store.MarkRunnerStarted(context.Background(), core.JobIdentity{JobID: testJobID})
+	assertMissingJobObservation(t, "accepted", func(store *Store) (core.ObservationResult, error) {
+		return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{JobID: testJobID})
 	})
 	assertMissingJobObservation(t, "terminal", func(store *Store) (core.ObservationResult, error) {
 		return store.Terminalize(context.Background(), core.JobIdentity{JobID: testJobID})
@@ -121,18 +121,184 @@ func missingLifecycleJobTransaction(commit func(context.Context) error) Transact
 	}
 }
 
-func TestRunnerStartedObservationByJobIDUsesTheDurableSource(t *testing.T) {
+func TestRunnerAcceptedObservationByJobIDUsesTheDurableSource(t *testing.T) {
 	t.Parallel()
 	mutationArguments := [][]any{}
-	transaction := startedLifecycleTransaction(&mutationArguments)
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(
+	transaction := acceptedLifecycleTransaction(&mutationArguments)
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(
 		context.Background(), core.JobIdentity{JobID: testJobID},
 	)
 	assertObservationOutcome(t, result, err, core.ObservationApplied)
 	assertResolvedLifecycleSource(t, mutationArguments[0])
 }
 
-func startedLifecycleTransaction(arguments *[][]any) Transaction {
+func TestRunnerAcceptedObservationGuardsTheExactAttempt(t *testing.T) {
+	t.Parallel()
+	attemptID := core.AttemptID{1}
+	statements, arguments := []string{}, [][]any{}
+	transaction := recordingLifecycleTransaction(&statements, &arguments)
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(
+		context.Background(), core.JobIdentity{JobID: testJobID, AttemptID: attemptID},
+	)
+	assertObservationOutcome(t, result, err, core.ObservationApplied)
+	wantRunnerName := core.AttemptRunnerName(testJobID, attemptID)
+	if !strings.Contains(statements[1], "runner_name") || len(arguments[1]) < 5 || arguments[1][2] != wantRunnerName {
+		t.Fatalf("acceptance statement = %q, arguments = %#v", statements[1], arguments[1])
+	}
+}
+
+func TestRunnerAcceptedObservationForAnotherAttemptIsUnmatched(t *testing.T) {
+	t.Parallel()
+	statements := make([]string, 0, 1)
+	rows := []Row{
+		rowFromValues([]any{"github", "request-3"}),
+		rowFromValues([]any{false}),
+		rowFromValues([]any{false}),
+	}
+	zeroResult := Result{rowsAffected: func() (int64, error) { return 0, nil }}
+	transaction := Transaction{
+		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+			statements = append(statements, statement)
+			return zeroResult, nil
+		},
+		queryRow: func(context.Context, string, ...any) Row {
+			row := rows[0]
+			rows = rows[1:]
+			return row
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(
+		context.Background(), core.JobIdentity{JobID: testJobID, AttemptID: core.AttemptID{2}},
+	)
+	assertObservationOutcome(t, result, err, core.ObservationUnmatched)
+	if len(statements) != 1 || !strings.Contains(statements[0], "UPDATE runnerfoundry_processing_jobs") ||
+		strings.Contains(statements[0], "INSERT INTO runnerfoundry_source_tombstones") ||
+		strings.Contains(statements[0], "DELETE FROM runnerfoundry_queued_jobs") {
+		t.Fatalf("stale attempt mutations = %#v", statements)
+	}
+}
+
+func TestTerminalObservationForAnotherAttemptDoesNotTerminalizeQueuedRetry(t *testing.T) {
+	t.Parallel()
+	statements := make([]string, 0)
+	rows := []Row{
+		rowFromValues([]any{"github", "request-3"}),
+		rowFromValues([]any{false}),
+		rowFromValues([]any{false}),
+	}
+	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row {
+			row := rows[0]
+			rows = rows[1:]
+			return row
+		},
+		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+			statements = append(statements, statement)
+			return successfulResult(), nil
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Terminalize(
+		context.Background(), core.JobIdentity{JobID: testJobID, AttemptID: core.AttemptID{2}},
+	)
+	assertObservationOutcome(t, result, err, core.ObservationUnmatched)
+	if len(statements) != 0 {
+		t.Fatalf("stale terminal attempt mutations = %#v", statements)
+	}
+}
+
+func TestTerminalObservationForExactAttemptTerminalizesSource(t *testing.T) {
+	t.Parallel()
+	statements := make([]string, 0, 2)
+	arguments := make([][]any, 0, 2)
+	rows := []Row{
+		rowFromValues([]any{"github", "request-3"}),
+		rowFromValues([]any{true}),
+	}
+	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row {
+			row := rows[0]
+			rows = rows[1:]
+			return row
+		},
+		execute: func(_ context.Context, statement string, supplied ...any) (Result, error) {
+			statements = append(statements, statement)
+			arguments = append(arguments, supplied)
+			return successfulResult(), nil
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	attemptID := core.AttemptID{2}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Terminalize(
+		context.Background(), core.JobIdentity{JobID: testJobID, AttemptID: attemptID},
+	)
+	assertObservationOutcome(t, result, err, core.ObservationApplied)
+	if len(statements) != 2 || len(arguments) != 2 {
+		t.Fatalf("terminal attempt mutations = %#v %#v", statements, arguments)
+	}
+}
+
+func TestTerminalObservationForCompletedAttemptIsReplay(t *testing.T) {
+	t.Parallel()
+	rows := []Row{
+		{scan: func(...any) error { return sql.ErrNoRows }},
+		rowFromValues([]any{false}),
+		rowFromValues([]any{true}),
+	}
+	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row {
+			row := rows[0]
+			rows = rows[1:]
+			return row
+		},
+		execute: func(context.Context, string, ...any) (Result, error) {
+			return Result{}, errors.New("terminal replay mutated state")
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Terminalize(
+		context.Background(), core.JobIdentity{Source: sqliteLifecycleSource, JobID: testJobID, AttemptID: core.AttemptID{2}},
+	)
+	assertObservationOutcome(t, result, err, core.ObservationAlreadyApplied)
+}
+
+func TestAttemptQualifiedTerminalObservationReportsClassificationFailures(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	for name, rows := range map[string][]Row{
+		"attempt lookup": {
+			rowFromValues([]any{"github", "request-3"}),
+			rowFromError(protocolErr),
+		},
+		"tombstone lookup": {
+			rowFromValues([]any{"github", "request-3"}),
+			rowFromValues([]any{false}),
+			rowFromError(protocolErr),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transaction := Transaction{
+				queryRow: func(context.Context, string, ...any) Row {
+					row := rows[0]
+					rows = rows[1:]
+					return row
+				},
+				execute: func(context.Context, string, ...any) (Result, error) {
+					return Result{}, errors.New("classification failure mutated state")
+				},
+				rollback: successfulCompletion,
+			}
+			if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Terminalize(
+				context.Background(), core.JobIdentity{JobID: testJobID, AttemptID: core.AttemptID{2}},
+			); !errors.Is(err, protocolErr) {
+				t.Fatalf("Terminalize() error = %v, want %v", err, protocolErr)
+			}
+		})
+	}
+}
+
+func acceptedLifecycleTransaction(arguments *[][]any) Transaction {
 	return Transaction{
 		queryRow: func(context.Context, string, ...any) Row {
 			return rowFromValues([]any{"github", "request-3"})
@@ -145,32 +311,43 @@ func startedLifecycleTransaction(arguments *[][]any) Transaction {
 	}
 }
 
-func TestRunnerStartedObservationDistinguishesReplayFromMissingState(t *testing.T) {
+func TestRunnerAcceptedObservationDistinguishesReplayFromMissingState(t *testing.T) {
 	t.Parallel()
-	assertUnchangedStartedOutcome(t, "missing", false, core.ObservationUnmatched)
-	assertUnchangedStartedOutcome(t, "terminal replay", true, core.ObservationAlreadyApplied)
+	assertUnchangedAcceptanceOutcome(t, "missing", []Row{
+		rowFromValues([]any{false}), rowFromValues([]any{false}),
+	}, core.ObservationUnmatched)
+	assertUnchangedAcceptanceOutcome(t, "terminal replay", []Row{
+		rowFromValues([]any{true}),
+	}, core.ObservationAlreadyApplied)
+	assertUnchangedAcceptanceOutcome(t, "accepted processing replay", []Row{
+		rowFromValues([]any{false}), rowFromValues([]any{true}),
+	}, core.ObservationAlreadyApplied)
 }
 
-func assertUnchangedStartedOutcome(
+func assertUnchangedAcceptanceOutcome(
 	t *testing.T,
 	name string,
-	tombstoned bool,
+	classifications []Row,
 	want core.ObservationOutcome,
 ) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
-		transaction := unchangedStartedTransaction(rowFromValues([]any{tombstoned}), successfulCompletion)
-		result, err := observeStartedSource(transaction)
+		transaction := unchangedAcceptanceTransaction(classifications, successfulCompletion)
+		result, err := observeAcceptedSource(transaction)
 		assertObservationOutcome(t, result, err, want)
 	})
 }
 
-func unchangedStartedTransaction(classification Row, commit func(context.Context) error) Transaction {
+func unchangedAcceptanceTransaction(classifications []Row, commit func(context.Context) error) Transaction {
 	zeroResult := Result{rowsAffected: func() (int64, error) { return 0, nil }}
 	return Transaction{
-		execute:  func(context.Context, string, ...any) (Result, error) { return zeroResult, nil },
-		queryRow: func(context.Context, string, ...any) Row { return classification },
-		commit:   commit, rollback: successfulCompletion,
+		execute: func(context.Context, string, ...any) (Result, error) { return zeroResult, nil },
+		queryRow: func(context.Context, string, ...any) Row {
+			classification := classifications[0]
+			classifications = classifications[1:]
+			return classification
+		},
+		commit: commit, rollback: successfulCompletion,
 	}
 }
 
@@ -215,22 +392,22 @@ func assertTerminalObservationFails(t *testing.T, transaction Transaction, ident
 	}
 }
 
-func TestRunnerStartedObservationReportsMutationResultFailures(t *testing.T) {
+func TestRunnerAcceptedObservationReportsMutationResultFailures(t *testing.T) {
 	t.Parallel()
-	assertStartedMutationResultFails(t, "started result", 1)
-	assertStartedMutationResultFails(t, "delayed-start tombstone result", 2)
-	assertStartedMutationResultFails(t, "queued removal result", 3)
+	assertAcceptedMutationResultFails(t, "accepted result", 1)
+	assertAcceptedMutationResultFails(t, "delayed-acceptance tombstone result", 2)
+	assertAcceptedMutationResultFails(t, "queued removal result", 3)
 }
 
-func assertStartedMutationResultFails(t *testing.T, name string, failureCall int) {
+func assertAcceptedMutationResultFails(t *testing.T, name string, failureCall int) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
-		transaction := startedResultFailureTransaction(failureCall, errors.New("protocol"))
-		assertRunnerStartedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
+		transaction := acceptedResultFailureTransaction(failureCall, errors.New("protocol"))
+		assertRunnerAcceptedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
 	})
 }
 
-func startedResultFailureTransaction(failureCall int, protocolErr error) Transaction {
+func acceptedResultFailureTransaction(failureCall int, protocolErr error) Transaction {
 	executeCalls := 0
 	return Transaction{
 		execute: func(ctx context.Context, statement string, arguments ...any) (Result, error) {
@@ -248,29 +425,41 @@ func zeroRowsAffected(context.Context, string, ...any) (Result, error) {
 	return Result{rowsAffected: func() (int64, error) { return 0, nil }}, nil
 }
 
-func TestRunnerStartedObservationReportsCommitFailure(t *testing.T) {
+func TestRunnerAcceptedObservationReportsCommitFailure(t *testing.T) {
 	t.Parallel()
-	transaction := unchangedStartedTransaction(rowFromValues([]any{false}), failingCompletion(errors.New("protocol")))
-	assertRunnerStartedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
+	transaction := unchangedAcceptanceTransaction(
+		[]Row{rowFromValues([]any{false}), rowFromValues([]any{false})},
+		failingCompletion(errors.New("protocol")),
+	)
+	assertRunnerAcceptedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
 }
 
-func TestRunnerStartedObservationReportsClassificationFailure(t *testing.T) {
+func TestRunnerAcceptedObservationReportsClassificationFailure(t *testing.T) {
 	t.Parallel()
-	transaction := unchangedStartedTransaction(rowFromError(errors.New("protocol")), successfulCompletion)
-	assertRunnerStartedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
+	transaction := unchangedAcceptanceTransaction([]Row{rowFromError(errors.New("protocol"))}, successfulCompletion)
+	assertRunnerAcceptedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
 }
 
-func TestRunnerStartedObservationReportsUnmatchedCommitFailure(t *testing.T) {
+func TestRunnerAcceptedObservationReportsAcceptedProcessingLookupFailure(t *testing.T) {
+	t.Parallel()
+	transaction := unchangedAcceptanceTransaction(
+		[]Row{rowFromValues([]any{false}), rowFromError(errors.New("protocol"))},
+		successfulCompletion,
+	)
+	assertRunnerAcceptedObservationFails(t, transaction, core.JobIdentity{Source: sqliteLifecycleSource})
+}
+
+func TestRunnerAcceptedObservationReportsUnmatchedCommitFailure(t *testing.T) {
 	t.Parallel()
 	transaction := missingLifecycleJobTransaction(failingCompletion(errors.New("protocol")))
-	assertRunnerStartedObservationFails(t, transaction, core.JobIdentity{JobID: testJobID})
+	assertRunnerAcceptedObservationFails(t, transaction, core.JobIdentity{JobID: testJobID})
 }
 
-func assertRunnerStartedObservationFails(t *testing.T, transaction Transaction, identity core.JobIdentity) {
+func assertRunnerAcceptedObservationFails(t *testing.T, transaction Transaction, identity core.JobIdentity) {
 	t.Helper()
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		MarkRunnerStarted(context.Background(), identity); err == nil {
-		t.Fatal("expected runner-start observation failure")
+		ObserveRunnerAcceptance(context.Background(), identity); err == nil {
+		t.Fatal("expected runner-acceptance observation failure")
 	}
 }
 
@@ -290,9 +479,9 @@ func failedRowsAffected(protocolErr error) func(context.Context, string, ...any)
 	}
 }
 
-func observeStartedSource(transaction Transaction) (core.ObservationResult, error) {
+func observeAcceptedSource(transaction Transaction) (core.ObservationResult, error) {
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: sqliteLifecycleSource})
+	return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: sqliteLifecycleSource})
 }
 
 func assertObservationOutcome(

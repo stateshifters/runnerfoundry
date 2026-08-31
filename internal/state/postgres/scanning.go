@@ -19,32 +19,21 @@ func scanQueuedJob(row scanner) (core.Job, error) {
 	return job, nil
 }
 
-func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
-	var processing core.ProcessingJob
-	var sourceAdapter, sourceIdentifier, runnerPool, runnerName string
-	if err := row.Scan(&processing.Job.ID, &sourceAdapter, &sourceIdentifier,
-		&runnerPool, &processing.MemberID, &runnerName,
-		&processing.RunnerStarted, &processing.SourceTerminal); err != nil {
-		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
-	}
-	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
-	processing.RunnerName = core.RunnerName(runnerName)
-	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
-	return processing, nil
-}
-
 func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var sourceAdapter, sourceIdentifier, runnerPool, runnerName string
+	var runnerAccepted bool
+	var sourceAdapter, sourceIdentifier, runnerPool, runnerName, provisioningFailure string
 	if err := row.Scan(&processing.Job.ID, &sourceAdapter, &sourceIdentifier,
 		&runnerPool, &processing.MemberID, &runnerName,
 		&processing.ClaimedAt, &processing.InventoryEndpointID,
-		&processing.RunnerStarted, &processing.SourceTerminal); err != nil {
+		&runnerAccepted, &processing.SourceTerminal, &provisioningFailure); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
 	}
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.RunnerName = core.RunnerName(runnerName)
 	processing.Job.Source = core.SourceReference{Adapter: core.SourceAdapter(sourceAdapter), ID: core.SourceIdentifier(sourceIdentifier)}
+	processing.RunnerAccepted = runnerAccepted
+	processing.ProvisioningFailure = core.ProvisioningFailureState(provisioningFailure)
 	return processing, nil
 }
 

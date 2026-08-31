@@ -89,7 +89,7 @@ func (provider LibvirtProvider) Start(ctx context.Context, request StartRequest)
 	err := provider.provider.Start(ctx, providerlibvirt.StartRequest{
 		RunnerPoolName: string(request.RunnerPool),
 		RunnerName:     string(request.RunnerName),
-		JITConfig:      string(request.Bootstrap.content),
+		JITConfig:      string(request.Bootstrap.Content()),
 	})
 	if err != nil {
 		return fmt.Errorf("start libvirt runner: %w", err)

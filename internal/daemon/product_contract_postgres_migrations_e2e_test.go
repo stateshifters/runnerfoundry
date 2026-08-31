@@ -22,14 +22,14 @@ func TestProductContractPostgresMigrationsRoundTripOnIsolatedDatabase(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), e2eWaitLimit)
 	defer cancel()
 	target := migratePostgresUp(ctx, t, store)
-	representative := populateCurrentPostgresState(ctx, t, store)
+	populateCurrentPostgresState(ctx, t, store)
 	if err := fixture.e2ePostgresAssertStableRoleOwnership(ctx); err != nil {
 		t.Fatalf("verify migrated PostgreSQL stable-role ownership: %v", err)
 	}
 	migratePostgresDown(ctx, t, store, target)
 	assertVersionOnePostgresState(ctx, t, store)
 	remigratePostgres(ctx, t, store, target)
-	assertMigratedPostgresState(ctx, t, store, representative)
+	assertMigratedPostgresState(ctx, t, store)
 	if err := fixture.e2ePostgresAssertStableRoleOwnership(ctx); err != nil {
 		t.Fatalf("verify remigrated PostgreSQL stable-role ownership: %v", err)
 	}
@@ -141,7 +141,7 @@ func postgresRelationExists(ctx context.Context, t *testing.T, pool *pgxpool.Poo
 func assertVersionOnePostgresDurableState(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
-	assertMigratedQueueClassifications(ctx, t, store)
+	assertMigratedQueueClassifications(ctx, t, store, core.QueueProcessing)
 	var registrations int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.runnerfoundry_github_registrations`).Scan(&registrations); err != nil {
 		t.Fatalf("count version-one registrations after rollback: %v", err)
@@ -161,7 +161,6 @@ func assertMigratedPostgresState(
 	ctx context.Context,
 	t *testing.T,
 	clusterStore *cluster.Store,
-	representative migrationRepresentativeState,
 ) {
 	t.Helper()
 	pool, err := clusterStore.OpenPool(ctx)
@@ -170,19 +169,9 @@ func assertMigratedPostgresState(
 	}
 	t.Cleanup(pool.Close)
 	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
-	assertMigratedQueueClassifications(ctx, t, store)
-	assertRemigratedProcessing(ctx, t, store, representative.processingJobID)
+	assertMigratedQueueClassifications(ctx, t, store, core.QueueQueued)
 	assertRemigratedGitHubState(ctx, t, store)
 	assertRemigratedCapacity(ctx, t, store)
-}
-
-func assertRemigratedProcessing(ctx context.Context, t *testing.T, store *postgresstate.Store, jobID core.JobID) {
-	t.Helper()
-	processing, err := store.ProcessingByMember(ctx, "upgrade-member", "linux")
-	wantRunnerName := core.RunnerName("runnerfoundry-" + jobID.String())
-	if err != nil || len(processing) != 1 || processing[0].RunnerName != wantRunnerName || !processing[0].RunnerStarted {
-		t.Fatalf("migrated processing = %+v, error = %v", processing, err)
-	}
 }
 
 func assertRemigratedGitHubState(
@@ -210,10 +199,15 @@ func assertRemigratedCapacity(ctx context.Context, t *testing.T, store *postgres
 	}
 }
 
-func assertMigratedQueueClassifications(ctx context.Context, t *testing.T, store *postgresstate.Store) {
+func assertMigratedQueueClassifications(
+	ctx context.Context,
+	t *testing.T,
+	store *postgresstate.Store,
+	processingOutcome core.QueueOutcome,
+) {
 	t.Helper()
 	for sourceID, want := range map[string]core.QueueOutcome{
-		"upgrade-queued": core.QueueAlreadyQueued, "upgrade-processing": core.QueueProcessing,
+		"upgrade-queued": core.QueueAlreadyQueued, "upgrade-processing": processingOutcome,
 		"upgrade-terminal": core.QueueSourceTerminal,
 	} {
 		result, err := store.Queue(ctx, core.JobRequest{

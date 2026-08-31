@@ -165,7 +165,7 @@ func assertRestartReconciliationProcessing(
 	if err != nil || len(processing) != 1 {
 		t.Fatalf("restart reconciliation %s processing = %+v, error = %v", runnerPool, processing, err)
 	}
-	if processing[0].Job.ID != want.jobID || processing[0].RunnerStarted != want.runnerStarted {
+	if processing[0].Job.ID != want.jobID || processing[0].RunnerAccepted != want.runnerStarted {
 		t.Fatalf("restart reconciliation %s processing = %+v, want job %s started=%t",
 			runnerPool, processing[0], want.jobID, want.runnerStarted)
 	}

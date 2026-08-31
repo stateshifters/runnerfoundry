@@ -81,14 +81,14 @@ func assertGitHubDemandLifecycleSuccess(
 	observation core.RunnerObservation,
 ) {
 	t.Helper()
-	if result, err := handler.Request(context.Background(), request); err != nil || result.Outcome != core.QueueQueued {
+	if result, err := handler.IngestDemand(context.Background(), request); err != nil || result.Outcome != core.QueueQueued {
 		t.Fatalf("request = (%#v, %v)", result, err)
 	}
-	if result, err := handler.RunnerStarted(context.Background(), observation); err != nil ||
+	if result, err := handler.ObserveRunnerAcceptance(context.Background(), observation); err != nil ||
 		result.Outcome != core.ObservationApplied {
-		t.Fatalf("runner started = (%#v, %v)", result, err)
+		t.Fatalf("runner acceptance = (%#v, %v)", result, err)
 	}
-	if result, err := handler.Terminalize(context.Background(), observation); err != nil ||
+	if result, err := handler.ObserveTerminal(context.Background(), observation); err != nil ||
 		result.Outcome != core.ObservationApplied {
 		t.Fatalf("terminalize = (%#v, %v)", result, err)
 	}
@@ -102,13 +102,13 @@ func assertGitHubDemandLifecycleFailure(
 	wantErr error,
 ) {
 	t.Helper()
-	if _, err := handler.Request(context.Background(), request); !errors.Is(err, wantErr) {
+	if _, err := handler.IngestDemand(context.Background(), request); !errors.Is(err, wantErr) {
 		t.Fatalf("request error = %v", err)
 	}
-	if _, err := handler.RunnerStarted(context.Background(), observation); !errors.Is(err, wantErr) {
-		t.Fatalf("runner-start error = %v", err)
+	if _, err := handler.ObserveRunnerAcceptance(context.Background(), observation); !errors.Is(err, wantErr) {
+		t.Fatalf("runner-acceptance error = %v", err)
 	}
-	if _, err := handler.Terminalize(context.Background(), observation); !errors.Is(err, wantErr) {
+	if _, err := handler.ObserveTerminal(context.Background(), observation); !errors.Is(err, wantErr) {
 		t.Fatalf("terminal error = %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func (store *githubDemandQueueStoreFake) Queue(
 	return core.EnqueueResult{Outcome: core.QueueQueued}, store.err
 }
 
-func (store *githubDemandQueueStoreFake) MarkRunnerStarted(
+func (store *githubDemandQueueStoreFake) ObserveRunnerAcceptance(
 	context.Context,
 	core.JobIdentity,
 ) (core.ObservationResult, error) {

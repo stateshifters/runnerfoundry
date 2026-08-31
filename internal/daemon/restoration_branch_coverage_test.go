@@ -143,7 +143,7 @@ func (*secondDoneCanceledContext) Value(any) any { return nil }
 func TestGitHubSourceRuntimeCoversStableAndRejectedLeadershipOpen(t *testing.T) {
 	wantErr := errors.New("snapshot failed")
 	manager := &githubManagerFake{snapshotErr: wantErr}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("OpenLeader() error = %v, want %v", err, wantErr)
@@ -161,7 +161,7 @@ func TestGitHubSourceRuntimeCoversStableAndRejectedLeadershipOpen(t *testing.T) 
 func TestGitHubSourceRuntimeIgnoresDuplicateDiscoveryAndSessionScheduling(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux"}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{{RunnerPool: "linux", Repository: "repo"}}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	term := &githubLeadershipTerm{discoveryActive: true}
 	source.startDiscovery(context.Background(), nil)

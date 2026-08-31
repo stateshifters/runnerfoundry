@@ -9,12 +9,12 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
+func TestObserveRunnerAcceptanceReportsEveryTransactionalFailure(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	assertTransactionalMutationFailures(t, []string{"serialize source", "mark processing started", "tombstone delayed start", "remove queued retry"},
+	assertTransactionalMutationFailures(t, []string{"serialize source", "mark processing accepted", "tombstone delayed acceptance", "remove queued retry"},
 		func(store *Store) error {
-			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			_, err := store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 			return err
 		})
 }
@@ -22,8 +22,8 @@ func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
 func TestLifecycleObservationsRejectInvalidIdentityBeforeMutation(t *testing.T) {
 	t.Parallel()
 	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
-		"started": func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{})
+		"accepted": func(store *Store) (core.ObservationResult, error) {
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{})
 		},
 		"terminal": func(store *Store) (core.ObservationResult, error) {
 			return store.Terminalize(context.Background(), core.JobIdentity{})
@@ -80,10 +80,10 @@ func TestLifecycleObservationReportsResolutionAndClassificationFailures(t *testi
 				return store.Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
 			},
 		},
-		"started classification": {
+		"acceptance classification": {
 			transaction: postgresOutcomeTransaction([]Row{{scan: func(...any) error { return protocolErr }}}, 0, new(int)),
 			operation: func(store *Store) (core.ObservationResult, error) {
-				return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+				return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 			},
 		},
 	} {
@@ -95,13 +95,31 @@ func TestLifecycleObservationReportsResolutionAndClassificationFailures(t *testi
 	}
 }
 
+func TestLifecycleObservationReportsJobResolutionFailureAfterSerialization(t *testing.T) {
+	t.Parallel()
+	protocolErr := errors.New("protocol")
+	source := core.SourceReference{Adapter: "github", ID: "request"}
+	transaction := transactionWithRows([]Row{
+		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
+		{scan: func(...any) error { return protocolErr }},
+	}, nil)
+
+	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).Terminalize(
+		context.Background(),
+		core.JobIdentity{JobID: testJobID1},
+	)
+	if !errors.Is(err, protocolErr) {
+		t.Fatalf("Terminalize() error = %v, want %v", err, protocolErr)
+	}
+}
+
 func TestLifecycleObservationReportsAffectedRowCountFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	source := core.SourceReference{Adapter: "github", ID: "request"}
 	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
-		"started": func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+		"accepted": func(store *Store) (core.ObservationResult, error) {
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 		},
 		"terminal": func(store *Store) (core.ObservationResult, error) {
 			return store.Terminalize(context.Background(), core.JobIdentity{Source: source})
@@ -121,8 +139,7 @@ func TestLifecycleObservationReportsAffectedRowCountFailures(t *testing.T) {
 func TestRetryUnstartedHandlesRejectedTransitions(t *testing.T) {
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	terminalValues := processingJobValues(job, testMemberIDA)
-	terminalValues[7] = true
+	terminalValues := postgresProcessingOutcomeValues(job, false, true)
 	terminal := rowFromValues(terminalValues)
 	noRow := Row{scan: func(...any) error { return sql.ErrNoRows }}
 	for name, transaction := range map[string]Transaction{
@@ -130,7 +147,7 @@ func TestRetryUnstartedHandlesRejectedTransitions(t *testing.T) {
 		"terminal": transactionWithRows([]Row{terminal}, nil),
 	} {
 		result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-			RetryUnstarted(context.Background(), testJobID1)
+			RetryUnstarted(context.Background(), retryProcessingJob())
 		want := core.RetryMissing
 		if name == "terminal" {
 			want = core.RetrySourceTerminal
@@ -145,7 +162,7 @@ func TestRetryUnstartedReportsCandidateFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	processing := rowFromValues(processingJobValues(job, testMemberIDA))
+	processing := rowFromValues(postgresProcessingOutcomeValues(job, false, false))
 	tests := []struct {
 		name        string
 		transaction Transaction
@@ -157,7 +174,7 @@ func TestRetryUnstartedReportsCandidateFailures(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
-				RetryUnstarted(context.Background(), testJobID1); err == nil {
+				RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 				t.Fatal("expected retry candidate failure")
 			}
 		})
@@ -168,11 +185,11 @@ func TestRetryUnstartedReportsRemovalFailure(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	processing := rowFromValues(processingJobValues(job, testMemberIDA))
+	processing := rowFromValues(postgresProcessingOutcomeValues(job, false, false))
 	queued := rowFromValues(queuedJobValues(testJobID1, core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool}))
 	transaction := transactionFailingAtExecuteWithRows(2, protocolErr, processing, queued)
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID1); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected retry ownership removal failure")
 	}
 }
@@ -194,7 +211,7 @@ func TestRetryUnstartedReportsRemovalCountFailure(t *testing.T) {
 		return baseExecute(ctx, statement, arguments...)
 	}
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID1); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected retry ownership count failure")
 	}
 }
@@ -206,7 +223,7 @@ func TestRetryUnstartedReportsPostSerializationClassificationFailure(t *testing.
 	rows := []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
 		{scan: func(...any) error { return protocolErr }}}
 	if _, err := NewStore(Executor{begin: transactionBeginning(postgresOutcomeTransaction(rows, 1, new(int)))}).
-		RetryUnstarted(context.Background(), testJobID1); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected post-serialization classification failure")
 	}
 }
@@ -215,7 +232,7 @@ func TestRetryUnstartedReportsCommitFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux"}
-	processing := rowFromValues(processingJobValues(job, testMemberIDA))
+	processing := rowFromValues(postgresProcessingOutcomeValues(job, false, false))
 	queued := rowFromValues(queuedJobValues(testJobID1, core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool}))
 	noRow := Row{scan: func(...any) error { return sql.ErrNoRows }}
 	tests := []struct {
@@ -229,7 +246,7 @@ func TestRetryUnstartedReportsCommitFailures(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
-				RetryUnstarted(context.Background(), testJobID1); err == nil {
+				RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 				t.Fatal("expected retry commit failure")
 			}
 		})

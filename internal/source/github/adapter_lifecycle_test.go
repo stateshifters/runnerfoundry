@@ -42,6 +42,66 @@ func TestNonActionableDemandEvidenceDoesNotBlockFollowingDurableDemand(t *testin
 	}
 }
 
+func TestSourceNeutralHandlerFailuresPreventAcknowledgement(t *testing.T) {
+	wantErr := errors.New("neutral handler failed")
+	testCases := map[string]struct {
+		message *upstream.RunnerScaleSetMessage
+		handler core.SourceEventHandler
+	}{
+		"demand": {
+			message: availableMessage(10, 42),
+			handler: sourceEventHandlerFake{ingestErr: wantErr},
+		},
+		"acceptance": {
+			message: &upstream.RunnerScaleSetMessage{MessageID: 11,
+				JobStartedMessages: []*upstream.JobStarted{{RunnerName: "external-runner"}}},
+			handler: sourceEventHandlerFake{acceptErr: wantErr},
+		},
+		"terminal": {
+			message: &upstream.RunnerScaleSetMessage{MessageID: 12,
+				JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "external-runner"}}},
+			handler: sourceEventHandlerFake{terminalErr: wantErr},
+		},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{testCase.message}, acquired: []int64{42}}
+			adapter := newAdapter(client, &recordingEventHandler{})
+			adapter.SourceEvents = testCase.handler
+			if result, err := adapter.Poll(context.Background(), 1); !errors.Is(err, wantErr) || result.Acknowledged {
+				t.Fatalf("Poll() = (%#v, %v)", result, err)
+			}
+		})
+	}
+}
+
+type sourceEventHandlerFake struct {
+	ingestErr   error
+	acceptErr   error
+	terminalErr error
+}
+
+func (handler sourceEventHandlerFake) IngestDemand(
+	context.Context,
+	core.JobRequest,
+) (core.EnqueueResult, error) {
+	return core.EnqueueResult{}, handler.ingestErr
+}
+
+func (handler sourceEventHandlerFake) ObserveRunnerAcceptance(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, handler.acceptErr
+}
+
+func (handler sourceEventHandlerFake) ObserveTerminal(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
+	return core.ObservationResult{}, handler.terminalErr
+}
+
 type runtimeCompositionFixture struct {
 	client  *recordingClient
 	store   *runtimeCompositionStore
@@ -51,7 +111,9 @@ type runtimeCompositionFixture struct {
 
 func newRuntimeCompositionFixture() runtimeCompositionFixture {
 	return newRuntimeCompositionFixtureWithMessages([]*upstream.RunnerScaleSetMessage{
-		{MessageID: 1, JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
+		{MessageID: 1,
+			JobStartedMessages:   []*upstream.JobStarted{{RunnerName: "external-runner"}},
+			JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "external-runner"}}},
 		availableMessage(2, 42),
 	})
 }
@@ -109,7 +171,7 @@ func (store *runtimeCompositionStore) Queue(_ context.Context, request core.JobR
 		Outcome: core.QueueQueued}, nil
 }
 
-func (*runtimeCompositionStore) MarkRunnerStarted(
+func (*runtimeCompositionStore) ObserveRunnerAcceptance(
 	context.Context,
 	core.JobIdentity,
 ) (core.ObservationResult, error) {
@@ -123,10 +185,10 @@ func (*runtimeCompositionStore) Terminalize(
 	return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
 }
 
-func TestPollAcknowledgesRunnerNameOnlyStartedObservation(t *testing.T) {
+func TestPollAcknowledgesRunnerNameOnlyAcceptanceObservation(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 211, JobStartedMessages: []*upstream.JobStarted{{
-		RunnerName: "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe",
+		RunnerName: "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 	}}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	handler := &recordingEventHandler{}
@@ -136,15 +198,15 @@ func TestPollAcknowledgesRunnerNameOnlyStartedObservation(t *testing.T) {
 		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
 	}
 	want := core.RunnerObservation{RunnerName: core.RunnerName(message.JobStartedMessages[0].RunnerName)}
-	if !reflect.DeepEqual(handler.started, []core.RunnerObservation{want}) {
-		t.Fatalf("started = %#v, want %#v", handler.started, []core.RunnerObservation{want})
+	if !reflect.DeepEqual(handler.accepted, []core.RunnerObservation{want}) {
+		t.Fatalf("accepted = %#v, want %#v", handler.accepted, []core.RunnerObservation{want})
 	}
 }
 
-func TestPollPreservesBothStartedObservationIdentities(t *testing.T) {
+func TestPollPreservesBothAcceptanceObservationIdentities(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 212, JobStartedMessages: []*upstream.JobStarted{{
-		RunnerName:     "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe",
+		RunnerName:     "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 63},
 	}}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
@@ -155,15 +217,15 @@ func TestPollPreservesBothStartedObservationIdentities(t *testing.T) {
 	}
 	want := core.RunnerObservation{Source: sourceReference(t, 63), RunnerName: core.RunnerName(
 		message.JobStartedMessages[0].RunnerName)}
-	if !reflect.DeepEqual(handler.started, []core.RunnerObservation{want}) {
-		t.Fatalf("started = %#v, want %#v", handler.started, []core.RunnerObservation{want})
+	if !reflect.DeepEqual(handler.accepted, []core.RunnerObservation{want}) {
+		t.Fatalf("accepted = %#v, want %#v", handler.accepted, []core.RunnerObservation{want})
 	}
 }
 
 func TestPollAcknowledgesRunnerNameOnlyCompletedObservation(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 213, JobCompletedMessages: []*upstream.JobCompleted{{
-		RunnerName: "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe", Result: "succeeded",
+		RunnerName: "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w", Result: "succeeded",
 	}}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	handler := &recordingEventHandler{}
@@ -211,7 +273,7 @@ func TestPollIgnoresNonActionableLifecycleEvidenceAndAppliesValidSibling(t *test
 			RunnerRequestID: -1, JobID: "negative-job", WorkflowRunID: 901,
 		}},
 		{RunnerID: 502, JobMessageBase: upstream.JobMessageBase{JobID: "missing-job", WorkflowRunID: 902}},
-		{RunnerName: "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe", RunnerID: 503},
+		{RunnerName: "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w", RunnerID: 503},
 	}}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	handler := &recordingEventHandler{}
@@ -225,9 +287,9 @@ func TestPollIgnoresNonActionableLifecycleEvidenceAndAppliesValidSibling(t *test
 	if err != nil || !result.Acknowledged {
 		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
 	}
-	if len(handler.started) != 1 || handler.started[0].RunnerName !=
-		"runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe" {
-		t.Fatalf("started observations = %#v", handler.started)
+	if len(handler.accepted) != 1 || handler.accepted[0].RunnerName !=
+		"runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w" {
+		t.Fatalf("accepted observations = %#v", handler.accepted)
 	}
 	assertLifecycleEvidence(t, ignoredActivities(activities))
 }
@@ -246,11 +308,11 @@ func assertLifecycleEvidence(t *testing.T, ignored []githubsource.ManagerActivit
 func TestPollPreservesBothLifecycleIdentitiesInFailure(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 216, JobStartedMessages: []*upstream.JobStarted{{
-		RunnerName:     "runnerfoundry-018fbb38-3d4e-7a58-a608-f23e1b764ffe",
+		RunnerName:     "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 64},
 	}}}
 	adapter := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}},
-		&recordingEventHandler{startedErr: errors.New("state failed")})
+		&recordingEventHandler{acceptErr: errors.New("state failed")})
 	_, err := adapter.Poll(context.Background(), 0)
 	if err == nil || !strings.Contains(err.Error(), "request 64, runner") {
 		t.Fatalf("Poll() error = %v", err)
@@ -296,12 +358,12 @@ func TestPollReportsLifecycleSourceEncodingFailure(t *testing.T) {
 type recordingEventHandler struct {
 	events           *[]string
 	requests         []core.JobRequest
-	started          []core.RunnerObservation
+	accepted         []core.RunnerObservation
 	completed        []core.RunnerObservation
 	requestErr       error
-	startedErr       error
+	acceptErr        error
 	completedErr     error
-	startedOutcome   core.ObservationOutcome
+	acceptedOutcome  core.ObservationOutcome
 	completedOutcome core.ObservationOutcome
 	demands          []githubsource.AssignedDemand
 	demandResult     githubsource.AssignedDemandResult
@@ -323,7 +385,10 @@ func (handler *recordingEventHandler) ReconcileAssignedDemand(
 	return result, handler.demandErr
 }
 
-func (handler *recordingEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+func (handler *recordingEventHandler) IngestDemand(
+	_ context.Context,
+	request core.JobRequest,
+) (core.EnqueueResult, error) {
 	handler.requests = append(handler.requests, request)
 	if handler.events != nil {
 		*handler.events = append(*handler.events, "request:"+string(request.Source.ID))
@@ -332,22 +397,22 @@ func (handler *recordingEventHandler) Request(_ context.Context, request core.Jo
 		Outcome: core.QueueQueued}, handler.requestErr
 }
 
-func (handler *recordingEventHandler) RunnerStarted(
+func (handler *recordingEventHandler) ObserveRunnerAcceptance(
 	_ context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {
-	handler.started = append(handler.started, observation)
+	handler.accepted = append(handler.accepted, observation)
 	if handler.events != nil {
-		*handler.events = append(*handler.events, "started:"+string(observation.Source.ID))
+		*handler.events = append(*handler.events, "accepted:"+string(observation.Source.ID))
 	}
-	outcome := handler.startedOutcome
+	outcome := handler.acceptedOutcome
 	if outcome == "" {
 		outcome = core.ObservationApplied
 	}
-	return core.ObservationResult{Outcome: outcome}, handler.startedErr
+	return core.ObservationResult{Outcome: outcome}, handler.acceptErr
 }
 
-func (handler *recordingEventHandler) Terminalize(
+func (handler *recordingEventHandler) ObserveTerminal(
 	_ context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {

@@ -22,13 +22,15 @@ type githubManagerRuntime interface {
 	ActiveRegistrations(ctx context.Context) ([]githubsource.Registration, error)
 	Reconcile(ctx context.Context, config githubsource.ManagerConfig) ([]githubsource.Registration, error)
 	RefreshMembers(ctx context.Context, config githubsource.ManagerConfig) error
-	OpenRegistrationSession(ctx context.Context, record githubsource.Registration,
+	OpenSourceRegistrationSession(ctx context.Context, record githubsource.Registration,
 		configured githubsource.RunnerPoolConfig, owner string,
-		handler githubsource.EventHandler) (*githubsource.RegistrationSession, error)
+		sourceEvents core.SourceEventHandler,
+		assignedDemand githubsource.AssignedDemandHandler) (*githubsource.RegistrationSession, error)
 }
 
-type capacityAggregator interface {
-	AvailableRunnerPoolCapacity(ctx context.Context, runnerPool core.RunnerPool, cutoff time.Time) (int, error)
+type githubSessionHandler interface {
+	core.SourceEventHandler
+	githubsource.AssignedDemandHandler
 }
 
 type githubRegistrationKey struct {
@@ -68,9 +70,9 @@ type githubLeadershipTerm struct {
 
 type githubSourceRuntime struct {
 	manager           githubManagerRuntime
-	capacities        capacityAggregator
+	capacityProvider  core.CapacitySnapshotProvider
 	owner             string
-	handler           githubsource.EventHandler
+	handler           githubSessionHandler
 	config            githubsource.ManagerConfig
 	discoveryInterval time.Duration
 	currentTime       func() time.Time
@@ -98,15 +100,15 @@ type githubSourceRuntime struct {
 
 func newGitHubSourceRuntime(
 	manager githubManagerRuntime,
-	capacities capacityAggregator,
+	capacityProvider core.CapacitySnapshotProvider,
 	owner string,
-	handler githubsource.EventHandler,
+	handler githubSessionHandler,
 	config githubsource.ManagerConfig,
 	discoveryInterval time.Duration,
 	currentTime func() time.Time,
 ) *githubSourceRuntime {
 	return &githubSourceRuntime{
-		manager: manager, capacities: capacities, owner: owner, handler: handler,
+		manager: manager, capacityProvider: capacityProvider, owner: owner, handler: handler,
 		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
 		polls: make(map[*githubsource.Adapter]*githubPollAttempt), publishedCapacity: make(map[core.RunnerPool]int),
 		desired:            make(map[githubRegistrationKey]githubsource.Registration),
@@ -244,7 +246,9 @@ func (source *githubSourceRuntime) openRegistrationSession(
 	defer release()
 	openContext, cancel := context.WithTimeout(ctx, source.sessionOpenTimeout)
 	defer cancel()
-	session, err := source.manager.OpenRegistrationSession(openContext, record, configured, source.owner, source.handler)
+	session, err := source.manager.OpenSourceRegistrationSession(
+		openContext, record, configured, source.owner, source.handler, source.handler,
+	)
 	if ctx.Err() != nil {
 		if session != nil {
 			source.abandonSession(session)

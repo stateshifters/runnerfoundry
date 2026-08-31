@@ -98,7 +98,7 @@ func assertRestartedAcceptedProcessing(t *testing.T, harness *e2eHarness, wantJo
 	processing, err := harness.runtime.state.store.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID || !processing[0].RunnerAccepted {
 		t.Fatalf("accepted processing after runtime restart = %s, error = %v", describeProcessing(processing), err)
 	}
 }

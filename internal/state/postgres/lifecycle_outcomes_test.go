@@ -34,11 +34,15 @@ func TestRetryUnstartedClassifiesEveryGuardedNoOp(t *testing.T) {
 		rows []Row
 		want core.RetryOutcome
 	}{
-		"missing":        {rows: []Row{noPostgresRow()}, want: core.RetryMissing},
-		"runner started": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, true, false))}, want: core.RetryRunnerStarted},
+		"missing":         {rows: []Row{noPostgresRow()}, want: core.RetryMissing},
+		"runner accepted": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, true, false))}, want: core.RetryRunnerAccepted},
 		"source terminal": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, true))},
 			want: core.RetrySourceTerminal},
-		"terminal wins over started": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, true, true))}, want: core.RetrySourceTerminal},
+		"terminal wins over accepted": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, true, true))}, want: core.RetrySourceTerminal},
+		"failure reporting pending": {rows: []Row{rowFromValues(postgresProcessingFailureStateValues(
+			job, core.ProvisioningFailureReporting))}, want: core.RetryFailureReportingPending},
+		"failure finalization pending": {rows: []Row{rowFromValues(postgresProcessingFailureStateValues(
+			job, core.ProvisioningFailureReported))}, want: core.RetryFailureFinalizationPending},
 	})
 }
 
@@ -55,8 +59,12 @@ func TestRetryUnstartedReclassifiesAfterSerialization(t *testing.T) {
 			rowFromValues(postgresProcessingOutcomeValues(job, false, true))}, want: core.RetrySourceTerminal},
 		"missing after serialization": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
 			noPostgresRow()}, want: core.RetryMissing},
-		"runner started after serialization": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
-			rowFromValues(postgresProcessingOutcomeValues(job, true, false))}, want: core.RetryRunnerStarted},
+		"runner accepted after serialization": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
+			rowFromValues(postgresProcessingOutcomeValues(job, true, false))}, want: core.RetryRunnerAccepted},
+		"failure reporting after serialization": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
+			rowFromValues(postgresProcessingFailureStateValues(job, core.ProvisioningFailureReporting))}, want: core.RetryFailureReportingPending},
+		"failure finalization after serialization": {rows: []Row{rowFromValues(postgresProcessingOutcomeValues(job, false, false)), noPostgresRow(),
+			rowFromValues(postgresProcessingFailureStateValues(job, core.ProvisioningFailureReported))}, want: core.RetryFailureFinalizationPending},
 	})
 }
 
@@ -70,7 +78,7 @@ func assertPostgresRetryOutcomes(t *testing.T, tests map[string]struct {
 			commits := 0
 			transaction := postgresOutcomeTransaction(test.rows, 1, &commits)
 			result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-				RetryUnstarted(context.Background(), testJobID1)
+				RetryUnstarted(context.Background(), retryProcessingJob())
 			if err != nil || result.Outcome != test.want || commits != 1 {
 				t.Fatalf("retry = (%#v, %v), commits=%d", result, err, commits)
 			}
@@ -85,11 +93,15 @@ func TestRecoverUnstartedClassifiesEveryLostGuard(t *testing.T) {
 		classification Row
 		want           core.RetryOutcome
 	}{
-		"missing":                    {classification: noPostgresRow(), want: core.RetryMissing},
-		"runner started":             {classification: rowFromValues(postgresClaimedOutcomeValues(processing, true, false)), want: core.RetryRunnerStarted},
-		"source terminal":            {classification: rowFromValues(postgresClaimedOutcomeValues(processing, false, true)), want: core.RetrySourceTerminal},
-		"terminal wins over started": {classification: rowFromValues(postgresClaimedOutcomeValues(processing, true, true)), want: core.RetrySourceTerminal},
-		"claim changed":              {classification: rowFromValues(postgresClaimedOutcomeValues(processing, false, false)), want: core.RetryClaimChanged},
+		"missing":                     {classification: noPostgresRow(), want: core.RetryMissing},
+		"runner accepted":             {classification: rowFromValues(postgresClaimedOutcomeValues(processing, true, false)), want: core.RetryRunnerAccepted},
+		"source terminal":             {classification: rowFromValues(postgresClaimedOutcomeValues(processing, false, true)), want: core.RetrySourceTerminal},
+		"terminal wins over accepted": {classification: rowFromValues(postgresClaimedOutcomeValues(processing, true, true)), want: core.RetrySourceTerminal},
+		"claim changed":               {classification: rowFromValues(postgresClaimedOutcomeValues(processing, false, false)), want: core.RetryClaimChanged},
+		"failure reporting pending": {classification: rowFromValues(postgresClaimedFailureStateValues(
+			processing, core.ProvisioningFailureReporting)), want: core.RetryFailureReportingPending},
+		"failure finalization pending": {classification: rowFromValues(postgresClaimedFailureStateValues(
+			processing, core.ProvisioningFailureReported)), want: core.RetryFailureFinalizationPending},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -138,7 +150,7 @@ func TestRetryRollsBackWhenProcessingOwnershipWasNotDeleted(t *testing.T) {
 		return baseExecute(ctx, statement, arguments...)
 	}
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID1); err == nil || commits != 0 {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil || commits != 0 {
 		t.Fatalf("retry ownership deletion error = %v, commits=%d", err, commits)
 	}
 }
@@ -166,16 +178,43 @@ func postgresOutcomeTransaction(rows []Row, affected int64, commits *int) Transa
 	}, commit: func(context.Context) error { *commits++; return nil }, rollback: successfulCompletion}
 }
 
-func postgresProcessingOutcomeValues(job core.Job, started, terminal bool) []any {
-	values := processingJobValues(job, testMemberIDA)
-	values[6], values[7] = started, terminal
+func postgresProcessingOutcomeValues(job core.Job, accepted, terminal bool) []any {
+	return postgresClaimedOutcomeValues(retryProcessingJobWith(job), accepted, terminal)
+}
+
+func postgresClaimedOutcomeValues(processing core.ProcessingJob, accepted, terminal bool) []any {
+	return []any{processing.Job.ID, string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
+		string(processing.Job.RunnerPool), testMemberIDA, string(processing.RunnerName), processing.ClaimedAt,
+		processing.InventoryEndpointID, accepted, terminal, ""}
+}
+
+func postgresProcessingFailureStateValues(job core.Job, status core.ProvisioningFailureState) []any {
+	values := postgresProcessingOutcomeValues(job, false, false)
+	values[10] = string(status)
 	return values
 }
 
-func postgresClaimedOutcomeValues(processing core.ProcessingJob, started, terminal bool) []any {
-	return []any{processing.Job.ID, string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
-		string(processing.Job.RunnerPool), testMemberIDA, string(processing.RunnerName), processing.ClaimedAt,
-		processing.InventoryEndpointID, started, terminal}
+func retryProcessingJob() core.ProcessingJob {
+	return retryProcessingJobWith(recoveryProcessing().Job)
+}
+
+func retryProcessingJobWith(job core.Job) core.ProcessingJob {
+	return core.ProcessingJob{
+		Job:                 job,
+		MemberID:            testMemberIDA,
+		RunnerName:          core.AttemptRunnerName(job.ID, core.AttemptID{1}),
+		ClaimedAt:           fixedTime(),
+		InventoryEndpointID: "docker:member-a",
+	}
+}
+
+func postgresClaimedFailureStateValues(
+	processing core.ProcessingJob,
+	status core.ProvisioningFailureState,
+) []any {
+	values := postgresClaimedOutcomeValues(processing, false, false)
+	values[10] = string(status)
+	return values
 }
 
 func noPostgresRow() Row { return Row{scan: func(...any) error { return sql.ErrNoRows }} }

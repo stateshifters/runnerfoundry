@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func transactionBeginning(transaction Transaction) func(context.Context) (Transaction, error) {
@@ -15,9 +17,23 @@ func successfulExecute(context.Context, string, ...any) (Result, error) {
 }
 
 func unstartedProcessingValues() []any {
-	values := processingJobValues()
-	values[6], values[7] = false, false
+	values := claimedProcessingJobValues()
+	values[8], values[9] = false, false
 	return values
+}
+
+func retryProcessingJob() core.ProcessingJob {
+	return core.ProcessingJob{
+		Job: core.Job{
+			ID:         testJobID,
+			Source:     core.SourceReference{Adapter: "github", ID: "request-3"},
+			RunnerPool: "linux",
+		},
+		MemberID:            testMemberID,
+		RunnerName:          core.AttemptRunnerName(testJobID, core.AttemptID{1}),
+		ClaimedAt:           fixedTime(),
+		InventoryEndpointID: "test:endpoint",
+	}
 }
 
 func successfulCompletion(context.Context) error { return nil }

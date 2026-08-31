@@ -21,17 +21,17 @@ func TestReconcilePoolRecoversOnlyExpiredClaimsWithEndpointProof(t *testing.T) {
 		name        string
 		claimedAt   time.Time
 		endpointID  core.InventoryEndpointID
-		started     bool
+		accepted    bool
 		wantRecover bool
 	}{
 		{name: "claim younger than lease is retained", claimedAt: now.Add(-5*time.Minute + time.Nanosecond), endpointID: endpointID},
 		{name: "claim at lease boundary is recovered", claimedAt: now.Add(-5 * time.Minute), endpointID: endpointID, wantRecover: true},
 		{name: "unknown endpoint is retained", claimedAt: now.Add(-6 * time.Minute), endpointID: "unknown"},
-		{name: "delayed start is never recovered", claimedAt: now.Add(-6 * time.Minute), endpointID: endpointID, started: true},
+		{name: "delayed acceptance is never recovered", claimedAt: now.Add(-6 * time.Minute), endpointID: endpointID, accepted: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, recovered, err := recoveryDecision(now, test.claimedAt, test.endpointID, test.started)
+			result, recovered, err := recoveryDecision(now, test.claimedAt, test.endpointID, test.accepted)
 			if err != nil || recovered != test.wantRecover {
 				t.Fatalf("ReconcilePool() = (%#v, %v), recovered=%t", result, err, recovered)
 			}
@@ -43,11 +43,11 @@ func recoveryDecision(
 	now time.Time,
 	claimedAt time.Time,
 	endpointID core.InventoryEndpointID,
-	started bool,
+	accepted bool,
 ) (runtimeengine.PoolReconciliation, bool, error) {
 	recovered := false
 	processing := core.ProcessingJob{Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, ClaimedAt: claimedAt,
-		InventoryEndpointID: endpointID, RunnerStarted: started}
+		InventoryEndpointID: endpointID, RunnerAccepted: accepted}
 	store := &jobStoreFake{
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 			return []core.ProcessingJob{processing}, nil
@@ -58,7 +58,7 @@ func recoveryDecision(
 		},
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
@@ -130,7 +130,7 @@ func assertJITCleanupRetainsProcessing(t *testing.T, now time.Time, processing c
 		return cleanupErr
 	}}
 	provider := &providerFake{}
-	result, err := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member",
+	result, err := newTestOrchestrator(store, bootstrapper, provider, provider, "member",
 		func() time.Time { return now }).ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, cleanupErr) || transitioned || result.RemainingProcessing != 1 {
 		t.Fatalf("ReconcilePool() = (%#v, %v), transitioned=%v", result, err, transitioned)
@@ -156,11 +156,11 @@ func TestReconcilePoolReportsExpiredProcessingRecoveryFailureAfterCleanup(t *tes
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
-				ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), RunnerPool: "linux",
+				ID: "runner", RunnerName: testRunnerName(jobID), RunnerPool: "linux",
 			}}, nil
 		},
 	}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
 	)
 
@@ -190,7 +190,7 @@ func TestReconcilePoolRetainsExpiredProcessingWhenRecoveryTransitionDoesNotApply
 		},
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
 	)
 
@@ -215,10 +215,10 @@ func TestReconciliationUsesMemberInventoryInsteadOfTheLaunchProvider(t *testing.
 	}
 	inventory := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{
-			ID: "existing", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: execution.RunnerStateRunning,
+			ID: "existing", RunnerName: testRunnerName(jobID), State: execution.RunnerStateRunning,
 		}}, nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, launcherFake{}, inventory, "member", testCurrentTime,
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
@@ -227,11 +227,11 @@ func TestReconciliationUsesMemberInventoryInsteadOfTheLaunchProvider(t *testing.
 	}
 }
 
-func TestTerminatePoolDestroysRunningOwnedResourcesAndRetainsStartedProcessing(t *testing.T) {
+func TestTerminatePoolDestroysRunningOwnedResourcesAndRetainsAcceptedProcessing(t *testing.T) {
 	jobID := uuid.New()
 	memberID := core.MemberID("member")
 	processing := core.ProcessingJob{Job: core.Job{ID: jobID, RunnerPool: "linux"}, MemberID: memberID}
-	processing.RunnerStarted = true
+	processing.RunnerAccepted = true
 	events := make([]string, 0, 2)
 	store := &jobStoreFake{
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
@@ -241,7 +241,7 @@ func TestTerminatePoolDestroysRunningOwnedResourcesAndRetainsStartedProcessing(t
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
-				ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: execution.RunnerStateRunning,
+				ID: "runner", RunnerName: testRunnerName(jobID), State: execution.RunnerStateRunning,
 			}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error {
@@ -249,7 +249,7 @@ func TestTerminatePoolDestroysRunningOwnedResourcesAndRetainsStartedProcessing(t
 			return nil
 		},
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, memberID, testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, memberID, testCurrentTime)
 
 	result, err := orchestrator.TerminatePool(context.Background(), "linux")
 	assertReconciliation(t, result, err, 1, 0)
@@ -270,11 +270,11 @@ func TestTerminatePoolRetainsProcessingWhenDestroyFails(t *testing.T) {
 	}
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-			return []execution.RunnerInstance{{ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String())}}, nil
+			return []execution.RunnerInstance{{ID: "runner", RunnerName: testRunnerName(jobID)}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return wantErr },
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	_, err := orchestrator.TerminatePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || removed {
 		t.Fatalf("TerminatePool() error = %v, removed=%v", err, removed)
@@ -304,7 +304,7 @@ func TestTerminatePoolReportsInventoryFailures(t *testing.T) {
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			orchestrator := runtimeengine.NewOrchestrator(
+			orchestrator := newTestOrchestrator(
 				test.store, &bootstrapGeneratorFake{}, test.provider, test.provider, "member", testCurrentTime,
 			)
 			if _, err := orchestrator.TerminatePool(context.Background(), "linux"); !errors.Is(err, wantErr) {
@@ -324,7 +324,7 @@ func TestTerminatePoolReportsMissingProcessingRemovalFailure(t *testing.T) {
 		remove: func(context.Context, core.JobID) error { return wantErr },
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.TerminatePool(context.Background(), "linux")
 	assertReconciliationError(t, result, err, wantErr, 0, 0)
 }
@@ -348,9 +348,9 @@ func TestTerminatePoolContinuesAfterOwnedRemovalFailure(t *testing.T) {
 		},
 	}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-		return []execution.RunnerInstance{{ID: "resource", RunnerName: core.RunnerName("runnerfoundry-" + resourceID.String())}}, nil
+		return []execution.RunnerInstance{{ID: "resource", RunnerName: testRunnerName(resourceID)}}, nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.TerminatePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemovedRunners != 1 || result.RemovedProcessing != 1 {
 		t.Fatalf("TerminatePool() = (%#v, %v)", result, err)
@@ -385,20 +385,20 @@ func TestReconcilePoolHonoursDurableLifecycleBoundaries(t *testing.T) {
 func lifecycleReconciliationCases() []lifecycleReconciliationCase {
 	return []lifecycleReconciliationCase{
 		{name: "unstarted missing retries", wantRetried: true},
-		{name: "started missing awaits completion", processing: core.ProcessingJob{RunnerStarted: true}, wantRemaining: 1},
+		{name: "accepted missing awaits completion", processing: core.ProcessingJob{RunnerAccepted: true}, wantRemaining: 1},
 		{name: "terminal missing removes", processing: core.ProcessingJob{SourceTerminal: true}, wantRemoved: true},
-		{name: "unstarted running is preserved while start event may be delayed", instancePresent: true,
+		{name: "unaccepted running is preserved while acceptance may be delayed", instancePresent: true,
 			instanceState: execution.RunnerStateRunning, wantRemaining: 1},
-		{name: "started running is preserved", processing: core.ProcessingJob{RunnerStarted: true},
+		{name: "accepted running is preserved", processing: core.ProcessingJob{RunnerAccepted: true},
 			instancePresent: true, instanceState: execution.RunnerStateRunning, wantRemaining: 1},
 		{name: "unstarted completed retries after cleanup", instancePresent: true,
 			instanceState: execution.RunnerStateCompleted, wantDestroyed: true, wantRetried: true},
-		{name: "started completed cleans up and awaits completion", processing: core.ProcessingJob{RunnerStarted: true},
+		{name: "accepted completed cleans up and awaits completion", processing: core.ProcessingJob{RunnerAccepted: true},
 			instancePresent: true, instanceState: execution.RunnerStateCompleted, wantDestroyed: true, wantRemaining: 1},
-		{name: "started unknown cleans up and awaits completion", processing: core.ProcessingJob{RunnerStarted: true},
+		{name: "accepted unknown cleans up and awaits completion", processing: core.ProcessingJob{RunnerAccepted: true},
 			instancePresent: true, instanceState: execution.RunnerStateUnknown, wantDestroyed: true, wantRemaining: 1},
 		{name: "terminal running cleans up and removes",
-			processing: core.ProcessingJob{RunnerStarted: true, SourceTerminal: true}, instancePresent: true,
+			processing: core.ProcessingJob{RunnerAccepted: true, SourceTerminal: true}, instancePresent: true,
 			instanceState: execution.RunnerStateRunning, wantDestroyed: true, wantRemoved: true},
 	}
 }
@@ -410,7 +410,7 @@ func assertLifecycleReconciliation(t *testing.T, test lifecycleReconciliationCas
 	effects := &reconciliationEffects{}
 	store := lifecycleStore(test.processing, effects)
 	provider := lifecycleProvider(jobID, test, effects)
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if err != nil {
 		t.Fatalf("ReconcilePool() error = %v", err)
@@ -439,7 +439,7 @@ func lifecycleProvider(jobID core.JobID, test lifecycleReconciliationCase, effec
 	instances := make([]execution.RunnerInstance, 0, 1)
 	if test.instancePresent {
 		instances = append(instances, execution.RunnerInstance{
-			ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: test.instanceState,
+			ID: "runner", RunnerName: testRunnerName(jobID), State: test.instanceState,
 		})
 	}
 	return &providerFake{
@@ -454,15 +454,15 @@ func TestTerminatePoolRequeuesOnlyUnstartedWorkAfterCleanup(t *testing.T) {
 	if err != nil || result.RemainingProcessing != 1 {
 		t.Fatalf("TerminatePool() = (%#v, %v)", result, err)
 	}
-	if !fixture.destroyed["unstarted"] || !fixture.destroyed["started"] ||
-		!fixture.retried[fixture.unstartedID] || fixture.retried[fixture.startedID] {
+	if !fixture.destroyed["unaccepted"] || !fixture.destroyed["accepted"] ||
+		!fixture.retried[fixture.unacceptedID] || fixture.retried[fixture.acceptedID] {
 		t.Fatalf("destroyed=%v retried=%v", fixture.destroyed, fixture.retried)
 	}
 }
 
 type terminatePoolFixture struct {
-	unstartedID  core.JobID
-	startedID    core.JobID
+	unacceptedID core.JobID
+	acceptedID   core.JobID
 	retried      map[core.JobID]bool
 	destroyed    map[string]bool
 	orchestrator *runtimeengine.Orchestrator
@@ -470,14 +470,14 @@ type terminatePoolFixture struct {
 
 func newTerminatePoolFixture() terminatePoolFixture {
 	fixture := terminatePoolFixture{
-		unstartedID: uuid.New(), startedID: uuid.New(),
+		unacceptedID: uuid.New(), acceptedID: uuid.New(),
 		retried: make(map[core.JobID]bool), destroyed: make(map[string]bool),
 	}
 	store := &jobStoreFake{
 		list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 			return []core.ProcessingJob{
-				{Job: core.Job{ID: fixture.unstartedID, RunnerPool: "linux"}},
-				{Job: core.Job{ID: fixture.startedID, RunnerPool: "linux"}, RunnerStarted: true},
+				{Job: core.Job{ID: fixture.unacceptedID, RunnerPool: "linux"}},
+				{Job: core.Job{ID: fixture.acceptedID, RunnerPool: "linux"}, RunnerAccepted: true},
 			}, nil
 		},
 		retry: func(_ context.Context, jobID core.JobID) (bool, error) {
@@ -486,7 +486,7 @@ func newTerminatePoolFixture() terminatePoolFixture {
 		},
 	}
 	provider := newTerminateProvider(&fixture)
-	fixture.orchestrator = runtimeengine.NewOrchestrator(
+	fixture.orchestrator = newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime,
 	)
 	return fixture
@@ -496,8 +496,8 @@ func newTerminateProvider(fixture *terminatePoolFixture) *providerFake {
 	return &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
-				{ID: "unstarted", RunnerName: core.RunnerName("runnerfoundry-" + fixture.unstartedID.String()), State: execution.RunnerStateRunning},
-				{ID: "started", RunnerName: core.RunnerName("runnerfoundry-" + fixture.startedID.String()), State: execution.RunnerStateRunning},
+				{ID: "unaccepted", RunnerName: testRunnerName(fixture.unacceptedID), State: execution.RunnerStateRunning},
+				{ID: "accepted", RunnerName: testRunnerName(fixture.acceptedID), State: execution.RunnerStateRunning},
 			}, nil
 		},
 		destroy: func(_ context.Context, instance execution.RunnerInstance) error {
@@ -509,7 +509,7 @@ func newTerminateProvider(fixture *terminatePoolFixture) *providerFake {
 
 func TestReconcilePoolRetainsProcessingWhenAtomicTransitionDoesNotApply(t *testing.T) {
 	jobID := uuid.New()
-	t.Run("retry raced with start or terminal event", func(t *testing.T) {
+	t.Run("retry raced with acceptance or terminal event", func(t *testing.T) {
 		assertAtomicTransitionRetained(t, core.ProcessingJob{Job: core.Job{ID: jobID, RunnerPool: "linux"}})
 	})
 	t.Run("terminal row already changed", func(t *testing.T) {
@@ -529,7 +529,7 @@ func assertAtomicTransitionRetained(t *testing.T, processing core.ProcessingJob)
 		removeTerminal: func(context.Context, core.JobID) (bool, error) { return false, nil },
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if err != nil || result.RemainingProcessing != 1 || result.RemovedProcessing != 0 {
 		t.Fatalf("ReconcilePool() = (%#v, %v)", result, err)
@@ -542,11 +542,11 @@ func TestReconcilePoolReportsOrphanCleanupFailure(t *testing.T) {
 	store := &jobStoreFake{list: emptyProcessing}
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-			return []execution.RunnerInstance{{ID: "orphan", RunnerName: core.RunnerName("runnerfoundry-" + orphanID.String())}}, nil
+			return []execution.RunnerInstance{{ID: "orphan", RunnerName: testRunnerName(orphanID)}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return wantErr },
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemovedRunners != 0 {
 		t.Fatalf("ReconcilePool() = (%#v, %v)", result, err)
@@ -568,12 +568,12 @@ func TestReconcilePoolRetainsTerminalProcessingWhenRunnerCleanupFails(t *testing
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
-				ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: execution.RunnerStateRunning,
+				ID: "runner", RunnerName: testRunnerName(jobID), State: execution.RunnerStateRunning,
 			}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return wantErr },
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 || removed {
 		t.Fatalf("ReconcilePool() = (%#v, %v), removed=%t", result, err, removed)
@@ -611,7 +611,7 @@ func newOwnedReconciliationFixture(state execution.RunnerState) ownedReconciliat
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
-				ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: state,
+				ID: "runner", RunnerName: testRunnerName(jobID), State: state,
 			}}, nil
 		},
 		destroy: func(_ context.Context, instance execution.RunnerInstance) error {
@@ -621,7 +621,7 @@ func newOwnedReconciliationFixture(state execution.RunnerState) ownedReconciliat
 	}
 	return ownedReconciliationFixture{
 		jobID: jobID, removed: removed, destroyed: destroyed,
-		orchestrator: runtimeengine.NewOrchestrator(
+		orchestrator: newTestOrchestrator(
 			store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime,
 		),
 	}
@@ -641,13 +641,13 @@ func TestReconcilePoolCleansMissingAndOrphanedWork(t *testing.T) {
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
-				{ID: "orphan", RunnerName: core.RunnerName("runnerfoundry-" + orphanID.String())},
+				{ID: "orphan", RunnerName: testRunnerName(orphanID)},
 				{ID: "external", RunnerName: "external"},
 			}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { destroyed = true; return nil },
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	assertReconciliation(t, result, err, 1, 1)
 	if !removed || !destroyed {
@@ -674,12 +674,12 @@ func TestReconcilePoolRetainsProcessingAcrossCleanupFailures(t *testing.T) {
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{{
-				ID: "destroy", RunnerName: core.RunnerName("runnerfoundry-" + destroyID.String()), State: execution.RunnerStateUnknown,
+				ID: "destroy", RunnerName: testRunnerName(destroyID), State: execution.RunnerStateUnknown,
 			}}, nil
 		},
 		destroy: func(context.Context, execution.RunnerInstance) error { return destroyErr },
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	_, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, destroyErr) || !errors.Is(err, removeErr) {
 		t.Fatalf("ReconcilePool() error = %v", err)
@@ -697,10 +697,10 @@ func TestReconcilePoolReportsRemovalFailureAfterDestroy(t *testing.T) {
 	}
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-			return []execution.RunnerInstance{{ID: "finished", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()), State: execution.RunnerStateCompleted}}, nil
+			return []execution.RunnerInstance{{ID: "finished", RunnerName: testRunnerName(jobID), State: execution.RunnerStateCompleted}}, nil
 		},
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemovedRunners != 1 || result.RemovedProcessing != 0 {
 		t.Fatalf("ReconcilePool() = (%#v, %v)", result, err)

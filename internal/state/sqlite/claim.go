@@ -44,6 +44,9 @@ func claimOldestInTransaction(
 	if err != nil {
 		return core.ClaimResult{}, fmt.Errorf("select oldest queued job: %w", err)
 	}
+	if !claim.AttemptID.IsValid() {
+		claim.AttemptID = core.NewAttemptID()
+	}
 	runnerName := core.AttemptRunnerName(job.ID, claim.AttemptID)
 	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID.String(), job.Source.Adapter,
 		job.Source.ID, string(job.RunnerPool), string(claim.MemberID), runnerName, claim.ClaimedAt.UnixNano(),

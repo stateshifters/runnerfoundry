@@ -181,7 +181,7 @@ func messageMatrixProcessing(t *testing.T, harness *e2eHarness, wantJobID core.J
 func assertMessageMatrixStarted(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
 	processing := messageMatrixProcessing(t, harness, wantJobID)
-	if !processing.RunnerStarted || processing.SourceTerminal {
+	if !processing.RunnerAccepted || processing.SourceTerminal {
 		t.Fatalf("message-matrix started processing = %+v", processing)
 	}
 }
@@ -189,7 +189,7 @@ func assertMessageMatrixStarted(t *testing.T, harness *e2eHarness, wantJobID cor
 func assertMessageMatrixTerminal(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
 	processing := messageMatrixProcessing(t, harness, wantJobID)
-	if !processing.RunnerStarted || !processing.SourceTerminal {
+	if !processing.RunnerAccepted || !processing.SourceTerminal {
 		t.Fatalf("message-matrix terminal processing = %+v", processing)
 	}
 }

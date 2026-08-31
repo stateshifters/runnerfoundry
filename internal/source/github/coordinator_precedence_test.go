@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
@@ -144,7 +143,7 @@ func assertCoordinatorBootstrap(t *testing.T, coordinator *MultiAppCoordinator, 
 	if err != nil {
 		t.Fatalf("generate bootstrap: %v", err)
 	}
-	if !reflect.DeepEqual(bootstrap, execution.NewBootstrap([]byte(expected))) {
+	if !reflect.DeepEqual(bootstrap, core.NewBootstrap([]byte(expected))) {
 		t.Fatalf("bootstrap = %#v, want content %q", bootstrap, expected)
 	}
 }

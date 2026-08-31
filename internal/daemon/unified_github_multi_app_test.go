@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
@@ -23,7 +24,7 @@ func TestGitHubSourceRuntimeReservesSessionAdmissionForEachApp(t *testing.T) {
 		RepositoryURL: "https://github.example/z-healthy", RunnerPool: "linux",
 		InstallationID: 2, RunnerGroupID: 1, ScaleSetID: 100})
 	manager := &multiAppSessionAdmissionManager{records: records, healthyStarted: make(chan struct{}, 1)}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, time.Now)
 	source.sessionOpenTimeout = time.Second
 
@@ -52,7 +53,7 @@ func TestGitHubSourceRuntimeActivatesHealthyAppFromDegradedCoordinatorPass(t *te
 	configured := githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
 		RunnerPool: "linux", RunnerGroup: "default",
 	}}}
-	source := newGitHubSourceRuntime(coordinator, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(coordinator, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		configured, time.Minute, time.Now)
 
 	if err = source.OpenLeader(context.Background()); err != nil {
@@ -234,12 +235,13 @@ func (*multiAppSessionAdmissionManager) RefreshMembers(context.Context, githubso
 	return nil
 }
 
-func (manager *multiAppSessionAdmissionManager) OpenRegistrationSession(
+func (manager *multiAppSessionAdmissionManager) OpenSourceRegistrationSession(
 	ctx context.Context,
 	record githubsource.Registration,
 	_ githubsource.RunnerPoolConfig,
 	_ string,
-	_ githubsource.EventHandler,
+	_ core.SourceEventHandler,
+	_ githubsource.AssignedDemandHandler,
 ) (*githubsource.RegistrationSession, error) {
 	if record.GitHubAppID == 22 {
 		manager.healthyStarted <- struct{}{}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
@@ -30,11 +31,39 @@ func TestGitHubSourceRuntimeReportsPoolCapacityFailureOnce(t *testing.T) {
 	mustCloseGitHubSource(t, fixture.source)
 }
 
+func TestGitHubSourceRuntimeReadsNeutralCapacitySnapshots(t *testing.T) {
+	source := &githubSourceRuntime{capacityProvider: capacitySnapshotProviderFake{available: 3}}
+	available, err := source.availableRunnerPoolCapacity(context.Background(), "linux")
+	if err != nil || available != 3 {
+		t.Fatalf("availableRunnerPoolCapacity() = (%d, %v)", available, err)
+	}
+}
+
+func TestGitHubSourceRuntimeReportsNeutralCapacitySnapshotFailure(t *testing.T) {
+	wantErr := errors.New("snapshot failed")
+	source := &githubSourceRuntime{capacityProvider: capacitySnapshotProviderFake{err: wantErr}}
+	if _, err := source.availableRunnerPoolCapacity(context.Background(), "linux"); !errors.Is(err, wantErr) {
+		t.Fatalf("availableRunnerPoolCapacity() error = %v", err)
+	}
+}
+
+type capacitySnapshotProviderFake struct {
+	available int
+	err       error
+}
+
+func (provider capacitySnapshotProviderFake) CapacitySnapshot(
+	context.Context,
+	core.RunnerPool,
+) (core.CapacitySnapshot, error) {
+	return core.CapacitySnapshot{RunnerPool: "linux", Available: provider.available}, provider.err
+}
+
 type capacityFailureFixture struct {
 	source     *githubSourceRuntime
 	first      *capacityMessageClientFake
 	second     *capacityMessageClientFake
-	capacities *capacityAggregatorFake
+	capacities *sourceCapacityProviderFake
 }
 
 func newCapacityFailureFixture(t *testing.T, wantErr error) capacityFailureFixture {
@@ -42,10 +71,10 @@ func newCapacityFailureFixture(t *testing.T, wantErr error) capacityFailureFixtu
 	messageClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
 	peerClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+		{Client: messageClient, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, SourceEvents: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
 	}}
-	failedCapacities := &capacityAggregatorFake{err: wantErr}
+	failedCapacities := &sourceCapacityProviderFake{err: wantErr}
 	source := newGitHubSourceRuntime(manager, failedCapacities, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, time.Now)
 	return capacityFailureFixture{source: source, first: messageClient, second: peerClient, capacities: failedCapacities}
@@ -56,9 +85,9 @@ func TestGitHubSourceRuntimeReportsCloseFailure(t *testing.T) {
 
 	wantErr := errors.New("GitHub failed")
 	manager := &githubManagerFake{closeErr: wantErr, adapters: []*githubsource.Adapter{{
-		Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux",
+		Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux",
 	}}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	mustOpenGitHubSource(t, source)
 	if err := source.CloseLeader(context.Background()); !errors.Is(err, wantErr) {

@@ -122,9 +122,9 @@ func TestGitHubAssignedDemandLoggingNamesChangeAndCarriesCounts(t *testing.T) {
 func TestGitHubLifecycleFailureLoggingText(t *testing.T) {
 	output := githubLifecycleFailureLog(t, "text")
 	assertLogFragments(t, output, []string{
-		"SQLite transaction failed while attempting to record terminal state for GitHub runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"SQLite transaction failed while attempting to record terminal state for GitHub runner runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"repository=https://github.com/example/project", "runner_pool=linux", "message_id=91",
-		"runner_name=runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"runner_name=runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"github_event_type=JobCompleted", "state_operation=terminalize_job",
 	})
 }
@@ -136,9 +136,9 @@ func TestGitHubLifecycleFailureLoggingJSON(t *testing.T) {
 	}
 	assertJSONFields(t, record, map[string]any{
 		"msg": "SQLite transaction failed while attempting to record terminal state for GitHub runner " +
-			"runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8 for https://github.com/example/project in Runner Pool linux",
+			"runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w for https://github.com/example/project in Runner Pool linux",
 		"repository": "https://github.com/example/project", "runner_pool": "linux", "message_id": float64(91),
-		"runner_name":       "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"runner_name":       "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"github_event_type": "JobCompleted", "state_operation": "terminalize_job",
 	})
 }
@@ -151,7 +151,7 @@ func githubLifecycleFailureLog(t *testing.T, format string) string {
 	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
 		Operation: "job_observation", Stage: "persist_terminal", Outcome: "failed",
 		Repository: "https://github.com/example/project", RunnerPool: "linux", MessageID: 91,
-		RunnerName: "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8", EventType: "JobCompleted",
+		RunnerName: "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w", EventType: "JobCompleted",
 		StateBackend: "sqlite", StateOperation: "terminalize_job", Err: errors.New("state operation failed"),
 	})
 	return strings.TrimSpace(destination.String())
@@ -333,7 +333,7 @@ func assertJITRemainsAtProviderBoundary(t *testing.T, reporter *productionRuntim
 		confidentialityProvider{}, "test", newProviderObserver(reporter.reportMaintenance),
 	)
 	if err := provider.Start(context.Background(), execution.StartRequest{RunnerPool: "linux", EndpointID: "test:endpoint",
-		Bootstrap: execution.NewBootstrap([]byte(jit))}); err != nil {
+		Bootstrap: core.NewBootstrap([]byte(jit))}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,7 +370,7 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 	reporter := newOperationalReporterFixture(t, "json", destination)
 	jobID := core.JobID{1}
 	reporter.Report(operationalEvent{operation: "runner_retry", outcome: "source_terminal",
-		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", runnerName: "runnerfoundry-job",
+		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", runnerName: "external-runner",
 		githubEventType: "JobCompleted", installationID: 11, runnerGroupID: 12,
 		scaleSetID: 13, messageID: 14, count: 2, capacity: 3, provider: "docker", composeService: "runner",
 		stateBackend: "postgresql", stateOperation: "retry_unstarted"})
@@ -381,7 +381,7 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 	}
 	want := map[string]any{"operation": "runner_retry", "member": "member-a", "outcome": "source_terminal",
 		"runner_pool": "linux", "job_id": jobID.String(), "runner_id": "runner-1",
-		"runner_name": "runnerfoundry-job", "github_event_type": "JobCompleted", "installation_id": float64(11),
+		"runner_name": "external-runner", "github_event_type": "JobCompleted", "installation_id": float64(11),
 		"runner_group_id": float64(12), "scale_set_id": float64(13), "message_id": float64(14),
 		"count": float64(2), "capacity": float64(3), "provider": "docker", "compose_service": "runner",
 		"state_backend": "postgresql", "state_operation": "retry_unstarted"}

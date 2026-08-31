@@ -85,6 +85,18 @@ For a behavior change, completion means the tests prove the production behavior.
 code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
 documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
 
+#### Coverage follows purpose
+
+V1 code MUST maintain 100% Go statement coverage using hermetic tests, as reported by `make coverage`. Always call this result
+"statement coverage". It records only whether each instrumented statement was executed at least once.
+
+Every maintained production path MUST serve a concrete product behavior, domain invariant, boundary guarantee, or failure
+policy, and that purpose MUST be protected by an automated test through a stable interface.
+
+Coverage-only tests are invalid. Uncovered code without a defensible purpose is a design problem, not a test gap. Passing the
+statement-coverage gate does not establish test adequacy or meaningful assertions; those remain separate acceptance conditions.
+Do not describe a change as fully or comprehensively tested solely because the statement-coverage gate reports 100%.
+
 #### E2E tests
 
 Ordinary tests prohibit external I/O. Tests tagged `e2e` are the sole exception: they may use isolated in-memory or
@@ -152,8 +164,6 @@ files in test-owned temporary directories. Production Go files MUST NOT use buil
 RunnerFoundry behavior is proved by automated tests that exercise production code through the stable seams defined above. Contributor and CI verification MUST NOT execute a built RunnerFoundry executable, RunnerFoundry installed from a distribution package, a RunnerFoundry container, or a deployed RunnerFoundry instance to prove application behavior, startup, embedded build metadata, or toolchain output. The compiler, linker, packager, and deployment system are not RunnerFoundry software-test subjects.
 
 Building or packaging may produce a requested artifact, but executing that artifact is not a verification gate. The gates listed below are exhaustive unless the product and contribution contracts are explicitly changed. This restriction does not prevent operators from running RunnerFoundry for its intended purpose.
-
-V1 code MUST maintain 100% Go test coverage using hermetic tests.
 
 ```sh
 make lint

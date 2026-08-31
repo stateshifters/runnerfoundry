@@ -205,7 +205,7 @@ func assertOutstandingAcceptedAfterFailover(
 ) {
 	t.Helper()
 	processing := outstandingProcessingAfterFailover(t, harness, wantJobID)
-	if !processing.RunnerStarted || processing.SourceTerminal {
+	if !processing.RunnerAccepted || processing.SourceTerminal {
 		t.Fatalf("accepted processing after failover = %+v, want started and nonterminal", processing)
 	}
 }
@@ -213,7 +213,7 @@ func assertOutstandingAcceptedAfterFailover(
 func assertOutstandingTerminalAfterFailover(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
 	processing := outstandingProcessingAfterFailover(t, harness, wantJobID)
-	if !processing.RunnerStarted || !processing.SourceTerminal {
+	if !processing.RunnerAccepted || !processing.SourceTerminal {
 		t.Fatalf("terminal processing after failover = %+v, want started and terminal", processing)
 	}
 }
@@ -414,7 +414,7 @@ func assertForeignRecoveryRetention(
 	t.Helper()
 	linux, linuxErr := harness.runtime.state.store.ProcessingByPool(context.Background(), "linux")
 	if linuxErr != nil || len(linux) != 1 || linux[0].Job.ID != candidates.unstarted.JobID ||
-		linux[0].MemberID != core.MemberID(owner) || linux[0].RunnerStarted {
+		linux[0].MemberID != core.MemberID(owner) || linux[0].RunnerAccepted {
 		t.Fatalf("unstarted foreign processing at %s = %+v, error = %v", phase, linux, linuxErr)
 	}
 	assertAcceptedForeignProcessingRetained(t, harness, owner, candidates.accepted.JobID)
@@ -429,7 +429,7 @@ func assertAcceptedForeignProcessingRetained(
 	t.Helper()
 	windows, err := harness.runtime.state.store.ProcessingByPool(context.Background(), "windows")
 	if err != nil || len(windows) != 1 || windows[0].Job.ID != wantJobID ||
-		windows[0].MemberID != core.MemberID(owner) || !windows[0].RunnerStarted {
+		windows[0].MemberID != core.MemberID(owner) || !windows[0].RunnerAccepted {
 		t.Fatalf("accepted foreign processing = %+v, error = %v", windows, err)
 	}
 }

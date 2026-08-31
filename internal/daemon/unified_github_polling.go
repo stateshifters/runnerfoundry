@@ -43,7 +43,7 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 	source.collectAbandonedSessions()
 	pollErrors = append(pollErrors, source.harvestPolls()...)
 	pollErrors = append(pollErrors, source.startDueDiscovery(ctx, term, liveMemberCutoff)...)
-	pollErrors = append(pollErrors, source.launchIdlePolls(ctx, liveMemberCutoff)...)
+	pollErrors = append(pollErrors, source.launchIdlePolls(ctx)...)
 	if cleanupErr := source.retryRetiringSessions(ctx); cleanupErr != nil {
 		pollErrors = append(pollErrors, cleanupErr)
 	}
@@ -363,17 +363,14 @@ func completedPoll(attempt *githubPollAttempt) (githubPollResult, bool) {
 	}
 }
 
-func (source *githubSourceRuntime) launchIdlePolls(
-	ctx context.Context,
-	liveMemberCutoff time.Time,
-) []error {
+func (source *githubSourceRuntime) launchIdlePolls(ctx context.Context) []error {
 	capacityErrors := make([]error, 0)
 	capacities := make(map[core.RunnerPool]runnerPoolPublication)
 	for _, adapter := range source.adapters {
 		if _, active := source.polls[adapter]; active {
 			continue
 		}
-		capacity, err := source.launchAdapterPoll(ctx, adapter, liveMemberCutoff, capacities)
+		capacity, err := source.launchAdapterPoll(ctx, adapter, capacities)
 		if err != nil {
 			capacityErrors = append(capacityErrors, err)
 		}
@@ -384,7 +381,7 @@ func (source *githubSourceRuntime) launchIdlePolls(
 }
 
 func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapter *githubsource.Adapter,
-	liveMemberCutoff time.Time, capacities map[core.RunnerPool]runnerPoolPublication,
+	capacities map[core.RunnerPool]runnerPoolPublication,
 ) (int, error) {
 	aggregate, observed := capacities[adapter.RunnerPool]
 	if observed {
@@ -395,7 +392,7 @@ func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapte
 			capacity: aggregate.capacity})
 		return aggregate.capacity, nil
 	}
-	capacity, err := source.capacities.AvailableRunnerPoolCapacity(ctx, adapter.RunnerPool, liveMemberCutoff)
+	capacity, err := source.availableRunnerPoolCapacity(ctx, adapter.RunnerPool)
 	if err != nil {
 		reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
 			runnerPool: adapter.RunnerPool, err: err})
@@ -411,6 +408,17 @@ func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapte
 	aggregate.count = 1
 	capacities[adapter.RunnerPool] = aggregate
 	return capacity, nil
+}
+
+func (source *githubSourceRuntime) availableRunnerPoolCapacity(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+) (int, error) {
+	snapshot, err := source.capacityProvider.CapacitySnapshot(ctx, runnerPool)
+	if err != nil {
+		return 0, fmt.Errorf("read capacity snapshot for Runner Pool %q: %w", runnerPool, err)
+	}
+	return snapshot.Available, nil
 }
 
 func (source *githubSourceRuntime) publishCapacityChanges(capacities map[core.RunnerPool]runnerPoolPublication) {

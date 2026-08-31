@@ -23,8 +23,8 @@ func (sqliteConformance) Exercise(t *testing.T, scenario storetest.Scenario) sto
 	switch {
 	case strings.HasPrefix(name, "queue/"):
 		return exerciseSQLiteQueueProtocol(t, scenario)
-	case scenario == storetest.DelayedStart:
-		return exerciseSQLiteDelayedStartProtocol(t)
+	case scenario == storetest.DelayedAcceptance:
+		return exerciseSQLiteDelayedAcceptanceProtocol(t)
 	case strings.HasPrefix(name, "claim/"):
 		return exerciseSQLiteClaimProtocol(t, scenario)
 	case strings.HasPrefix(name, "retry/"):
@@ -89,7 +89,7 @@ func exerciseSQLiteClaimProtocol(t *testing.T, scenario storetest.Scenario) stor
 	return observation
 }
 
-func exerciseSQLiteDelayedStartProtocol(t *testing.T) storetest.Observation {
+func exerciseSQLiteDelayedAcceptanceProtocol(t *testing.T) storetest.Observation {
 	t.Helper()
 	processing := storetest.ExpectedProcessing()
 	transaction := Transaction{execute: outcomeExecute(1),
@@ -97,25 +97,25 @@ func exerciseSQLiteDelayedStartProtocol(t *testing.T) storetest.Observation {
 			return rowsFromValues([][]any{sqliteClaimedValues(processing, true, false)}), nil
 		}, commit: successfulCompletion, rollback: successfulCompletion}
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	if _, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: processing.Job.Source}); err != nil {
-		t.Fatalf("mark started: %v", err)
+	if _, err := store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: processing.Job.Source}); err != nil {
+		t.Fatalf("mark accepted: %v", err)
 	}
 	current, err := store.ProcessingByPool(context.Background(), processing.Job.RunnerPool)
 	if err != nil || len(current) != 1 {
-		t.Fatalf("processing after start = %#v, %v", current, err)
+		t.Fatalf("processing after acceptance = %#v, %v", current, err)
 	}
-	return storetest.Observation{Started: current[0].RunnerStarted}
+	return storetest.Observation{Accepted: current[0].RunnerAccepted}
 }
 
 func exerciseSQLiteRetryProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	job := storetest.OldestJob()
-	plain := rowFromValues(sqliteProcessingValues(job, false, false))
+	processing := storetest.ExpectedProcessing()
+	plain := rowFromValues(sqliteClaimedValues(processing, false, false))
 	rows := map[storetest.Scenario][]Row{
 		storetest.RetryRequeue:      {plain},
 		storetest.RetryMissing:      {{scan: func(...any) error { return sql.ErrNoRows }}},
-		storetest.RetryStarted:      {rowFromValues(sqliteProcessingValues(job, true, false))},
-		storetest.RetryTerminal:     {rowFromValues(sqliteProcessingValues(job, false, true))},
+		storetest.RetryAccepted:     {rowFromValues(sqliteClaimedValues(processing, true, false))},
+		storetest.RetryTerminal:     {rowFromValues(sqliteClaimedValues(processing, false, true))},
 		storetest.RetryClaimChanged: {plain, plain},
 	}[scenario]
 	affected := int64(1)
@@ -125,7 +125,7 @@ func exerciseSQLiteRetryProtocol(t *testing.T, scenario storetest.Scenario) stor
 	transaction := Transaction{queryRow: sqliteRowsInOrder(rows...), execute: outcomeExecute(affected),
 		commit: successfulCompletion, rollback: successfulCompletion}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), job.ID)
+		RetryUnstarted(context.Background(), processing)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -138,7 +138,7 @@ func exerciseSQLiteRecoveryProtocol(t *testing.T, scenario storetest.Scenario) s
 	affected := int64(0)
 	classification := map[storetest.Scenario]Row{
 		storetest.RecoveryMissing:      {scan: func(...any) error { return sql.ErrNoRows }},
-		storetest.RecoveryStarted:      rowFromValues(sqliteClaimedValues(processing, true, false)),
+		storetest.RecoveryAccepted:     rowFromValues(sqliteClaimedValues(processing, true, false)),
 		storetest.RecoveryTerminal:     rowFromValues(sqliteClaimedValues(processing, false, true)),
 		storetest.RecoveryClaimChanged: rowFromValues(sqliteClaimedValues(processing, false, false)),
 	}[scenario]
@@ -228,19 +228,15 @@ func sqliteQueuedValues(job core.Job) []any {
 	return []any{job.ID.String(), string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), job.EnqueuedAt.UnixNano()}
 }
 
-func sqliteProcessingValues(job core.Job, started, terminal bool) []any {
-	return []any{job.ID.String(), string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool),
-		"member-a", string(core.AttemptRunnerName(job.ID, core.JobID{})), started, terminal}
-}
-
-func sqliteClaimedValues(processing core.ProcessingJob, started, terminal bool) []any {
+func sqliteClaimedValues(processing core.ProcessingJob, accepted, terminal bool) []any {
 	return []any{processing.Job.ID.String(), string(processing.Job.Source.Adapter), string(processing.Job.Source.ID),
 		string(processing.Job.RunnerPool), string(processing.MemberID), string(processing.RunnerName), processing.ClaimedAt.UnixNano(),
-		string(processing.InventoryEndpointID), started, terminal}
+		string(processing.InventoryEndpointID), accepted, terminal, ""}
 }
 
 func sqliteConformanceClaim() core.ProcessingClaim {
-	return core.ProcessingClaim{MemberID: "member-a", ClaimedAt: storetest.FixedTime(), InventoryEndpointID: "docker:member-a"}
+	return core.ProcessingClaim{MemberID: "member-a", AttemptID: core.AttemptID{1}, ClaimedAt: storetest.FixedTime(),
+		InventoryEndpointID: "docker:member-a"}
 }
 
 func sqliteRowsInOrder(rows ...Row) func(context.Context, string, ...any) Row {

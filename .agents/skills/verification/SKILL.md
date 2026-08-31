@@ -43,4 +43,7 @@ not evidence that a nested verification command passed.
 - Identify the verified revision and worktree state in the final handoff, and
   report the exit status of every verification command.
 
+Use the coverage terminology required by [Contributing](../../../CONTRIBUTING.md#coverage-follows-purpose). Report the gate
+result separately from the evidence that the suite adequately protects the required behaviors and invariants.
+
 When no verification command is appropriate, report the inspection evidence used instead. Do not run an unrelated command solely to obtain an exit status.

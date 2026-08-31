@@ -57,17 +57,6 @@ type ExecutionProvider interface {
 	RunnerInventory
 }
 
-// Bootstrap is source-owned runner initialization data. Execution providers
-// transport it without interpreting it.
-type Bootstrap struct {
-	content []byte
-}
-
-// NewBootstrap takes a defensive copy of source-owned bootstrap data.
-func NewBootstrap(content []byte) Bootstrap {
-	return Bootstrap{content: append([]byte(nil), content...)}
-}
-
 // StartRequest binds a runner to exactly one configured Runner Pool and
 // inventory endpoint. Bootstrap remains opaque to the execution provider.
 type StartRequest struct {
@@ -75,7 +64,7 @@ type StartRequest struct {
 	RunnerPool core.RunnerPool
 	EndpointID InventoryEndpointID
 	RunnerName core.RunnerName
-	Bootstrap  Bootstrap
+	Bootstrap  core.Bootstrap
 }
 
 // ProviderName identifies the configured execution implementation in operator

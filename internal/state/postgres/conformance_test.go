@@ -22,8 +22,8 @@ func (postgresConformance) Exercise(t *testing.T, scenario storetest.Scenario) s
 	switch {
 	case strings.HasPrefix(name, "queue/"):
 		return exercisePostgresQueue(t, scenario)
-	case scenario == storetest.DelayedStart:
-		return exercisePostgresDelayedStart(t)
+	case scenario == storetest.DelayedAcceptance:
+		return exercisePostgresDelayedAcceptance(t)
 	case strings.HasPrefix(name, "claim/"):
 		return exercisePostgresClaim(t, scenario)
 	case strings.HasPrefix(name, "retry/"):
@@ -63,7 +63,7 @@ func exercisePostgresClaim(t *testing.T, scenario storetest.Scenario) storetest.
 		rows = []Row{rowFromValues(queuedJobValues(job.ID, request)), rowFromValues(queuedJobValues(job.ID, request))}
 	}
 	result, err := NewStore((&recordedTransaction{rows: rows}).executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{
-		MemberID: "member-a", ClaimedAt: storetest.FixedTime(), InventoryEndpointID: "docker:member-a",
+		MemberID: "member-a", AttemptID: core.AttemptID{1}, ClaimedAt: storetest.FixedTime(), InventoryEndpointID: "docker:member-a",
 	})
 	if err != nil {
 		t.Fatalf("claim: %v", err)
@@ -78,35 +78,36 @@ func exercisePostgresClaim(t *testing.T, scenario storetest.Scenario) storetest.
 	return observation
 }
 
-func exercisePostgresDelayedStart(t *testing.T) storetest.Observation {
+func exercisePostgresDelayedAcceptance(t *testing.T) storetest.Observation {
 	t.Helper()
 	job := storetest.OldestJob()
 	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{
 		postgresClaimedOutcomeValues(storetest.ExpectedProcessing(), true, false),
 	})}
 	store := NewStore(protocol.executor())
-	if _, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: job.Source}); err != nil {
-		t.Fatalf("mark started: %v", err)
+	if _, err := store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: job.Source}); err != nil {
+		t.Fatalf("mark accepted: %v", err)
 	}
 	processing, err := store.ProcessingByPool(context.Background(), job.RunnerPool)
 	if err != nil || len(processing) != 1 {
-		t.Fatalf("processing after start = %#v, %v", processing, err)
+		t.Fatalf("processing after acceptance = %#v, %v", processing, err)
 	}
-	return storetest.Observation{Started: processing[0].RunnerStarted}
+	return storetest.Observation{Accepted: processing[0].RunnerAccepted}
 }
 
 func exercisePostgresRetry(t *testing.T, scenario storetest.Scenario) storetest.Observation {
 	t.Helper()
-	job := storetest.OldestJob()
-	plain := rowFromValues(postgresProcessingOutcomeValues(job, false, false))
+	processing := storetest.ExpectedProcessing()
+	job := processing.Job
+	plain := rowFromValues(postgresClaimedOutcomeValues(processing, false, false))
 	rows := map[storetest.Scenario][]Row{
 		storetest.RetryRequeue:      {plain, rowFromValues(queuedJobValues(job.ID, core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool}))},
 		storetest.RetryMissing:      {noPostgresRow()},
-		storetest.RetryStarted:      {rowFromValues(postgresProcessingOutcomeValues(job, true, false))},
-		storetest.RetryTerminal:     {rowFromValues(postgresProcessingOutcomeValues(job, false, true))},
+		storetest.RetryAccepted:     {rowFromValues(postgresClaimedOutcomeValues(processing, true, false))},
+		storetest.RetryTerminal:     {rowFromValues(postgresClaimedOutcomeValues(processing, false, true))},
 		storetest.RetryClaimChanged: {plain, noPostgresRow(), plain},
 	}[scenario]
-	result, err := NewStore((&recordedTransaction{rows: rows}).executor()).RetryUnstarted(context.Background(), job.ID)
+	result, err := NewStore((&recordedTransaction{rows: rows}).executor()).RetryUnstarted(context.Background(), processing)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -120,7 +121,7 @@ func exercisePostgresRecovery(t *testing.T, scenario storetest.Scenario) storete
 		storetest.RecoveryRequeue: {rowFromValues(queuedJobValues(processing.Job.ID, core.JobRequest{Source: processing.Job.Source,
 			RunnerPool: processing.Job.RunnerPool, EnqueuedAt: processing.Job.EnqueuedAt}))},
 		storetest.RecoveryMissing:      {noPostgresRow(), noPostgresRow()},
-		storetest.RecoveryStarted:      {noPostgresRow(), rowFromValues(postgresClaimedOutcomeValues(processing, true, false))},
+		storetest.RecoveryAccepted:     {noPostgresRow(), rowFromValues(postgresClaimedOutcomeValues(processing, true, false))},
 		storetest.RecoveryTerminal:     {noPostgresRow(), rowFromValues(postgresClaimedOutcomeValues(processing, false, true))},
 		storetest.RecoveryClaimChanged: {noPostgresRow(), rowFromValues(postgresClaimedOutcomeValues(processing, false, false))},
 	}[scenario]

@@ -83,7 +83,7 @@ func assertRetainedUnstartedProcessing(t *testing.T, harness *e2eHarness, wantJo
 	records, err := harness.runtime.state.store.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
-	if err != nil || len(records) != 1 || records[0].Job.ID != wantJobID || records[0].RunnerStarted {
+	if err != nil || len(records) != 1 || records[0].Job.ID != wantJobID || records[0].RunnerAccepted {
 		t.Fatalf("retained unstarted processing = %+v, error = %v, want job %s", records, err, wantJobID)
 	}
 }

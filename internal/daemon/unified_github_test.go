@@ -19,12 +19,12 @@ func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T)
 	t.Parallel()
 
 	messageClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
-	adapter := &githubsource.Adapter{Client: messageClient, Handler: eventHandlerFake{}, RunnerPool: "linux"}
+	adapter := &githubsource.Adapter{Client: messageClient, SourceEvents: eventHandlerFake{}, RunnerPool: "linux"}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
 		adapter,
-		{Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{}, RunnerPool: "linux"},
+		{Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{}, RunnerPool: "linux"},
 	}}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}}
+	capacities := &sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager, capacities, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
@@ -47,7 +47,7 @@ func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
@@ -73,9 +73,9 @@ func TestGitHubSourceRuntimeActivatesReconciledRoutesWhenPruningFails(t *testing
 	record := githubsource.Registration{RepositoryURL: "https://github.example/repository", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 1}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{{
-		Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{}, RunnerPool: "linux",
+		Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{}, RunnerPool: "linux",
 	}}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}}},
 		time.Minute, func() time.Time { return time.Time{} })
 	term := &githubLeadershipTerm{epoch: 1, openResults: make(chan githubRegistrationOpenResult, 1),
@@ -98,7 +98,7 @@ func TestGitHubSourceRuntimeActivatesTrustworthyRoutesWhenOneAppFails(t *testing
 	wantErr := errors.New("GitHub App unavailable")
 	record := githubsource.Registration{GitHubAppID: 22, RepositoryURL: "https://github.example/healthy",
 		RunnerPool: "linux", InstallationID: 2, RunnerGroupID: 3, ScaleSetID: 4}
-	source := newGitHubSourceRuntime(&githubManagerFake{}, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	term := &githubLeadershipTerm{epoch: 1, openResults: make(chan githubRegistrationOpenResult, 1),
 		discoveryResult: make(chan githubDiscoveryResult, 1), openSlots: make(chan struct{}, 1),
@@ -196,7 +196,7 @@ func newReorderedRegistrationFixture() *reorderedRegistrationFixture {
 		facts.Active[3], facts.Active[2], facts.Active[1], facts.Active[0],
 	}}
 	fixture.source = newGitHubSourceRuntime(fixture.manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1, "windows": 1}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1, "windows": 1}},
 		"member-1", recordingQueueEventHandler{queued: fixture.queued}, managerConfigForAdapters(fixture.manager.adapters), time.Minute,
 		func() time.Time { return fixture.now })
 	return fixture
@@ -207,7 +207,7 @@ func TestGitHubSourceRuntimeRefreshesMemberRoutesAtDiscoveryCadence(t *testing.T
 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
 
 	if err := source.RefreshMembers(context.Background()); err != nil {
@@ -229,18 +229,18 @@ func TestGitHubSourceRuntimeRestoresExistingAdaptersAfterReplacementOpenFails(t 
 	t.Parallel()
 
 	client := newBlockingCapacityMessageClient()
-	adapter := &githubsource.Adapter{Client: client, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"}
+	adapter := &githubsource.Adapter{Client: client, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{adapter}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
 		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 
 	now = now.Add(time.Minute)
 	replacementErr := errors.New("replacement failed")
 	manager.setRepositoryOpen(
-		[]*githubsource.Adapter{{Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{},
+		[]*githubsource.Adapter{{Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{},
 			Repository: "two", RunnerPool: "linux"}}, replacementErr)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	awaitGitHubDiscovery(t, source)
@@ -262,11 +262,11 @@ func TestGitHubSourceRuntimeRetainsPollsWhenCancellationDeadlineExpires(t *testi
 
 	client := newStubbornCapacityMessageClient()
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{{
-		Client: client, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux",
+		Client: client, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux",
 	}}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
 		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
@@ -287,10 +287,10 @@ func TestGitHubSourceRuntimeKeepsInstalledAdaptersWhenOldSessionCloseFails(t *te
 	closeErr := errors.New("old session close failed")
 	messageClient := &capacityMessageClientFake{}
 	manager := &githubManagerFake{
-		adapters: []*githubsource.Adapter{{Client: messageClient, Handler: eventHandlerFake{}, RunnerPool: "linux"}},
+		adapters: []*githubsource.Adapter{{Client: messageClient, SourceEvents: eventHandlerFake{}, RunnerPool: "linux"}},
 		closeErr: closeErr,
 	}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 
 	mustOpenGitHubSource(t, source)
@@ -308,7 +308,7 @@ func TestGitHubSourceRuntimeReportsLifecycleFailures(t *testing.T) {
 	wantErr := errors.New("GitHub failed")
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{refreshErr: wantErr}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
 	if err := source.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("refresh error = %v", err)
@@ -327,7 +327,7 @@ func TestGitHubSourceRuntimeMarksMemberRefreshDueAfterDiscovery(t *testing.T) {
 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{refreshErr: errors.New("member refresh called during discovery")}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
 	source.nextMemberRefresh = now.Add(time.Hour)
 	if err := source.OpenLeader(context.Background()); err != nil {
@@ -433,12 +433,13 @@ func (fake *githubManagerFake) RefreshMembers(context.Context, githubsource.Mana
 	fake.events = append(fake.events, "refresh")
 	return fake.refreshErr
 }
-func (fake *githubManagerFake) OpenRegistrationSession(
+func (fake *githubManagerFake) OpenSourceRegistrationSession(
 	ctx context.Context,
 	record githubsource.Registration,
 	configured githubsource.RunnerPoolConfig,
 	owner string,
-	handler githubsource.EventHandler,
+	sourceEvents core.SourceEventHandler,
+	assignedDemand githubsource.AssignedDemandHandler,
 ) (*githubsource.RegistrationSession, error) {
 	if fake.openStarted != nil {
 		fake.openStarted <- struct{}{}
@@ -458,7 +459,9 @@ func (fake *githubManagerFake) OpenRegistrationSession(
 	if err != nil {
 		return nil, err
 	}
-	session, err := manager.OpenRegistrationSession(ctx, record, configured, owner, handler)
+	session, err := manager.OpenSourceRegistrationSession(
+		ctx, record, configured, owner, sourceEvents, assignedDemand,
+	)
 	if err != nil {
 		return session, fmt.Errorf("open test registration session: %w", err)
 	}
@@ -540,19 +543,18 @@ func (session githubManagedSessionFake) Close(context.Context) error {
 	return session.manager.closeErr
 }
 
-type capacityAggregatorFake struct {
+type sourceCapacityProviderFake struct {
 	capacities map[core.RunnerPool]int
 	queries    []core.RunnerPool
 	err        error
 }
 
-func (fake *capacityAggregatorFake) AvailableRunnerPoolCapacity(
+func (fake *sourceCapacityProviderFake) CapacitySnapshot(
 	_ context.Context,
 	runnerPool core.RunnerPool,
-	_ time.Time,
-) (int, error) {
+) (core.CapacitySnapshot, error) {
 	fake.queries = append(fake.queries, runnerPool)
-	return fake.capacities[runnerPool], fake.err
+	return core.CapacitySnapshot{RunnerPool: runnerPool, Available: fake.capacities[runnerPool]}, fake.err
 }
 
 type capacityMessageClientFake struct {
@@ -687,16 +689,19 @@ func (failingQueueEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
-func (handler failingQueueEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+func (handler failingQueueEventHandler) IngestDemand(
+	context.Context,
+	core.JobRequest,
+) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, handler.err
 }
-func (failingQueueEventHandler) RunnerStarted(
+func (failingQueueEventHandler) ObserveRunnerAcceptance(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
-func (failingQueueEventHandler) Terminalize(
+func (failingQueueEventHandler) ObserveTerminal(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -716,7 +721,7 @@ func (*lifecycleThenQueueEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
-func (handler *lifecycleThenQueueEventHandler) Request(
+func (handler *lifecycleThenQueueEventHandler) IngestDemand(
 	_ context.Context,
 	request core.JobRequest,
 ) (core.EnqueueResult, error) {
@@ -724,13 +729,13 @@ func (handler *lifecycleThenQueueEventHandler) Request(
 	handler.woken <- request.RunnerPool
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
-func (*lifecycleThenQueueEventHandler) RunnerStarted(
+func (*lifecycleThenQueueEventHandler) ObserveRunnerAcceptance(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
 }
-func (handler *lifecycleThenQueueEventHandler) Terminalize(
+func (handler *lifecycleThenQueueEventHandler) ObserveTerminal(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -780,29 +785,38 @@ func (recordingQueueEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
-func (handler recordingQueueEventHandler) Request(_ context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+func (handler recordingQueueEventHandler) IngestDemand(
+	_ context.Context,
+	request core.JobRequest,
+) (core.EnqueueResult, error) {
 	handler.queued <- request
 	return core.EnqueueResult{Outcome: core.QueueQueued, Job: core.Job{ID: core.JobID{1}}}, nil
 }
-func (recordingQueueEventHandler) RunnerStarted(
+func (recordingQueueEventHandler) ObserveRunnerAcceptance(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
-func (recordingQueueEventHandler) Terminalize(
+func (recordingQueueEventHandler) ObserveTerminal(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
 
-func (eventHandlerFake) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+func (eventHandlerFake) IngestDemand(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
-func (eventHandlerFake) RunnerStarted(context.Context, core.RunnerObservation) (core.ObservationResult, error) {
+func (eventHandlerFake) ObserveRunnerAcceptance(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
-func (eventHandlerFake) Terminalize(context.Context, core.RunnerObservation) (core.ObservationResult, error) {
+func (eventHandlerFake) ObserveTerminal(
+	context.Context,
+	core.RunnerObservation,
+) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }

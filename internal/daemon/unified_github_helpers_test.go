@@ -121,7 +121,7 @@ func awaitGitHubDiscoveryProgress(source *githubSourceRuntime) []error {
 
 func newGitHubPollingTestSource(
 	adapters []*githubsource.Adapter,
-	capacities *capacityAggregatorFake,
+	capacities *sourceCapacityProviderFake,
 	currentTime func() time.Time,
 ) *githubSourceRuntime {
 	manager := &githubManagerFake{adapters: adapters}

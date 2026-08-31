@@ -114,6 +114,7 @@ func TestRepositoryQuotasReserveAdmissionForEveryConfiguredApp(t *testing.T) {
 		appCount int
 		want     []int
 	}{
+		"no Apps require no capacity":      {appCount: 0, want: []int{}},
 		"one App uses all capacity":        {appCount: 1, want: []int{4}},
 		"two Apps divide capacity":         {appCount: 2, want: []int{2, 2}},
 		"remainder follows precedence":     {appCount: 3, want: []int{2, 1, 1}},

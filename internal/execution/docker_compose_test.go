@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	providerdocker "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
@@ -18,7 +19,7 @@ func TestDockerComposeStartTranslatesSourceNeutralRequest(t *testing.T) {
 	err := provider.Start(context.Background(), StartRequest{
 		RunnerPool: "linux",
 		RunnerName: "linux-1",
-		Bootstrap:  NewBootstrap([]byte("opaque-bootstrap")),
+		Bootstrap:  core.NewBootstrap([]byte("opaque-bootstrap")),
 	})
 	if err != nil {
 		t.Fatalf("start Docker Compose runner: %v", err)

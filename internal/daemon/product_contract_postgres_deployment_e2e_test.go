@@ -55,7 +55,7 @@ func completeAcceptedPostgresProcessingAfterReconnect(
 	processing, err := second.runtime.state.store.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted {
 		t.Fatalf("accepted processing after PostgreSQL reconnect = %s, error = %v", describeProcessing(processing), err)
 	}
 	second.deliver(&upstream.RunnerScaleSetMessage{

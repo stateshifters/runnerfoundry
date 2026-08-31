@@ -264,6 +264,15 @@ func TestQueuedJobProcessorImmediatelyRetriesDurablyRequeuedFailure(t *testing.T
 }
 
 func TestQueuedJobProcessorContinuesAfterStartingRunner(t *testing.T) {
+	assertQueuedJobProcessorContinuesAfter(t, runtimeengine.ProcessRunnerStarted)
+}
+
+func TestQueuedJobProcessorContinuesAfterReportingProvisioningFailure(t *testing.T) {
+	assertQueuedJobProcessorContinuesAfter(t, runtimeengine.ProcessProvisioningFailureReported)
+}
+
+func assertQueuedJobProcessorContinuesAfter(t *testing.T, outcome runtimeengine.ProcessOutcome) {
+	t.Helper()
 	requests := make(chan int, 2)
 	requestCount := 0
 	requester := queuedJobRequesterFake{request: func(
@@ -273,7 +282,7 @@ func TestQueuedJobProcessorContinuesAfterStartingRunner(t *testing.T) {
 		requestCount++
 		requests <- requestCount
 		if requestCount == 1 {
-			return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRunnerStarted}, nil
+			return runtimeengine.ProcessResult{Outcome: outcome}, nil
 		}
 		return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}, nil
 	}}

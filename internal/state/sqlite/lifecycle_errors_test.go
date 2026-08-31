@@ -9,12 +9,12 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-func TestMarkRunnerStartedReportsEveryTransactionalFailure(t *testing.T) {
+func TestObserveRunnerAcceptanceReportsEveryTransactionalFailure(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request"}
-	assertTransactionalMutationFailures(t, []string{"mark processing started", "tombstone delayed start", "remove queued retry"},
+	assertTransactionalMutationFailures(t, []string{"mark processing accepted", "tombstone delayed acceptance", "remove queued retry"},
 		func(store *Store) error {
-			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			_, err := store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 			return err
 		})
 }
@@ -26,7 +26,7 @@ func TestRetryUnstartedProcessingHandlesIneligibleTransition(t *testing.T) {
 	}, queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}),
 		commit: successfulCompletion, rollback: successfulCompletion}
 	if result, err := NewStore(Executor{begin: transactionBeginning(ineligible)}).
-		RetryUnstarted(context.Background(), testJobID); err != nil || result.Outcome != core.RetryMissing {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err != nil || result.Outcome != core.RetryMissing {
 		t.Fatalf("ineligible retry=%#v error=%v", result, err)
 	}
 }
@@ -35,7 +35,7 @@ func TestRetryUnstartedProcessingReportsInsertFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
 	if _, err := NewStore(Executor{begin: failingBegin(protocolErr)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected processing retry begin failure")
 	}
 	tests := []namedTransaction{
@@ -47,7 +47,7 @@ func TestRetryUnstartedProcessingReportsInsertFailures(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			if _, err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).
-				RetryUnstarted(context.Background(), testJobID); err == nil {
+				RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 				t.Fatal("expected retry insertion failure")
 			}
 		})
@@ -60,7 +60,7 @@ func TestRetryUnstartedProcessingReportsRemovalFailure(t *testing.T) {
 	deleteFailure := transactionFailingExecute(2, protocolErr)
 	deleteFailure.queryRow = constantRow(rowFromValues(unstartedProcessingValues()))
 	if _, err := NewStore(Executor{begin: transactionBeginning(deleteFailure)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected processing removal failure")
 	}
 }
@@ -91,7 +91,7 @@ func TestRetryUnstartedProcessingReportsRemovalCountFailure(t *testing.T) {
 func assertSQLiteRetryFailure(t *testing.T, transaction Transaction) {
 	t.Helper()
 	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected retry failure")
 	}
 }
@@ -104,13 +104,13 @@ func TestRetryUnstartedProcessingReportsCommitFailures(t *testing.T) {
 	}, queryRow: constantRow(Row{scan: func(...any) error { return sql.ErrNoRows }}),
 		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
 	if _, err := NewStore(Executor{begin: transactionBeginning(ineligibleCommit)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected ineligible retry commit failure")
 	}
 	successfulCommit := Transaction{queryRow: constantRow(rowFromValues(unstartedProcessingValues())), execute: successfulExecute,
 		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
 	if _, err := NewStore(Executor{begin: transactionBeginning(successfulCommit)}).
-		RetryUnstarted(context.Background(), testJobID); err == nil {
+		RetryUnstarted(context.Background(), retryProcessingJob()); err == nil {
 		t.Fatal("expected successful retry commit failure")
 	}
 }

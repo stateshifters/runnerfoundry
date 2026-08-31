@@ -6,18 +6,18 @@ import (
 	"strconv"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`
-const processingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
-	runner_name, runner_started, EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
-		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
-		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
 const claimedProcessingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
 	runner_name, claimed_at, inventory_endpoint_id, runner_started,
 	EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
-		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal,
+	CASE WHEN EXISTS (SELECT 1 FROM public.runnerfoundry_provisioning_failures failures
+		WHERE failures.job_id = runnerfoundry_processing_jobs.job_id AND failures.is_reported) THEN 'reported'
+		WHEN provisioning_failure_reserved THEN 'reporting' ELSE '' END AS provisioning_failure_state`
 
 const serializeRunnerPoolClaimSQL = `SELECT pg_advisory_xact_lock(1, hashtext($1))`
 const serializeSourceSQL = `SELECT pg_advisory_xact_lock(2, hashtext($1))`
@@ -63,8 +63,8 @@ const processingByMemberSQL = `SELECT ` + claimedProcessingJobColumns + `
 
 type Store struct{ executor Executor }
 
-var _ core.JobQueueStore = (*Store)(nil)
-var _ core.ProcessingJobStore = (*Store)(nil)
+var _ statecontract.JobQueueStore = (*Store)(nil)
+var _ statecontract.ProcessingJobStore = (*Store)(nil)
 
 func NewStore(executor Executor) *Store { return &Store{executor: executor} }
 
@@ -166,14 +166,17 @@ func (store *Store) RecoverUnstartedProcessing(
 	return core.RetryResult{Outcome: outcome}, nil
 }
 
-func (store *Store) RetryUnstarted(ctx context.Context, jobID core.JobID) (_ core.RetryResult, resultErr error) {
+func (store *Store) RetryUnstarted(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (_ core.RetryResult, resultErr error) {
 	transaction, err := store.executor.Begin(ctx)
 	if err != nil {
 		return core.RetryResult{}, fmt.Errorf("begin retry processing job: %w", err)
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	outcome, err := retryUnstartedProcessing(ctx, transaction, jobID)
+	outcome, err := retryUnstartedProcessing(ctx, transaction, processing)
 	if err != nil {
 		return core.RetryResult{}, err
 	}

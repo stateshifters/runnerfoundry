@@ -66,11 +66,7 @@ func (adapter *Adapter) executeAssignedDemandReconciliation(
 	if err := demand.Validate(); err != nil {
 		return AssignedDemandResult{}, err
 	}
-	handler, available := adapter.Handler.(AssignedDemandHandler)
-	if !available {
-		return AssignedDemandResult{}, errors.New("GitHub assigned-demand handler is required")
-	}
-	result, err := handler.ReconcileAssignedDemand(ctx, demand)
+	result, err := adapter.AssignedDemand.ReconcileAssignedDemand(ctx, demand)
 	if err != nil {
 		return result, fmt.Errorf("persist assigned demand: %w", err)
 	}

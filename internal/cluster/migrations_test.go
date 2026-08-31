@@ -25,13 +25,13 @@ func TestEmbeddedMigrationCatalogIncludesReversibleGitHubAppMigration(t *testing
 	if err != nil {
 		t.Fatalf("load embedded migrations: %v", err)
 	}
-	if target := migrationTarget(catalog); target != 6 {
-		t.Fatalf("embedded migration target = %d, want 6", target)
+	if target := migrationTarget(catalog); target != 8 {
+		t.Fatalf("embedded migration target = %d, want 8", target)
 	}
 	queueNotifications := catalog.Migrations[3]
 	declarations := catalog.Migrations[4]
 	multipleApps := catalog.Migrations[5]
-	if len(catalog.Migrations) != 6 || strings.TrimSpace(queueNotifications.DownSQL) == "" ||
+	if len(catalog.Migrations) != 8 || strings.TrimSpace(queueNotifications.DownSQL) == "" ||
 		!strings.Contains(queueNotifications.UpSQL, "pg_notify('runnerfoundry_queued_jobs', NEW.runner_pool)") ||
 		!strings.Contains(queueNotifications.UpSQL, "AFTER INSERT ON public.runnerfoundry_queued_jobs") ||
 		strings.TrimSpace(declarations.DownSQL) == "" ||

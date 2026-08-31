@@ -7,18 +7,25 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 const queuedJobColumns = `job_id, source_name, source_reference, runner_pool, enqueued_at`
 const processingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
 	runner_name, runner_started, EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
-		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal,
+	CASE WHEN EXISTS (SELECT 1 FROM runnerfoundry_provisioning_failures failures
+		WHERE failures.job_id = runnerfoundry_processing_jobs.job_id AND failures.is_reported = 1) THEN 'reported'
+		WHEN provisioning_failure_reserved = 1 THEN 'reporting' ELSE '' END AS provisioning_failure_state`
 const claimedProcessingJobColumns = `job_id, source_name, source_reference, runner_pool, member_id,
 	runner_name, claimed_at, inventory_endpoint_id, runner_started,
 	EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
-		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal`
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference) AS source_terminal,
+	CASE WHEN EXISTS (SELECT 1 FROM runnerfoundry_provisioning_failures failures
+		WHERE failures.job_id = runnerfoundry_processing_jobs.job_id AND failures.is_reported = 1) THEN 'reported'
+		WHEN provisioning_failure_reserved = 1 THEN 'reporting' ELSE '' END AS provisioning_failure_state`
 
 const insertQueuedJobSQL = `INSERT INTO runnerfoundry_queued_jobs
 	(job_id, source_name, source_reference, runner_pool, enqueued_at)
@@ -49,11 +56,22 @@ const insertTombstoneSQL = `INSERT INTO runnerfoundry_source_tombstones(source_n
 const deleteQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs WHERE job_id = ?`
 const cancelQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs
 	WHERE source_name = ? AND source_reference = ?`
-const markProcessingStartedSQL = `UPDATE runnerfoundry_processing_jobs SET runner_started = 1
-	WHERE source_name = ? AND source_reference = ? AND runner_started = 0
+const markProcessingAcceptedSQL = `UPDATE runnerfoundry_processing_jobs SET runner_started = 1
+	WHERE source_name = ? AND source_reference = ? AND runner_started = 0 AND provisioning_failure_reserved = 0
 	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
 		WHERE source_name = ? AND source_reference = ?)`
-const tombstoneDelayedStartSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
+const markProcessingAttemptAcceptedSQL = `UPDATE runnerfoundry_processing_jobs SET runner_started = 1
+	WHERE source_name = ? AND source_reference = ? AND runner_name = ? AND runner_started = 0
+	AND provisioning_failure_reserved = 0
+	AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
+		WHERE source_name = ? AND source_reference = ?)`
+const sourceAcceptedProcessingSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_processing_jobs
+	WHERE source_name = ? AND source_reference = ?
+	AND (runner_started = 1 OR provisioning_failure_reserved = 1))`
+const attemptAcceptedProcessingSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_processing_jobs
+	WHERE source_name = ? AND source_reference = ? AND runner_name = ?
+	AND (runner_started = 1 OR provisioning_failure_reserved = 1))`
+const tombstoneDelayedAcceptanceSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
 	SELECT ?, ? WHERE EXISTS (SELECT 1 FROM runnerfoundry_queued_jobs
 		WHERE source_name = ? AND source_reference = ?)
 	ON CONFLICT(source_name, source_reference) DO NOTHING`
@@ -67,8 +85,8 @@ type Store struct {
 	close    func() error
 }
 
-var _ core.JobQueueStore = (*Store)(nil)
-var _ core.ProcessingJobStore = (*Store)(nil)
+var _ statecontract.JobQueueStore = (*Store)(nil)
+var _ statecontract.ProcessingJobStore = (*Store)(nil)
 
 func (store *Store) ProcessingByMember(
 	ctx context.Context,
@@ -158,7 +176,8 @@ func recoverSQLiteProcessingClaim(
 	processing core.ProcessingJob,
 ) (core.RetryOutcome, error) {
 	result, err := transaction.Execute(ctx, recoverProcessingSQL, processing.Job.EnqueuedAt.UnixNano(),
-		processing.Job.ID.String(), processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID))
+		processing.Job.ID.String(), processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID),
+		processing.RunnerName)
 	if err != nil {
 		return "", fmt.Errorf("requeue expired processing: %w", err)
 	}
@@ -175,15 +194,18 @@ func recoverSQLiteProcessingClaim(
 	return core.RetryRequeued, nil
 }
 
-func (store *Store) RetryUnstarted(ctx context.Context, jobID core.JobID) (_ core.RetryResult, resultErr error) {
+func (store *Store) RetryUnstarted(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (_ core.RetryResult, resultErr error) {
 	return store.executeRetryTransition(ctx, "processing retry", func(transaction Transaction) (core.RetryOutcome, error) {
-		return retryUnstartedProcessing(ctx, transaction, jobID)
+		return retryUnstartedProcessing(ctx, transaction, processing)
 	})
 }
 
 func removeRecoveredSQLiteOwnership(ctx context.Context, transaction Transaction, processing core.ProcessingJob) error {
 	removal, err := transaction.Execute(ctx, deleteRecoveredProcessingSQL, processing.Job.ID.String(),
-		processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID))
+		processing.ClaimedAt.UnixNano(), string(processing.InventoryEndpointID), processing.RunnerName)
 	if err != nil {
 		return fmt.Errorf("remove recovered processing: %w", err)
 	}
@@ -197,62 +219,122 @@ func removeRecoveredSQLiteOwnership(ctx context.Context, transaction Transaction
 	return nil
 }
 
-func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobID core.JobID) (core.RetryOutcome, error) {
-	outcome, err := classifyRetryCandidate(ctx, transaction, jobID)
+func retryUnstartedProcessing(
+	ctx context.Context,
+	transaction Transaction,
+	expected core.ProcessingJob,
+) (core.RetryOutcome, error) {
+	outcome, err := classifyRetryCandidate(ctx, transaction, expected)
 	if err != nil || outcome != "" {
 		return outcome, err
 	}
-	return requeueProcessingOwnership(ctx, transaction, jobID)
+	return requeueProcessingOwnership(ctx, transaction, expected)
 }
 
-func classifyRetryCandidate(ctx context.Context, transaction Transaction, jobID core.JobID) (core.RetryOutcome, error) {
-	processing, err := scanProcessingJob(transaction.QueryRow(ctx, processingByIDSQL, jobID.String()))
+func classifyRetryCandidate(
+	ctx context.Context,
+	transaction Transaction,
+	expected core.ProcessingJob,
+) (core.RetryOutcome, error) {
+	processing, err := scanClaimedProcessingJob(
+		transaction.QueryRow(ctx, processingByClaimIDSQL, expected.Job.ID.String()),
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.RetryMissing, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("load processing retry candidate: %w", err)
 	}
+	if !sameSQLiteProcessingClaim(processing, expected) {
+		return core.RetryClaimChanged, nil
+	}
 	if processing.SourceTerminal {
 		return core.RetrySourceTerminal, nil
 	}
-	if processing.RunnerStarted {
-		return core.RetryRunnerStarted, nil
+	if processing.RunnerAccepted {
+		return core.RetryRunnerAccepted, nil
+	}
+	if processing.ProvisioningFailure == core.ProvisioningFailureReported {
+		return core.RetryFailureFinalizationPending, nil
+	}
+	if processing.ProvisioningFailure == core.ProvisioningFailureReporting {
+		return core.RetryFailureReportingPending, nil
 	}
 	return "", nil
 }
 
-func requeueProcessingOwnership(ctx context.Context, transaction Transaction, jobID core.JobID) (core.RetryOutcome, error) {
-	result, err := transaction.Execute(ctx, retryProcessingSQL, jobID.String())
+func requeueProcessingOwnership(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) (core.RetryOutcome, error) {
+	requeued, err := enqueueSQLiteProcessingRetry(ctx, transaction, processing)
 	if err != nil {
-		return "", fmt.Errorf("return processing job to queue: %w", err)
+		return "", err
+	}
+	if !requeued {
+		return classifyLostSQLiteRetry(ctx, transaction, processing)
+	}
+	if err := removeRetriedSQLiteOwnership(ctx, transaction, processing); err != nil {
+		return "", err
+	}
+	return core.RetryRequeued, nil
+}
+
+func enqueueSQLiteProcessingRetry(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) (bool, error) {
+	arguments := []any{processing.Job.ID.String(), processing.ClaimedAt.UnixNano(),
+		string(processing.InventoryEndpointID), processing.RunnerName}
+	result, err := transaction.Execute(ctx, retryProcessingSQL, arguments...)
+	if err != nil {
+		return false, fmt.Errorf("return processing job to queue: %w", err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return "", fmt.Errorf("read processing retry count: %w", err)
+		return false, fmt.Errorf("read processing retry count: %w", err)
 	}
-	if rowsAffected == 0 {
-		outcome, classifyErr := classifyRetryCandidate(ctx, transaction, jobID)
-		if classifyErr != nil {
-			return "", classifyErr
-		}
-		if outcome == "" {
-			outcome = core.RetryClaimChanged
-		}
-		return outcome, nil
+	return rowsAffected != 0, nil
+}
+
+func classifyLostSQLiteRetry(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) (core.RetryOutcome, error) {
+	outcome, err := classifyRetryCandidate(ctx, transaction, processing)
+	if err != nil || outcome != "" {
+		return outcome, err
 	}
-	removal, removalErr := transaction.Execute(ctx, deleteRetriedProcessingSQL, jobID.String())
+	return core.RetryClaimChanged, nil
+}
+
+func removeRetriedSQLiteOwnership(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) error {
+	arguments := []any{processing.Job.ID.String(), processing.ClaimedAt.UnixNano(),
+		string(processing.InventoryEndpointID), processing.RunnerName}
+	removal, removalErr := transaction.Execute(ctx, deleteRetriedProcessingSQL, arguments...)
 	if removalErr != nil {
-		return "", fmt.Errorf("remove retried processing ownership: %w", removalErr)
+		return fmt.Errorf("remove retried processing ownership: %w", removalErr)
 	}
 	removed, removalErr := removal.RowsAffected()
 	if removalErr != nil {
-		return "", fmt.Errorf("read retried processing removal count: %w", removalErr)
+		return fmt.Errorf("read retried processing removal count: %w", removalErr)
 	}
 	if removed != 1 {
-		return "", fmt.Errorf("remove retried processing ownership: expected one row, got %d", removed)
+		return fmt.Errorf("remove retried processing ownership: expected one row, got %d", removed)
 	}
-	return core.RetryRequeued, nil
+	return nil
+}
+
+func sameSQLiteProcessingClaim(actual, expected core.ProcessingJob) bool {
+	return actual.Job.ID == expected.Job.ID && actual.ClaimedAt.Equal(expected.ClaimedAt) &&
+		actual.InventoryEndpointID == expected.InventoryEndpointID && actual.RunnerName == expected.RunnerName
 }
 
 func (store *Store) RemoveTerminal(ctx context.Context, jobID core.JobID) (_ core.TerminalRemovalResult, resultErr error) {
@@ -303,11 +385,20 @@ func classifySQLiteRecoveryFailure(ctx context.Context, transaction Transaction,
 	if err != nil {
 		return "", fmt.Errorf("classify processing recovery: %w", err)
 	}
+	if !sameSQLiteProcessingClaim(actual, expected) {
+		return core.RetryClaimChanged, nil
+	}
 	if actual.SourceTerminal {
 		return core.RetrySourceTerminal, nil
 	}
-	if actual.RunnerStarted {
-		return core.RetryRunnerStarted, nil
+	if actual.RunnerAccepted {
+		return core.RetryRunnerAccepted, nil
+	}
+	if actual.ProvisioningFailure == core.ProvisioningFailureReported {
+		return core.RetryFailureFinalizationPending, nil
+	}
+	if actual.ProvisioningFailure == core.ProvisioningFailureReporting {
+		return core.RetryFailureReportingPending, nil
 	}
 	return core.RetryClaimChanged, nil
 }

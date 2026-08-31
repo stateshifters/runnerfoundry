@@ -10,6 +10,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/stateshifters/runnerfoundry/internal/config"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
@@ -91,7 +92,8 @@ func newRuntimeSnapshotManager(t *testing.T, discoverer githubsource.RepositoryD
 func newRuntimeSnapshotGeneration(manager *githubsource.Manager, store *builderStoreFake,
 	reporter *productionRuntimeReporter, now time.Time, ticker *manualCycleTicker,
 ) (*maintenanceGeneration, *githubSourceRuntime, chan struct{}) {
-	source := newGitHubSourceRuntime(manager, store, "member-a", eventHandlerFake{}, githubsource.ManagerConfig{
+	capacity := runtimeengine.NewCapacitySnapshotService(store, func() time.Time { return now }, time.Minute)
+	source := newGitHubSourceRuntime(manager, capacity, "member-a", eventHandlerFake{}, githubsource.ManagerConfig{
 		RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}},
 	}, time.Hour, func() time.Time { return now })
 	source.report = reporter.reportMaintenance

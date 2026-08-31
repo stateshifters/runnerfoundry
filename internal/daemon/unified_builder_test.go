@@ -63,6 +63,17 @@ func TestBuildUnifiedGenerationRejectsInvalidComposition(t *testing.T) {
 	assertBuildRejected(t, invalidDiscovery, valid)
 }
 
+func TestBuildUnifiedGenerationRejectsMissingSourceOperations(t *testing.T) {
+	t.Parallel()
+	dependencies := validBuilderDependencies(t)
+	dependencies.manager = sourceLessManager{githubManagerComposition: dependencies.manager}
+	assertBuildRejected(t, builderConfig(), dependencies)
+}
+
+type sourceLessManager struct{ githubManagerComposition }
+
+func (sourceLessManager) Source() *githubsource.Source { return nil }
+
 func TestBuildUnifiedGenerationAttachesPostgreSQLQueueNotifications(t *testing.T) {
 	configured := builderConfig()
 	configured.State.Postgres = &postgresconfig.Settings{Role: "runnerfoundry"}
@@ -124,7 +135,7 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	store.operationErr = wantErr
 	manager := newBuilderManager(t, store)
 	provider := builderProviderFake{}
-	orchestrator := newBuilderOrchestrator(store, manager, provider)
+	orchestrator := newBuilderOrchestrator(t, store, manager, provider)
 	assertPoolAdapterFailures(t, orchestrator, wantErr)
 	store.operationErr = nil
 	assertPoolAdapterSuccess(t, orchestrator)
@@ -150,12 +161,20 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 }
 
 func newBuilderOrchestrator(
+	t *testing.T,
 	store *builderStoreFake,
 	manager *githubsource.Manager,
 	provider builderProviderFake,
 ) *runtimeengine.Orchestrator {
-	return runtimeengine.NewOrchestrator(
-		store, manager.Source(), provider, provider, daemonTestID(1), builderTime,
+	t.Helper()
+	resolver, err := newSourceOperationsResolver([]sourceOperationsRegistration{{
+		adapter: githubsource.AdapterName, operations: manager.Source(),
+	}})
+	if err != nil {
+		t.Fatalf("source operations resolver: %v", err)
+	}
+	return runtimeengine.NewOrchestratorWithSourceOperations(
+		store, resolver, provider, provider, daemonTestID(1), builderTime,
 	)
 }
 
@@ -332,7 +351,7 @@ func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool,
 func (*builderStoreFake) Terminalize(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
-func (*builderStoreFake) MarkRunnerStarted(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+func (*builderStoreFake) ObserveRunnerAcceptance(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
@@ -341,13 +360,22 @@ func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID
 func (store *builderStoreFake) ProcessingByPool(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
-func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.RetryResult, error) {
+func (*builderStoreFake) RetryUnstarted(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
 func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
 func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TerminalRemovalResult, error) {
+	return core.TerminalRemovalResult{Outcome: core.TerminalMissing}, nil
+}
+func (*builderStoreFake) ReserveProvisioningFailure(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryFailureReportingPending}, nil
+}
+func (*builderStoreFake) RecordProvisioningFailureReported(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryFailureFinalizationPending}, nil
+}
+func (*builderStoreFake) FinalizeProvisioningFailure(context.Context, core.ProcessingJob) (core.TerminalRemovalResult, error) {
 	return core.TerminalRemovalResult{Outcome: core.TerminalMissing}, nil
 }
 

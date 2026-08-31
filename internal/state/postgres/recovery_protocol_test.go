@@ -14,7 +14,8 @@ import (
 func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"},
 		RunnerPool: "linux", EnqueuedAt: fixedTime()}
-	claim := core.ProcessingClaim{MemberID: testMemberIDA, ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
+	claim := core.ProcessingClaim{MemberID: testMemberIDA, AttemptID: core.AttemptID{1}, ClaimedAt: fixedTime(),
+		InventoryEndpointID: "docker:member-a"}
 	protocol := &recordedTransaction{rows: []Row{
 		rowFromValues(queuedJobValues(testJobID1, request)), rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
@@ -53,6 +54,19 @@ func TestClaimOldestReportsEveryTransactionFailure(t *testing.T) {
 	protocol = &recordedTransaction{rows: recoveryQueuedRows(request), commitErr: protocolErr}
 	if _, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err == nil {
 		t.Fatal("claim commit failure was ignored")
+	}
+}
+
+func TestClaimOldestAllocatesMissingAttemptIdentityBeforePersistence(t *testing.T) {
+	request := recoveryRequest()
+	protocol := &recordedTransaction{rows: recoveryQueuedRows(request)}
+	result, err := NewStore(protocol.executor()).ClaimOldest(
+		context.Background(), "linux", core.ProcessingClaim{},
+	)
+	identity, owned, parseErr := core.ParseRunnerName(result.Processing.RunnerName)
+	if err != nil || parseErr != nil || !owned || !identity.AttemptID.IsValid() {
+		t.Fatalf("ClaimOldest() = (%#v, %v), parsed identity = (%#v, %t, %v)",
+			result, err, identity, owned, parseErr)
 	}
 }
 
@@ -112,7 +126,7 @@ func assertClaimExecuteFailure(t *testing.T, request core.JobRequest, failureCal
 		return successfulExecute(ctx, statement, args...)
 	}
 	if _, err := NewStore(Executor{begin: transactionBeginning(base)}).
-		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{}); err == nil {
+		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{AttemptID: core.AttemptID{1}}); err == nil {
 		t.Fatal("claim execute failure was ignored")
 	}
 }
@@ -146,8 +160,8 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
 	values := []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), "linux", testMemberIDA,
-		string(core.AttemptRunnerName(job.ID, core.JobID{})), fixedTime(),
-		core.InventoryEndpointID("docker:member-a"), false, false}
+		string(core.AttemptRunnerName(job.ID, core.AttemptID{1})), fixedTime(),
+		core.InventoryEndpointID("docker:member-a"), false, false, ""}
 	protocol := &recordedTransaction{queryRows: rowsFromValues([][]any{values})}
 	processing, err := NewStore(protocol.executor()).ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].ClaimedAt != fixedTime() ||
@@ -158,16 +172,17 @@ func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 
 func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 	processing := core.ProcessingJob{Job: core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"},
-		RunnerPool: "linux", EnqueuedAt: fixedTime().Add(time.Minute)}, ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
+		RunnerPool: "linux", EnqueuedAt: fixedTime().Add(time.Minute)},
+		RunnerName: core.AttemptRunnerName(testJobID1, core.AttemptID{1}),
+		ClaimedAt:  fixedTime(), InventoryEndpointID: "docker:member-a"}
 	request := core.JobRequest{Source: processing.Job.Source, RunnerPool: "linux", EnqueuedAt: processing.Job.EnqueuedAt}
 	protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
 	result, err := NewStore(protocol.executor()).RecoverUnstartedProcessing(context.Background(), processing)
-	if err != nil || result.Outcome != core.RetryRequeued || protocol.commitCalls != 1 || len(protocol.statements) != 3 ||
-		!strings.Contains(protocol.statements[1], "claimed_at = $2") ||
-		!strings.Contains(protocol.statements[1], "NOT processing.runner_started") ||
-		!strings.Contains(protocol.statements[1], "source_tombstones") {
-		t.Fatalf("recovery = (%#v, %v), statements=%#v", result, err, protocol.statements)
+	if err != nil || result.Outcome != core.RetryRequeued || protocol.commitCalls != 1 {
+		t.Fatalf("recovery = (%#v, %v), statements=%#v arguments=%#v",
+			result, err, protocol.statements, protocol.arguments)
 	}
+	assertPostgresRecoveryAttemptGuard(t, protocol, processing.RunnerName)
 
 	protocol = &recordedTransaction{rows: []Row{{scan: func(...any) error { return sql.ErrNoRows }}}}
 	result, err = NewStore(protocol.executor()).RecoverUnstartedProcessing(context.Background(), processing)
@@ -176,7 +191,33 @@ func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 	}
 }
 
-func TestNamedStoreResultsDescribeLegacyProtocolOutcomes(t *testing.T) {
+func assertPostgresRecoveryAttemptGuard(
+	t *testing.T,
+	protocol *recordedTransaction,
+	runnerName core.RunnerName,
+) {
+	t.Helper()
+	if len(protocol.statements) != 3 || len(protocol.arguments[1]) != 5 || len(protocol.arguments[2]) != 4 {
+		t.Fatalf("recovery protocol = %#v %#v", protocol.statements, protocol.arguments)
+	}
+	for index, fragment := range map[int]string{
+		1: "claimed_at = $2", 2: "runner_name = $4",
+	} {
+		if !strings.Contains(protocol.statements[index], fragment) {
+			t.Fatalf("recovery statement %d = %q, want %q", index, protocol.statements[index], fragment)
+		}
+	}
+	for _, fragment := range []string{"NOT processing.runner_started", "source_tombstones", "runner_name = $5"} {
+		if !strings.Contains(protocol.statements[1], fragment) {
+			t.Fatalf("recovery insert = %q, want %q", protocol.statements[1], fragment)
+		}
+	}
+	if protocol.arguments[1][4] != runnerName || protocol.arguments[2][3] != runnerName {
+		t.Fatalf("recovery arguments = %#v, want runner %q", protocol.arguments, runnerName)
+	}
+}
+
+func TestNamedStoreResultsDescribeTransitionOutcomes(t *testing.T) {
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux", EnqueuedAt: fixedTime()}
 	queueProtocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(testJobID1, request))}}
 	queued, err := NewStore(queueProtocol.executor()).Queue(context.Background(), request)

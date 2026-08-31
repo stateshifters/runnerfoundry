@@ -38,11 +38,13 @@ tests, unless this skill declares an explicit exception.
 
 See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
 
-## Coverage follows behavior
+## Coverage follows purpose
 
-RunnerFoundry requires 100% Go test coverage, but coverage is evidence about the suite, not a reason to create or organise tests. Every test must protect a durable domain behavior or genuine invariant through an agreed stable seam. A test is invalid if its only purpose is to execute a line, branch, return value, error, or helper.
+Apply the [coverage contract](../../../CONTRIBUTING.md#coverage-follows-purpose) before responding to uncovered production code.
 
-Use coverage reports to find questions, not answers. For uncovered code, identify the product promise, domain rule, or invariant that requires it and write the smallest test that proves that contract. If no such contract exists, do not invent a test to satisfy the metric. Remove or simplify the unsupported code when authorised, or report the design problem.
+Treat unexecuted production code as a design question. Identify the requirement or invariant that makes it necessary, the observable outcome it protects, the realistic condition that executes it, and the assertion that would fail if its promise were broken. If those questions have defensible answers, write the smallest behavior-focused test that proves the contract. Exercise material happy, unhappy, boundary, replay, ordering, and failure cases according to that purpose.
+
+If the code has no defensible purpose, remove or simplify it when authorized, or report the design problem when removal is outside the active scope.
 
 Name and group test files, suites, tests, helpers, and fixtures by the durable capability or invariant they specify. Names such as coverage, branch coverage, retained behavior, public behavior, or failure paths describe why tests were added, not what the system promises. Do not use them as the suite taxonomy. Terms such as outcome or error remain valid when they name a real domain contract.
 

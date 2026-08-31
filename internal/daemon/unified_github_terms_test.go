@@ -9,6 +9,7 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
@@ -19,7 +20,7 @@ func TestGitHubLeadershipReconnectsCommittedRepositoryWhileDiscoveryIsBlocked(t 
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/repo", InstallationID: 1,
 		RunnerPool: "linux", RunnerGroupID: 2, ScaleSetID: 3}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: []githubsource.Registration{record}})
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
 			RunnerPool: "linux", RunnerGroup: "default",
 		}}}, time.Minute, func() time.Time { return time.Time{} })
@@ -51,7 +52,7 @@ func TestGitHubLeadershipReconnectsCommittedRegistrationAbsentFromLocalConfigura
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/repo", InstallationID: 1,
 		RunnerPool: "retired", RunnerGroupID: 2, ScaleSetID: 3}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: []githubsource.Registration{record}})
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
@@ -80,7 +81,7 @@ func TestGitHubLeadershipRestoresSiblingWhenScaleSetIsMissing(t *testing.T) {
 	}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: records, Owned: records},
 		map[transport.ScaleSetID]error{4: upstream.NotFoundError})
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
@@ -111,7 +112,7 @@ func TestGitHubLeadershipActivatesSiblingWhileTransientFailureRetries(t *testing
 	}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: records, Owned: records},
 		map[transport.ScaleSetID]error{4: wantErr})
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
@@ -164,7 +165,7 @@ func newAccumulatingSiblingFixture(
 	}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: records, Owned: records},
 		map[transport.ScaleSetID]error{4: wantErr, 5: wantErr})
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
@@ -285,14 +286,17 @@ func (fake *termManagerFake) Reconcile(ctx context.Context, _ githubsource.Manag
 
 func (*termManagerFake) RefreshMembers(context.Context, githubsource.ManagerConfig) error { return nil }
 
-func (fake *termManagerFake) OpenRegistrationSession(
+func (fake *termManagerFake) OpenSourceRegistrationSession(
 	ctx context.Context,
 	record githubsource.Registration,
 	configured githubsource.RunnerPoolConfig,
 	owner string,
-	handler githubsource.EventHandler,
+	sourceEvents core.SourceEventHandler,
+	assignedDemand githubsource.AssignedDemandHandler,
 ) (*githubsource.RegistrationSession, error) {
-	session, err := fake.manager.OpenRegistrationSession(ctx, record, configured, owner, handler)
+	session, err := fake.manager.OpenSourceRegistrationSession(
+		ctx, record, configured, owner, sourceEvents, assignedDemand,
+	)
 	if err != nil {
 		return session, fmt.Errorf("open registration session: %w", err)
 	}

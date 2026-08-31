@@ -7,6 +7,7 @@ import (
 	"time"
 
 	upstream "github.com/actions/scaleset"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 // PollOnce receives and processes at most one GitHub message. It acknowledges
@@ -104,8 +105,11 @@ func (adapter *Adapter) validatePollBoundaries() error {
 	if adapter.Client == nil {
 		return errors.New("GitHub message client is required")
 	}
-	if adapter.Handler == nil {
-		return errors.New("GitHub event handler is required")
+	if !core.IsValidSourceEventHandler(adapter.SourceEvents) {
+		return errors.New("GitHub source event handler is required")
+	}
+	if !isValidAssignedDemandHandler(adapter.AssignedDemand) {
+		return errors.New("GitHub assigned-demand handler is required")
 	}
 	return nil
 }

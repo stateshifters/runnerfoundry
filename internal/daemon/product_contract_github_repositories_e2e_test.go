@@ -37,7 +37,7 @@ type multiRepositoryFixture struct {
 	discovery *paginatedRepositoryDiscovery
 	manager   *githubsource.Manager
 	config    githubsource.RunnerPoolConfig
-	handler   githubsource.EventHandler
+	handler   githubSessionHandler
 	records   []githubsource.Registration
 }
 
@@ -93,8 +93,8 @@ func (fixture *multiRepositoryFixture) reconcile(ctx context.Context, t *testing
 func (fixture *multiRepositoryFixture) assertRouteLocalConflict(ctx context.Context, t *testing.T) {
 	t.Helper()
 	fixture.host.conflictNextOpen(fixture.records[0].RepositoryURL)
-	session, err := fixture.manager.OpenRegistrationSession(
-		ctx, fixture.records[0], fixture.config, "owner", fixture.handler,
+	session, err := fixture.manager.OpenSourceRegistrationSession(
+		ctx, fixture.records[0], fixture.config, "owner", fixture.handler, fixture.handler,
 	)
 	if session != nil || !errors.Is(err, upstream.ConflictError) {
 		t.Fatalf("route-local 409 restoration = (%v, %v), want retained conflict", session, err)
@@ -151,10 +151,10 @@ func openMultiRepositorySession(
 	manager *githubsource.Manager,
 	record githubsource.Registration,
 	configured githubsource.RunnerPoolConfig,
-	handler githubsource.EventHandler,
+	handler githubSessionHandler,
 ) *githubsource.RegistrationSession {
 	t.Helper()
-	session, err := manager.OpenRegistrationSession(ctx, record, configured, "owner", handler)
+	session, err := manager.OpenSourceRegistrationSession(ctx, record, configured, "owner", handler, handler)
 	if err != nil {
 		t.Fatalf("open multi-repository session for %q: %v", record.RepositoryURL, err)
 	}

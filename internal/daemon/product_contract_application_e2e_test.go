@@ -536,7 +536,7 @@ func (application *e2eApplication) assertLeaveShutdownState(
 	t.Helper()
 	if application.provider.destroyCount() != 0 || application.windows.destroyCount() != 0 ||
 		len(linuxProcessing) != 1 || linuxProcessing[0].Job.ID != linux.JobID ||
-		len(windowsProcessing) != 1 || windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerStarted {
+		len(windowsProcessing) != 1 || windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerAccepted {
 		t.Fatalf("leave shutdown state: linux=%+v windows=%+v errors=(%v,%v) destroys=(%d,%d)",
 			linuxProcessing, windowsProcessing, linuxErr, windowsErr,
 			application.provider.destroyCount(), application.windows.destroyCount())
@@ -554,9 +554,9 @@ func (application *e2eApplication) assertTerminateShutdownState(
 ) {
 	t.Helper()
 	if linuxErr != nil || windowsErr != nil || len(linuxProcessing) != 1 ||
-		linuxProcessing[0].Job.ID != linux.JobID || linuxProcessing[0].RunnerStarted ||
+		linuxProcessing[0].Job.ID != linux.JobID || linuxProcessing[0].RunnerAccepted ||
 		len(windowsProcessing) != 1 ||
-		windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerStarted ||
+		windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerAccepted ||
 		application.provider.destroyCount() != 0 || application.windows.destroyCount() != 1 {
 		t.Fatalf("terminate shutdown state: linux=%+v windows=%+v errors=(%v,%v) destroys=(%d,%d)",
 			linuxProcessing, windowsProcessing, linuxErr, windowsErr,

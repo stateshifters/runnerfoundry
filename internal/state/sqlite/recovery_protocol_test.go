@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
@@ -29,7 +28,8 @@ func TestClaimOldestRequestsClaimEvidenceInOneTransaction(t *testing.T) {
 		},
 		commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion,
 	}
-	claim := core.ProcessingClaim{MemberID: testMemberID, ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
+	claim := core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}, ClaimedAt: fixedTime(),
+		InventoryEndpointID: "docker:member-a"}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
 		ClaimOldest(context.Background(), "linux", claim)
 	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.InventoryEndpointID != claim.InventoryEndpointID || commits != 1 ||
@@ -50,10 +50,26 @@ func TestClaimOldestCommitsEmptySelection(t *testing.T) {
 	}
 }
 
+func TestClaimOldestAllocatesMissingAttemptIdentityBeforePersistence(t *testing.T) {
+	transaction := Transaction{
+		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(queuedJobValues()) },
+		execute:  successfulExecute,
+		commit:   successfulCompletion, rollback: successfulCompletion,
+	}
+	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ClaimOldest(
+		context.Background(), "linux", core.ProcessingClaim{},
+	)
+	identity, owned, parseErr := core.ParseRunnerName(result.Processing.RunnerName)
+	if err != nil || parseErr != nil || !owned || !identity.AttemptID.IsValid() {
+		t.Fatalf("ClaimOldest() = (%#v, %v), parsed identity = (%#v, %t, %v)",
+			result, err, identity, owned, parseErr)
+	}
+}
+
 func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	values := []any{testJobIDText, "github", "request-3", "linux", string(testMemberID),
-		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(),
-		"docker:member-a", false, false}
+		string(core.AttemptRunnerName(testJobID, core.AttemptID{1})), fixedTime().UnixNano(),
+		"docker:member-a", false, false, ""}
 	transaction := Transaction{query: func(context.Context, string, ...any) (Rows, error) {
 		return rowsFromValues([][]any{values}), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
@@ -62,23 +78,6 @@ func TestProcessingByPoolReadsRecoveryEvidence(t *testing.T) {
 	if err != nil || len(processing) != 1 || processing[0].ClaimedAt != fixedTime() ||
 		processing[0].InventoryEndpointID != "docker:member-a" {
 		t.Fatalf("processing = (%#v, %v)", processing, err)
-	}
-}
-
-func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
-	statements := make([]string, 0, 2)
-	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
-		statements = append(statements, statement)
-		return successfulResult(), nil
-	}, commit: successfulCompletion, rollback: successfulCompletion}
-	processing := core.ProcessingJob{Job: core.Job{ID: testJobID, RunnerPool: "linux", EnqueuedAt: fixedTime().Add(time.Minute)},
-		ClaimedAt: fixedTime(), InventoryEndpointID: "docker:member-a"}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RecoverUnstartedProcessing(context.Background(), processing)
-	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 ||
-		!strings.Contains(statements[0], "claimed_at = ?") || !strings.Contains(statements[0], "runner_started = 0") ||
-		!strings.Contains(statements[0], "source_tombstones") {
-		t.Fatalf("recovery = (%#v, %v), statements=%#v", result, err, statements)
 	}
 }
 

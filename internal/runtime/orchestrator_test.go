@@ -11,6 +11,19 @@ import (
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
+func newTestOrchestrator(
+	store *jobStoreFake,
+	bootstrapper core.RunnerBootstrapProvider,
+	launcher execution.RunnerLauncher,
+	inventory execution.RunnerInventory,
+	member core.MemberID,
+	currentTime func() time.Time,
+) *runtimeengine.Orchestrator {
+	return runtimeengine.NewOrchestratorWithSourceOperations(
+		store, sourceOperationsResolverFake{operations: bootstrapper}, launcher, inventory, member, currentTime,
+	)
+}
+
 func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 	evidence := newProcessOneEvidence(t)
 	processed, err := evidence.orchestrator.ProcessOne(context.Background(), "linux")
@@ -25,18 +38,45 @@ func TestProcessOneStartsExactlyOneDequeuedJob(t *testing.T) {
 	}
 }
 
+func TestOrchestratorUsesResolvedBootstrapProviderForReconciliation(t *testing.T) {
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	processing := core.ProcessingJob{
+		Job: core.Job{
+			ID: uuid.New(), Source: core.SourceReference{Adapter: "github", ID: "request"}, RunnerPool: "linux",
+		},
+		ClaimedAt: now.Add(-5 * time.Minute), InventoryEndpointID: "test:endpoint",
+	}
+	store := &jobStoreFake{list: func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
+		return []core.ProcessingJob{processing}, nil
+	}}
+	cleaned := false
+	bootstrapper := &bootstrapGeneratorFake{cleanup: func(context.Context, core.Job, core.RunnerName) error {
+		cleaned = true
+		return nil
+	}}
+	provider := &providerFake{}
+	orchestrator := newTestOrchestrator(
+		store, bootstrapper, provider, provider, "member", func() time.Time { return now },
+	)
+
+	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
+	if err != nil || !cleaned || result.RemovedProcessing != 1 || result.RemainingProcessing != 0 {
+		t.Fatalf("ReconcilePool() = (%#v, %v), bootstrap cleaned=%t", result, err, cleaned)
+	}
+}
+
 func TestProvisioningAttemptsForSameJobUseDifferentRunnerNames(t *testing.T) {
 	job := core.Job{ID: uuid.New(), RunnerPool: "linux"}
 	names := make([]core.RunnerName, 0, 2)
 	store := &jobStoreFake{persistAttempt: true, take: func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error) {
 		return core.ProcessingJob{Job: job}, true, nil
 	}}
-	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, _ core.Job, name core.RunnerName) (execution.Bootstrap, error) {
+	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, _ core.Job, name core.RunnerName) (core.Bootstrap, error) {
 		names = append(names, name)
-		return execution.NewBootstrap([]byte("opaque")), nil
+		return core.NewBootstrap([]byte("opaque")), nil
 	}}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, bootstrapper, provider, provider, "member", testCurrentTime)
 	for range 2 {
 		if _, err := orchestrator.Process(context.Background(), "linux"); err != nil {
 			t.Fatalf("Process() error = %v", err)
@@ -64,12 +104,12 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 		evidence.claimCalls++
 		return core.ProcessingJob{Job: job, MemberID: memberID}, true, nil
 	}}
-	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName core.RunnerName) (execution.Bootstrap, error) {
+	bootstrapper := &bootstrapGeneratorFake{generate: func(_ context.Context, actual core.Job, runnerName core.RunnerName) (core.Bootstrap, error) {
 		claimedRunnerName = core.AttemptRunnerName(jobID, store.lastClaim.AttemptID)
 		if actual.ID != jobID || runnerName == "" || runnerName != claimedRunnerName {
 			t.Fatalf("bootstrap job = %#v, runner = %q", actual, runnerName)
 		}
-		return execution.NewBootstrap([]byte("opaque")), nil
+		return core.NewBootstrap([]byte("opaque")), nil
 	}}
 	provider := &providerFake{start: func(_ context.Context, request execution.StartRequest) error {
 		evidence.startCalls++
@@ -78,7 +118,7 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 		}
 		return nil
 	}}
-	evidence.orchestrator = runtimeengine.NewOrchestrator(store, bootstrapper, provider, provider, memberID, testCurrentTime)
+	evidence.orchestrator = newTestOrchestrator(store, bootstrapper, provider, provider, memberID, testCurrentTime)
 	return evidence
 }
 
@@ -88,15 +128,19 @@ type jobStoreFake struct {
 	enqueue         func(context.Context, core.JobRequest) (core.Job, bool, error)
 	take            func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
 	terminalize     func(context.Context, core.JobIdentity) (core.ObservationResult, error)
-	started         func(context.Context, core.JobIdentity) (core.ObservationResult, error)
+	accepted        func(context.Context, core.JobIdentity) (core.ObservationResult, error)
 	list            func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
 	poolList        func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error)
 	retry           func(context.Context, core.JobID) (bool, error)
+	retried         []core.ProcessingJob
 	retryOutcome    core.RetryOutcome
 	recover         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
 	remove          func(context.Context, core.JobID) error
 	removeTerminal  func(context.Context, core.JobID) (bool, error)
 	terminalOutcome core.TerminalRemovalOutcome
+	reserve         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	recordReported  func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	finalizeFailure func(context.Context, core.ProcessingJob) (core.TerminalRemovalResult, error)
 }
 
 func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool, claim core.ProcessingClaim) (core.ClaimResult, error) {
@@ -104,7 +148,7 @@ func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool
 	job, taken, err := store.take(ctx, pool, claim.MemberID)
 	job.ClaimedAt = claim.ClaimedAt
 	job.InventoryEndpointID = claim.InventoryEndpointID
-	if store.persistAttempt {
+	if store.persistAttempt || job.RunnerName == "" {
 		job.RunnerName = core.AttemptRunnerName(job.Job.ID, claim.AttemptID)
 	}
 	outcome := core.ClaimEmpty
@@ -125,29 +169,48 @@ func (store *jobStoreFake) Queue(ctx context.Context, request core.JobRequest) (
 func (store *jobStoreFake) Terminalize(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
 	return store.terminalize(ctx, identity)
 }
-func (store *jobStoreFake) MarkRunnerStarted(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
-	return store.started(ctx, identity)
+func (store *jobStoreFake) ObserveRunnerAcceptance(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
+	return store.accepted(ctx, identity)
 }
 func (store *jobStoreFake) ProcessingByMember(ctx context.Context, member core.MemberID, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	if store.list == nil {
 		return nil, nil
 	}
-	return store.list(ctx, member, pool)
+	processing, err := store.list(ctx, member, pool)
+	return normalizedTestProcessing(processing), err
 }
 func (store *jobStoreFake) ProcessingByPool(ctx context.Context, pool core.RunnerPool) ([]core.ProcessingJob, error) {
 	if store.poolList != nil {
-		return store.poolList(ctx, pool)
+		processing, err := store.poolList(ctx, pool)
+		return normalizedTestProcessing(processing), err
 	}
 	return store.ProcessingByMember(ctx, "", pool)
 }
-func (store *jobStoreFake) RetryUnstarted(ctx context.Context, jobID core.JobID) (core.RetryResult, error) {
+
+func normalizedTestProcessing(processing []core.ProcessingJob) []core.ProcessingJob {
+	for index := range processing {
+		if processing[index].RunnerName == "" {
+			processing[index].RunnerName = testRunnerName(processing[index].Job.ID)
+		}
+	}
+	return processing
+}
+
+func testRunnerName(jobID core.JobID) core.RunnerName {
+	return core.AttemptRunnerName(jobID, core.AttemptID{1})
+}
+func (store *jobStoreFake) RetryUnstarted(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (core.RetryResult, error) {
+	store.retried = append(store.retried, processing)
 	if store.retry == nil {
 		if store.retryOutcome != "" {
 			return core.RetryResult{Outcome: store.retryOutcome}, nil
 		}
 		return core.RetryResult{Outcome: core.RetryRequeued}, nil
 	}
-	applied, err := store.retry(ctx, jobID)
+	applied, err := store.retry(ctx, processing.Job.ID)
 	outcome := core.RetryClaimChanged
 	if applied {
 		outcome = core.RetryRequeued
@@ -178,8 +241,38 @@ func (store *jobStoreFake) RemoveTerminal(ctx context.Context, jobID core.JobID)
 	return core.TerminalRemovalResult{Outcome: core.TerminalRemoved}, store.remove(ctx, jobID)
 }
 
+func (store *jobStoreFake) ReserveProvisioningFailure(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (core.RetryResult, error) {
+	if store.reserve != nil {
+		return store.reserve(ctx, processing)
+	}
+	return core.RetryResult{Outcome: core.RetryFailureReportingPending}, nil
+}
+
+func (store *jobStoreFake) RecordProvisioningFailureReported(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (core.RetryResult, error) {
+	if store.recordReported != nil {
+		return store.recordReported(ctx, processing)
+	}
+	return core.RetryResult{Outcome: core.RetryFailureFinalizationPending}, nil
+}
+
+func (store *jobStoreFake) FinalizeProvisioningFailure(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (core.TerminalRemovalResult, error) {
+	if store.finalizeFailure != nil {
+		return store.finalizeFailure(ctx, processing)
+	}
+	return core.TerminalRemovalResult{Outcome: core.TerminalRemoved}, nil
+}
+
 type bootstrapGeneratorFake struct {
-	generate func(context.Context, core.Job, core.RunnerName) (execution.Bootstrap, error)
+	generate func(context.Context, core.Job, core.RunnerName) (core.Bootstrap, error)
 	cleanup  func(context.Context, core.Job, core.RunnerName) error
 }
 
@@ -191,7 +284,7 @@ func (launcherFake) Start(context.Context, execution.StartRequest) error {
 	return nil
 }
 
-func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name core.RunnerName) (execution.Bootstrap, error) {
+func (generator *bootstrapGeneratorFake) GenerateBootstrap(ctx context.Context, job core.Job, name core.RunnerName) (core.Bootstrap, error) {
 	return generator.generate(ctx, job, name)
 }
 
@@ -209,10 +302,12 @@ type providerFake struct {
 	inspect    func(context.Context) ([]execution.RunnerInstance, error)
 	destroy    func(context.Context, execution.RunnerInstance) error
 	canInspect func(execution.InventoryEndpointID, core.MemberID) bool
+	lastStart  execution.StartRequest
 }
 
 func (*providerFake) Validate(context.Context) error { return nil }
 func (provider *providerFake) Start(ctx context.Context, request execution.StartRequest) error {
+	provider.lastStart = request
 	if provider.start == nil {
 		return nil
 	}
@@ -236,7 +331,13 @@ func (provider *providerFake) Refresh(ctx context.Context) error {
 	return err
 }
 func (provider *providerFake) InspectEndpoint(ctx context.Context, _ execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
-	return provider.Inspect(ctx)
+	instances, err := provider.Inspect(ctx)
+	for index := range instances {
+		if instances[index].RunnerName == testRunnerName(provider.lastStart.JobID) {
+			instances[index].RunnerName = provider.lastStart.RunnerName
+		}
+	}
+	return instances, err
 }
 func (provider *providerFake) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
 	if provider.inspect == nil {

@@ -47,7 +47,7 @@ func exerciseRunnerAcceptanceWinsRecoveryRace(t *testing.T, harness *e2eHarness)
 	harness.awaitExecutionMaintenance(maintenanceBefore)
 
 	processing := loadGuardedRaceProcessing(t, harness)
-	if len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerStarted ||
+	if len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted ||
 		processing[0].SourceTerminal {
 		t.Fatalf("processing after runner-acceptance race = %+v", processing)
 	}
@@ -88,7 +88,7 @@ func exerciseTerminalObservationWinsRecoveryRace(t *testing.T, harness *e2eHarne
 	harness.awaitExecutionMaintenance(maintenanceBefore)
 
 	processing := loadGuardedRaceProcessing(t, harness)
-	if len(processing) != 1 || !processing[0].SourceTerminal || processing[0].RunnerStarted {
+	if len(processing) != 1 || !processing[0].SourceTerminal || processing[0].RunnerAccepted {
 		t.Fatalf("processing after terminal-observation race = %+v", processing)
 	}
 	harness.completeMaintenanceCycle(harness.execution)

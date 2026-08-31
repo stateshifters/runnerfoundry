@@ -11,7 +11,7 @@ import (
 func TestUnadmittedRegistrationRemovesDesiredRoute(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/missing", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	source := newGitHubSourceRuntime(&githubManagerFake{}, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	term := branchLeadershipTerm(1)
@@ -37,7 +37,7 @@ func TestUnadmittedRegistrationRemovesDesiredRoute(t *testing.T) {
 func TestNilRegistrationSessionIsRetryableManagerFailure(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/retry", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	source := newGitHubSourceRuntime(&githubManagerFake{}, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	term := branchLeadershipTerm(1)
@@ -57,7 +57,7 @@ func TestNilRegistrationSessionIsRetryableManagerFailure(t *testing.T) {
 
 func TestRemovingDesiredRegistrationWithoutActivationLeavesProgressInactive(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/inactive", RunnerPool: "linux"}
-	source := newGitHubSourceRuntime(&githubManagerFake{}, &capacityAggregatorFake{}, "member", eventHandlerFake{},
+	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	source.desired[key] = record

@@ -29,13 +29,13 @@ func TestForeignRecoveryRecoversExpiredUnstartedProcessing(t *testing.T) {
 	}
 }
 
-func TestForeignRecoveryRetainsStartedAndUninspectableProcessing(t *testing.T) {
+func TestForeignRecoveryRetainsAcceptedAndUninspectableProcessing(t *testing.T) {
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
-	started := core.ProcessingJob{
-		Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-a", RunnerStarted: true,
+	accepted := core.ProcessingJob{
+		Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-a", RunnerAccepted: true,
 		ClaimedAt: now.Add(-time.Hour), InventoryEndpointID: "test:endpoint",
 	}
-	assertForeignRecoveryRetained(t, now, started, &providerFake{})
+	assertForeignRecoveryRetained(t, now, accepted, &providerFake{})
 }
 
 func TestForeignRecoveryRetainsUninspectableProcessing(t *testing.T) {
@@ -74,7 +74,7 @@ func TestForeignRecoveryCleansTerminalProcessingImmediately(t *testing.T) {
 		removeTerminal: func(context.Context, core.JobID) (bool, error) { removed = true; return true, nil },
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "member-b", func() time.Time { return now },
 	)
 	result, err := orchestrator.RecoverForeignPool(context.Background(), "linux")
@@ -91,7 +91,7 @@ func TestForeignRecoveryRetainsProcessingWhenCleanupFails(t *testing.T) {
 	}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{
-			ID: "foreign", RunnerName: core.RunnerName("runnerfoundry-" + processing.Job.ID.String()),
+			ID: "foreign", RunnerName: testRunnerName(processing.Job.ID),
 			RunnerPool: "linux", EndpointID: "test:endpoint", State: execution.RunnerStateCompleted,
 		}}, nil
 	}, destroy: func(context.Context, execution.RunnerInstance) error { return errors.New("cleanup failed") }}
@@ -101,7 +101,7 @@ func TestForeignRecoveryRetainsProcessingWhenCleanupFails(t *testing.T) {
 	}
 }
 
-func TestForeignRecoveryRetainsProcessingWhenJobStartedWinsGuardedRace(t *testing.T) {
+func TestForeignRecoveryRetainsProcessingWhenRunnerAcceptanceWinsGuardedRace(t *testing.T) {
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	processing := core.ProcessingJob{
 		Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-a",
@@ -121,7 +121,7 @@ func TestForeignRecoveryReportsPoolStateFailure(t *testing.T) {
 		return nil, wantErr
 	}}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime)
 	if _, err := orchestrator.RecoverForeignPool(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("RecoverForeignPool() error = %v", err)
 	}
@@ -133,7 +133,7 @@ func TestForeignRecoveryReportsInventoryFailure(t *testing.T) {
 		return nil, nil
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) { return nil, wantErr }}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime)
 	if _, err := orchestrator.RecoverForeignPool(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("RecoverForeignPool() error = %v", err)
 	}
@@ -142,7 +142,8 @@ func TestForeignRecoveryReportsInventoryFailure(t *testing.T) {
 func TestForeignRecoveryIgnoresLeaderOwnedProcessing(t *testing.T) {
 	processing := core.ProcessingJob{Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-b"}
 	result, err := runForeignRecovery(t, testCurrentTime(), processing, &providerFake{}, nil)
-	if err != nil || result != (runtimeengine.PoolReconciliation{}) {
+	if err != nil || result.RemovedProcessing != 0 || result.RemovedRunners != 0 ||
+		result.RemainingProcessing != 0 || len(result.ReportedProvisioningFailures) != 0 {
 		t.Fatalf("RecoverForeignPool() = (%#v, %v), want no local mutation", result, err)
 	}
 }
@@ -161,7 +162,7 @@ func runForeignRecovery(
 		},
 		recover: recoverProcessing,
 	}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "member-b", func() time.Time { return now },
 	)
 	result, err := orchestrator.RecoverForeignPool(context.Background(), "linux")

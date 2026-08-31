@@ -89,18 +89,46 @@ func TestManagerReportsCancellationWhileWaitingForSharedRepositorySlot(t *testin
 	}
 }
 
+func TestManagerReportsCancellationWhileWaitingForAppRepositorySlot(t *testing.T) {
+	store := &coordinatorRepositoryFake{}
+	manager := coordinatorManager(t, store, 11, []transport.Repository{{InstallationID: 1,
+		URL: "https://github.com/example/repository"}})
+	if _, err := NewMultiAppCoordinator(store, manager); err != nil {
+		t.Fatalf("create coordinator: %v", err)
+	}
+	for index := 0; index < cap(manager.appRepositorySlots); index++ {
+		manager.appRepositorySlots <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := manager.Reconcile(ctx, coordinatorManagerConfig()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("App repository-slot cancellation error = %v", err)
+	}
+}
+
 func TestMultiAppCoordinatorRoutesSessionsByApp(t *testing.T) {
 	store := &coordinatorRepositoryFake{}
-	valid := coordinatorManager(t, store, 11, nil)
-	coordinator, err := NewMultiAppCoordinator(store, valid)
+	manager := coordinatorManager(t, store, 11, nil)
+	coordinator, err := NewMultiAppCoordinator(store, manager)
 	if err != nil {
 		t.Fatalf("create valid coordinator: %v", err)
 	}
-	if _, err = coordinator.OpenRegistrationSession(context.Background(), Registration{GitHubAppID: 22}, RunnerPoolConfig{}, "", nil); err == nil {
-		t.Fatal("unconfigured App session was accepted")
-	}
-	if _, err = coordinator.OpenRegistrationSession(context.Background(), Registration{GitHubAppID: 11}, RunnerPoolConfig{}, "", nil); err == nil {
-		t.Fatal("invalid configured-App session was accepted")
+	for name, open := range map[string]func(Registration) error{
+		"source-neutral": func(record Registration) error {
+			_, openErr := coordinator.OpenSourceRegistrationSession(
+				context.Background(), record, RunnerPoolConfig{}, "", nil, nil,
+			)
+			return openErr
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if open(Registration{GitHubAppID: 22}) == nil {
+				t.Fatal("unconfigured App session was accepted")
+			}
+			if open(Registration{GitHubAppID: 11}) == nil {
+				t.Fatal("invalid configured-App session was accepted")
+			}
+		})
 	}
 }
 

@@ -19,12 +19,12 @@ func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t 
 	firstClient := newBlockingCapacityMessageClient()
 	secondClient := newBlockingCapacityMessageClient()
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: firstClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: secondClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+		{Client: firstClient, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: secondClient, SourceEvents: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
 	}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}},
 		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
@@ -41,7 +41,7 @@ func TestGitHubSourceRuntimeBoundsConcurrentSessionRestorationAtSixteen(t *testi
 
 	adapters := make([]*githubsource.Adapter, 17)
 	for index := range adapters {
-		adapters[index] = &githubsource.Adapter{Client: &capacityMessageClientFake{}, Handler: eventHandlerFake{},
+		adapters[index] = &githubsource.Adapter{Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{},
 			Repository: fmt.Sprintf("https://github.example/repository-%02d", index), RunnerPool: "linux"}
 	}
 	started := make(chan struct{}, len(adapters))
@@ -49,7 +49,7 @@ func TestGitHubSourceRuntimeBoundsConcurrentSessionRestorationAtSixteen(t *testi
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	manager := &githubManagerFake{adapters: adapters, openStarted: started, openRelease: release}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		managerConfigForAdapters(adapters), time.Minute, func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)
@@ -87,11 +87,11 @@ func TestGitHubSourceRuntimeLeavesPeerPollRunningAfterMessage(t *testing.T) {
 	peerClient := newBlockingCapacityMessageClient()
 	unrelatedClient := newBlockingCapacityMessageClient()
 	adapters := []*githubsource.Adapter{
-		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
-		{Client: unrelatedClient, Handler: eventHandlerFake{}, Repository: "three", RunnerPool: "windows"},
+		{Client: messageClient, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, SourceEvents: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+		{Client: unrelatedClient, SourceEvents: eventHandlerFake{}, Repository: "three", RunnerPool: "windows"},
 	}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7, "windows": 3}}
+	capacities := &sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7, "windows": 3}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
@@ -125,7 +125,7 @@ type peerCapacityRefreshFixture struct {
 	source        *githubSourceRuntime
 	messageClient *messageThenBlockingClient
 	peerClient    *stubbornCapacityMessageClient
-	capacities    *capacityAggregatorFake
+	capacities    *sourceCapacityProviderFake
 	now           time.Time
 }
 
@@ -133,10 +133,10 @@ func newPeerCapacityRefreshFixture() *peerCapacityRefreshFixture {
 	messageClient := newMessageThenBlockingClient()
 	peerClient := newStubbornCapacityMessageClient()
 	adapters := []*githubsource.Adapter{
-		{Client: messageClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+		{Client: messageClient, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, SourceEvents: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
 	}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}}
+	capacities := &sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubPollingTestSource(adapters, capacities, func() time.Time { return now })
 	return &peerCapacityRefreshFixture{source: source, messageClient: messageClient, peerClient: peerClient,
@@ -189,10 +189,10 @@ func TestGitHubSourceRuntimeDoesNotRefreshPeerCapacityAfterUnhandledMessage(t *t
 	failedClient := newUnhandledMessageThenBlockingClient()
 	peerClient := newBlockingCapacityMessageClient()
 	adapters := []*githubsource.Adapter{
-		{Client: failedClient, Handler: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
-		{Client: peerClient, Handler: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
+		{Client: failedClient, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux"},
+		{Client: peerClient, SourceEvents: eventHandlerFake{}, Repository: "two", RunnerPool: "linux"},
 	}
-	capacities := &capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 7}}
+	capacities := &sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{adapters: adapters}
 	source := newGitHubSourceRuntime(manager, capacities, "member-1",
@@ -244,7 +244,7 @@ func newIgnoredLifecyclePollingFixture() *ignoredLifecyclePollingFixture {
 	}}
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
-		&capacityAggregatorFake{capacities: map[core.RunnerPool]int{"linux": 1}},
+		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
 		"member-1", handler, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
 	return &ignoredLifecyclePollingFixture{source: source, lifecycleClient: lifecycleClient,
 		demandClient: demandClient, handler: handler, now: now}
@@ -315,10 +315,10 @@ func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
 	firstClient := &capacityMessageClientFake{err: firstErr, finished: make(chan struct{}, 1)}
 	secondClient := &capacityMessageClientFake{finished: make(chan struct{}, 1)}
 	manager := &githubManagerFake{adapters: []*githubsource.Adapter{
-		{Client: firstClient, Handler: eventHandlerFake{}, RunnerPool: "first"},
-		{Client: secondClient, Handler: eventHandlerFake{}, RunnerPool: "second"},
+		{Client: firstClient, SourceEvents: eventHandlerFake{}, RunnerPool: "first"},
+		{Client: secondClient, SourceEvents: eventHandlerFake{}, RunnerPool: "second"},
 	}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member-1", eventHandlerFake{},
+	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)

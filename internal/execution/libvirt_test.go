@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	providerlibvirt "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
@@ -21,7 +22,7 @@ func TestLibvirtStartTransportsOpaqueBootstrapInGuestConfiguration(t *testing.T)
 	err := provider.Start(context.Background(), StartRequest{
 		RunnerPool: "linux-vm",
 		RunnerName: "linux-vm-1",
-		Bootstrap:  NewBootstrap([]byte(`opaque<&bootstrap`)),
+		Bootstrap:  core.NewBootstrap([]byte(`opaque<&bootstrap`)),
 	})
 	if err != nil {
 		t.Fatalf("start libvirt runner: %v", err)

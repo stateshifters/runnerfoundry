@@ -52,7 +52,7 @@ func mixedConfiguredProviders() (
 	return buildConfiguredProviders(context.Background(), configured, executionDependencies{
 		dockerCommands: dockerCommandsFake{
 			services: "runner\n",
-			runners:  `{"ID":"old-docker","State":"running","Labels":"runnerfoundry.scale-set=libvirt,runnerfoundry.runner=runnerfoundry-00000000-0000-4000-8000-000000000001"}`,
+			runners:  `{"ID":"old-docker","State":"running","Labels":"runnerfoundry.scale-set=libvirt,runnerfoundry.runner=external-runner"}`,
 		},
 		libvirtCommands: libvirtCommandsFake{},
 		readTemplate: func(string) ([]byte, error) {

@@ -101,7 +101,7 @@ func claimAndAcceptMigrationDemand(
 	if claimed.Outcome != core.ClaimClaimed || claimed.Processing.Job.ID != processingJobID {
 		t.Fatalf("populate current PostgreSQL processing claim = %+v, error = %v", claimed, err)
 	}
-	started, err := store.MarkRunnerStarted(ctx, core.JobIdentity{JobID: processingJobID})
+	started, err := store.ObserveRunnerAcceptance(ctx, core.JobIdentity{JobID: processingJobID})
 	if err != nil {
 		t.Fatalf("populate current PostgreSQL accepted processing: %v", err)
 	}

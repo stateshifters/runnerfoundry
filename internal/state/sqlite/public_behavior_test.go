@@ -20,14 +20,14 @@ func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	if err != nil || queued.Outcome != core.QueueQueued || queued.Job.ID != testJobID {
 		t.Fatalf("queue = %#v, %v", queued, err)
 	}
-	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{MemberID: testMemberID})
+	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}})
 	if err != nil || claimed.Outcome != core.ClaimClaimed || claimed.Processing.MemberID != testMemberID {
 		t.Fatalf("claim = %#v, %v", claimed, err)
 	}
 	processingJobs, err := store.ProcessingByMember(ctx, testMemberID, "linux")
 	if err != nil || len(processingJobs) != 1 || processingJobs[0].Job.ID != testJobID ||
 		!processingJobs[0].ClaimedAt.Equal(fixedTime()) || processingJobs[0].InventoryEndpointID != "test:endpoint" ||
-		!processingJobs[0].RunnerStarted || !processingJobs[0].SourceTerminal {
+		!processingJobs[0].RunnerAccepted || !processingJobs[0].SourceTerminal {
 		t.Fatalf("processing = %#v, %v", processingJobs, err)
 	}
 }
@@ -37,8 +37,8 @@ func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
 	store := NewStore(successfulBehaviorExecutor())
 	ctx := context.Background()
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
-	if _, err := store.MarkRunnerStarted(ctx, core.JobIdentity{Source: source}); err != nil {
-		t.Fatalf("mark started: %v", err)
+	if _, err := store.ObserveRunnerAcceptance(ctx, core.JobIdentity{Source: source}); err != nil {
+		t.Fatalf("mark accepted: %v", err)
 	}
 	if _, err := store.Terminalize(ctx, core.JobIdentity{Source: source}); err != nil {
 		t.Fatalf("terminalize: %v", err)
@@ -133,12 +133,12 @@ func successfulBehaviorExecutor() Executor {
 
 func processingJobValues() []any {
 	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText,
-		string(core.AttemptRunnerName(testJobID, core.JobID{})), true, true}
+		string(core.AttemptRunnerName(testJobID, core.AttemptID{1})), true, true, ""}
 }
 
 func claimedProcessingJobValues() []any {
 	return []any{testJobIDText, "github", "request-3", "linux", testMemberIDText,
-		string(core.AttemptRunnerName(testJobID, core.JobID{})), fixedTime().UnixNano(), "test:endpoint", true, true}
+		string(core.AttemptRunnerName(testJobID, core.AttemptID{1})), fixedTime().UnixNano(), "test:endpoint", true, true, ""}
 }
 
 func rowFromValues(values []any) Row {

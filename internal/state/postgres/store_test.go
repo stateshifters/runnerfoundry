@@ -90,7 +90,8 @@ func TestTakeOldestMovesQueueEntryAtomically(t *testing.T) {
 		rowFromValues(queuedJobValues(testJobID1, request)),
 		rowFromValues(queuedJobValues(testJobID1, request)),
 	}}
-	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberIDA})
+	result, err := NewStore(protocol.executor()).ClaimOldest(context.Background(), "linux",
+		core.ProcessingClaim{MemberID: testMemberIDA, AttemptID: core.AttemptID{1}})
 	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.Job.ID != testJobID1 || result.Processing.MemberID != testMemberIDA ||
 		protocol.commitCalls != 1 {
 		t.Fatalf("claim = %#v, commits=%d, error=%v", result, protocol.commitCalls, err)
@@ -125,7 +126,7 @@ func TestProcessingByMemberReturnsCurrentOwnership(t *testing.T) {
 	processing, err := NewStore(protocol.executor()).ProcessingByMember(context.Background(), testMemberIDA, "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job != job || processing[0].MemberID != testMemberIDA ||
 		!processing[0].ClaimedAt.Equal(fixedTime()) || processing[0].InventoryEndpointID != "test:endpoint" ||
-		!processing[0].RunnerStarted || !processing[0].SourceTerminal || protocol.commitCalls != 1 ||
+		!processing[0].RunnerAccepted || !processing[0].SourceTerminal || protocol.commitCalls != 1 ||
 		len(protocol.statements) != 1 || !strings.Contains(protocol.statements[0], "source_tombstones") {
 		t.Fatalf("processing = %#v, commits=%d, error=%v", processing, protocol.commitCalls, err)
 	}
@@ -172,8 +173,8 @@ func protocolFailureOperations(request core.JobRequest) []namedStoreOperation {
 			_, err := store.Terminalize(context.Background(), core.JobIdentity{Source: request.Source})
 			return err
 		}},
-		{name: "mark runner started", operation: func(store *Store) error {
-			_, err := store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: request.Source})
+		{name: "mark runner accepted", operation: func(store *Store) error {
+			_, err := store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: request.Source})
 			return err
 		}},
 		{name: "processing list", operation: func(store *Store) error {
@@ -181,7 +182,7 @@ func protocolFailureOperations(request core.JobRequest) []namedStoreOperation {
 			return err
 		}},
 		{name: "retry", operation: func(store *Store) error {
-			_, err := store.RetryUnstarted(context.Background(), testJobID1)
+			_, err := store.RetryUnstarted(context.Background(), retryProcessingJob())
 			return err
 		}},
 		{name: "remove terminal", operation: func(store *Store) error {
@@ -239,14 +240,9 @@ func queuedJobValues(identifier core.JobID, request core.JobRequest) []any {
 	return []any{identifier, string(request.Source.Adapter), string(request.Source.ID), string(request.RunnerPool), request.EnqueuedAt}
 }
 
-func processingJobValues(job core.Job, memberID core.MemberID) []any {
-	return []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), memberID,
-		string(core.AttemptRunnerName(job.ID, core.JobID{})), false, false}
-}
-
 func claimedProcessingJobValues(job core.Job, memberID core.MemberID) []any {
 	return []any{job.ID, string(job.Source.Adapter), string(job.Source.ID), string(job.RunnerPool), memberID,
-		string(core.AttemptRunnerName(job.ID, core.JobID{})), fixedTime(), core.InventoryEndpointID("test:endpoint"), false, false}
+		string(core.AttemptRunnerName(job.ID, core.AttemptID{1})), fixedTime(), core.InventoryEndpointID("test:endpoint"), false, false, ""}
 }
 
 func rowFromValues(values []any) Row {

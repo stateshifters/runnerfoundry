@@ -68,10 +68,27 @@ func TestTakeOldestProtocolFailures(t *testing.T) {
 	if _, err := NewStore(Executor{begin: transactionBeginning(emptyCommitFailure)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
 		t.Fatal("expected empty commit failure")
 	}
+	assertClaimMutationFailures(t, protocolErr)
 	commitFailure := Transaction{queryRow: constantRow(rowFromValues(queuedJobValues())), execute: successfulExecute,
 		commit: failingCompletion(protocolErr), rollback: successfulCompletion}
-	if _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID}); err == nil {
+	if _, err := NewStore(Executor{begin: transactionBeginning(commitFailure)}).ClaimOldest(context.Background(), "linux",
+		core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}}); err == nil {
 		t.Fatal("expected move commit failure")
+	}
+}
+
+func assertClaimMutationFailures(t *testing.T, protocolErr error) {
+	t.Helper()
+	for name, failureCall := range map[string]int{"processing insertion": 1, "queue removal": 2} {
+		t.Run(name, func(t *testing.T) {
+			transaction := transactionFailingExecute(failureCall, protocolErr)
+			transaction.queryRow = constantRow(rowFromValues(queuedJobValues()))
+			if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ClaimOldest(
+				context.Background(), "linux", core.ProcessingClaim{AttemptID: core.AttemptID{1}},
+			); err == nil {
+				t.Fatal("expected move failure")
+			}
+		})
 	}
 }
 

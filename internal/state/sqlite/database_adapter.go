@@ -111,12 +111,16 @@ func sqliteJobSchemaStatements() []string {
 		claimed_at INTEGER NOT NULL,
 		inventory_endpoint_id TEXT NOT NULL CHECK(length(trim(inventory_endpoint_id)) > 0),
 		runner_started INTEGER NOT NULL DEFAULT 0 CHECK(runner_started IN (0, 1)),
+		provisioning_failure_reserved INTEGER NOT NULL DEFAULT 0
+			CHECK(provisioning_failure_reserved IN (0, 1)),
+		CHECK(NOT (runner_started = 1 AND provisioning_failure_reserved = 1)),
 		UNIQUE(source_name, source_reference)
 	)`,
 		`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_member_pool
 		ON runnerfoundry_processing_jobs(member_id, runner_pool)`,
 		`CREATE INDEX IF NOT EXISTS runnerfoundry_processing_jobs_pool
 		ON runnerfoundry_processing_jobs(runner_pool)`,
+		sqliteProvisioningFailureSchema,
 		`CREATE TABLE IF NOT EXISTS runnerfoundry_source_tombstones (
 		source_name TEXT NOT NULL CHECK(length(trim(source_name)) > 0),
 		source_reference TEXT NOT NULL CHECK(length(trim(source_reference)) > 0),
@@ -124,6 +128,13 @@ func sqliteJobSchemaStatements() []string {
 	)`,
 	}
 }
+
+const sqliteProvisioningFailureSchema = `CREATE TABLE IF NOT EXISTS runnerfoundry_provisioning_failures (
+	job_id TEXT NOT NULL PRIMARY KEY
+		REFERENCES runnerfoundry_processing_jobs(job_id) ON DELETE RESTRICT,
+	runner_name TEXT NOT NULL CHECK(length(trim(runner_name)) > 0),
+	is_reported INTEGER NOT NULL DEFAULT 0 CHECK(is_reported IN (0, 1))
+)`
 
 func sqliteCapacitySchemaStatements() []string {
 	return []string{
@@ -166,8 +177,14 @@ const sqliteGitHubMemberRunnerPoolsSchema = `CREATE TABLE IF NOT EXISTS runnerfo
 	PRIMARY KEY(member_id, runner_pool)
 )`
 
-const sqliteSchemaVersion = 108
-const sqliteSchemaVersionSQL = "PRAGMA user_version = 108"
+const sqliteSchemaVersion = 109
+const sqliteSchemaVersionSQL = "PRAGMA user_version = 109"
+const sqliteSchemaVersion108SQL = "PRAGMA user_version = 108"
+
+const addSQLiteProvisioningFailureFenceSQL = `ALTER TABLE runnerfoundry_processing_jobs
+	ADD COLUMN provisioning_failure_reserved INTEGER NOT NULL DEFAULT 0
+	CHECK(provisioning_failure_reserved IN (0, 1)
+		AND NOT (runner_started = 1 AND provisioning_failure_reserved = 1))`
 
 func initialize(ctx context.Context, database *sql.DB) (resultErr error) {
 	needsInitialization, err := validateSQLiteSchema(ctx, database)
@@ -188,14 +205,8 @@ func validateSQLiteSchema(ctx context.Context, database *sql.DB) (bool, error) {
 	if version == sqliteSchemaVersion {
 		return false, nil
 	}
-	if version == 105 {
-		return false, migrateSQLite105(ctx, database)
-	}
-	if version == 106 {
-		return false, migrateSQLite106(ctx, database)
-	}
-	if version == 107 {
-		return false, migrateSQLite107(ctx, database)
+	if version >= 106 && version <= 108 {
+		return false, migrateSQLiteSchema(ctx, database, version)
 	}
 	if version != 0 {
 		return false, fmt.Errorf("SQLite job schema version %d requires database recreation", version)
@@ -211,42 +222,52 @@ func validateSQLiteSchema(ctx context.Context, database *sql.DB) (bool, error) {
 	return true, nil
 }
 
-func migrateSQLite105(ctx context.Context, database *sql.DB) error {
-	return runSQLiteMigration(ctx, database, "job schema upgrade", upgradeSQLite105State)
-}
-
-func upgradeSQLite105State(ctx context.Context, transaction *sql.Tx) error {
-	if _, err := transaction.ExecContext(ctx,
-		`ALTER TABLE runnerfoundry_processing_jobs ADD COLUMN runner_name TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("add SQLite runner attempt identity: %w", err)
+func migrateSQLiteSchema(ctx context.Context, database *sql.DB, version int) error {
+	if version < 108 {
+		migration := migrateSQLite107
+		if version == 106 {
+			migration = migrateSQLite106
+		}
+		if err := migration(ctx, database); err != nil {
+			return err
+		}
 	}
-	if _, err := transaction.ExecContext(ctx,
-		`UPDATE runnerfoundry_processing_jobs SET runner_name = 'runnerfoundry-' || job_id`); err != nil {
-		return fmt.Errorf("backfill SQLite runner attempt identity: %w", err)
-	}
-	if _, err := transaction.ExecContext(ctx, sqliteGitHubMemberRunnerPoolsSchema); err != nil {
-		return fmt.Errorf("add SQLite GitHub Runner Pool declarations: %w", err)
-	}
-	return replaceSQLiteGitHubAdapterState(ctx, transaction)
+	return migrateSQLite108(ctx, database)
 }
 
 func migrateSQLite106(ctx context.Context, database *sql.DB) error {
-	return runSQLiteMigration(ctx, database, "GitHub declaration schema upgrade", func(ctx context.Context, transaction *sql.Tx) error {
-		if _, err := transaction.ExecContext(ctx, sqliteGitHubMemberRunnerPoolsSchema); err != nil {
-			return fmt.Errorf("add SQLite GitHub Runner Pool declarations: %w", err)
-		}
-		return replaceSQLiteGitHubAdapterState(ctx, transaction)
-	})
+	return runSQLiteMigration(ctx, database, "GitHub declaration schema upgrade", sqliteSchemaVersion108SQL,
+		func(ctx context.Context, transaction *sql.Tx) error {
+			if _, err := transaction.ExecContext(ctx, sqliteGitHubMemberRunnerPoolsSchema); err != nil {
+				return fmt.Errorf("add SQLite GitHub Runner Pool declarations: %w", err)
+			}
+			return replaceSQLiteGitHubAdapterState(ctx, transaction)
+		})
 }
 
 func migrateSQLite107(ctx context.Context, database *sql.DB) error {
-	return runSQLiteMigration(ctx, database, "GitHub App schema upgrade", replaceSQLiteGitHubAdapterState)
+	return runSQLiteMigration(ctx, database, "GitHub App schema upgrade", sqliteSchemaVersion108SQL,
+		replaceSQLiteGitHubAdapterState)
+}
+
+func migrateSQLite108(ctx context.Context, database *sql.DB) error {
+	return runSQLiteMigration(ctx, database, "provisioning failure schema upgrade", sqliteSchemaVersionSQL,
+		func(ctx context.Context, transaction *sql.Tx) error {
+			if _, err := transaction.ExecContext(ctx, addSQLiteProvisioningFailureFenceSQL); err != nil {
+				return fmt.Errorf("add SQLite provisioning failure fence: %w", err)
+			}
+			if _, err := transaction.ExecContext(ctx, sqliteProvisioningFailureSchema); err != nil {
+				return fmt.Errorf("add SQLite provisioning failure state: %w", err)
+			}
+			return nil
+		})
 }
 
 func runSQLiteMigration(
 	ctx context.Context,
 	database *sql.DB,
 	description string,
+	versionStatement string,
 	upgrade func(context.Context, *sql.Tx) error,
 ) (resultErr error) {
 	transaction, err := database.BeginTx(ctx, nil)
@@ -262,7 +283,7 @@ func runSQLiteMigration(
 	if err = upgrade(ctx, transaction); err != nil {
 		return err
 	}
-	if _, err = transaction.ExecContext(ctx, sqliteSchemaVersionSQL); err != nil {
+	if _, err = transaction.ExecContext(ctx, versionStatement); err != nil {
 		return fmt.Errorf("record SQLite %s: %w", description, err)
 	}
 	if err = transaction.Commit(); err != nil {

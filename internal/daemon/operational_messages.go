@@ -26,8 +26,9 @@ var operationalComponents = map[string]string{
 	"assigned_demand": "github_messages",
 	"source_routes":   "github_routes", "capacity_publication": "github_capacity",
 	"claim": "job_queue", "job_processing": "job_queue", "runner_retry": "job_queue",
-	"runner_start": "runner_provisioning", "leadership": "github_leadership",
-	"heartbeat": "cluster_membership", "refresh_member_routes": "github_control", "leader_work": "github_control",
+	"runner_start": "runner_provisioning", "provisioning_failure": "runner_provisioning",
+	"leadership": "github_leadership",
+	"heartbeat":  "cluster_membership", "refresh_member_routes": "github_control", "leader_work": "github_control",
 	"refresh_inventory": "runner_inventory", "recover_foreign": "runner_recovery",
 	"reconcile_runner_pool": "runner_reconciliation", "generation": "runtime", "maintenance": "runtime",
 	"maintenance_cycle": "runtime", "reload": "runtime",
@@ -53,10 +54,11 @@ var operationalMessageBuilders = map[string]func(operationalEvent) string{
 	"capacity_publication": func(event operationalEvent) string {
 		return fmt.Sprintf("Published GitHub capacity %d for Runner Pool %s", event.capacity, event.runnerPool)
 	},
-	"claim":        claimMessage,
-	"runner_start": runnerStartMessage,
-	"runner_retry": runnerRetryMessage,
-	"leadership":   func(event operationalEvent) string { return fmt.Sprintf("GitHub leadership is %s", event.leadership) },
+	"claim":                claimMessage,
+	"runner_start":         runnerStartMessage,
+	"runner_retry":         runnerRetryMessage,
+	"provisioning_failure": provisioningFailureMessage,
+	"leadership":           func(event operationalEvent) string { return fmt.Sprintf("GitHub leadership is %s", event.leadership) },
 	"job_processing": func(event operationalEvent) string {
 		return fmt.Sprintf("Queued-job processing %s for Runner Pool %s", event.outcome, event.runnerPool)
 	},
@@ -112,7 +114,7 @@ func githubJobObservationMessage(event operationalEvent) string {
 }
 
 func githubJobObservationFailureMessage(event operationalEvent) string {
-	action := "record runner start for"
+	action := "record runner acceptance for"
 	if event.stage == "persist_terminal" || event.stage == "validate_terminal" {
 		action = "record terminal state for"
 	}
@@ -234,6 +236,9 @@ func runnerStartMessage(event operationalEvent) string {
 }
 
 func runnerRetryMessage(event operationalEvent) string {
+	if event.outcome == string(core.RetryFailureReportingPending) {
+		return pendingProvisioningFailureMessage(event)
+	}
 	provider := providerDisplayName(event.provider)
 	if event.err != nil && event.stage == "start_runner" {
 		if event.sourceRequestID != 0 {
@@ -244,6 +249,21 @@ func runnerRetryMessage(event operationalEvent) string {
 			provider, event.jobID, event.runnerPool)
 	}
 	return fmt.Sprintf("Returned job %s to Runner Pool %s after provisioning failure", event.jobID, event.runnerPool)
+}
+
+func provisioningFailureMessage(event operationalEvent) string {
+	if event.outcome == string(core.RetryFailureReportingPending) {
+		return pendingProvisioningFailureMessage(event)
+	}
+	if event.count != 0 {
+		return fmt.Sprintf("Reported %d replayed provisioning failures in Runner Pool %s", event.count, event.runnerPool)
+	}
+	return fmt.Sprintf("Reported provisioning failure for job %s in Runner Pool %s", event.jobID, event.runnerPool)
+}
+
+func pendingProvisioningFailureMessage(event operationalEvent) string {
+	return fmt.Sprintf("Retained job %s in Runner Pool %s while provisioning failure reporting remains pending",
+		event.jobID, event.runnerPool)
 }
 
 func providerDisplayName(provider string) string {

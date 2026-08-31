@@ -36,6 +36,8 @@ Run every lane applicable to the reviewed project change and no others.
 
 For changes to production code, dispatch one independent reviewer to verify requirement fit, correctness, relevant failure paths, regression risk, test coverage, and consistency with project quality standards.
 
+The reviewer must inspect every code comment added or materially changed by the reviewed change and apply the repository's code-comment policy. Report every violation as a blocking finding. The review cannot complete while an accepted, in-scope violation remains unresolved.
+
 ### Architectural fitness
 
 Additionally dispatch a separate independent reviewer only when both of these conditions hold:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -30,21 +31,21 @@ type MessageClient interface {
 	DeleteMessage(ctx context.Context, messageID int) error
 }
 
-// EventHandler durably accepts source-neutral events translated from GitHub.
-// A method must return nil only after its event can survive process failure;
-// Adapter acknowledges the containing GitHub message only after every method
-// invoked for that message succeeds. Implementations must handle redelivery
-// idempotently because acknowledgement can fail after durable handling.
-type EventHandler interface {
-	Request(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error)
-	RunnerStarted(ctx context.Context, observation core.RunnerObservation) (core.ObservationResult, error)
-	Terminalize(ctx context.Context, observation core.RunnerObservation) (core.ObservationResult, error)
-}
-
 // AssignedDemandHandler durably reconciles GitHub's aggregate assigned-job
 // observation after actionable lifecycle events have been applied.
 type AssignedDemandHandler interface {
 	ReconcileAssignedDemand(ctx context.Context, demand AssignedDemand) (AssignedDemandResult, error)
+}
+
+func isValidAssignedDemandHandler(handler AssignedDemandHandler) bool {
+	if handler == nil {
+		return false
+	}
+	value := reflect.ValueOf(handler)
+	kind := value.Kind()
+	nilable := kind == reflect.Chan || kind == reflect.Func || kind == reflect.Interface ||
+		kind == reflect.Map || kind == reflect.Pointer || kind == reflect.Slice
+	return !nilable || !value.IsNil()
 }
 
 // Adapter translates exact GitHub lifecycle events and authoritative
@@ -55,7 +56,8 @@ type AssignedDemandHandler interface {
 // leaves LastMessageID unchanged so GitHub can redeliver the message.
 type Adapter struct {
 	Client                   MessageClient
-	Handler                  EventHandler
+	SourceEvents             core.SourceEventHandler
+	AssignedDemand           AssignedDemandHandler
 	Observer                 ManagerObserver
 	Repository               string
 	RunnerPool               core.RunnerPool
@@ -106,7 +108,7 @@ func (adapter *Adapter) applyMessageEffects(ctx context.Context, effects message
 		return err
 	}
 	adapter.reportMessageCount("job_ingestion", "enqueue_jobs", len(acquired))
-	if err := adapter.persistStarted(ctx, effects.Started); err != nil {
+	if err := adapter.persistAccepted(ctx, effects.Started); err != nil {
 		return err
 	}
 	if err := adapter.persistCompleted(ctx, effects.Completed); err != nil {
@@ -350,7 +352,7 @@ func (adapter *Adapter) request(ctx context.Context, requestID int64, request co
 	adapter.Observer.report(ManagerActivity{Visibility: ActivityDebug, Operation: "job_ingestion",
 		Stage: "persist_job", Outcome: "started", Repository: adapter.Repository,
 		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, SourceRequestIDSet: true})
-	result, err := adapter.Handler.Request(ctx, request)
+	result, err := adapter.ingestDemand(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("durably handle GitHub request %d: %w", requestID, err)
@@ -370,6 +372,14 @@ func (adapter *Adapter) request(ctx context.Context, requestID int64, request co
 		Stage: "persist_job", Outcome: string(result.Outcome), Repository: adapter.Repository,
 		RunnerPool: adapter.RunnerPool, SourceRequestID: requestID, SourceRequestIDSet: true, JobID: result.Job.ID})
 	return nil
+}
+
+func (adapter *Adapter) ingestDemand(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+	result, err := adapter.SourceEvents.IngestDemand(ctx, request)
+	if err != nil {
+		return result, fmt.Errorf("ingest source-neutral demand: %w", err)
+	}
+	return result, nil
 }
 
 func (adapter *Adapter) sourceReference(requestID int64) (core.SourceReference, error) {

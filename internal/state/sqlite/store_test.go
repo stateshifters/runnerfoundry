@@ -27,7 +27,8 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 	}
 	store := NewStore(Executor{begin: transactionBeginning(transaction)})
 
-	result, err := store.ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
+	result, err := store.ClaimOldest(context.Background(), "linux",
+		core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}})
 
 	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.Job.ID != testJobID || result.Processing.MemberID != testMemberID {
 		t.Fatalf("claim oldest = %#v, %v", result, err)
@@ -105,27 +106,27 @@ func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 	}
 }
 
-func TestMarkRunnerStartedTombstonesAQueuedRetry(t *testing.T) {
+func TestObserveRunnerAcceptanceTombstonesAQueuedRetry(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 3)
 	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
 		statements = append(statements, statement)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
-	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).MarkRunnerStarted(context.Background(),
+	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(context.Background(),
 		core.JobIdentity{Source: core.SourceReference{Adapter: "github", ID: "request-3"}})
 	if err != nil || len(statements) != 3 || !strings.Contains(statements[0], "runner_started") ||
 		!strings.Contains(statements[0], "runner_started = 0") ||
 		!strings.Contains(statements[1], "source_tombstones") || !strings.Contains(statements[2], "queued_jobs") {
-		t.Fatalf("delayed start statements=%#v error=%v", statements, err)
+		t.Fatalf("delayed acceptance statements=%#v error=%v", statements, err)
 	}
 }
 
 func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 2)
-	processingValues := processingJobValues()
-	processingValues[6], processingValues[7] = false, false
+	processingValues := claimedProcessingJobValues()
+	processingValues[8], processingValues[9] = false, false
 	transaction := Transaction{
 		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(processingValues) },
 		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
@@ -135,7 +136,7 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
 	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		RetryUnstarted(context.Background(), testJobID)
+		RetryUnstarted(context.Background(), retryProcessingJob())
 	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
 		!strings.Contains(statements[0], "runner_started = 0") {
 		t.Fatalf("retry statements=%#v result=%#v error=%v", statements, result, err)

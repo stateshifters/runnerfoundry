@@ -19,15 +19,15 @@ const (
 	ClaimFIFO            Scenario = "claim/fifo-by-pool"
 	ClaimEmpty           Scenario = "claim/empty"
 	ClaimMetadata        Scenario = "claim/metadata"
-	DelayedStart         Scenario = "lifecycle/delayed-start"
+	DelayedAcceptance    Scenario = "lifecycle/delayed-acceptance"
 	RetryRequeue         Scenario = "retry/requeued"
 	RetryMissing         Scenario = "retry/missing"
-	RetryStarted         Scenario = "retry/runner-started"
+	RetryAccepted        Scenario = "retry/runner-accepted"
 	RetryTerminal        Scenario = "retry/source-terminal"
 	RetryClaimChanged    Scenario = "retry/claim-changed"
 	RecoveryRequeue      Scenario = "recovery/requeued"
 	RecoveryMissing      Scenario = "recovery/missing"
-	RecoveryStarted      Scenario = "recovery/runner-started"
+	RecoveryAccepted     Scenario = "recovery/runner-accepted"
 	RecoveryTerminal     Scenario = "recovery/source-terminal"
 	RecoveryClaimChanged Scenario = "recovery/claim-changed"
 	RemovalRemoved       Scenario = "removal/removed"
@@ -45,7 +45,7 @@ type Observation struct {
 	Job            core.Job
 	Processing     core.ProcessingJob
 	Capacity       int
-	Started        bool
+	Accepted       bool
 	Registrations  githubsource.RegistrationSnapshot
 }
 
@@ -73,19 +73,19 @@ func assertObservation(reporter fatalReporter, got, want Observation) {
 }
 
 var conformanceExpectations = map[Scenario]Observation{
-	QueueNew:        {QueueOutcome: core.QueueQueued},
-	QueueDuplicate:  {QueueOutcome: core.QueueAlreadyQueued},
-	QueueProcessing: {QueueOutcome: core.QueueProcessing},
-	QueueTerminal:   {QueueOutcome: core.QueueSourceTerminal},
-	ClaimFIFO:       {ClaimOutcome: core.ClaimClaimed, Job: OldestJob()},
-	ClaimEmpty:      {ClaimOutcome: core.ClaimEmpty},
-	ClaimMetadata:   {ClaimOutcome: core.ClaimClaimed, Job: OldestJob(), Processing: ExpectedProcessing()},
-	DelayedStart:    {Started: true},
-	RetryRequeue:    {RetryOutcome: core.RetryRequeued}, RetryMissing: {RetryOutcome: core.RetryMissing},
-	RetryStarted: {RetryOutcome: core.RetryRunnerStarted}, RetryTerminal: {RetryOutcome: core.RetrySourceTerminal},
+	QueueNew:          {QueueOutcome: core.QueueQueued},
+	QueueDuplicate:    {QueueOutcome: core.QueueAlreadyQueued},
+	QueueProcessing:   {QueueOutcome: core.QueueProcessing},
+	QueueTerminal:     {QueueOutcome: core.QueueSourceTerminal},
+	ClaimFIFO:         {ClaimOutcome: core.ClaimClaimed, Job: OldestJob()},
+	ClaimEmpty:        {ClaimOutcome: core.ClaimEmpty},
+	ClaimMetadata:     {ClaimOutcome: core.ClaimClaimed, Job: OldestJob(), Processing: ExpectedProcessing()},
+	DelayedAcceptance: {Accepted: true},
+	RetryRequeue:      {RetryOutcome: core.RetryRequeued}, RetryMissing: {RetryOutcome: core.RetryMissing},
+	RetryAccepted: {RetryOutcome: core.RetryRunnerAccepted}, RetryTerminal: {RetryOutcome: core.RetrySourceTerminal},
 	RetryClaimChanged: {RetryOutcome: core.RetryClaimChanged},
 	RecoveryRequeue:   {RetryOutcome: core.RetryRequeued}, RecoveryMissing: {RetryOutcome: core.RetryMissing},
-	RecoveryStarted: {RetryOutcome: core.RetryRunnerStarted}, RecoveryTerminal: {RetryOutcome: core.RetrySourceTerminal},
+	RecoveryAccepted: {RetryOutcome: core.RetryRunnerAccepted}, RecoveryTerminal: {RetryOutcome: core.RetrySourceTerminal},
 	RecoveryClaimChanged: {RetryOutcome: core.RetryClaimChanged},
 	RemovalRemoved:       {RemovalOutcome: core.TerminalRemoved}, RemovalMissing: {RemovalOutcome: core.TerminalMissing},
 	RemovalNotTerminal: {RemovalOutcome: core.TerminalNotTerminal},
@@ -99,7 +99,7 @@ func OldestJob() core.Job {
 
 func ExpectedProcessing() core.ProcessingJob {
 	job := OldestJob()
-	return core.ProcessingJob{Job: job, RunnerName: core.AttemptRunnerName(job.ID, core.JobID{}),
+	return core.ProcessingJob{Job: job, RunnerName: core.AttemptRunnerName(job.ID, core.AttemptID{1}),
 		MemberID: "member-a", ClaimedAt: FixedTime(),
 		InventoryEndpointID: "docker:member-a"}
 }

@@ -30,9 +30,11 @@ func scanJob(row scanner) (core.Job, error) {
 
 func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName string
+	var runnerAccepted bool
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName, provisioningFailure string
 	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
-		&runnerPool, &memberID, &runnerName, &processing.RunnerStarted, &processing.SourceTerminal); err != nil {
+		&runnerPool, &memberID, &runnerName, &runnerAccepted, &processing.SourceTerminal,
+		&provisioningFailure); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan processing job: %w", err)
 	}
 	parsedJobID, err := uuid.Parse(jobID)
@@ -44,16 +46,19 @@ func scanProcessingJob(row scanner) (core.ProcessingJob, error) {
 	processing.Job.RunnerPool = core.RunnerPool(runnerPool)
 	processing.MemberID = core.MemberID(memberID)
 	processing.RunnerName = core.RunnerName(runnerName)
+	processing.RunnerAccepted = runnerAccepted
+	processing.ProvisioningFailure = core.ProvisioningFailureState(provisioningFailure)
 	return processing, nil
 }
 
 func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
-	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName, endpointID string
+	var runnerAccepted bool
+	var jobID, sourceAdapter, sourceIdentifier, runnerPool, memberID, runnerName, endpointID, provisioningFailure string
 	var claimedAt int64
 	if err := row.Scan(&jobID, &sourceAdapter, &sourceIdentifier,
-		&runnerPool, &memberID, &runnerName, &claimedAt, &endpointID, &processing.RunnerStarted,
-		&processing.SourceTerminal); err != nil {
+		&runnerPool, &memberID, &runnerName, &claimedAt, &endpointID, &runnerAccepted,
+		&processing.SourceTerminal, &provisioningFailure); err != nil {
 		return core.ProcessingJob{}, fmt.Errorf("scan claimed processing job: %w", err)
 	}
 	parsedJobID, err := uuid.Parse(jobID)
@@ -67,6 +72,8 @@ func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	processing.RunnerName = core.RunnerName(runnerName)
 	processing.ClaimedAt = time.Unix(0, claimedAt).UTC()
 	processing.InventoryEndpointID = core.InventoryEndpointID(endpointID)
+	processing.RunnerAccepted = runnerAccepted
+	processing.ProvisioningFailure = core.ProvisioningFailureState(provisioningFailure)
 	return processing, nil
 }
 

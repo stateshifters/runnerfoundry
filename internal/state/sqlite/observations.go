@@ -17,6 +17,8 @@ const sourceByJobIDSQL = `SELECT source_name, source_reference FROM (
 ) LIMIT 1`
 const sourceTombstonedSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
 	WHERE source_name = ? AND source_reference = ?)`
+const processingAttemptExistsSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_processing_jobs
+	WHERE source_name = ? AND source_reference = ? AND runner_name = ?)`
 
 func (store *Store) Terminalize(
 	ctx context.Context,
@@ -28,13 +30,13 @@ func (store *Store) Terminalize(
 	})
 }
 
-func (store *Store) MarkRunnerStarted(
+func (store *Store) ObserveRunnerAcceptance(
 	ctx context.Context,
 	identity core.JobIdentity,
 ) (core.ObservationResult, error) {
 	return store.applyObservation(ctx, identity, sqliteObservationOperation{
-		begin: "mark runner started", unmatchedCommit: "unmatched runner-start observation",
-		commit: "runner start", apply: applyRunnerStartedObservation,
+		begin: "mark runner accepted", unmatchedCommit: "unmatched runner-acceptance observation",
+		commit: "runner acceptance", apply: applyRunnerAcceptedObservation,
 	})
 }
 
@@ -42,7 +44,7 @@ type sqliteObservationOperation struct {
 	begin           string
 	unmatchedCommit string
 	commit          string
-	apply           func(context.Context, Transaction, core.SourceReference) (core.ObservationOutcome, error)
+	apply           func(context.Context, Transaction, core.SourceReference, core.JobIdentity) (core.ObservationOutcome, error)
 }
 
 func (store *Store) applyObservation(
@@ -63,7 +65,7 @@ func (store *Store) applyObservation(
 	if !matched {
 		return commitObservation(ctx, transaction, &open, core.ObservationUnmatched, operation.unmatchedCommit)
 	}
-	outcome, err := operation.apply(ctx, transaction, source)
+	outcome, err := operation.apply(ctx, transaction, source, identity)
 	if err != nil {
 		return core.ObservationResult{}, err
 	}
@@ -74,7 +76,14 @@ func terminalizeSource(
 	ctx context.Context,
 	transaction Transaction,
 	source core.SourceReference,
+	identity core.JobIdentity,
 ) (core.ObservationOutcome, error) {
+	if identity.AttemptID.IsValid() {
+		matched, outcome, err := classifyProcessingAttempt(ctx, transaction, source, identity)
+		if err != nil || !matched {
+			return outcome, err
+		}
+	}
 	tombstone, err := transaction.Execute(ctx, insertTombstoneSQL, source.Adapter, source.ID)
 	if err != nil {
 		return "", fmt.Errorf("tombstone terminal source: %w", err)
@@ -92,81 +101,139 @@ func terminalizeSource(
 	return core.ObservationAlreadyApplied, nil
 }
 
-func applyRunnerStartedObservation(
+func applyRunnerAcceptedObservation(
 	ctx context.Context,
 	transaction Transaction,
 	source core.SourceReference,
+	identity core.JobIdentity,
 ) (core.ObservationOutcome, error) {
-	started, err := countStartedProcessing(ctx, transaction, source)
+	accepted, err := countAcceptedProcessing(ctx, transaction, source, identity)
 	if err != nil {
 		return "", err
 	}
-	tombstoned, err := countDelayedStartTombstone(ctx, transaction, source)
+	if identity.AttemptID.IsValid() {
+		if accepted > 0 {
+			return core.ObservationApplied, nil
+		}
+		return classifyUnchangedRunnerAcceptance(ctx, transaction, source, identity)
+	}
+	tombstoned, err := countDelayedAcceptanceTombstone(ctx, transaction, source)
 	if err != nil {
 		return "", err
 	}
-	removed, err := countRemovedDelayedStart(ctx, transaction, source)
+	removed, err := countRemovedDelayedAcceptance(ctx, transaction, source)
 	if err != nil {
 		return "", err
 	}
-	if started > 0 || tombstoned > 0 || removed > 0 {
+	if accepted > 0 || tombstoned > 0 || removed > 0 {
 		return core.ObservationApplied, nil
 	}
-	return classifyUnchangedRunnerStart(ctx, transaction, source)
+	return classifyUnchangedRunnerAcceptance(ctx, transaction, source, identity)
 }
 
-func countStartedProcessing(ctx context.Context, transaction Transaction, source core.SourceReference) (int64, error) {
-	result, err := transaction.Execute(ctx, markProcessingStartedSQL,
-		source.Adapter, source.ID, source.Adapter, source.ID)
-	if err != nil {
-		return 0, fmt.Errorf("mark processing runner started: %w", err)
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read started processing count: %w", err)
-	}
-	return count, nil
-}
-
-func countDelayedStartTombstone(ctx context.Context, transaction Transaction, source core.SourceReference) (int64, error) {
-	result, err := transaction.Execute(ctx, tombstoneDelayedStartSQL,
-		source.Adapter, source.ID, source.Adapter, source.ID)
-	if err != nil {
-		return 0, fmt.Errorf("tombstone delayed runner start: %w", err)
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read delayed-start tombstone count: %w", err)
-	}
-	return count, nil
-}
-
-func countRemovedDelayedStart(ctx context.Context, transaction Transaction, source core.SourceReference) (int64, error) {
-	result, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID)
-	if err != nil {
-		return 0, fmt.Errorf("remove delayed-start queued job: %w", err)
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read delayed-start removal count: %w", err)
-	}
-	return count, nil
-}
-
-func classifyUnchangedRunnerStart(
+func countAcceptedProcessing(
 	ctx context.Context,
 	transaction Transaction,
 	source core.SourceReference,
+	identity core.JobIdentity,
+) (int64, error) {
+	statement := markProcessingAcceptedSQL
+	arguments := []any{source.Adapter, source.ID, source.Adapter, source.ID}
+	if identity.AttemptID.IsValid() {
+		statement = markProcessingAttemptAcceptedSQL
+		arguments = []any{source.Adapter, source.ID,
+			core.AttemptRunnerName(identity.JobID, identity.AttemptID), source.Adapter, source.ID}
+	}
+	result, err := transaction.Execute(ctx, statement, arguments...)
+	if err != nil {
+		return 0, fmt.Errorf("mark processing runner accepted: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read accepted processing count: %w", err)
+	}
+	return count, nil
+}
+
+func countDelayedAcceptanceTombstone(ctx context.Context, transaction Transaction, source core.SourceReference) (int64, error) {
+	result, err := transaction.Execute(ctx, tombstoneDelayedAcceptanceSQL,
+		source.Adapter, source.ID, source.Adapter, source.ID)
+	if err != nil {
+		return 0, fmt.Errorf("tombstone delayed runner acceptance: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read delayed-acceptance tombstone count: %w", err)
+	}
+	return count, nil
+}
+
+func countRemovedDelayedAcceptance(ctx context.Context, transaction Transaction, source core.SourceReference) (int64, error) {
+	result, err := transaction.Execute(ctx, cancelQueuedJobSQL, source.Adapter, source.ID)
+	if err != nil {
+		return 0, fmt.Errorf("remove delayed-acceptance queued job: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read delayed-acceptance removal count: %w", err)
+	}
+	return count, nil
+}
+
+func classifyUnchangedRunnerAcceptance(
+	ctx context.Context,
+	transaction Transaction,
+	source core.SourceReference,
+	identity core.JobIdentity,
 ) (core.ObservationOutcome, error) {
 	var tombstoned bool
 	err := transaction.QueryRow(ctx, sourceTombstonedSQL, source.Adapter, source.ID).Scan(&tombstoned)
 	if err != nil {
-		return "", fmt.Errorf("classify runner-start observation: %w", err)
+		return "", fmt.Errorf("classify runner-acceptance observation: %w", err)
 	}
 	if tombstoned {
 		return core.ObservationAlreadyApplied, nil
 	}
+	statement := sourceAcceptedProcessingSQL
+	arguments := []any{source.Adapter, source.ID}
+	if identity.AttemptID.IsValid() {
+		statement = attemptAcceptedProcessingSQL
+		arguments = append(arguments, core.AttemptRunnerName(identity.JobID, identity.AttemptID))
+	}
+	var accepted bool
+	if err = transaction.QueryRow(ctx, statement, arguments...).Scan(&accepted); err != nil {
+		return "", fmt.Errorf("classify runner-acceptance observation: %w", err)
+	}
+	if accepted {
+		return core.ObservationAlreadyApplied, nil
+	}
 	return core.ObservationUnmatched, nil
+}
+
+func classifyProcessingAttempt(
+	ctx context.Context,
+	transaction Transaction,
+	source core.SourceReference,
+	identity core.JobIdentity,
+) (bool, core.ObservationOutcome, error) {
+	runnerName := core.AttemptRunnerName(identity.JobID, identity.AttemptID)
+	var matched bool
+	if err := transaction.QueryRow(ctx, processingAttemptExistsSQL,
+		source.Adapter, source.ID, runnerName).Scan(&matched); err != nil {
+		return false, "", fmt.Errorf("match lifecycle processing attempt: %w", err)
+	}
+	if matched {
+		return true, "", nil
+	}
+	var tombstoned bool
+	if err := transaction.QueryRow(ctx, sourceTombstonedSQL,
+		source.Adapter, source.ID).Scan(&tombstoned); err != nil {
+		return false, "", fmt.Errorf("classify lifecycle processing attempt: %w", err)
+	}
+	if tombstoned {
+		return false, core.ObservationAlreadyApplied, nil
+	}
+	return false, core.ObservationUnmatched, nil
 }
 
 func commitObservation(
@@ -195,7 +262,13 @@ func resolveJobIdentity(
 		return identity.Source, true, nil
 	}
 	durableSource, matched, err := findSourceByJobID(ctx, transaction, identity.JobID)
-	if err != nil || !matched {
+	if err != nil {
+		return core.SourceReference{}, false, err
+	}
+	if !matched && identity.AttemptID.IsValid() && identity.Source.IsValid() {
+		return identity.Source, true, nil
+	}
+	if !matched {
 		return core.SourceReference{}, matched, err
 	}
 	if identity.Source.IsValid() && identity.Source != durableSource {
