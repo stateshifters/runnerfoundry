@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
 type roleConnection interface {
@@ -17,6 +18,9 @@ type roleConnection interface {
 // OpenPool opens the primary PostgreSQL endpoint for concurrent runtime state
 // access. Every connection assumes the configured stable role before use.
 func (store *Store) OpenPool(ctx context.Context) (*pgxpool.Pool, error) {
+	if err := postgresconfig.Validate(store.settings); err != nil {
+		return nil, fmt.Errorf("validate PostgreSQL settings: %w", err)
+	}
 	role, err := resolvedConnectionRole(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PostgreSQL role: %w", err)

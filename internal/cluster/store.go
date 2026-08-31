@@ -142,6 +142,9 @@ func operatingSystemPostgreSQLConnectionAdapter() postgreSQLConnectionAdapter {
 }
 
 func (store *Store) connectDirectPostgreSQL(ctx context.Context) (*pgx.Conn, error) {
+	if err := postgresconfig.Validate(store.settings); err != nil {
+		return nil, fmt.Errorf("validate PostgreSQL settings: %w", err)
+	}
 	role, err := resolvedConnectionRole(store.settings, store.connectionResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PostgreSQL role: %w", err)
@@ -211,9 +214,6 @@ func closePostgreSQLAfterFailure(
 }
 
 func resolvedConnectionRole(settings postgresconfig.Settings, resolver connectionSettingResolver) (string, error) {
-	if settings.Role == "" {
-		return "", errors.New("PostgreSQL role is required")
-	}
 	return resolver.resolve(settings.Role)
 }
 

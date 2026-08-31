@@ -122,6 +122,32 @@ func TestLoadPostgreSQLStateRejectsInvalidPostgreSQLConfiguration(t *testing.T) 
 	}
 }
 
+func TestLoadPostgreSQLStateRejectsWhitespaceDSNConflicts(t *testing.T) {
+	tests := map[string]struct {
+		configText    string
+		expectedError string
+	}{
+		"primary DSN with structured settings": {
+			configText: "state:\n  postgres:\n    role: runnerfoundry\n    dsn: '   '\n    host: database.internal\n",
+			expectedError: "validate PostgreSQL migration config: " +
+				"state.postgres.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"direct DSN with structured settings": {
+			configText: "state:\n  postgres:\n    role: runnerfoundry\n    direct:\n      dsn: '   '\n      host: database.internal\n",
+			expectedError: "validate PostgreSQL migration config: " +
+				"state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
+		},
+	}
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadPostgreSQLState(strings.NewReader(testCase.configText))
+			if err == nil || err.Error() != testCase.expectedError {
+				t.Fatalf("LoadPostgreSQLState() error = %v, want %q", err, testCase.expectedError)
+			}
+		})
+	}
+}
+
 func TestLoadDefaultsLogLevelToInfo(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	configWithoutLevel := strings.Replace(validConfig(privateKeyPath), "  level: debug\n", "", 1)
@@ -201,6 +227,34 @@ func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
 			_, err := Load(strings.NewReader(configText))
 			if err == nil || !strings.Contains(err.Error(), testCase.expectedError) {
 				t.Fatalf("Load() error = %v, want an error containing %q", err, testCase.expectedError)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsWhitespaceDSNConflicts(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	tests := map[string]struct {
+		state         string
+		expectedError string
+	}{
+		"primary DSN with structured settings": {
+			state: "  postgres:\n    role: runnerfoundry\n    dsn: '   '\n    host: database.internal\n",
+			expectedError: "validate PostgreSQL state: " +
+				"state.postgres.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"direct DSN with structured settings": {
+			state: "  postgres:\n    role: runnerfoundry\n    direct:\n      dsn: '   '\n      host: database.internal\n",
+			expectedError: "validate PostgreSQL state: " +
+				"state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
+		},
+	}
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "state:\n"+testCase.state, 1)
+			_, err := Load(strings.NewReader(configText))
+			if err == nil || err.Error() != testCase.expectedError {
+				t.Fatalf("Load() error = %v, want %q", err, testCase.expectedError)
 			}
 		})
 	}
