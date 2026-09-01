@@ -142,21 +142,20 @@ func (commands *readinessDockerCommands) takeInventoryGate() *readinessCommandGa
 func (commands *readinessDockerCommands) StartComposeRunner(
 	ctx context.Context,
 	configured dockerprovider.ComposeConfig,
-	request dockerprovider.StartRequest,
+	request dockerprovider.ComposeRunnerRequest,
 ) error {
 	return commands.delegate.StartComposeRunner(ctx, configured, request)
 }
 
 func (commands *readinessDockerCommands) ListComposeRunners(
 	ctx context.Context,
-	runnerPoolName string,
 ) (string, error) {
 	if gate := commands.takeInventoryGate(); gate != nil {
 		if err := gate.wait(ctx); err != nil {
 			return "", err
 		}
 	}
-	return commands.delegate.ListComposeRunners(ctx, runnerPoolName)
+	return commands.delegate.ListComposeRunners(ctx)
 }
 
 func (commands *readinessDockerCommands) RemoveComposeRunner(ctx context.Context, containerID string) error {

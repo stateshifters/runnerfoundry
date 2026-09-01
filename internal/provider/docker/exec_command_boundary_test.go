@@ -8,6 +8,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
@@ -20,10 +23,10 @@ func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
 	}
 	assertDockerArguments(t, recording.arguments, "compose", "-f", "compose.yml", "config", "--services")
 
-	if _, err = runner.ListComposeRunners(context.Background(), "linux"); err != nil {
+	if _, err = runner.ListComposeRunners(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json", "--filter", "label=runnerfoundry.runner-pool=linux")
+	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json")
 
 	if err = runner.RemoveComposeRunner(context.Background(), "runner-id"); err != nil {
 		t.Fatal(err)
@@ -82,12 +85,12 @@ func TestComposeProviderDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
 		output: []byte("Error response from daemon: removal of container " + containerID + " is already in progress"),
 		err:    errors.New("exit status 1"),
 	}
-	provider := ComposeProvider{CommandRunner: recording.runner()}
+	provider := ComposeProvider{commandRunner: recording.runner()}
 
-	err := provider.Destroy(context.Background(), RunnerInstance{
+	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         containerID,
 		RunnerName: "linux-1",
-		State:      RunnerStateRunning,
+		State:      execution.RunnerStateRunning,
 	})
 	if err != nil {
 		t.Fatalf("Docker-owned removal returned an error: %v", err)
@@ -117,15 +120,15 @@ type jitPrivacyTestCase struct {
 
 func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
 	t.Helper()
-	parentEnvironment := []string{"RUNNERFOUNDRY_PRESERVED=inherited", JITConfigEnvironment + "=parent-jit-value"}
+	parentEnvironment := []string{"RUNNERFOUNDRY_PRESERVED=inherited", jitConfigEnvironment + "=parent-jit-value"}
 	recording := &recordingDockerExecution{
 		echoCommandEnvironment: true,
 		inheritedEnvironment:   parentEnvironment,
 	}
-	provider := ComposeProvider{CommandRunner: recording.runner(), Config: ComposeConfig{Service: "runner"}}
+	provider := ComposeProvider{commandRunner: recording.runner(), config: ComposeConfig{Service: "runner"}}
 
-	err := provider.Start(context.Background(), StartRequest{
-		RunnerPoolName: "linux", RunnerName: "linux-1", JITConfig: jitConfig,
+	err := provider.Start(context.Background(), execution.StartRequest{
+		RunnerPool: "linux", RunnerName: "linux-1", Bootstrap: core.NewBootstrap([]byte(jitConfig)),
 	})
 	if err == nil {
 		t.Fatal("expected docker failure")
@@ -140,7 +143,7 @@ func assertPrivateJITArguments(t *testing.T, arguments []string, jitConfig strin
 	assertDockerArguments(t, arguments,
 		"compose", "-f", "", "run", "--detach", "--rm", "--name", "linux-1",
 		"--label", "runnerfoundry.runner-pool=linux", "--label", "runnerfoundry.runner=linux-1",
-		"--env", JITConfigEnvironment, "runner",
+		"--env", jitConfigEnvironment, "runner",
 	)
 	if jitConfig != "" && strings.Contains(fmt.Sprint(arguments), jitConfig) {
 		t.Fatalf("docker arguments disclosed JIT config: %#v", arguments)
@@ -162,7 +165,7 @@ func assertJITFailureRedacted(t *testing.T, err error, jitConfig string) {
 
 func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
 	recording := &recordingDockerExecution{err: errors.New("missing")}
-	if _, err := recording.runner().ListComposeRunners(context.Background(), "linux"); err == nil || strings.Contains(err.Error(), ": missing:") {
+	if _, err := recording.runner().ListComposeRunners(context.Background()); err == nil || strings.Contains(err.Error(), ": missing:") {
 		t.Fatalf("docker failure = %v", err)
 	}
 }
@@ -204,7 +207,7 @@ func (recording *recordingDockerExecution) runner() ExecCommandRunner {
 func assertPrivateJITEnvironment(t *testing.T, actual []string, inherited []string, jitConfig string) {
 	t.Helper()
 	expected := make([]string, 0, len(inherited))
-	prefix := JITConfigEnvironment + "="
+	prefix := jitConfigEnvironment + "="
 	for _, entry := range inherited {
 		if !strings.HasPrefix(entry, prefix) {
 			expected = append(expected, entry)

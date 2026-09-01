@@ -5,63 +5,46 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
-
-// RunnerState is Docker's normalized lifecycle observation.
-type RunnerState string
 
 const (
-	JITConfigEnvironment = contract.JITConfigEnvironment
-	RunnerStateRunning   = contract.RunnerStateRunning
-	RunnerStateCompleted = contract.RunnerStateCompleted
-	RunnerStateUnknown   = contract.RunnerStateUnknown
+	jitConfigEnvironment    = "ACTIONS_RUNNER_INPUT_JITCONFIG"
+	ownershipRunnerPool     = "runnerfoundry.runner-pool"
+	legacyOwnershipScaleSet = "runnerfoundry.scale-set"
+	ownershipRunner         = "runnerfoundry.runner"
 )
 
-// RunnerInstance is one owned Compose container returned by List.
-type RunnerInstance struct {
-	ID             string
-	RunnerName     string
-	RunnerPoolName string
-	State          RunnerState
-}
-
-// StartRequest contains the ownership labels and opaque JIT configuration for
-// one ephemeral runner. JITConfig is passed through child-only environment.
-type StartRequest struct {
+type ComposeRunnerRequest struct {
 	RunnerPoolName string
 	RunnerName     string
 	JITConfig      string
 }
 
-// ComposeConfig selects one service from one Compose file.
 type ComposeConfig struct {
 	ComposeFile string
 	Service     string
 }
 
-// CommandRunner is the Docker command boundary. Implementations return command
-// failures without exposing private JIT values.
 type CommandRunner interface {
-	StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error
-	ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error)
+	StartComposeRunner(ctx context.Context, config ComposeConfig, request ComposeRunnerRequest) error
+	ListComposeRunners(ctx context.Context) (string, error)
 	RemoveComposeRunner(ctx context.Context, containerID string) error
 	ListComposeServices(ctx context.Context, config ComposeConfig) (string, error)
 }
 
-// ExecCommandRunner invokes the local Docker CLI without retaining command or
-// environment state between calls.
 type ExecCommandRunner struct {
 	newCommand           func(context.Context, string, ...string) *exec.Cmd
 	combinedOutput       func(*exec.Cmd) ([]byte, error)
 	inheritedEnvironment func() []string
 }
 
-// NewExecCommandRunner constructs the production Docker CLI boundary.
 func NewExecCommandRunner() ExecCommandRunner {
 	return ExecCommandRunner{
 		newCommand:           exec.CommandContext,
@@ -70,32 +53,30 @@ func NewExecCommandRunner() ExecCommandRunner {
 	}
 }
 
-func (runner ExecCommandRunner) StartComposeRunner(ctx context.Context, config ComposeConfig, request StartRequest) error {
+func (runner ExecCommandRunner) StartComposeRunner(
+	ctx context.Context,
+	config ComposeConfig,
+	request ComposeRunnerRequest,
+) error {
 	invocation := dockerInvocation{
 		arguments: append(composeArgs(config),
 			"run", "--detach", "--rm",
 			"--name", request.RunnerName,
-			"--label", contract.OwnershipRunnerPool+"="+request.RunnerPoolName,
-			"--label", contract.OwnershipRunner+"="+request.RunnerName,
-			"--env", JITConfigEnvironment,
+			"--label", ownershipRunnerPool+"="+request.RunnerPoolName,
+			"--label", ownershipRunner+"="+request.RunnerName,
+			"--env", jitConfigEnvironment,
 			config.Service,
 		),
-		privateEnvironment: []privateEnvironmentVariable{{name: JITConfigEnvironment, value: request.JITConfig}},
+		privateEnvironment: []privateEnvironmentVariable{{name: jitConfigEnvironment, value: request.JITConfig}},
 	}
 	_, err := runner.runDocker(ctx, invocation)
 	return err
 }
 
-func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context, runnerPoolName string) (string, error) {
-	arguments := []string{"ps", "--all", "--format", "json"}
-	if runnerPoolName != "" {
-		arguments = append(arguments, "--filter", "label="+contract.OwnershipRunnerPool+"="+runnerPoolName)
-	}
-	return runner.runDocker(ctx, dockerInvocation{arguments: arguments})
+func (runner ExecCommandRunner) ListComposeRunners(ctx context.Context) (string, error) {
+	return runner.runDocker(ctx, dockerInvocation{arguments: []string{"ps", "--all", "--format", "json"}})
 }
 
-// RemoveComposeRunner requests forced cleanup and treats Docker's exact
-// removal-in-progress response as a successful handoff to the daemon.
 func (runner ExecCommandRunner) RemoveComposeRunner(ctx context.Context, containerID string) error {
 	diagnostic, err := runner.runDocker(ctx, dockerInvocation{arguments: []string{"rm", "--force", containerID}})
 	if err != nil && dockerOwnsRemoval(diagnostic, containerID) {
@@ -140,13 +121,9 @@ type privateEnvironmentVariable struct {
 	value string
 }
 
-type redactedExecutionError struct {
-	message string
-}
+type redactedExecutionError struct{ message string }
 
-func (executionError redactedExecutionError) Error() string {
-	return executionError.message
-}
+func (executionError redactedExecutionError) Error() string { return executionError.message }
 
 func replaceEnvironment(inherited []string, replacements []privateEnvironmentVariable) []string {
 	replacedNames := make(map[string]struct{}, len(replacements))
@@ -185,92 +162,146 @@ func redactPrivateValues(value string, privateEnvironment []privateEnvironmentVa
 	return redactedValue
 }
 
-// ComposeProvider owns runner containers bearing RunnerFoundry ownership
-// labels for Config. Callers must Validate before Start.
 type ComposeProvider struct {
-	CommandRunner CommandRunner
-	Config        ComposeConfig
+	commandRunner CommandRunner
+	config        ComposeConfig
+	memberID      core.MemberID
 }
 
-// Start creates one detached, self-removing runner container.
-func (provider ComposeProvider) Start(ctx context.Context, request StartRequest) error {
-	err := provider.CommandRunner.StartComposeRunner(ctx, provider.Config, request)
+var _ execution.ExecutionProvider = ComposeProvider{}
+
+func NewComposeProvider(commandRunner CommandRunner, config ComposeConfig, memberID core.MemberID) ComposeProvider {
+	return ComposeProvider{commandRunner: commandRunner, config: config, memberID: memberID}
+}
+
+func (provider ComposeProvider) EndpointID() execution.InventoryEndpointID {
+	return execution.InventoryEndpointID("docker:" + url.QueryEscape(normalizedHostname(provider.memberID)))
+}
+
+func (provider ComposeProvider) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	if provider.EndpointID() == endpointID {
+		return true
+	}
+	hostname, legacy := legacyComposeEndpointHostname(endpointID)
+	return legacy && hostname == normalizedHostname(provider.memberID)
+}
+
+func normalizedHostname(memberID core.MemberID) string {
+	return strings.ToLower(strings.TrimSpace(string(memberID)))
+}
+
+func legacyComposeEndpointHostname(endpointID execution.InventoryEndpointID) (string, bool) {
+	legacyEndpoint, legacy := strings.CutPrefix(string(endpointID), "docker-compose:")
+	if !legacy {
+		return "", false
+	}
+	escapedHostname, _, hasConfiguration := strings.Cut(legacyEndpoint, "?")
+	if !hasConfiguration {
+		return "", false
+	}
+	hostname, err := url.QueryUnescape(escapedHostname)
+	return normalizedHostname(core.MemberID(hostname)), err == nil
+}
+
+func (provider ComposeProvider) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	return provider.KnowsEndpoint(endpointID) && normalizedHostname(provider.memberID) == normalizedHostname(memberID)
+}
+
+func (provider ComposeProvider) Refresh(ctx context.Context) error {
+	_, err := provider.Inspect(ctx)
+	return err
+}
+
+func (provider ComposeProvider) InspectEndpoint(
+	ctx context.Context,
+	endpointID execution.InventoryEndpointID,
+) ([]execution.RunnerInstance, error) {
+	if !provider.KnowsEndpoint(endpointID) {
+		return nil, fmt.Errorf("docker Compose endpoint %q is not configured", endpointID)
+	}
+	instances, err := provider.Inspect(ctx)
+	for index := range instances {
+		instances[index].EndpointID = endpointID
+	}
+	return instances, err
+}
+
+func (provider ComposeProvider) Validate(ctx context.Context) error {
+	output, err := provider.commandRunner.ListComposeServices(ctx, provider.config)
 	if err != nil {
-		return fmt.Errorf("start compose runner: %w", err)
+		return fmt.Errorf("validate Docker Compose provider: validate compose config: %w", err)
+	}
+	for _, service := range strings.Split(output, "\n") {
+		if strings.TrimSpace(service) == provider.config.Service {
+			return nil
+		}
+	}
+	return fmt.Errorf("validate Docker Compose provider: compose service %q was not found", provider.config.Service)
+}
+
+func (provider ComposeProvider) Start(ctx context.Context, request execution.StartRequest) error {
+	err := provider.commandRunner.StartComposeRunner(ctx, provider.config, ComposeRunnerRequest{
+		RunnerPoolName: string(request.RunnerPool),
+		RunnerName:     string(request.RunnerName),
+		JITConfig:      string(request.Bootstrap.Content()),
+	})
+	if err != nil {
+		return fmt.Errorf("start Docker Compose runner: start compose runner: %w", err)
 	}
 	return nil
 }
 
-// List returns all owned containers when requestedPools is empty, or filters by
-// the first requested Runner Pool. A filtered result omits RunnerPoolName.
-func (provider ComposeProvider) List(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
-	output, err := provider.CommandRunner.ListComposeRunners(ctx, "")
+func (provider ComposeProvider) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	output, err := provider.commandRunner.ListComposeRunners(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list compose runners: %w", err)
+		return nil, fmt.Errorf("inspect Docker Compose runners: list compose runners: %w", err)
 	}
 	containers, err := decodeDockerContainers(output)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inspect Docker Compose runners: %w", err)
 	}
-	instances := make([]RunnerInstance, 0, len(containers))
+	instances := make([]execution.RunnerInstance, 0, len(containers))
 	for _, container := range containers {
-		instance, owned := runnerInstance(container, requestedPools)
-		if !owned {
-			continue
+		instance, owned := runnerInstance(container)
+		if owned {
+			instances = append(instances, instance)
 		}
-		instances = append(instances, instance)
 	}
 	return instances, nil
 }
 
-func runnerInstance(container dockerContainer, requestedPools []string) (RunnerInstance, bool) {
+func runnerInstance(container dockerContainer) (execution.RunnerInstance, bool) {
 	labels := parseLabels(container.Labels)
-	runnerPoolName := labels[contract.OwnershipRunnerPool]
+	runnerPoolName := labels[ownershipRunnerPool]
 	if runnerPoolName == "" {
-		runnerPoolName = labels[contract.LegacyOwnershipScaleSet]
+		runnerPoolName = labels[legacyOwnershipScaleSet]
 	}
-	if runnerPoolName == "" || len(requestedPools) != 0 && runnerPoolName != requestedPools[0] {
-		return RunnerInstance{}, false
+	if runnerPoolName == "" {
+		return execution.RunnerInstance{}, false
 	}
-	reportedRunnerPool := runnerPoolName
-	if len(requestedPools) != 0 {
-		reportedRunnerPool = ""
-	}
-	return RunnerInstance{
-		ID:             container.ID,
-		RunnerName:     labels[contract.OwnershipRunner],
-		RunnerPoolName: reportedRunnerPool,
-		State:          dockerState(container.State),
+	return execution.RunnerInstance{
+		ID:         container.ID,
+		RunnerName: core.RunnerName(labels[ownershipRunner]),
+		RunnerPool: core.RunnerPool(runnerPoolName),
+		State:      dockerState(container.State),
 	}, true
 }
 
-// Destroy confirms cleanup for one Docker runner. Completed instances are left
-// to Docker's automatic --rm lifecycle; running and unknown instances are
-// force-removed. If forced removal fails, Destroy refreshes owned inventory and
-// succeeds only when the exact container is absent or completed. A failed
-// refresh is joined with the original removal failure.
-func (provider ComposeProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	if instance.State == RunnerStateCompleted {
+func (provider ComposeProvider) Destroy(ctx context.Context, instance execution.RunnerInstance) error {
+	if instance.State == execution.RunnerStateCompleted {
 		return nil
 	}
-	err := provider.CommandRunner.RemoveComposeRunner(ctx, instance.ID)
+	err := provider.commandRunner.RemoveComposeRunner(ctx, instance.ID)
 	if err == nil {
 		return nil
 	}
-	return provider.confirmRemoval(ctx, instance, fmt.Errorf("remove docker runner %q: %w", instance.RunnerName, err))
-}
-
-func (provider ComposeProvider) confirmRemoval(
-	ctx context.Context,
-	instance RunnerInstance,
-	removalFailure error,
-) error {
-	instances, confirmationErr := provider.List(ctx)
+	removalFailure := fmt.Errorf("destroy Docker Compose runner: remove docker runner %q: %w", instance.RunnerName, err)
+	instances, confirmationErr := provider.Inspect(ctx)
 	if confirmationErr != nil {
-		return errors.Join(
-			removalFailure,
-			fmt.Errorf("confirm docker runner %q removal: %w", instance.RunnerName, confirmationErr),
-		)
+		return errors.Join(removalFailure, fmt.Errorf("confirm docker runner %q removal: %w", instance.RunnerName, confirmationErr))
 	}
 	if dockerCleanupComplete(instances, instance.ID) {
 		return nil
@@ -278,32 +309,16 @@ func (provider ComposeProvider) confirmRemoval(
 	return removalFailure
 }
 
-func dockerCleanupComplete(instances []RunnerInstance, containerID string) bool {
+func dockerCleanupComplete(instances []execution.RunnerInstance, containerID string) bool {
 	for _, instance := range instances {
 		if instance.ID == containerID {
-			return instance.State == RunnerStateCompleted
+			return instance.State == execution.RunnerStateCompleted
 		}
 	}
 	return true
 }
 
-// Validate resolves the Compose model and requires Config.Service to exist.
-func (provider ComposeProvider) Validate(ctx context.Context) error {
-	output, err := provider.CommandRunner.ListComposeServices(ctx, provider.Config)
-	if err != nil {
-		return fmt.Errorf("validate compose config: %w", err)
-	}
-	for _, service := range strings.Split(output, "\n") {
-		if strings.TrimSpace(service) == provider.Config.Service {
-			return nil
-		}
-	}
-	return fmt.Errorf("compose service %q was not found", provider.Config.Service)
-}
-
-func composeArgs(config ComposeConfig) []string {
-	return []string{"compose", "-f", config.ComposeFile}
-}
+func composeArgs(config ComposeConfig) []string { return []string{"compose", "-f", config.ComposeFile} }
 
 func decodeDockerContainers(output string) ([]dockerContainer, error) {
 	var containers []dockerContainer
@@ -334,14 +349,14 @@ type dockerContainer struct {
 	Labels string `json:"Labels"`
 }
 
-func dockerState(state string) RunnerState {
+func dockerState(state string) execution.RunnerState {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "running":
-		return RunnerStateRunning
+		return execution.RunnerStateRunning
 	case "exited", "removing":
-		return RunnerStateCompleted
+		return execution.RunnerStateCompleted
 	default:
-		return RunnerStateUnknown
+		return execution.RunnerStateUnknown
 	}
 }
 

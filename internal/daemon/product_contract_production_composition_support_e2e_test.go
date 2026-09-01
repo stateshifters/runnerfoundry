@@ -23,7 +23,6 @@ import (
 	upstream "github.com/actions/scaleset"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/stateshifters/runnerfoundry/internal/config"
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
@@ -469,10 +468,10 @@ func productionCompositionPrivateKey(t *testing.T) []byte {
 
 type productionCompositionDockerCommands struct {
 	mutex          sync.Mutex
-	instances      map[string]dockerprovider.StartRequest
+	instances      map[string]dockerprovider.ComposeRunnerRequest
 	startBehaviors []productionCompositionDockerStartBehavior
 	contexts       chan productionCompositionCommandContext
-	starts         chan dockerprovider.StartRequest
+	starts         chan dockerprovider.ComposeRunnerRequest
 	removals       chan string
 }
 
@@ -501,9 +500,9 @@ type productionCompositionDockerStartBehavior struct {
 
 func newProductionCompositionDockerCommands() *productionCompositionDockerCommands {
 	return &productionCompositionDockerCommands{
-		instances: make(map[string]dockerprovider.StartRequest),
+		instances: make(map[string]dockerprovider.ComposeRunnerRequest),
 		contexts:  make(chan productionCompositionCommandContext, 256),
-		starts:    make(chan dockerprovider.StartRequest, 8), removals: make(chan string, 8),
+		starts:    make(chan dockerprovider.ComposeRunnerRequest, 8), removals: make(chan string, 8),
 	}
 }
 
@@ -518,7 +517,7 @@ func (commands *productionCompositionDockerCommands) blockNextStartWithPartial(e
 }
 
 func (commands *productionCompositionDockerCommands) StartComposeRunner(
-	ctx context.Context, configured dockerprovider.ComposeConfig, request dockerprovider.StartRequest,
+	ctx context.Context, configured dockerprovider.ComposeConfig, request dockerprovider.ComposeRunnerRequest,
 ) error {
 	recordProductionCompositionCommandContext(ctx, "start", commands.contexts)
 	if configured.ComposeFile != "compose.yaml" || configured.Service != "runner" {
@@ -545,7 +544,6 @@ func (commands *productionCompositionDockerCommands) StartComposeRunner(
 
 func (commands *productionCompositionDockerCommands) ListComposeRunners(
 	ctx context.Context,
-	_ string,
 ) (string, error) {
 	recordProductionCompositionCommandContext(ctx, "inventory", commands.contexts)
 	commands.mutex.Lock()
@@ -553,8 +551,8 @@ func (commands *productionCompositionDockerCommands) ListComposeRunners(
 	for identifier, request := range commands.instances {
 		containers = append(containers, map[string]string{
 			"ID": identifier, "Names": request.RunnerName, "State": "running",
-			"Labels": contract.OwnershipRunnerPool + "=" + request.RunnerPoolName + "," +
-				contract.OwnershipRunner + "=" + request.RunnerName,
+			"Labels": "runnerfoundry.runner-pool=" + request.RunnerPoolName + "," +
+				"runnerfoundry.runner=" + request.RunnerName,
 		})
 	}
 	commands.mutex.Unlock()

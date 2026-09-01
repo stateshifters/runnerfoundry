@@ -159,7 +159,7 @@ func newCancellationBlockingDockerCommands() *cancellationBlockingDockerCommands
 func (commands *cancellationBlockingDockerCommands) StartComposeRunner(
 	ctx context.Context,
 	_ dockerprovider.ComposeConfig,
-	_ dockerprovider.StartRequest,
+	_ dockerprovider.ComposeRunnerRequest,
 ) error {
 	commands.entered <- struct{}{}
 	<-ctx.Done()

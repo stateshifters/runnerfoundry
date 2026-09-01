@@ -334,7 +334,7 @@ func buildProductionProvidersWithDependencies(
 	}
 	return buildConfiguredProviders(ctx, configured, executionDependencies{
 		dockerCommands: dependencies.dockerCommands, libvirtCommands: dependencies.libvirtCommands,
-		readTemplate: dependencies.readFile, memberHostname: hostname,
+		readTemplate: dependencies.readFile, memberID: core.MemberID(hostname),
 		providerObserver: dependencies.providerObserver,
 	})
 }

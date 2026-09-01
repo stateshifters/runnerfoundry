@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
@@ -15,7 +16,7 @@ type executionDependencies struct {
 	dockerCommands   dockerprovider.CommandRunner
 	libvirtCommands  libvirtprovider.CommandRunner
 	readTemplate     func(string) ([]byte, error)
-	memberHostname   string
+	memberID         core.MemberID
 	providerObserver func(execution.ProviderActivity)
 }
 
@@ -54,12 +55,12 @@ func configuredDockerProvider(
 	configured config.RunnerPoolConfig,
 	dependencies executionDependencies,
 ) configuredExecutionProvider {
-	provider := execution.NewDockerComposeProvider(
+	provider := dockerprovider.NewComposeProvider(
 		dependencies.dockerCommands,
 		dockerprovider.ComposeConfig{
 			ComposeFile: configured.Docker.ComposeFile,
 			Service:     configured.Docker.Service,
-		}, execution.HostIdentity(dependencies.memberHostname),
+		}, dependencies.memberID,
 	)
 	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlinesAndMetadata(
 		provider, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
@@ -78,14 +79,14 @@ func configuredLibvirtProvider(
 	if err != nil {
 		return configuredExecutionProvider{}, fmt.Errorf("read libvirt domain template: %w", err)
 	}
-	provider := execution.NewLibvirtProvider(
+	provider := libvirtprovider.NewProvider(
 		dependencies.libvirtCommands,
 		libvirtprovider.Config{
 			ConnectionURI:     configured.Libvirt.ConnectionURI,
 			DomainXMLTemplate: configured.Libvirt.DomainXMLTemplate,
 		},
 		template,
-		execution.HostIdentity(dependencies.memberHostname),
+		dependencies.memberID,
 	)
 	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(
 		provider, execution.ProviderName(config.ProviderKindLibvirt), dependencies.providerObserver,

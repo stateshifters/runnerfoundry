@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 	upstream "libvirt.org/go/libvirtxml"
 )
 
 const (
-	MetadataNamespace  = "urn:runnerfoundry"
-	JITOEMStringPrefix = contract.JITOEMStringPrefix
+	metadataNamespace  = "urn:runnerfoundry"
+	jitOEMStringPrefix = "runnerfoundry.jit="
 )
 
 // DomainTemplate is immutable source XML used to render one transient runner
@@ -59,7 +58,7 @@ func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	ensureSMBIOSSystemInfo(&domain)
 	addJITOEMString(&domain, request.JITConfig)
 	domain.Metadata = &upstream.DomainMetadata{
-		XML: scalerMetadata(request),
+		XML: runnerMetadata(request),
 	}
 	renderedXML, err := template.marshal(&domain)
 	if err != nil {
@@ -86,7 +85,7 @@ func addJITOEMString(domain *upstream.Domain, jitConfig string) {
 	domain.SysInfo = append(domain.SysInfo, upstream.DomainSysInfo{
 		SMBIOS: &upstream.DomainSysInfoSMBIOS{
 			OEMStrings: &upstream.DomainSysInfoOEMStrings{
-				Entry: []string{JITOEMStringPrefix + jitConfig},
+				Entry: []string{jitOEMStringPrefix + jitConfig},
 			},
 		},
 	})
@@ -98,18 +97,18 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 	}
 	oemStrings := make([]string, 0, len(smbios.OEMStrings.Entry)+1)
 	for _, oemString := range smbios.OEMStrings.Entry {
-		if strings.HasPrefix(oemString, JITOEMStringPrefix) {
+		if strings.HasPrefix(oemString, jitOEMStringPrefix) {
 			continue
 		}
 		oemStrings = append(oemStrings, oemString)
 	}
-	smbios.OEMStrings.Entry = append(oemStrings, JITOEMStringPrefix+jitConfig)
+	smbios.OEMStrings.Entry = append(oemStrings, jitOEMStringPrefix+jitConfig)
 }
 
-func scalerMetadata(request RenderRequest) string {
+func runnerMetadata(request RenderRequest) string {
 	return fmt.Sprintf(
 		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:runner-pool>%s</runnerfoundry:runner-pool><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
-		MetadataNamespace,
+		metadataNamespace,
 		escapeXML(request.RunnerPoolName),
 		escapeXML(request.RunnerName),
 	)

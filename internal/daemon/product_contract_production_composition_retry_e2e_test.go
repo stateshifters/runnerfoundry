@@ -97,8 +97,8 @@ func exerciseProductionCompositionProvisioningRetry(
 
 func awaitDockerCompositionStart(
 	t *testing.T,
-	values <-chan dockerprovider.StartRequest,
-) dockerprovider.StartRequest {
+	values <-chan dockerprovider.ComposeRunnerRequest,
+) dockerprovider.ComposeRunnerRequest {
 	t.Helper()
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
@@ -107,6 +107,6 @@ func awaitDockerCompositionStart(
 		return value
 	case <-timer.C:
 		t.Fatal("timed out waiting for production Docker start")
-		return dockerprovider.StartRequest{}
+		return dockerprovider.ComposeRunnerRequest{}
 	}
 }

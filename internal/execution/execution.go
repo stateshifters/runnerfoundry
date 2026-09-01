@@ -11,10 +11,6 @@ import (
 // endpoint that accepted a claim.
 type InventoryEndpointID = core.InventoryEndpointID
 
-// HostIdentity is the stable member-local host name used when deriving provider
-// endpoint identities across reloads.
-type HostIdentity string
-
 // RunnerLauncher validates and starts ephemeral runner environments.
 type RunnerLauncher interface {
 	EndpointID() InventoryEndpointID

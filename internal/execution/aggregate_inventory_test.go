@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	providerdocker "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestAggregateRunnerInventoryMergesActiveBackendsAndRoutesDestruction(t *testing.T) {
@@ -95,29 +94,6 @@ func TestAggregateRunnerInventoryDeduplicatesEquivalentBackends(t *testing.T) {
 	}
 	if firstLibvirtInventory.inspections != 1 || secondLibvirtInventory.inspections != 0 {
 		t.Fatalf("libvirt inspection counts = %d, %d, want 1, 0", firstLibvirtInventory.inspections, secondLibvirtInventory.inspections)
-	}
-}
-
-func TestAggregateRunnerInventoryDeduplicatesConcreteMechanismsAndEndpoints(t *testing.T) {
-	firstDockerTransport := &recordingDockerTransport{}
-	secondDockerTransport := &recordingDockerTransport{}
-	firstLibvirtTransport := &recordingLibvirtTransport{}
-	secondLibvirtTransport := &recordingLibvirtTransport{}
-	inventory := NewAggregateRunnerInventory(
-		NewDockerComposeProvider(firstDockerTransport, providerdockerTestConfig(), "local"),
-		NewDockerComposeProvider(secondDockerTransport, providerdockerTestConfig(), "local"),
-		NewLibvirtProvider(firstLibvirtTransport, libvirtTestConfig(), libvirtTemplate(), "member-a"),
-		NewLibvirtProvider(secondLibvirtTransport, libvirtTestConfig(), libvirtTemplate(), "member-a"),
-	)
-
-	if _, err := inventory.Inspect(context.Background()); err != nil {
-		t.Fatalf("Inspect() error = %v", err)
-	}
-	if firstDockerTransport.listCalls != 1 || secondDockerTransport.listCalls != 0 {
-		t.Fatalf("Docker list calls = %d, %d, want 1, 0", firstDockerTransport.listCalls, secondDockerTransport.listCalls)
-	}
-	if firstLibvirtTransport.listCalls != 1 || secondLibvirtTransport.listCalls != 0 {
-		t.Fatalf("libvirt list calls = %d, %d, want 1, 0", firstLibvirtTransport.listCalls, secondLibvirtTransport.listCalls)
 	}
 }
 
@@ -222,14 +198,6 @@ func TestAggregateRunnerInventoryInspectEndpointReturnsBackendFailure(t *testing
 	if instances != nil {
 		t.Fatalf("InspectEndpoint() instances = %#v, want nil", instances)
 	}
-}
-
-func providerdockerTestConfig() providerdocker.ComposeConfig {
-	return providerdocker.ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"}
-}
-
-func libvirtTemplate() []byte {
-	return []byte(`<domain><name>template</name></domain>`)
 }
 
 type runnerInventoryFake struct {

@@ -77,10 +77,10 @@ type dockerCommandsFake struct {
 
 type dockerCommandsErrorFake struct{ err error }
 
-func (fake dockerCommandsErrorFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.StartRequest) error {
+func (fake dockerCommandsErrorFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.ComposeRunnerRequest) error {
 	return nil
 }
-func (fake dockerCommandsErrorFake) ListComposeRunners(context.Context, string) (string, error) {
+func (fake dockerCommandsErrorFake) ListComposeRunners(context.Context) (string, error) {
 	return "", nil
 }
 func (fake dockerCommandsErrorFake) RemoveComposeRunner(context.Context, string) error { return nil }
@@ -105,11 +105,11 @@ func (libvirtCommandsFake) ReadConnectionURI(context.Context, string) (string, e
 
 var _ libvirtprovider.CommandRunner = libvirtCommandsFake{}
 
-func (dockerCommandsFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.StartRequest) error {
+func (dockerCommandsFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.ComposeRunnerRequest) error {
 	return nil
 }
 
-func (commands dockerCommandsFake) ListComposeRunners(context.Context, string) (string, error) {
+func (commands dockerCommandsFake) ListComposeRunners(context.Context) (string, error) {
 	return commands.runners, nil
 }
 

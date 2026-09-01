@@ -53,7 +53,7 @@ func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
 		t.Fatalf("expected render success, got %v", err)
 	}
 	if !strings.Contains(renderedXML, "runnerfoundry:runner-pool") {
-		t.Fatalf("expected scaler metadata: %s", renderedXML)
+		t.Fatalf("expected runner metadata: %s", renderedXML)
 	}
 	if strings.Contains(renderedXML, "<old>value</old>") {
 		t.Fatalf("expected old metadata replaced: %s", renderedXML)
@@ -76,7 +76,7 @@ func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
 		}
 	}
 	if strings.Contains(renderedXML, "runnerfoundry.jit=old") {
-		t.Fatalf("expected old scaler JIT OEM string replaced:\n%s", renderedXML)
+		t.Fatalf("expected old runner JIT OEM string replaced:\n%s", renderedXML)
 	}
 }
 
