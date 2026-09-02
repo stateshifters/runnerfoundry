@@ -20,11 +20,13 @@ type Connection struct {
 	queryRow func(context.Context, string, ...any) Row
 }
 
+func (connection Connection) Executor() Executor { return Executor(connection) }
+
 // NewConnectionStore builds a state store from an adapted PostgreSQL connection.
 // The returned store is safe to use with the concurrency guarantees of the
 // underlying pool and does not own or close that pool.
 func NewConnectionStore(connection Connection) *Store {
-	return NewStore(Executor(connection))
+	return NewStore(connection.Executor())
 }
 
 // NewPGXConnection adapts a pgx pool to the state store's narrow database

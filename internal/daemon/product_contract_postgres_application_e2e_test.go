@@ -14,6 +14,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
@@ -257,7 +258,8 @@ func e2ePostgresAssertProcessing(
 
 func e2ePostgresAssertMigrationsCurrent(t *testing.T, settings postgresconfig.Settings) {
 	t.Helper()
-	status, err := cluster.NewStore(settings).MigrationStatus(context.Background())
+	services := newE2EPostgresMigrationServices(t, settings)
+	status, err := services.migrator.Status(context.Background())
 	if err != nil || status.Current == 0 || status.Current != status.Target {
 		t.Fatalf("PostgreSQL application migration status = %+v, error = %v", status, err)
 	}
@@ -285,11 +287,26 @@ func e2ePostgresWithStateStore(
 	inspect func(*postgresstate.Store),
 ) {
 	t.Helper()
-	pool, err := cluster.NewStore(settings).OpenPool(context.Background())
+	e2ePostgresWithStores(t, settings, func(store *postgresstate.Store, _ *githubpostgres.Store) {
+		inspect(store)
+	})
+}
+
+func e2ePostgresWithStores(
+	t *testing.T,
+	settings postgresconfig.Settings,
+	inspect func(*postgresstate.Store, *githubpostgres.Store),
+) {
+	t.Helper()
+	connections, err := cluster.NewConnections(settings)
+	if err != nil {
+		t.Fatalf("configure PostgreSQL application assertion connections: %v", err)
+	}
+	pool, err := connections.OpenPool(context.Background())
 	if err != nil {
 		t.Fatalf("open PostgreSQL application assertion pool: %v", err)
 	}
 	defer pool.Close()
-	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
-	inspect(store)
+	connection := postgresstate.NewPGXConnection(pool)
+	inspect(postgresstate.NewConnectionStore(connection), githubpostgres.NewStore(connection))
 }

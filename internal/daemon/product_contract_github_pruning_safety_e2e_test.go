@@ -142,7 +142,7 @@ func openGitHubPruningSafetyStore(
 		}
 	})
 	return &githubPruningSafetyState{
-		registrations: state.store, publishMemberState: state.store.PublishMemberState,
+		registrations: state.registrationStore, publishMemberState: state.store.PublishMemberState,
 	}
 }
 

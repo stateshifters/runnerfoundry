@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/state/storetest"
 )
 
@@ -34,7 +33,7 @@ func (sqliteConformance) Exercise(t *testing.T, scenario storetest.Scenario) sto
 	case strings.HasPrefix(name, "removal/"):
 		return exerciseSQLiteRemovalProtocol(t, scenario)
 	default:
-		return exerciseSQLiteSnapshotProtocol(t, scenario)
+		return exerciseSQLiteSnapshotProtocol(t)
 	}
 }
 
@@ -173,12 +172,9 @@ func exerciseSQLiteRemovalProtocol(t *testing.T, scenario storetest.Scenario) st
 	return storetest.Observation{RemovalOutcome: result.Outcome}
 }
 
-func exerciseSQLiteSnapshotProtocol(t *testing.T, scenario storetest.Scenario) storetest.Observation {
+func exerciseSQLiteSnapshotProtocol(t *testing.T) storetest.Observation {
 	t.Helper()
-	if scenario == storetest.Capacity {
-		return exerciseSQLiteCapacity(t)
-	}
-	return exerciseSQLiteRegistrationRecords(t)
+	return exerciseSQLiteCapacity(t)
 }
 
 func exerciseSQLiteCapacity(t *testing.T) storetest.Observation {
@@ -187,34 +183,6 @@ func exerciseSQLiteCapacity(t *testing.T) storetest.Observation {
 	capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", storetest.FixedTime())
 	requireSQLiteConformanceSuccess(t, "capacity", err)
 	return storetest.Observation{Capacity: capacity}
-}
-
-func exerciseSQLiteRegistrationRecords(t *testing.T) storetest.Observation {
-	t.Helper()
-	want := storetest.ExpectedRegistrations()
-	queryCalls := 0
-	transaction := Transaction{execute: outcomeExecute(1), query: func(context.Context, string, ...any) (Rows, error) {
-		queryCalls++
-		registrations := want.Active
-		if queryCalls == 2 {
-			registrations = want.Owned
-		}
-		return rowsFromValues(sqliteRegistrationValues(registrations)), nil
-	}, commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	for _, registration := range append(want.Active, want.Owned...) {
-		requireSQLiteConformanceSuccess(t, "upsert registration",
-			store.UpsertRegistration(context.Background(), registration))
-	}
-	requireSQLiteConformanceSuccess(t, "delete active ownership",
-		store.DeleteOwnedRegistration(context.Background(), want.Active[0]))
-	requireSQLiteConformanceSuccess(t, "delete owned route",
-		store.DeleteActiveRegistration(context.Background(), want.Owned[0]))
-	active, err := store.Registrations(context.Background())
-	requireSQLiteConformanceSuccess(t, "read active registrations", err)
-	owned, err := store.OwnedRegistrations(context.Background())
-	requireSQLiteConformanceSuccess(t, "read owned registrations", err)
-	return storetest.Observation{Registrations: githubsource.RegistrationSnapshot{Active: active, Owned: owned}}
 }
 
 func requireSQLiteConformanceSuccess(t *testing.T, operation string, err error) {
@@ -245,13 +213,4 @@ func sqliteRowsInOrder(rows ...Row) func(context.Context, string, ...any) Row {
 		rows = rows[1:]
 		return row
 	}
-}
-
-func sqliteRegistrationValues(registrations []githubsource.Registration) [][]any {
-	values := make([][]any, 0, len(registrations))
-	for _, registration := range registrations {
-		values = append(values, []any{int64(registration.GitHubAppID), registration.RepositoryURL, string(registration.RunnerPool), int64(registration.InstallationID),
-			int64(registration.RunnerGroupID), int64(registration.ScaleSetID)})
-	}
-	return values
 }

@@ -27,6 +27,18 @@ func advisoryLockIdentity(firstComponent, secondComponent string) string {
 	return strconv.Itoa(len(firstComponent)) + ":" + firstComponent + secondComponent
 }
 
+func SerializeDemandScope(ctx context.Context, transaction Transaction, scope core.DemandScope) error {
+	_, err := transaction.Execute(ctx, serializeDemandScopeSQL,
+		advisoryLockIdentity(string(scope.Adapter), string(scope.ID)))
+	return err
+}
+
+func SerializeSource(ctx context.Context, transaction Transaction, source core.SourceReference) error {
+	_, err := transaction.Execute(ctx, serializeSourceSQL,
+		advisoryLockIdentity(string(source.Adapter), string(source.ID)))
+	return err
+}
+
 const insertQueuedJobSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	(source_name, source_reference, runner_pool, enqueued_at)
 	SELECT $1, $2, $3, $4

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 type Scenario string
@@ -34,7 +33,6 @@ const (
 	RemovalMissing       Scenario = "removal/missing"
 	RemovalNotTerminal   Scenario = "removal/not-terminal"
 	Capacity             Scenario = "capacity/calculation"
-	RegistrationRecords  Scenario = "registration/independent-records"
 )
 
 type Observation struct {
@@ -46,7 +44,6 @@ type Observation struct {
 	Processing     core.ProcessingJob
 	Capacity       int
 	Accepted       bool
-	Registrations  githubsource.RegistrationSnapshot
 }
 
 type Factory interface {
@@ -89,7 +86,7 @@ var conformanceExpectations = map[Scenario]Observation{
 	RecoveryClaimChanged: {RetryOutcome: core.RetryClaimChanged},
 	RemovalRemoved:       {RemovalOutcome: core.TerminalRemoved}, RemovalMissing: {RemovalOutcome: core.TerminalMissing},
 	RemovalNotTerminal: {RemovalOutcome: core.TerminalNotTerminal},
-	Capacity:           {Capacity: 2}, RegistrationRecords: {Registrations: ExpectedRegistrations()},
+	Capacity:           {Capacity: 2},
 }
 
 func OldestJob() core.Job {
@@ -102,14 +99,6 @@ func ExpectedProcessing() core.ProcessingJob {
 	return core.ProcessingJob{Job: job, RunnerName: core.AttemptRunnerName(job.ID, core.AttemptID{1}),
 		MemberID: "member-a", ClaimedAt: FixedTime(),
 		InventoryEndpointID: "docker:member-a"}
-}
-
-func ExpectedRegistrations() githubsource.RegistrationSnapshot {
-	active := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/active", RunnerPool: "linux",
-		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	owned := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/owned", RunnerPool: "linux",
-		InstallationID: 4, RunnerGroupID: 5, ScaleSetID: 6}
-	return githubsource.RegistrationSnapshot{Active: []githubsource.Registration{active}, Owned: []githubsource.Registration{owned}}
 }
 
 func FixedTime() time.Time { return time.Unix(1_700_000_000, 0).UTC() }

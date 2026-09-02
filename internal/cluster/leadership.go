@@ -6,95 +6,59 @@ import (
 	"fmt"
 )
 
-// LeaderLease owns the dedicated PostgreSQL connection holding the cluster's
-// session advisory lock. The caller must close the lease to release leadership.
+type LeaderElector struct {
+	sessions sessionOpener
+}
+
+func NewLeaderElector(connections *Connections) *LeaderElector {
+	return &LeaderElector{sessions: connections}
+}
+
+func leaderElectorWithSessions(sessions sessionOpener) *LeaderElector {
+	return &LeaderElector{sessions: sessions}
+}
+
 type LeaderLease struct {
-	connection leaderConnection
+	session *databaseSession
 }
 
-// Lease describes ownership and liveness of a cluster leadership lease.
-type Lease interface {
-	// Alive reports whether the lease's connection is open and responds to a
-	// PostgreSQL ping using ctx.
-	Alive(ctx context.Context) bool
-	// Close releases leadership by closing the lease's dedicated connection.
-	Close(ctx context.Context) error
-}
-
-// TryLeader attempts to acquire the cluster leadership lease without waiting.
-// It returns ErrNotLeader when another session holds the lease; callers should
-// detect that result with errors.Is and remain on standby or call WaitForLeader.
-// A returned lease owns its connection until Close is called.
-func (store *Store) TryLeader(ctx context.Context) (*LeaderLease, error) {
-	connection, err := store.directConnector(ctx)
+func (elector *LeaderElector) TryAcquire(ctx context.Context) (*LeaderLease, error) {
+	session, err := elector.sessions.openSession(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var acquired bool
-	if err = connection.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderAdvisoryLockKey).Scan(&acquired); err != nil {
-		return nil, errors.Join(fmt.Errorf("try clustered leader lease: %w", err), closeConnection(ctx, connection))
+	if err = session.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderAdvisoryLockKey).Scan(&acquired); err != nil {
+		return nil, errors.Join(fmt.Errorf("try clustered leader lease: %w", err), closeSession(ctx, session))
 	}
 	if !acquired {
-		return nil, errors.Join(ErrNotLeader, closeConnection(ctx, connection))
+		return nil, errors.Join(ErrNotLeader, closeSession(ctx, session))
 	}
-	return &LeaderLease{connection: connection}, nil
+	return &LeaderLease{session: session}, nil
 }
 
-// WaitForLeader blocks on PostgreSQL's session advisory lock. Canceling ctx
-// aborts the wait and closes the dedicated connection with the same canceled
-// context so an unresponsive connection cannot extend the caller's deadline.
-// A returned lease owns its connection until Close.
-func (store *Store) WaitForLeader(ctx context.Context) (*LeaderLease, error) {
-	connection, err := store.directConnector(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, leaderAdvisoryLockKey); err != nil {
-		if ctx.Err() != nil {
-			return nil, errors.Join(
-				fmt.Errorf("wait for clustered leader lease: %w", ctx.Err()),
-				closeConnectionWithContext(ctx, connection),
-			)
-		}
-		return nil, errors.Join(fmt.Errorf("wait for clustered leader lease: %w", err), closeConnection(ctx, connection))
-	}
-	return &LeaderLease{connection: connection}, nil
-}
-
-// Close releases leadership by closing the lease's dedicated connection. The
-// caller's context bounds graceful PostgreSQL shutdown; pgx still closes the
-// underlying network connection when that context expires. A nil or empty
-// lease is already closed and returns nil.
 func (lease *LeaderLease) Close(ctx context.Context) error {
-	if lease == nil || lease.connection == nil {
+	if lease == nil || lease.session == nil {
 		return nil
 	}
-	if err := lease.connection.Close(ctx); err != nil {
+	if err := lease.session.Close(ctx); err != nil {
 		return fmt.Errorf("close PostgreSQL leader lease: %w", err)
 	}
 	return nil
 }
 
-func closeConnection(ctx context.Context, connection interface {
-	Close(ctx context.Context) error
-}) error {
-	return closeConnectionWithContext(context.WithoutCancel(ctx), connection)
+func (lease *LeaderLease) Alive(ctx context.Context) bool {
+	if lease == nil || lease.session == nil || lease.session.IsClosed() {
+		return false
+	}
+	return lease.session.Ping(ctx) == nil
 }
 
-func closeConnectionWithContext(ctx context.Context, connection interface {
+func closeSession(ctx context.Context, session interface {
 	Close(ctx context.Context) error
 }) error {
-	if err := connection.Close(ctx); err != nil {
+	if err := session.Close(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("close PostgreSQL connection: %w", err)
 	}
 	return nil
-}
-
-// Alive reports whether the lease's connection is open and responds to a
-// PostgreSQL ping using ctx. A nil or empty lease is not alive.
-func (lease *LeaderLease) Alive(ctx context.Context) bool {
-	if lease == nil || lease.connection == nil || lease.connection.IsClosed() {
-		return false
-	}
-	return lease.connection.Ping(ctx) == nil
 }

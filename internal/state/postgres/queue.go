@@ -26,7 +26,7 @@ func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.
 		string(request.Source.Adapter), string(request.Source.ID))); lockErr != nil {
 		return core.EnqueueResult{}, fmt.Errorf("serialize source enqueue: %w", lockErr)
 	}
-	job, outcome, err := enqueueInTransaction(ctx, transaction, request)
+	job, outcome, err := EnqueueInTransaction(ctx, transaction, request)
 	if err != nil {
 		return core.EnqueueResult{}, err
 	}
@@ -37,7 +37,7 @@ func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.
 	return core.EnqueueResult{Job: job, Outcome: outcome}, nil
 }
 
-func enqueueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.Job, core.QueueOutcome, error) {
+func EnqueueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.Job, core.QueueOutcome, error) {
 	job, err := scanQueuedJob(transaction.QueryRow(ctx, insertQueuedJobSQL,
 		request.Source.Adapter, request.Source.ID, string(request.RunnerPool), request.EnqueuedAt))
 	if err == nil {

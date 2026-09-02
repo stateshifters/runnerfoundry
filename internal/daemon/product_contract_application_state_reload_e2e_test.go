@@ -211,11 +211,11 @@ func e2eApplicationRegistrationSnapshot(
 	application *e2eApplication,
 ) githubsource.RegistrationSnapshot {
 	t.Helper()
-	active, err := application.runtime.state.store.Registrations(context.Background())
+	active, err := application.runtime.state.registrationStore.Registrations(context.Background())
 	if err != nil {
 		t.Fatalf("load active application registrations: %v", err)
 	}
-	owned, err := application.runtime.state.store.OwnedRegistrations(context.Background())
+	owned, err := application.runtime.state.registrationStore.OwnedRegistrations(context.Background())
 	if err != nil {
 		t.Fatalf("load owned application registrations: %v", err)
 	}
@@ -243,7 +243,8 @@ func e2eAssertApplicationProcessing(t *testing.T, application *e2eApplication, j
 
 func e2ePostgresMigrationStatus(t *testing.T, settings postgresconfig.Settings) cluster.MigrationStatus {
 	t.Helper()
-	status, err := cluster.NewStore(settings).MigrationStatus(context.Background())
+	services := newE2EPostgresMigrationServices(t, settings)
+	status, err := services.migrator.Status(context.Background())
 	if err != nil {
 		t.Fatalf("inspect PostgreSQL reload target migration status: %v", err)
 	}

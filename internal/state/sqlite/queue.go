@@ -16,7 +16,7 @@ func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	result, err := queueInTransaction(ctx, transaction, request)
+	result, err := EnqueueInTransaction(ctx, transaction, request)
 	if err != nil {
 		return core.EnqueueResult{}, err
 	}
@@ -27,7 +27,7 @@ func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.
 	return result, nil
 }
 
-func queueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.EnqueueResult, error) {
+func EnqueueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.EnqueueResult, error) {
 	result, err := transaction.Execute(ctx, insertQueuedJobSQL,
 		request.Source.Adapter, request.Source.ID, string(request.RunnerPool), request.EnqueuedAt.UnixNano(),
 		request.Source.Adapter, request.Source.ID, request.Source.Adapter, request.Source.ID)

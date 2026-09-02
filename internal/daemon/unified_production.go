@@ -18,6 +18,8 @@ import (
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
@@ -51,16 +53,21 @@ type productionDependencies struct {
 	newTicker                func(time.Duration) cycleTicker
 	currentTime              func() time.Time
 	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
-	openSQLite               func(context.Context, string) (*sqlitestate.Store, error)
+	openSQLite               func(context.Context, string, ...sqlitestate.SchemaExtension) (*sqlitestate.Store, error)
 	closeSQLite              func(*sqlitestate.Store) error
-	newClusterStore          func(postgresconfig.Settings) *cluster.Store
-	migrateCluster           func(*cluster.Store, context.Context) error
-	openClusterPool          func(*cluster.Store, context.Context) (*pgxpool.Pool, error)
+	newSQLiteGitHubStore     func(sqlitestate.Executor) *githubsqlite.Store
+	newConnections           func(postgresconfig.Settings) (*cluster.Connections, error)
+	newMigrationCatalog      func() (*cluster.Catalog, error)
+	newMigrator              func(*cluster.Connections, *cluster.Catalog) *cluster.Migrator
+	migratePostgreSQL        func(*cluster.Migrator, context.Context) error
+	openClusterPool          func(*cluster.Connections, context.Context) (*pgxpool.Pool, error)
 	newPGConnection          func(*pgxpool.Pool) postgresstate.Connection
 	newPGStore               func(postgresstate.Connection) *postgresstate.Store
+	newPGGitHubStore         func(postgresstate.Connection) *githubpostgres.Store
 	newQueueNotificationPool func(*pgxpool.Pool) queueNotificationPool
 	closePool                func(*pgxpool.Pool)
-	tryLeader                func(*cluster.Store, context.Context) (*cluster.LeaderLease, error)
+	newLeaderElector         func(*cluster.Connections) *cluster.LeaderElector
+	tryLeader                func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error)
 	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
 	readHostname             func() (string, error)
 	logDestinationFactory    logDestinationFactory
@@ -79,12 +86,16 @@ func newProductionDependencies() productionDependencies {
 			return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 		}, currentTime: time.Now,
 		openSQLite: sqlitestate.Open, closeSQLite: (*sqlitestate.Store).Close,
-		newClusterStore: cluster.NewStore, migrateCluster: (*cluster.Store).Migrate,
-		openClusterPool: (*cluster.Store).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
-		newPGStore: postgresstate.NewConnectionStore, newQueueNotificationPool: newPGXQueueNotificationPool,
-		closePool: (*pgxpool.Pool).Close,
-		tryLeader: (*cluster.Store).TryLeader, buildProviderSet: buildProductionProvidersWithDependencies,
-		readHostname: os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
+		newSQLiteGitHubStore: githubsqlite.NewStore,
+		newConnections:       cluster.NewConnections, newMigrationCatalog: newPostgreSQLMigrationCatalog,
+		newMigrator: cluster.NewMigrator, migratePostgreSQL: (*cluster.Migrator).Up,
+		openClusterPool: (*cluster.Connections).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
+		newPGStore: postgresstate.NewConnectionStore, newPGGitHubStore: githubpostgres.NewStore,
+		newQueueNotificationPool: newPGXQueueNotificationPool,
+		closePool:                (*pgxpool.Pool).Close,
+		newLeaderElector:         cluster.NewLeaderElector, tryLeader: (*cluster.LeaderElector).TryAcquire,
+		buildProviderSet: buildProductionProvidersWithDependencies,
+		readHostname:     os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
 		openState: openProductionStateWithDependencies, buildGeneration: buildProductionGenerationWithDependencies,
 	}
 }
@@ -97,7 +108,7 @@ func buildProductionGenerationWithDependencies(
 	report func(error),
 	dependencies productionDependencies,
 ) (*maintenanceGeneration, error) {
-	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.store, report, dependencies)
+	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.registrationStore, report, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +126,7 @@ func buildProductionGenerationWithDependencies(
 
 func buildProductionGitHubManagerWithDependencies(
 	configured config.Config,
-	store unifiedStore,
+	store githubsource.RegistrationRepository,
 	report func(error),
 	dependencies productionDependencies,
 ) (*githubsource.MultiAppCoordinator, error) {
@@ -136,7 +147,7 @@ func buildProductionGitHubManagerWithDependencies(
 
 func buildGitHubAppManagers(
 	credentials []config.GitHubAppCredentials,
-	store unifiedStore,
+	store githubsource.RegistrationRepository,
 	report func(error),
 	dependencies productionDependencies,
 ) ([]*githubsource.Manager, error) {
@@ -234,6 +245,7 @@ func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {
 
 type productionState struct {
 	store              unifiedStore
+	registrationStore  githubsource.RegistrationRepository
 	demandStore        githubsource.AssignedDemandRepository
 	member             core.MemberID
 	newLeadership      func() leadershipRuntime
@@ -283,14 +295,16 @@ func openProductionSQLiteStateWithDependencies(
 	path string,
 	dependencies productionDependencies,
 ) (*productionState, error) {
-	store, err := dependencies.openSQLite(ctx, path)
+	store, err := dependencies.openSQLite(ctx, path, githubsqlite.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite state: %w", err)
 	}
 	closer := contextCloserFunc(func(context.Context) error { return dependencies.closeSQLite(store) })
+	githubStore := dependencies.newSQLiteGitHubStore(store.Backend())
 	return &productionState{
-		store: store, demandStore: store, newLeadership: func() leadershipRuntime { return permanentLeadership{} },
-		closers: []runtimeCloser{closer},
+		store: store, registrationStore: githubStore, demandStore: githubStore,
+		newLeadership: func() leadershipRuntime { return permanentLeadership{} },
+		closers:       []runtimeCloser{closer},
 	}, nil
 }
 
@@ -299,27 +313,50 @@ func openProductionPostgreSQLStateWithDependencies(
 	configured postgresconfig.Settings,
 	dependencies productionDependencies,
 ) (*productionState, error) {
-	clusterStore := dependencies.newClusterStore(configured)
-	if err := dependencies.migrateCluster(clusterStore, ctx); err != nil {
-		return nil, fmt.Errorf("migrate PostgreSQL state: %w", err)
-	}
-	pool, err := dependencies.openClusterPool(clusterStore, ctx)
+	connections, pool, err := openProductionPostgreSQLPool(ctx, configured, dependencies)
 	if err != nil {
-		return nil, fmt.Errorf("open PostgreSQL state pool: %w", err)
+		return nil, err
 	}
-	store := dependencies.newPGStore(dependencies.newPGConnection(pool))
+	connection := dependencies.newPGConnection(pool)
+	store := dependencies.newPGStore(connection)
+	githubStore := dependencies.newPGGitHubStore(connection)
 	closer := contextCloserFunc(func(context.Context) error { dependencies.closePool(pool); return nil })
 	queueNotifications := dependencies.newQueueNotificationPool(pool)
+	elector := dependencies.newLeaderElector(connections)
 	return &productionState{
-		store: store, demandStore: store,
+		store: store, registrationStore: githubStore, demandStore: githubStore,
 		queueNotifications: &queueNotifications,
 		newLeadership: func() leadershipRuntime {
 			return newExclusiveLeadership(cluster.ErrNotLeader, func(leaderContext context.Context) (leaderLease, error) {
-				return dependencies.tryLeader(clusterStore, leaderContext)
+				return dependencies.tryLeader(elector, leaderContext)
 			})
 		},
 		closers: []runtimeCloser{closer},
 	}, nil
+}
+
+func openProductionPostgreSQLPool(
+	ctx context.Context,
+	configured postgresconfig.Settings,
+	dependencies productionDependencies,
+) (*cluster.Connections, *pgxpool.Pool, error) {
+	connections, err := dependencies.newConnections(configured)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure PostgreSQL connections: %w", err)
+	}
+	catalog, err := dependencies.newMigrationCatalog()
+	if err != nil {
+		return nil, nil, fmt.Errorf("compose PostgreSQL migrations: %w", err)
+	}
+	migrator := dependencies.newMigrator(connections, catalog)
+	if err = dependencies.migratePostgreSQL(migrator, ctx); err != nil {
+		return nil, nil, fmt.Errorf("migrate PostgreSQL state: %w", err)
+	}
+	pool, err := dependencies.openClusterPool(connections, ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open PostgreSQL state pool: %w", err)
+	}
+	return connections, pool, nil
 }
 
 func buildProductionProvidersWithDependencies(

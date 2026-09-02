@@ -8,6 +8,7 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 const assignedDemandJobsSQL = `SELECT job_id, source_name, source_reference, runner_pool, enqueued_at, 0
@@ -59,7 +60,7 @@ func (store *Store) ReconcileAssignedDemand(
 
 func reconcileAssignedDemandTransaction(
 	ctx context.Context,
-	transaction Transaction,
+	transaction sqlitestate.Transaction,
 	demand githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	jobs, err := loadAssignedDemandJobs(ctx, transaction, demand)
@@ -84,7 +85,7 @@ func reconcileAssignedDemandTransaction(
 
 func addMissingAssignedDemand(
 	ctx context.Context,
-	transaction Transaction,
+	transaction sqlitestate.Transaction,
 	demand githubsource.AssignedDemand,
 	result *githubsource.AssignedDemandResult,
 ) error {
@@ -104,7 +105,7 @@ func addMissingAssignedDemand(
 
 func queueAggregateAssignedDemand(
 	ctx context.Context,
-	transaction Transaction,
+	transaction sqlitestate.Transaction,
 	demand githubsource.AssignedDemand,
 	ordinal int,
 ) (core.EnqueueResult, error) {
@@ -112,12 +113,16 @@ func queueAggregateAssignedDemand(
 	if err != nil {
 		return core.EnqueueResult{}, fmt.Errorf("identify aggregate assigned demand: %w", err)
 	}
-	return queueInTransaction(ctx, transaction, request)
+	result, err := sqlitestate.EnqueueInTransaction(ctx, transaction, request)
+	if err != nil {
+		return core.EnqueueResult{}, fmt.Errorf("enqueue aggregate demand job: %w", err)
+	}
+	return result, nil
 }
 
 func removeSurplusAssignedDemand(
 	ctx context.Context,
-	transaction Transaction,
+	transaction sqlitestate.Transaction,
 	jobs []assignedDemandJob,
 	surplus int,
 ) (int, error) {
@@ -151,7 +156,7 @@ func assignedDemandJobIsNewer(left, right assignedDemandJob) bool {
 	return left.timestamp > right.timestamp
 }
 
-func removeAssignedDemandJob(ctx context.Context, transaction Transaction, jobID string) error {
+func removeAssignedDemandJob(ctx context.Context, transaction sqlitestate.Transaction, jobID string) error {
 	result, err := transaction.Execute(ctx, removeAssignedDemandJobSQL, jobID)
 	if err != nil {
 		return fmt.Errorf("remove surplus assigned demand: %w", err)
@@ -168,7 +173,7 @@ func removeAssignedDemandJob(ctx context.Context, transaction Transaction, jobID
 
 func loadAssignedDemandJobs(
 	ctx context.Context,
-	transaction Transaction,
+	transaction sqlitestate.Transaction,
 	demand githubsource.AssignedDemand,
 ) ([]assignedDemandJob, error) {
 	rows, err := transaction.Query(ctx, assignedDemandJobsSQL,
@@ -180,7 +185,7 @@ func loadAssignedDemandJobs(
 }
 
 func scanAssignedDemandJobs(
-	rows Rows,
+	rows sqlitestate.Rows,
 	demand githubsource.AssignedDemand,
 ) (jobs []assignedDemandJob, resultErr error) {
 	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()

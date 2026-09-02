@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
@@ -67,28 +66,6 @@ func TestStorePublicCapacityBehaviors(t *testing.T) {
 	}
 }
 
-func TestStorePublicRegistrationBehaviors(t *testing.T) {
-	t.Parallel()
-	store := NewStore(successfulBehaviorExecutor())
-	ctx := context.Background()
-	registration := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "repo", RunnerPool: "linux", InstallationID: 1,
-		RunnerGroupID: 2, ScaleSetID: 3}
-	if err := store.UpsertRegistration(ctx, registration); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	actual, found, err := store.Registration(ctx, "repo", "linux")
-	if err != nil || !found || actual != registration {
-		t.Fatalf("registration=%#v found=%t err=%v", actual, found, err)
-	}
-	registrations, err := store.Registrations(ctx)
-	if err != nil || len(registrations) != 1 {
-		t.Fatalf("registrations=%#v err=%v", registrations, err)
-	}
-	if err := store.DeleteRegistration(ctx, "repo", "linux"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-}
-
 func TestStoreCloseUsesOptionalDatabaseCloser(t *testing.T) {
 	t.Parallel()
 	if err := NewStore(Executor{}).Close(); err != nil {
@@ -106,8 +83,6 @@ func successfulBehaviorExecutor() Executor {
 		execute: successfulExecute,
 		query: func(_ context.Context, statement string, _ ...any) (Rows, error) {
 			switch statement {
-			case registrationsSQL:
-				return rowsFromValues([][]any{{int64(7), "repo", "linux", int64(1), int64(2), int64(3)}}), nil
 			case processingByMemberSQL:
 				return rowsFromValues([][]any{claimedProcessingJobValues()}), nil
 			default:
@@ -120,8 +95,6 @@ func successfulBehaviorExecutor() Executor {
 				return rowFromValues([]any{1})
 			case availableCapacitySQL:
 				return rowFromValues([]any{3, 0, 1})
-			case registrationSQL:
-				return rowFromValues([]any{int64(7), "repo", "linux", int64(1), int64(2), int64(3)})
 			default:
 				return rowFromValues(queuedJobValues())
 			}

@@ -129,13 +129,22 @@ func TestForeignRecoveryReportsPoolStateFailure(t *testing.T) {
 
 func TestForeignRecoveryReportsInventoryFailure(t *testing.T) {
 	wantErr := errors.New("inventory unavailable")
+	foreignProcessing := core.ProcessingJob{
+		Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-a",
+		ProvisioningFailure: core.ProvisioningFailureOpen,
+	}
+	leaderProcessing := core.ProcessingJob{
+		Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, MemberID: "member-b",
+		ProvisioningFailure: core.ProvisioningFailureOpen,
+	}
 	store := &jobStoreFake{poolList: func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
-		return nil, nil
+		return []core.ProcessingJob{foreignProcessing, leaderProcessing}, nil
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) { return nil, wantErr }}
 	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime)
-	if _, err := orchestrator.RecoverForeignPool(context.Background(), "linux"); !errors.Is(err, wantErr) {
-		t.Fatalf("RecoverForeignPool() error = %v", err)
+	result, err := orchestrator.RecoverForeignPool(context.Background(), "linux")
+	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 {
+		t.Fatalf("RecoverForeignPool() = (%#v, %v), want one retained foreign job", result, err)
 	}
 }
 

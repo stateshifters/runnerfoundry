@@ -18,7 +18,6 @@ type unifiedStore interface {
 	statecontract.JobQueueStore
 	statecontract.ProcessingJobStore
 	runtimeengine.MembershipStore
-	githubsource.RegistrationRepository
 	statecontract.RunnerPoolCapacityStore
 }
 

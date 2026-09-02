@@ -1,37 +1,42 @@
-package sqlite
+package postgres
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
-const upsertRegistrationSQL = `INSERT INTO runnerfoundry_github_registrations
-	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES(?, ?, ?, ?, ?, ?)
+const upsertRegistrationSQL = `INSERT INTO public.runnerfoundry_github_registrations
+	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5, $6)
 	ON CONFLICT(repository_url, runner_pool) DO UPDATE SET github_app_id = excluded.github_app_id, installation_id = excluded.installation_id,
 		runner_group_id = excluded.runner_group_id, scale_set_id = excluded.scale_set_id`
-const registrationSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
-	FROM runnerfoundry_github_registrations WHERE repository_url = ? AND runner_pool = ?`
 const registrationsSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
-	FROM runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
-const deleteRegistrationSQL = `DELETE FROM runnerfoundry_github_registrations WHERE repository_url = ? AND runner_pool = ?`
-const deleteActiveRegistrationSQL = `DELETE FROM runnerfoundry_github_registrations
-	WHERE github_app_id = ? AND repository_url = ? AND runner_pool = ? AND installation_id = ? AND runner_group_id = ? AND scale_set_id = ?`
-const upsertOwnedRegistrationSQL = `INSERT INTO runnerfoundry_github_scale_set_ownership
-	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES(?, ?, ?, ?, ?, ?)
+	FROM public.runnerfoundry_github_registrations ORDER BY repository_url, runner_pool`
+const deleteActiveRegistrationSQL = `DELETE FROM public.runnerfoundry_github_registrations
+	WHERE github_app_id = $1 AND repository_url = $2 AND runner_pool = $3 AND installation_id = $4 AND runner_group_id = $5 AND scale_set_id = $6`
+const upsertOwnedRegistrationSQL = `INSERT INTO public.runnerfoundry_github_scale_set_ownership
+	(github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id) VALUES($1, $2, $3, $4, $5, $6)
 	ON CONFLICT(repository_url, scale_set_id) DO UPDATE SET github_app_id = excluded.github_app_id, runner_pool = excluded.runner_pool,
 		installation_id = excluded.installation_id, runner_group_id = excluded.runner_group_id`
 const ownedRegistrationsSQL = `SELECT github_app_id, repository_url, runner_pool, installation_id, runner_group_id, scale_set_id
-	FROM runnerfoundry_github_scale_set_ownership ORDER BY repository_url, scale_set_id`
-const deleteOwnedRegistrationSQL = `DELETE FROM runnerfoundry_github_scale_set_ownership
-	WHERE github_app_id = ? AND repository_url = ? AND runner_pool = ? AND installation_id = ? AND runner_group_id = ? AND scale_set_id = ?`
+	FROM public.runnerfoundry_github_scale_set_ownership ORDER BY repository_url, scale_set_id`
+const deleteOwnedRegistrationSQL = `DELETE FROM public.runnerfoundry_github_scale_set_ownership
+	WHERE github_app_id = $1 AND repository_url = $2 AND runner_pool = $3 AND installation_id = $4 AND runner_group_id = $5 AND scale_set_id = $6`
 
 var _ githubsource.RegistrationRepository = (*Store)(nil)
+
+type Store struct{ executor postgresstate.Executor }
+
+func NewStore(connection postgresstate.Connection) *Store {
+	return newExecutorStore(connection.Executor())
+}
+
+func newExecutorStore(executor postgresstate.Executor) *Store { return &Store{executor: executor} }
 
 func (store *Store) UpsertRegistration(
 	ctx context.Context,
@@ -89,21 +94,6 @@ func (store *Store) DeleteOwnedRegistration(ctx context.Context, registration gi
 		registrationArguments(registration)...)
 }
 
-func (store *Store) Registration(
-	ctx context.Context,
-	repositoryURL string,
-	runnerPool core.RunnerPool,
-) (githubsource.Registration, bool, error) {
-	registration, err := scanRegistration(store.executor.QueryRow(ctx, registrationSQL, repositoryURL, string(runnerPool)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return githubsource.Registration{}, false, nil
-	}
-	if err != nil {
-		return githubsource.Registration{}, false, fmt.Errorf("lookup registration: %w", err)
-	}
-	return registration, true, nil
-}
-
 func (store *Store) Registrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
 	return store.listRegistrations(ctx, "registrations", registrationsSQL)
 }
@@ -137,10 +127,6 @@ func (store *Store) listRegistrations(
 	return registrations, nil
 }
 
-func (store *Store) DeleteRegistration(ctx context.Context, repositoryURL string, runnerPool core.RunnerPool) error {
-	return store.executeTransaction(ctx, "delete registration", deleteRegistrationSQL, repositoryURL, string(runnerPool))
-}
-
 func scanRegistration(row scanner) (githubsource.Registration, error) {
 	var registration githubsource.Registration
 	var runnerPool string
@@ -158,7 +144,11 @@ func scanRegistration(row scanner) (githubsource.Registration, error) {
 	return registration, nil
 }
 
-func scanRegistrations(rows Rows) (registrations []githubsource.Registration, resultErr error) {
+type scanner interface {
+	Scan(destinations ...any) error
+}
+
+func scanRegistrations(rows postgresstate.Rows) (registrations []githubsource.Registration, resultErr error) {
 	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
 	for rows.Next() {
 		registration, err := scanRegistration(rows)
@@ -171,4 +161,32 @@ func scanRegistrations(rows Rows) (registrations []githubsource.Registration, re
 		return nil, fmt.Errorf("iterate registrations: %w", err)
 	}
 	return registrations, nil
+}
+
+func rollback(ctx context.Context, transaction postgresstate.Transaction, open *bool, resultErr *error) {
+	if *open {
+		*resultErr = errors.Join(*resultErr, transaction.Rollback(ctx))
+	}
+}
+
+func (store *Store) executeTransaction(
+	ctx context.Context,
+	description string,
+	statement string,
+	arguments ...any,
+) (resultErr error) {
+	transaction, err := store.executor.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin %s: %w", description, err)
+	}
+	open := true
+	defer rollback(ctx, transaction, &open, &resultErr)
+	if _, err = transaction.Execute(ctx, statement, arguments...); err != nil {
+		return fmt.Errorf("%s: %w", description, err)
+	}
+	if err = transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit %s: %w", description, err)
+	}
+	open = false
+	return nil
 }

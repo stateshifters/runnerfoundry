@@ -17,6 +17,8 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
@@ -83,7 +85,7 @@ func TestProductionStateCompositionUsesSelectedBackend(t *testing.T) {
 func assertProductionSQLiteState(t *testing.T, dependencies productionDependencies) {
 	t.Helper()
 	sqliteState, err := openProductionStateWithDependencies(context.Background(), config.Config{State: config.StateConfig{Path: "state.db"}}, dependencies)
-	if err != nil || sqliteState == nil || len(sqliteState.closers) != 1 {
+	if err != nil || sqliteState == nil || sqliteState.registrationStore == nil || len(sqliteState.closers) != 1 {
 		t.Fatalf("SQLite state = (%v, %v)", sqliteState, err)
 	}
 	if err = sqliteState.closers[0].Close(context.Background()); err != nil {
@@ -97,13 +99,13 @@ func assertProductionSQLiteState(t *testing.T, dependencies productionDependenci
 func assertProductionPostgreSQLState(t *testing.T, dependencies productionDependencies) {
 	t.Helper()
 	settings := postgresconfig.Settings{Role: "runnerfoundry"}
-	dependencies.tryLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
+	dependencies.tryLeader = func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error) {
 		return nil, cluster.ErrNotLeader
 	}
 	postgresState, err := openProductionStateWithDependencies(
 		context.Background(), config.Config{State: config.StateConfig{Postgres: &settings}}, dependencies,
 	)
-	if err != nil || postgresState == nil || len(postgresState.closers) != 1 {
+	if err != nil || postgresState == nil || postgresState.registrationStore == nil || len(postgresState.closers) != 1 {
 		t.Fatalf("PostgreSQL state = (%v, %v)", postgresState, err)
 	}
 	if err = postgresState.closers[0].Close(context.Background()); err != nil {
@@ -114,25 +116,51 @@ func assertProductionPostgreSQLState(t *testing.T, dependencies productionDepend
 	}
 }
 
-func TestProductionStateReportsBackendFailures(t *testing.T) {
+func TestProductionStateReportsSQLiteFailures(t *testing.T) {
 	dependencies := testProductionStateDependencies()
 	wantErr := errors.New("state failed")
-	dependencies.openSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return nil, wantErr }
+	dependencies.openSQLite = func(context.Context, string, ...sqlitestate.SchemaExtension) (*sqlitestate.Store, error) {
+		return nil, wantErr
+	}
 	if _, err := openProductionStateWithDependencies(context.Background(), config.Config{}, dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("selected backend error = %v", err)
 	}
 	if _, err := openProductionSQLiteStateWithDependencies(context.Background(), "state.db", dependencies); !errors.Is(err, wantErr) {
 		t.Fatalf("SQLite error = %v", err)
 	}
+}
+
+func TestProductionStateReportsPostgreSQLFailures(t *testing.T) {
+	dependencies := testProductionStateDependencies()
+	wantErr := errors.New("state failed")
 	settings := postgresconfig.Settings{Role: "runnerfoundry"}
-	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return wantErr }
-	if _, err := openProductionPostgreSQLStateWithDependencies(context.Background(), settings, dependencies); !errors.Is(err, wantErr) {
-		t.Fatalf("PostgreSQL migration error = %v", err)
+	dependencies.newConnections = func(postgresconfig.Settings) (*cluster.Connections, error) {
+		return nil, wantErr
 	}
-	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return nil }
-	dependencies.openClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return nil, wantErr }
+	assertPostgreSQLStateFailure(t, settings, dependencies, wantErr, "connection configuration")
+	dependencies.newConnections = func(postgresconfig.Settings) (*cluster.Connections, error) {
+		return &cluster.Connections{}, nil
+	}
+	dependencies.newMigrationCatalog = func() (*cluster.Catalog, error) { return nil, wantErr }
+	assertPostgreSQLStateFailure(t, settings, dependencies, wantErr, "migration catalog")
+	dependencies.newMigrationCatalog = func() (*cluster.Catalog, error) { return &cluster.Catalog{}, nil }
+	dependencies.migratePostgreSQL = func(*cluster.Migrator, context.Context) error { return wantErr }
+	assertPostgreSQLStateFailure(t, settings, dependencies, wantErr, "migration")
+	dependencies.migratePostgreSQL = func(*cluster.Migrator, context.Context) error { return nil }
+	dependencies.openClusterPool = func(*cluster.Connections, context.Context) (*pgxpool.Pool, error) { return nil, wantErr }
+	assertPostgreSQLStateFailure(t, settings, dependencies, wantErr, "pool")
+}
+
+func assertPostgreSQLStateFailure(
+	t *testing.T,
+	settings postgresconfig.Settings,
+	dependencies productionDependencies,
+	wantErr error,
+	description string,
+) {
+	t.Helper()
 	if _, err := openProductionPostgreSQLStateWithDependencies(context.Background(), settings, dependencies); !errors.Is(err, wantErr) {
-		t.Fatalf("PostgreSQL pool error = %v", err)
+		t.Fatalf("PostgreSQL %s error = %v", description, err)
 	}
 }
 
@@ -160,18 +188,25 @@ func TestProductionMemberIdentityRequiresHostnameReader(t *testing.T) {
 func testProductionStateDependencies() productionDependencies {
 	dependencies := newProductionDependencies()
 	dependencies.readHostname = func() (string, error) { return string(daemonTestID(1)), nil }
-	dependencies.openSQLite = func(context.Context, string) (*sqlitestate.Store, error) { return &sqlitestate.Store{}, nil }
+	dependencies.openSQLite = func(context.Context, string, ...sqlitestate.SchemaExtension) (*sqlitestate.Store, error) {
+		return &sqlitestate.Store{}, nil
+	}
 	dependencies.closeSQLite = func(*sqlitestate.Store) error { return nil }
-	dependencies.newClusterStore = func(settings postgresconfig.Settings) *cluster.Store { return cluster.NewStore(settings) }
-	dependencies.migrateCluster = func(*cluster.Store, context.Context) error { return nil }
-	dependencies.openClusterPool = func(*cluster.Store, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
+	dependencies.newSQLiteGitHubStore = func(sqlitestate.Executor) *githubsqlite.Store { return &githubsqlite.Store{} }
+	dependencies.newConnections = func(postgresconfig.Settings) (*cluster.Connections, error) { return &cluster.Connections{}, nil }
+	dependencies.newMigrationCatalog = func() (*cluster.Catalog, error) { return &cluster.Catalog{}, nil }
+	dependencies.newMigrator = func(*cluster.Connections, *cluster.Catalog) *cluster.Migrator { return &cluster.Migrator{} }
+	dependencies.migratePostgreSQL = func(*cluster.Migrator, context.Context) error { return nil }
+	dependencies.openClusterPool = func(*cluster.Connections, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
 	dependencies.newPGConnection = func(*pgxpool.Pool) postgresstate.Connection { return postgresstate.Connection{} }
 	dependencies.newPGStore = func(postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
+	dependencies.newPGGitHubStore = func(postgresstate.Connection) *githubpostgres.Store { return &githubpostgres.Store{} }
 	dependencies.newQueueNotificationPool = func(*pgxpool.Pool) queueNotificationPool {
 		return queueNotificationPool{maxConnections: 2}
 	}
 	dependencies.closePool = func(*pgxpool.Pool) {}
-	dependencies.tryLeader = func(*cluster.Store, context.Context) (*cluster.LeaderLease, error) {
+	dependencies.newLeaderElector = func(*cluster.Connections) *cluster.LeaderElector { return &cluster.LeaderElector{} }
+	dependencies.tryLeader = func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error) {
 		return &cluster.LeaderLease{}, nil
 	}
 	return dependencies
@@ -258,7 +293,7 @@ func TestProductionGitHubCoordinatorRejectsMissingAndInvalidAppScopes(t *testing
 func assertProductionDiscovererFailure(
 	t *testing.T,
 	configured config.Config,
-	store unifiedStore,
+	store githubsource.RegistrationRepository,
 	wantErr error,
 ) {
 	t.Helper()
@@ -272,7 +307,12 @@ func assertProductionDiscovererFailure(
 	}
 }
 
-func assertProductionClientFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
+func assertProductionClientFailure(
+	t *testing.T,
+	configured config.Config,
+	store githubsource.RegistrationRepository,
+	wantErr error,
+) {
 	t.Helper()
 	dependencies := newProductionDependencies()
 	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
@@ -296,7 +336,12 @@ func assertProductionClientFailure(t *testing.T, configured config.Config, store
 	}
 }
 
-func assertProductionManagerFailure(t *testing.T, configured config.Config, store unifiedStore, wantErr error) {
+func assertProductionManagerFailure(
+	t *testing.T,
+	configured config.Config,
+	store githubsource.RegistrationRepository,
+	wantErr error,
+) {
 	t.Helper()
 	dependencies := newProductionDependencies()
 	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
@@ -327,7 +372,7 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	}
 	dependencies.currentTime = builderTime
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildTimedProductionGeneration(
 		builderConfig(), state, &localLeadershipGate{}, nil,
@@ -365,7 +410,7 @@ func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) 
 		return &manualCycleTicker{ticks: make(chan time.Time)}
 	}
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	if _, err := buildTimedProductionGeneration(
 		config.Config{}, state, &localLeadershipGate{}, nil,
@@ -381,7 +426,7 @@ func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
 	configured := builderConfig()
 	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
 	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
-	state := &productionState{store: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildProductionGenerationWithDependencies(
 		context.Background(), configured, state, &localLeadershipGate{}, func(error) {}, dependencies,
@@ -442,8 +487,10 @@ func newProductionGenerationFailureFixture(t *testing.T) productionGenerationFai
 	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
 	store := newBuilderStoreFake()
 	return productionGenerationFailureFixture{
-		configured: configured, state: &productionState{store: store, member: daemonTestID(1)}, manager: newBuilderManager(t, store),
-		wantErr: errors.New("composition failed"), dependencies: func() productionDependencies {
+		configured: configured,
+		state:      &productionState{store: store, registrationStore: store, member: daemonTestID(1)},
+		manager:    newBuilderManager(t, store),
+		wantErr:    errors.New("composition failed"), dependencies: func() productionDependencies {
 			dependencies := newProductionDependencies()
 			dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
 			return dependencies

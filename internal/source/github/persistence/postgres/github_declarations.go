@@ -8,6 +8,7 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 const deleteGitHubRunnerPoolDeclarationsSQL = `DELETE FROM public.runnerfoundry_github_member_runner_pools WHERE member_id = $1`
@@ -73,7 +74,7 @@ func (store *Store) LiveGitHubRunnerPoolDeclarations(
 	return declarations, nil
 }
 
-func scanGitHubRunnerPoolDeclarations(rows Rows) (declarations []githubsource.MemberRunnerPoolDeclaration, resultErr error) {
+func scanGitHubRunnerPoolDeclarations(rows postgresstate.Rows) (declarations []githubsource.MemberRunnerPoolDeclaration, resultErr error) {
 	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
 	for rows.Next() {
 		var memberID, runnerPool, runnerGroup string

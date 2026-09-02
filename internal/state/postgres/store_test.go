@@ -40,7 +40,8 @@ func TestScopedEnqueueSerializesOnlyMatchingDemandScope(t *testing.T) {
 	}
 	lockArguments := make([][]any, 0, len(requests))
 	for index, request := range requests {
-		protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(assignedDemandJobID(index+1), request))}}
+		jobID := uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-%012d", index+1))
+		protocol := &recordedTransaction{rows: []Row{rowFromValues(queuedJobValues(jobID, request))}}
 		if _, err := NewStore(protocol.executor()).Queue(context.Background(), request); err != nil {
 			t.Fatal(err)
 		}

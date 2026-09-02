@@ -4,7 +4,17 @@ Read the repository [contribution contract](../../../CONTRIBUTING.md) before cha
 
 ## Create a migration
 
-Migration files are sequential and append-only once released. Before the first release, an explicitly approved schema reset may replace the unreleased sequence with a fresh `001`; no compatibility or data conversion is implied. Otherwise, name a new file `NNN_description.sql` using the next integer. Do not leave gaps, reuse or renumber a released sequence, or edit a released migration.
+Migration definitions live with the data owner:
+
+- source-neutral PostgreSQL state migrations belong in `internal/state/postgres/migrations`;
+- source-specific PostgreSQL migrations belong in that source adapter's PostgreSQL persistence package; and
+- `internal/cluster` composes and executes the registered migration sets but does not own schema SQL.
+
+Each owner exports its embedded migration filesystem and the daemon registers the owner as a migration set in `internal/daemon/migration_application.go`. That composition is the authoritative owner registry. Registration order resolves dependencies between fragments that share a global sequence: Up runs lower owner orders first and Down reverses that order. Choose an unused order with maintainers when registering a new owner, place it according to its schema dependencies, and do not change an existing owner's name or order after release.
+
+Migration sequence numbers are global, sequential, and append-only once released. Inspect every migration directory registered by the daemon and use one more than the highest sequence present across them. Coordinate any planned but unmerged migration with maintainers before selecting that number. Before the first release, an explicitly approved schema reset may replace the unreleased sequence with a fresh `001`; no compatibility or data conversion is implied. Otherwise, name a new owner-local file `NNN_description.sql` using the next global integer. Do not leave gaps, reuse or renumber a released sequence, or edit a released migration.
+
+More than one owner may contribute a fragment to the same global sequence when the change crosses ownership boundaries. An owner may contribute at most one fragment to a sequence. Each fragment must remain independently reversible, and later owner fragments may depend only on objects created by earlier owner orders in that sequence.
 
 Each file uses tern's reversible format:
 
@@ -18,7 +28,7 @@ ALTER TABLE scaler_nodes DROP COLUMN availability_zone;
 
 SQL above the separator is Up and SQL below it is Down. Both directions run transactionally. Do not use `---- tern: disable-tx ----` without explicit maintainer approval for a PostgreSQL operation that cannot run in a transaction and a documented safe failure procedure.
 
-All RunnerFoundry-owned schema creation, alteration, indexing, constraints, data transformations, and teardown SQL belong in migration files. Go code may orchestrate tern but must not duplicate schema-definition SQL.
+All RunnerFoundry-owned schema creation, alteration, indexing, constraints, data transformations, and teardown SQL belong in the owning package's migration files. Go code may register migration sets and orchestrate tern but must not duplicate schema-definition SQL.
 
 ## Preserve rollback parity
 
@@ -73,7 +83,9 @@ make vet
 
 Review must confirm that:
 
-- the filename uses the next sequence;
+- the migration is registered from the package that owns the affected data;
+- the filename uses the next global sequence, or is an approved owner fragment for that sequence;
+- owner names and orders are stable and do not conflict;
 - Up and Down are present, transactional, and dependency-safe;
 - representative schema and data complete the Up/Down/Up round trip;
 - objects retain the configured stable-role ownership;

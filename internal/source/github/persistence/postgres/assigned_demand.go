@@ -9,6 +9,7 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 const selectGitHubActiveDemandSQL = `SELECT job_id, source_name, source_reference, 'queued' AS job_state,
@@ -63,8 +64,7 @@ func (store *Store) reconcileValidAssignedDemand(
 	}
 	open := true
 	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, serializeDemandScopeSQL, advisoryLockIdentity(
-		string(scope.Adapter), string(scope.ID))); err != nil {
+	if err = postgresstate.SerializeDemandScope(ctx, transaction, scope); err != nil {
 		return githubsource.AssignedDemandResult{}, fmt.Errorf("serialize assigned demand reconciliation: %w", err)
 	}
 	result, err := reconcileAssignedDemandInTransaction(ctx, transaction, demand)
@@ -80,7 +80,7 @@ func (store *Store) reconcileValidAssignedDemand(
 
 func reconcileAssignedDemandInTransaction(
 	ctx context.Context,
-	transaction Transaction,
+	transaction postgresstate.Transaction,
 	demand githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	jobs, err := loadMatchingDemand(ctx, transaction, demand)
@@ -99,7 +99,7 @@ func reconcileAssignedDemandInTransaction(
 
 func addAssignedDemandDeficit(
 	ctx context.Context,
-	transaction Transaction,
+	transaction postgresstate.Transaction,
 	demand githubsource.AssignedDemand,
 	result *githubsource.AssignedDemandResult,
 ) error {
@@ -119,7 +119,7 @@ func addAssignedDemandDeficit(
 
 func loadMatchingDemand(
 	ctx context.Context,
-	transaction Transaction,
+	transaction postgresstate.Transaction,
 	demand githubsource.AssignedDemand,
 ) (_ []activeDemandJob, resultErr error) {
 	rows, err := transaction.Query(ctx, selectGitHubActiveDemandSQL, string(demand.RunnerPool), githubsource.AdapterName)
@@ -149,7 +149,7 @@ func loadMatchingDemand(
 
 func removeAggregateSurplus(
 	ctx context.Context,
-	transaction Transaction,
+	transaction postgresstate.Transaction,
 	jobs []activeDemandJob,
 	desiredJobs int,
 	result *githubsource.AssignedDemandResult,
@@ -187,9 +187,8 @@ func newestAggregateQueuedJobs(jobs []activeDemandJob) []activeDemandJob {
 	return candidates
 }
 
-func removeAggregateDemandJob(ctx context.Context, transaction Transaction, candidate activeDemandJob) (bool, error) {
-	if _, err := transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
-		string(candidate.source.Adapter), string(candidate.source.ID))); err != nil {
+func removeAggregateDemandJob(ctx context.Context, transaction postgresstate.Transaction, candidate activeDemandJob) (bool, error) {
+	if err := postgresstate.SerializeSource(ctx, transaction, candidate.source); err != nil {
 		return false, fmt.Errorf("serialize aggregate demand removal: %w", err)
 	}
 	removed, err := transaction.Execute(ctx, deleteAggregateQueuedJobSQL,
@@ -218,7 +217,7 @@ func countAssignedDemand(jobs []activeDemandJob) githubsource.AssignedDemandResu
 
 func addAggregateDemandJob(
 	ctx context.Context,
-	transaction Transaction,
+	transaction postgresstate.Transaction,
 	demand githubsource.AssignedDemand,
 	ordinal int,
 ) (bool, error) {
@@ -226,13 +225,12 @@ func addAggregateDemandJob(
 	if err != nil {
 		return false, fmt.Errorf("identify aggregate demand job: %w", err)
 	}
-	if _, err = transaction.Execute(ctx, serializeSourceSQL, advisoryLockIdentity(
-		string(request.Source.Adapter), string(request.Source.ID))); err != nil {
+	if err = postgresstate.SerializeSource(ctx, transaction, request.Source); err != nil {
 		return false, fmt.Errorf("serialize aggregate demand enqueue: %w", err)
 	}
-	_, outcome, err := enqueueInTransaction(ctx, transaction, request)
+	_, outcome, err := postgresstate.EnqueueInTransaction(ctx, transaction, request)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("enqueue aggregate demand job: %w", err)
 	}
 	return outcome == core.QueueQueued, nil
 }

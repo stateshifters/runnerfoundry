@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stateshifters/runnerfoundry/internal/cluster"
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
@@ -18,49 +20,73 @@ func TestProductContractPostgresMigrationsRoundTripOnIsolatedDatabase(t *testing
 		return
 	}
 	fixture := e2ePostgresStart(t)
-	store := cluster.NewStore(fixture.Settings())
+	services := newE2EPostgresMigrationServices(t, fixture.Settings())
 	ctx, cancel := context.WithTimeout(context.Background(), e2eWaitLimit)
 	defer cancel()
-	target := migratePostgresUp(ctx, t, store)
-	populateCurrentPostgresState(ctx, t, store)
+	target := migratePostgresUp(ctx, t, services)
+	populateCurrentPostgresState(ctx, t, services.connections)
 	if err := fixture.e2ePostgresAssertStableRoleOwnership(ctx); err != nil {
 		t.Fatalf("verify migrated PostgreSQL stable-role ownership: %v", err)
 	}
-	migratePostgresDown(ctx, t, store, target)
-	assertVersionOnePostgresState(ctx, t, store)
-	remigratePostgres(ctx, t, store, target)
-	assertMigratedPostgresState(ctx, t, store)
+	migratePostgresDown(ctx, t, services, target)
+	assertVersionOnePostgresState(ctx, t, services.connections)
+	remigratePostgres(ctx, t, services, target)
+	assertMigratedPostgresState(ctx, t, services.connections)
 	if err := fixture.e2ePostgresAssertStableRoleOwnership(ctx); err != nil {
 		t.Fatalf("verify remigrated PostgreSQL stable-role ownership: %v", err)
 	}
 }
 
-func migratePostgresUp(ctx context.Context, t *testing.T, store *cluster.Store) int32 {
+type e2ePostgresMigrationServices struct {
+	connections *cluster.Connections
+	migrator    *cluster.Migrator
+}
+
+func newE2EPostgresMigrationServices(
+	t *testing.T,
+	settings postgresconfig.Settings,
+) e2ePostgresMigrationServices {
 	t.Helper()
-	if err := store.Migrate(ctx); err != nil {
+	connections, err := cluster.NewConnections(settings)
+	if err != nil {
+		t.Fatalf("configure PostgreSQL migration connections: %v", err)
+	}
+	catalog, err := newPostgreSQLMigrationCatalog()
+	if err != nil {
+		t.Fatalf("compose PostgreSQL migration catalog: %v", err)
+	}
+	return e2ePostgresMigrationServices{
+		connections: connections,
+		migrator:    cluster.NewMigrator(connections, catalog),
+	}
+}
+
+func migratePostgresUp(ctx context.Context, t *testing.T, services e2ePostgresMigrationServices) int32 {
+	t.Helper()
+	if err := services.migrator.Up(ctx); err != nil {
 		t.Fatalf("migrate isolated PostgreSQL database up: %v", err)
 	}
-	upStatus, err := store.MigrationStatus(ctx)
+	upStatus, err := services.migrator.Status(ctx)
 	if err != nil || upStatus.Current == 0 || upStatus.Current != upStatus.Target {
 		t.Fatalf("PostgreSQL migration status after up = %+v, error = %v", upStatus, err)
 	}
 	return upStatus.Target
 }
 
-func migratePostgresDown(ctx context.Context, t *testing.T, store *cluster.Store, target int32) {
+func migratePostgresDown(ctx context.Context, t *testing.T, services e2ePostgresMigrationServices, target int32) {
 	t.Helper()
-	if err := store.MigrateDown(ctx, 1, time.Now().Add(time.Hour), runtimeMemberTTL); err != nil {
+	if err := services.migrator.RollbackTo(ctx, 1, time.Now().Add(time.Hour-runtimeMemberTTL)); err != nil {
 		t.Fatalf("migrate isolated PostgreSQL database down: %v", err)
 	}
-	downStatus, err := store.MigrationStatus(ctx)
+	downStatus, err := services.migrator.Status(ctx)
 	if err != nil || downStatus.Current != 1 || downStatus.Target != target {
 		t.Fatalf("PostgreSQL migration status after down = %+v, error = %v", downStatus, err)
 	}
 }
 
-func assertVersionOnePostgresState(ctx context.Context, t *testing.T, clusterStore *cluster.Store) {
+func assertVersionOnePostgresState(ctx context.Context, t *testing.T, connections *cluster.Connections) {
 	t.Helper()
-	pool, err := clusterStore.OpenPool(ctx)
+	pool, err := connections.OpenPool(ctx)
 	if err != nil {
 		t.Fatalf("open rolled-back PostgreSQL pool: %v", err)
 	}
@@ -160,24 +186,26 @@ func assertVersionOnePostgresDurableState(ctx context.Context, t *testing.T, poo
 func assertMigratedPostgresState(
 	ctx context.Context,
 	t *testing.T,
-	clusterStore *cluster.Store,
+	connections *cluster.Connections,
 ) {
 	t.Helper()
-	pool, err := clusterStore.OpenPool(ctx)
+	pool, err := connections.OpenPool(ctx)
 	if err != nil {
 		t.Fatalf("open migrated PostgreSQL pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
+	connection := postgresstate.NewPGXConnection(pool)
+	store := postgresstate.NewConnectionStore(connection)
+	githubStore := githubpostgres.NewStore(connection)
 	assertMigratedQueueClassifications(ctx, t, store, core.QueueQueued)
-	assertRemigratedGitHubState(ctx, t, store)
-	assertRemigratedCapacity(ctx, t, store)
+	assertRemigratedGitHubState(ctx, t, githubStore)
+	assertRemigratedCapacity(ctx, t, store, githubStore)
 }
 
 func assertRemigratedGitHubState(
 	ctx context.Context,
 	t *testing.T,
-	store *postgresstate.Store,
+	store *githubpostgres.Store,
 ) {
 	t.Helper()
 	registrations, registrationErr := store.Registrations(ctx)
@@ -187,13 +215,18 @@ func assertRemigratedGitHubState(
 	}
 }
 
-func assertRemigratedCapacity(ctx context.Context, t *testing.T, store *postgresstate.Store) {
+func assertRemigratedCapacity(
+	ctx context.Context,
+	t *testing.T,
+	store *postgresstate.Store,
+	githubStore *githubpostgres.Store,
+) {
 	t.Helper()
 	capacity, err := store.AvailableRunnerPoolCapacity(ctx, "linux", time.Date(2026, time.August, 16, 11, 59, 30, 0, time.UTC))
 	if err != nil || capacity != 1 {
 		t.Fatalf("migrated available capacity = %d, error = %v, want 1", capacity, err)
 	}
-	declarations, err := store.LiveGitHubRunnerPoolDeclarations(ctx, time.Date(2026, time.August, 16, 11, 59, 30, 0, time.UTC))
+	declarations, err := githubStore.LiveGitHubRunnerPoolDeclarations(ctx, time.Date(2026, time.August, 16, 11, 59, 30, 0, time.UTC))
 	if err != nil || len(declarations) != 0 {
 		t.Fatalf("remigrated declarations = %+v, error = %v, want none after documented rollback loss", declarations, err)
 	}
@@ -220,12 +253,12 @@ func assertMigratedQueueClassifications(
 	}
 }
 
-func remigratePostgres(ctx context.Context, t *testing.T, store *cluster.Store, target int32) {
+func remigratePostgres(ctx context.Context, t *testing.T, services e2ePostgresMigrationServices, target int32) {
 	t.Helper()
-	if err := store.Migrate(ctx); err != nil {
+	if err := services.migrator.Up(ctx); err != nil {
 		t.Fatalf("remigrate isolated PostgreSQL database: %v", err)
 	}
-	remigrated, err := store.MigrationStatus(ctx)
+	remigrated, err := services.migrator.Status(ctx)
 	if err != nil || remigrated.Current != target {
 		t.Fatalf("PostgreSQL migration status after remigration = %+v, error = %v", remigrated, err)
 	}

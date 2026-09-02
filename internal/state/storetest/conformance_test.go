@@ -5,7 +5,6 @@ import "testing"
 func TestConformanceDispatcherRunsEveryScenario(t *testing.T) {
 	_ = OldestJob()
 	_ = ExpectedProcessing()
-	_ = ExpectedRegistrations()
 	_ = FixedTime()
 	called := make(map[Scenario]bool, len(conformanceExpectations))
 	RunConformance(t, recordingFactory{called: called})

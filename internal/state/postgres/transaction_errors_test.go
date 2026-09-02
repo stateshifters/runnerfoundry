@@ -23,19 +23,6 @@ func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
 	}
 }
 
-func TestRegistrationMutationReportsEachProtocolFailure(t *testing.T) {
-	t.Parallel()
-	protocolErr := errors.New("protocol")
-	tests := transactionFailureExecutors(protocolErr, "mutation")
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			if err := NewStore(testCase.executor).DeleteRegistration(context.Background(), "repo", "linux"); err == nil {
-				t.Fatal("expected registration mutation error")
-			}
-		})
-	}
-}
-
 func TestPublishMemberStateReportsCapacityReplacementFailures(t *testing.T) {
 	t.Parallel()
 
@@ -91,14 +78,10 @@ func TestScalarQueriesReportProtocolFailures(t *testing.T) {
 	}
 }
 
-func TestJobAndRegistrationListsReportProtocolFailures(t *testing.T) {
+func TestJobListsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	assertTransactionalListFailures(t, func(store *Store) error {
 		_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
-		return err
-	})
-	assertTransactionalListFailures(t, func(store *Store) error {
-		_, err := store.Registrations(context.Background())
 		return err
 	})
 }

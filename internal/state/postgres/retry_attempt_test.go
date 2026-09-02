@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,44 @@ func TestRetryUnstartedProcessingRejectsReplacementClaim(t *testing.T) {
 	}
 	if len(protocol.statements) != 1 || !strings.Contains(protocol.statements[0], "claimed_at") {
 		t.Fatalf("stale retry protocol = %#v %#v", protocol.statements, protocol.arguments)
+	}
+}
+
+func TestRetryUnstartedProcessingClassifiesLostRequeue(t *testing.T) {
+	processing := recoveryProcessing()
+	plain := rowFromValues(postgresClaimedOutcomeValues(processing, false, false))
+	protocol := &recordedTransaction{rows: []Row{plain, noPostgresRow(), plain}}
+	result, err := NewStore(protocol.executor()).RetryUnstarted(context.Background(), processing)
+	if err != nil || result.Outcome != core.RetryClaimChanged {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRetryUnstartedProcessingReportsLostRequeueClassificationFailure(t *testing.T) {
+	processing := recoveryProcessing()
+	expectedErr := errors.New("protocol")
+	protocol := &recordedTransaction{rows: []Row{
+		rowFromValues(postgresClaimedOutcomeValues(processing, false, false)),
+		noPostgresRow(),
+		{scan: func(...any) error { return expectedErr }},
+	}}
+	if _, err := NewStore(protocol.executor()).RetryUnstarted(context.Background(), processing); !errors.Is(err, expectedErr) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetryUnstartedProcessingClassifiesReplacementAfterLostRequeue(t *testing.T) {
+	processing := recoveryProcessing()
+	replacement := processing
+	replacement.RunnerName = core.AttemptRunnerName(processing.Job.ID, core.AttemptID{2})
+	protocol := &recordedTransaction{rows: []Row{
+		rowFromValues(postgresClaimedOutcomeValues(processing, false, false)),
+		noPostgresRow(),
+		rowFromValues(postgresClaimedOutcomeValues(replacement, false, false)),
+	}}
+	result, err := NewStore(protocol.executor()).RetryUnstarted(context.Background(), processing)
+	if err != nil || result.Outcome != core.RetryClaimChanged {
+		t.Fatalf("result = %#v, error = %v", result, err)
 	}
 }
 

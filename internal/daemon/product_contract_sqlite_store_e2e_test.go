@@ -12,6 +12,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
@@ -132,7 +133,7 @@ type sqliteDurabilityState struct {
 func persistSQLiteDurabilityState(t *testing.T, databasePath string) sqliteDurabilityState {
 	t.Helper()
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, databasePath)
+	store, err := sqlite.Open(ctx, databasePath, githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("open SQLite store: %v", err)
 	}
@@ -140,7 +141,7 @@ func persistSQLiteDurabilityState(t *testing.T, databasePath string) sqliteDurab
 	publishSQLiteDurabilityMember(t, store, state)
 	state.claimed = persistSQLiteProcessing(t, store, state)
 	state.queued = persistSQLiteQueuedDemand(t, store, state)
-	persistSQLiteRegistration(t, store, state.registration)
+	persistSQLiteRegistration(t, githubsqlite.NewStore(store.Backend()), state.registration)
 	if err = store.Close(); err != nil {
 		t.Fatalf("close SQLite store before restart: %v", err)
 	}
@@ -209,7 +210,7 @@ func persistSQLiteQueuedDemand(t *testing.T, store *sqlite.Store, state sqliteDu
 	return queued.Job
 }
 
-func persistSQLiteRegistration(t *testing.T, store *sqlite.Store, registration githubsource.Registration) {
+func persistSQLiteRegistration(t *testing.T, store *githubsqlite.Store, registration githubsource.Registration) {
 	t.Helper()
 	if err := store.UpsertRegistration(context.Background(), registration); err != nil {
 		t.Fatalf("persist GitHub registration: %v", err)
@@ -218,7 +219,7 @@ func persistSQLiteRegistration(t *testing.T, store *sqlite.Store, registration g
 
 func reopenSQLiteDurabilityStore(t *testing.T, databasePath string) *sqlite.Store {
 	t.Helper()
-	reopened, err := sqlite.Open(context.Background(), databasePath)
+	reopened, err := sqlite.Open(context.Background(), databasePath, githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("reopen SQLite store: %v", err)
 	}
@@ -276,11 +277,12 @@ func assertSQLiteDurableProcessing(t *testing.T, reopened *sqlite.Store, state s
 
 func assertSQLiteDurableRegistrations(t *testing.T, reopened *sqlite.Store, state sqliteDurabilityState) {
 	t.Helper()
-	registrations, err := reopened.Registrations(context.Background())
+	store := githubsqlite.NewStore(reopened.Backend())
+	registrations, err := store.Registrations(context.Background())
 	if err != nil || len(registrations) != 1 || registrations[0] != state.registration {
 		t.Fatalf("durable active registration after restart = %+v, error = %v", registrations, err)
 	}
-	ownedRegistrations, err := reopened.OwnedRegistrations(context.Background())
+	ownedRegistrations, err := store.OwnedRegistrations(context.Background())
 	if err != nil || len(ownedRegistrations) != 1 || ownedRegistrations[0] != state.registration {
 		t.Fatalf("durable registration ownership after restart = %+v, error = %v", ownedRegistrations, err)
 	}
