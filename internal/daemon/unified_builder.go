@@ -26,7 +26,7 @@ type unifiedBuilderDependencies struct {
 	demandStore        githubsource.AssignedDemandRepository
 	manager            githubManagerComposition
 	member             core.MemberID
-	providers          map[core.RunnerPool]execution.ExecutionProvider
+	providers          map[core.RunnerPool]execution.RunnerLauncher
 	inventory          execution.RunnerInventory
 	leadership         leadershipRuntime
 	currentTime        func() time.Time
@@ -271,7 +271,7 @@ func (assembled *assembledRuntime) appendPoolConfiguration(configured config.Run
 
 func newOrchestrationPool(
 	orchestrator *runtimeengine.Orchestrator,
-	provider execution.ExecutionProvider,
+	provider execution.RunnerLauncher,
 	providerKind config.ProviderKind,
 	configured config.RunnerPoolConfig,
 	stateBackend string,

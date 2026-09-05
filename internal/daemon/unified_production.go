@@ -48,7 +48,7 @@ type productionDependencies struct {
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
 	newClient                func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
-	dockerCommands           dockerprovider.CommandRunner
+	dockerCommands           dockerprovider.ExecCommandRunner
 	libvirtCommands          libvirtprovider.CommandRunner
 	newTicker                func(time.Duration) cycleTicker
 	currentTime              func() time.Time
@@ -68,7 +68,7 @@ type productionDependencies struct {
 	closePool                func(*pgxpool.Pool)
 	newLeaderElector         func(*cluster.Connections) *cluster.LeaderElector
 	tryLeader                func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error)
-	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
+	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error)
 	readHostname             func() (string, error)
 	logDestinationFactory    logDestinationFactory
 	providerObserver         func(execution.ProviderActivity)
@@ -191,7 +191,7 @@ func productionManagerClientFactory(
 
 type productionGenerationComponents struct {
 	manager   githubManagerComposition
-	providers map[core.RunnerPool]execution.ExecutionProvider
+	providers map[core.RunnerPool]execution.RunnerLauncher
 	inventory execution.RunnerInventory
 	member    core.MemberID
 }
@@ -364,33 +364,66 @@ func buildProductionProvidersWithDependencies(
 	configured config.Config,
 	member core.MemberID,
 	dependencies productionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
 	hostname := strings.TrimSpace(string(member))
 	if len(configured.RunnerPools) != 0 && hostname == "" {
 		return nil, execution.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
 	}
-	return buildConfiguredProviders(ctx, configured, executionDependencies{
-		dockerCommands: dependencies.dockerCommands, libvirtCommands: dependencies.libvirtCommands,
-		readTemplate: dependencies.readFile, memberID: core.MemberID(hostname),
+	return buildConfiguredProviders(ctx, configured, productionExecutionDependencies(
+		dependencies, core.MemberID(hostname),
+	))
+}
+
+func productionExecutionDependencies(
+	dependencies productionDependencies,
+	memberID core.MemberID,
+) executionDependencies {
+	return executionDependencies{
+		newDockerLauncher: func(config dockerprovider.ComposeConfig, memberID core.MemberID) execution.RunnerLauncher {
+			return dockerprovider.NewComposeLauncher(dependencies.dockerCommands, config, memberID)
+		},
+		newDockerInventory: func(memberID core.MemberID) execution.RunnerInventory {
+			return dockerprovider.NewInventory(dependencies.dockerCommands, memberID)
+		},
+		libvirtCommands: dependencies.libvirtCommands,
+		readTemplate:    dependencies.readFile, memberID: memberID,
 		providerObserver: dependencies.providerObserver,
-	})
+	}
 }
 
 func buildConfiguredProviders(
 	ctx context.Context,
 	configured config.Config,
 	dependencies executionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	providers := make(map[core.RunnerPool]execution.ExecutionProvider, len(configured.RunnerPools))
+) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+	providers := make(map[core.RunnerPool]execution.RunnerLauncher, len(configured.RunnerPools))
 	inventories := make([]execution.RunnerInventory, 0, len(configured.RunnerPools))
+	if configurationUsesDocker(configured) {
+		dockerInventory, err := configuredDockerInventory(dependencies)
+		if err != nil {
+			return nil, execution.AggregateRunnerInventory{}, err
+		}
+		inventories = append(inventories, dockerInventory)
+	}
 	for _, runnerPoolConfig := range configured.RunnerPools {
 		provider, err := buildExecutionProvider(ctx, runnerPoolConfig, dependencies)
 		if err != nil {
 			return nil, execution.AggregateRunnerInventory{}, err
 		}
-		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider
-		inventories = append(inventories, provider)
+		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider.Launcher
+		if provider.Inventory != nil {
+			inventories = append(inventories, provider.Inventory)
+		}
 	}
 	inventory := execution.NewAggregateRunnerInventory(inventories...)
 	return providers, inventory, nil
+}
+
+func configurationUsesDocker(configured config.Config) bool {
+	for _, runnerPool := range configured.RunnerPools {
+		if runnerPool.Docker != nil {
+			return true
+		}
+	}
+	return false
 }

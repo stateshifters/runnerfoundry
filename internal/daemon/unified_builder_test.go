@@ -28,7 +28,7 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
 		store: store, demandStore: store, manager: manager, member: daemonTestID(1),
-		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
 		ticker: ticker, processGate: &localLeadershipGate{},
@@ -114,7 +114,7 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 	store := newBuilderStoreFake()
 	return unifiedBuilderDependencies{
 		store: store, demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
-		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
 		ticker: &manualCycleTicker{ticks: make(chan time.Time)}, processGate: &localLeadershipGate{},

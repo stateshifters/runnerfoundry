@@ -378,7 +378,7 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 		builderConfig(), state, &localLeadershipGate{}, nil,
 		productionGenerationComponents{
 			manager:   newBuilderManager(t, store),
-			providers: map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+			providers: map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 			inventory: builderProviderFake{}, member: daemonTestID(1),
 		}, dependencies,
 	)
@@ -455,10 +455,10 @@ func productionGenerationDependencies() productionDependencies {
 		config.Config,
 		core.MemberID,
 		productionDependencies,
-	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+	) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
 		provider := builderProviderFake{}
 		inventory := execution.NewAggregateRunnerInventory(provider)
-		return map[core.RunnerPool]execution.ExecutionProvider{"linux": provider}, inventory, nil
+		return map[core.RunnerPool]execution.RunnerLauncher{"linux": provider}, inventory, nil
 	}
 	dependencies.newTicker = func(time.Duration) cycleTicker {
 		return &manualCycleTicker{ticks: make(chan time.Time)}
@@ -533,7 +533,7 @@ func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testi
 		config.Config,
 		core.MemberID,
 		productionDependencies,
-	) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+	) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
 		return nil, execution.AggregateRunnerInventory{}, fixture.wantErr
 	}
 	if _, err := fixture.build(dependencies); !errors.Is(err, fixture.wantErr) {

@@ -29,8 +29,29 @@ type ProviderMetadata struct {
 	ComposeService string
 }
 
-func WithOperationDeadlinesAndMetadata(
-	provider ExecutionProvider,
+func WithLauncherOperationDeadlinesAndMetadata(
+	launcher RunnerLauncher,
+	metadata ProviderMetadata,
+	observers ...func(ProviderActivity),
+) LauncherOperationDeadlineProvider {
+	return LauncherOperationDeadlineProvider{
+		launcher:   launcher,
+		operations: newOperationDeadlineReporter(metadata, observers...),
+	}
+}
+
+func WithInventoryOperationDeadlines(
+	inventory RunnerInventory,
+	name ProviderName,
+	observers ...func(ProviderActivity),
+) InventoryOperationDeadlineProvider {
+	return InventoryOperationDeadlineProvider{
+		inventory:  inventory,
+		operations: newOperationDeadlineReporter(ProviderMetadata{Name: name}, observers...),
+	}
+}
+
+func newOperationDeadlineReporter(
 	metadata ProviderMetadata,
 	observers ...func(ProviderActivity),
 ) OperationDeadlineProvider {
@@ -38,7 +59,17 @@ func WithOperationDeadlinesAndMetadata(
 	if len(observers) != 0 {
 		observer = observers[0]
 	}
-	return OperationDeadlineProvider{provider: provider, metadata: metadata, observer: observer, currentTime: time.Now}
+	return OperationDeadlineProvider{metadata: metadata, observer: observer, currentTime: time.Now}
+}
+
+func WithOperationDeadlinesAndMetadata(
+	provider ExecutionProvider,
+	metadata ProviderMetadata,
+	observers ...func(ProviderActivity),
+) OperationDeadlineProvider {
+	wrapped := newOperationDeadlineReporter(metadata, observers...)
+	wrapped.provider = provider
+	return wrapped
 }
 
 // ProviderActivity describes one provider call without exposing its command or
@@ -63,6 +94,94 @@ type OperationDeadlineProvider struct {
 	metadata    ProviderMetadata
 	observer    func(ProviderActivity)
 	currentTime func() time.Time
+}
+
+type LauncherOperationDeadlineProvider struct {
+	launcher   RunnerLauncher
+	operations OperationDeadlineProvider
+}
+
+func (provider LauncherOperationDeadlineProvider) EndpointID() InventoryEndpointID {
+	return provider.launcher.EndpointID()
+}
+
+func (provider LauncherOperationDeadlineProvider) Validate(ctx context.Context) error {
+	started := provider.operations.begin("validate", "", provider.EndpointID(), core.JobID{}, "")
+	ctx, cancel := context.WithTimeout(ctx, providerOperationTimeout)
+	defer cancel()
+	err := provider.operations.wrap("validate", provider.EndpointID(), provider.launcher.Validate(ctx))
+	provider.operations.finish("validate", "", provider.EndpointID(), core.JobID{}, "", started, err)
+	return err
+}
+
+func (provider LauncherOperationDeadlineProvider) Start(ctx context.Context, request StartRequest) error {
+	started := provider.operations.begin("start", request.RunnerPool, request.EndpointID, request.JobID, string(request.RunnerName))
+	ctx, cancel := context.WithTimeout(ctx, providerStartTimeout)
+	defer cancel()
+	err := provider.operations.wrap("start", request.EndpointID, provider.launcher.Start(ctx, request))
+	provider.operations.finish("start", request.RunnerPool, request.EndpointID, request.JobID, string(request.RunnerName), started, err)
+	return err
+}
+
+type InventoryOperationDeadlineProvider struct {
+	inventory  RunnerInventory
+	operations OperationDeadlineProvider
+}
+
+func (provider InventoryOperationDeadlineProvider) EndpointID() InventoryEndpointID {
+	return provider.inventory.EndpointID()
+}
+
+func (provider InventoryOperationDeadlineProvider) Refresh(ctx context.Context) error {
+	started := provider.operations.begin("refresh", "", provider.EndpointID(), core.JobID{}, "")
+	ctx, cancel := context.WithTimeout(ctx, providerOperationTimeout)
+	defer cancel()
+	err := provider.operations.wrap("refresh", provider.EndpointID(), provider.inventory.Refresh(ctx))
+	provider.operations.finish("refresh", "", provider.EndpointID(), core.JobID{}, "", started, err)
+	return err
+}
+
+func (provider InventoryOperationDeadlineProvider) Inspect(ctx context.Context) ([]RunnerInstance, error) {
+	started := provider.operations.begin("inspect", "", provider.EndpointID(), core.JobID{}, "")
+	ctx, cancel := context.WithTimeout(ctx, providerOperationTimeout)
+	defer cancel()
+	instances, err := provider.inventory.Inspect(ctx)
+	err = provider.operations.wrap("inspect", provider.EndpointID(), err)
+	provider.operations.finish("inspect", "", provider.EndpointID(), core.JobID{}, "", started, err)
+	return instances, err
+}
+
+func (provider InventoryOperationDeadlineProvider) InspectEndpoint(
+	ctx context.Context,
+	endpointID InventoryEndpointID,
+) ([]RunnerInstance, error) {
+	started := provider.operations.begin("inspect", "", endpointID, core.JobID{}, "")
+	ctx, cancel := context.WithTimeout(ctx, providerOperationTimeout)
+	defer cancel()
+	instances, err := provider.inventory.InspectEndpoint(ctx, endpointID)
+	err = provider.operations.wrap("inspect", endpointID, err)
+	provider.operations.finish("inspect", "", endpointID, core.JobID{}, "", started, err)
+	return instances, err
+}
+
+func (provider InventoryOperationDeadlineProvider) KnowsEndpoint(endpointID InventoryEndpointID) bool {
+	return provider.inventory.KnowsEndpoint(endpointID)
+}
+
+func (provider InventoryOperationDeadlineProvider) CanInspectEndpointForMember(
+	endpointID InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	return provider.inventory.CanInspectEndpointForMember(endpointID, memberID)
+}
+
+func (provider InventoryOperationDeadlineProvider) Destroy(ctx context.Context, instance RunnerInstance) error {
+	started := provider.operations.begin("destroy", instance.RunnerPool, instance.EndpointID, core.JobID{}, instance.ID)
+	ctx, cancel := context.WithTimeout(ctx, providerOperationTimeout)
+	defer cancel()
+	err := provider.operations.wrap("destroy", instance.EndpointID, provider.inventory.Destroy(ctx, instance))
+	provider.operations.finish("destroy", instance.RunnerPool, instance.EndpointID, core.JobID{}, instance.ID, started, err)
+	return err
 }
 
 func (provider OperationDeadlineProvider) EndpointID() InventoryEndpointID {

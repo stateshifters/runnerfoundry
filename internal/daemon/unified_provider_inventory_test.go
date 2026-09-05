@@ -7,6 +7,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductionProviderComposition(t *testing.T) {
@@ -38,8 +39,95 @@ func TestProductionInventoryCombinesActiveProviderBackends(t *testing.T) {
 	}
 }
 
+func TestDockerPoolsShareEndpointInventoryWithoutComposeServiceMetadata(t *testing.T) {
+	var activities []execution.ProviderActivity
+	inventoryBuilds := 0
+	providers, inventory, err := buildConfiguredProviders(context.Background(), twoDockerPoolConfiguration(), executionDependencies{
+		newDockerLauncher: func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher {
+			return providerFactoryLauncherFake{endpointID: "docker:member-a"}
+		},
+		newDockerInventory: func(core.MemberID) execution.RunnerInventory {
+			inventoryBuilds++
+			return &providerFactoryInventoryFake{endpointID: "docker:member-a"}
+		},
+		memberID: "member-a",
+		providerObserver: func(activity execution.ProviderActivity) {
+			activities = append(activities, activity)
+		},
+	})
+	if err != nil {
+		t.Fatalf("build providers: %v", err)
+	}
+	if inventoryBuilds != 1 {
+		t.Fatalf("Docker inventory builds = %d, want 1", inventoryBuilds)
+	}
+	assertDockerLaunchersUseConfiguredServices(t, providers, &activities)
+	assertDockerInventoryHasNoComposeService(t, inventory, &activities)
+}
+
+func twoDockerPoolConfiguration() config.Config {
+	return config.Config{
+		RunnerPools: []config.RunnerPoolConfig{
+			{Name: "linux-a", Docker: &config.DockerConfig{ComposeFile: "a.yml", Service: "runner-a"}},
+			{Name: "linux-b", Docker: &config.DockerConfig{ComposeFile: "b.yml", Service: "runner-b"}},
+		},
+	}
+}
+
+func assertDockerLaunchersUseConfiguredServices(
+	t *testing.T,
+	providers map[core.RunnerPool]execution.RunnerLauncher,
+	activities *[]execution.ProviderActivity,
+) {
+	t.Helper()
+	if len(providers) != 2 {
+		t.Fatalf("providers = %d, want 2", len(providers))
+	}
+	assertDockerLauncherUsesService(t, providers["linux-a"], "linux-a", "runner-a", activities)
+	assertDockerLauncherUsesService(t, providers["linux-b"], "linux-b", "runner-b", activities)
+}
+
+func assertDockerLauncherUsesService(
+	t *testing.T,
+	launcher execution.RunnerLauncher,
+	runnerPool core.RunnerPool,
+	expectedService string,
+	activities *[]execution.ProviderActivity,
+) {
+	t.Helper()
+	if err := launcher.Start(context.Background(), execution.StartRequest{
+		RunnerPool: runnerPool,
+		EndpointID: launcher.EndpointID(),
+	}); err != nil {
+		t.Fatalf("start %s: %v", runnerPool, err)
+	}
+	for _, activity := range *activities {
+		if activity.Operation == "start" && activity.RunnerPool == runnerPool &&
+			activity.ComposeService == expectedService {
+			return
+		}
+	}
+	t.Fatalf("start activity for %s did not use Compose service %q: %#v", runnerPool, expectedService, *activities)
+}
+
+func assertDockerInventoryHasNoComposeService(
+	t *testing.T,
+	inventory execution.RunnerInventory,
+	activities *[]execution.ProviderActivity,
+) {
+	t.Helper()
+	if _, err := inventory.Inspect(context.Background()); err != nil {
+		t.Fatalf("inspect inventory: %v", err)
+	}
+	for _, activity := range *activities {
+		if activity.Operation == "inspect" && activity.ComposeService != "" {
+			t.Fatalf("inventory activity claimed Compose service: %#v", activity)
+		}
+	}
+}
+
 func mixedConfiguredProviders() (
-	map[core.RunnerPool]execution.ExecutionProvider,
+	map[core.RunnerPool]execution.RunnerLauncher,
 	execution.AggregateRunnerInventory,
 	error,
 ) {
@@ -50,9 +138,13 @@ func mixedConfiguredProviders() (
 		}},
 	}}
 	return buildConfiguredProviders(context.Background(), configured, executionDependencies{
-		dockerCommands: dockerCommandsFake{
-			services: "runner\n",
-			runners:  `{"ID":"old-docker","State":"running","Labels":"runnerfoundry.scale-set=libvirt,runnerfoundry.runner=external-runner"}`,
+		newDockerLauncher: func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher {
+			return providerFactoryLauncherFake{endpointID: "docker:member-a"}
+		},
+		newDockerInventory: func(core.MemberID) execution.RunnerInventory {
+			return &providerFactoryInventoryFake{endpointID: "docker:member-a", instances: []execution.RunnerInstance{{
+				ID: "old-docker", RunnerName: "external-runner", RunnerPool: "libvirt", State: execution.RunnerStateRunning,
+			}}}
 		},
 		libvirtCommands: libvirtCommandsFake{},
 		readTemplate: func(string) ([]byte, error) {
@@ -69,9 +161,6 @@ func TestProductionInventoryContainsOnlyActiveConfigurationEndpoints(t *testing.
 		},
 	}}}
 	_, inventory, err := buildConfiguredProviders(context.Background(), configured, executionDependencies{
-		dockerCommands: dockerCommandsFake{
-			runners: `{"ID":"old-docker","State":"running","Labels":"runnerfoundry.scale-set=linux,runnerfoundry.runner=old"}`,
-		},
 		libvirtCommands: libvirtCommandsFake{},
 		readTemplate: func(string) ([]byte, error) {
 			return []byte(`<domain type="kvm"><name>template</name></domain>`), nil
@@ -86,6 +175,37 @@ func TestProductionInventoryContainsOnlyActiveConfigurationEndpoints(t *testing.
 	}
 }
 
+type providerFactoryInventoryFake struct {
+	endpointID execution.InventoryEndpointID
+	instances  []execution.RunnerInstance
+}
+
+func (inventory *providerFactoryInventoryFake) EndpointID() execution.InventoryEndpointID {
+	return inventory.endpointID
+}
+func (inventory *providerFactoryInventoryFake) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	return inventory.endpointID == endpointID
+}
+func (inventory *providerFactoryInventoryFake) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	_ core.MemberID,
+) bool {
+	return inventory.KnowsEndpoint(endpointID)
+}
+func (inventory *providerFactoryInventoryFake) Refresh(context.Context) error { return nil }
+func (inventory *providerFactoryInventoryFake) Inspect(context.Context) ([]execution.RunnerInstance, error) {
+	return append([]execution.RunnerInstance(nil), inventory.instances...), nil
+}
+func (inventory *providerFactoryInventoryFake) InspectEndpoint(
+	ctx context.Context,
+	_ execution.InventoryEndpointID,
+) ([]execution.RunnerInstance, error) {
+	return inventory.Inspect(ctx)
+}
+func (*providerFactoryInventoryFake) Destroy(context.Context, execution.RunnerInstance) error {
+	return nil
+}
+
 func TestProviderBuilderAcceptsEmptyConfiguration(t *testing.T) {
 	providers, inventory, err := buildProductionProvidersWithDependencies(
 		context.Background(), config.Config{}, "", productionDependencies{},
@@ -96,5 +216,17 @@ func TestProviderBuilderAcceptsEmptyConfiguration(t *testing.T) {
 	instances, inspectErr := inventory.Inspect(context.Background())
 	if inspectErr != nil || len(instances) != 0 {
 		t.Fatalf("empty production inventory = (%#v, %v)", instances, inspectErr)
+	}
+}
+
+func TestProductionDockerFactoriesConstructSeparateBoundaries(t *testing.T) {
+	dependencies := productionExecutionDependencies(productionDependencies{
+		dockerCommands: dockerprovider.NewExecCommandRunner(),
+	}, "member-a")
+	launcher := dependencies.newDockerLauncher(dockerprovider.ComposeConfig{Service: "runner"}, "member-a")
+	inventory := dependencies.newDockerInventory("member-a")
+	if launcher == nil || inventory == nil || launcher.EndpointID() != inventory.EndpointID() {
+		t.Fatalf("Docker boundaries = (%T, %T), endpoints = (%q, %q)",
+			launcher, inventory, launcher.EndpointID(), inventory.EndpointID())
 	}
 }

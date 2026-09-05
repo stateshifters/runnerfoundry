@@ -526,7 +526,7 @@ RunnerFoundry validates that the configured Compose service exists before activa
 
 When a job needs a runner, RunnerFoundry starts a detached one-job container and supplies the GitHub JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`.
 
-The container uses Docker's `--rm` lifecycle. RunnerFoundry also tracks it so failed or interrupted provisioning can be cleaned up.
+The container uses Docker's `--rm` lifecycle and normally removes itself after the runner exits. RunnerFoundry still issues `docker rm --force` during cleanup. A failed or interrupted runner might not terminate by itself. Cleanup succeeds when Docker reports that removal of that exact container is already in progress. Docker then owns completing the removal, and RunnerFoundry does not retry it. Other removal failures require RunnerFoundry to confirm that the container is absent.
 
 The image, tools, command, volumes, networks and security policy remain yours to define.
 

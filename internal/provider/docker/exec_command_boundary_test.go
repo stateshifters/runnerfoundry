@@ -17,18 +17,20 @@ func TestExecCommandRunnerBuildsDockerCommandsInMemory(t *testing.T) {
 	recording := &recordingDockerExecution{output: []byte("runner\n")}
 	runner := recording.runner()
 
-	output, err := runner.ListComposeServices(context.Background(), ComposeConfig{ComposeFile: "compose.yml"})
+	output, err := runner.listComposeServices(context.Background(), ComposeConfig{ComposeFile: "compose.yml"})
 	if err != nil || strings.TrimSpace(output) != "runner" {
 		t.Fatalf("list compose services: output=%q error=%v", output, err)
 	}
 	assertDockerArguments(t, recording.arguments, "compose", "-f", "compose.yml", "config", "--services")
 
-	if _, err = runner.ListComposeRunners(context.Background()); err != nil {
+	if _, err = runner.listComposeRunners(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	assertDockerArguments(t, recording.arguments, "ps", "--all", "--format", "json")
+	assertDockerArguments(t, recording.arguments, "ps", "--all", "--no-trunc", "--format",
+		`{"ID":{{json .ID}},"State":{{json .State}},"RunnerPool":{{json (.Label "runnerfoundry.runner-pool")}},"LegacyRunnerPool":{{json (.Label "runnerfoundry.scale-set")}},"RunnerName":{{json (.Label "runnerfoundry.runner")}},"Endpoint":{{json (.Label "runnerfoundry.endpoint")}}}`,
+	)
 
-	if err = runner.RemoveComposeRunner(context.Background(), "runner-id"); err != nil {
+	if err = runner.removeComposeRunner(context.Background(), "runner-id"); err != nil {
 		t.Fatal(err)
 	}
 	assertDockerArguments(t, recording.arguments, "rm", "--force", "runner-id")
@@ -41,7 +43,7 @@ func TestExecCommandRunnerAcceptsDockerOwnedRemoval(t *testing.T) {
 		err:    errors.New("exit status 1"),
 	}
 
-	err := recording.runner().RemoveComposeRunner(context.Background(), containerID)
+	err := recording.runner().removeComposeRunner(context.Background(), containerID)
 	if err != nil {
 		t.Fatalf("Docker-owned removal returned an error: %v", err)
 	}
@@ -54,7 +56,7 @@ func TestExecCommandRunnerAcceptsPrefixedDockerOwnedRemoval(t *testing.T) {
 		err:    errors.New("exit status 1"),
 	}
 
-	err := recording.runner().RemoveComposeRunner(context.Background(), containerID)
+	err := recording.runner().removeComposeRunner(context.Background(), containerID)
 	if err != nil {
 		t.Fatalf("Docker-owned removal returned an error: %v", err)
 	}
@@ -72,20 +74,20 @@ func TestExecCommandRunnerRejectsNonExactRemovalDiagnostics(t *testing.T) {
 	for name, diagnostic := range diagnostics {
 		t.Run(name, func(t *testing.T) {
 			recording := &recordingDockerExecution{output: []byte(diagnostic), err: errors.New("exit status 1")}
-			if err := recording.runner().RemoveComposeRunner(context.Background(), containerID); err == nil {
+			if err := recording.runner().removeComposeRunner(context.Background(), containerID); err == nil {
 				t.Fatalf("non-exact Docker diagnostic %q was accepted", diagnostic)
 			}
 		})
 	}
 }
 
-func TestComposeProviderDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
+func TestDockerInventoryDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
 	const containerID = "runner-id"
 	recording := &recordingDockerExecution{
 		output: []byte("Error response from daemon: removal of container " + containerID + " is already in progress"),
 		err:    errors.New("exit status 1"),
 	}
-	provider := ComposeProvider{commandRunner: recording.runner()}
+	provider := Inventory{commandRunner: recording.runner()}
 
 	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         containerID,
@@ -98,65 +100,66 @@ func TestComposeProviderDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
 	assertDockerArguments(t, recording.arguments, "rm", "--force", containerID)
 }
 
-func TestExecCommandRunnerKeepsJITConfigPrivate(t *testing.T) {
-	testCases := []jitPrivacyTestCase{
-		{name: "ordinary", jitConfig: "opaque-jit-value"},
-		{name: "empty", jitConfig: ""},
-		{name: "multiline", jitConfig: "first line\nsecond line"},
-		{name: "shell significant", jitConfig: `$(echo exposed); '&|%PATH%' "quoted"`},
+func TestExecCommandRunnerKeepsBootstrapPrivate(t *testing.T) {
+	testCases := []bootstrapPrivacyTestCase{
+		{name: "ordinary", bootstrap: "opaque-bootstrap-value"},
+		{name: "empty", bootstrap: ""},
+		{name: "multiline", bootstrap: "first line\nsecond line"},
+		{name: "shell significant", bootstrap: `$(echo exposed); '&|%PATH%' "quoted"`},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			assertJITConfigPrivacy(t, testCase.jitConfig)
+			assertBootstrapPrivacy(t, testCase.bootstrap)
 		})
 	}
 }
 
-type jitPrivacyTestCase struct {
+type bootstrapPrivacyTestCase struct {
 	name      string
-	jitConfig string
+	bootstrap string
 }
 
-func assertJITConfigPrivacy(t *testing.T, jitConfig string) {
+func assertBootstrapPrivacy(t *testing.T, bootstrap string) {
 	t.Helper()
-	parentEnvironment := []string{"RUNNERFOUNDRY_PRESERVED=inherited", jitConfigEnvironment + "=parent-jit-value"}
+	parentEnvironment := []string{"RUNNERFOUNDRY_PRESERVED=inherited", bootstrapEnvironment + "=parent-bootstrap-value"}
 	recording := &recordingDockerExecution{
 		echoCommandEnvironment: true,
 		inheritedEnvironment:   parentEnvironment,
 	}
-	provider := ComposeProvider{commandRunner: recording.runner(), config: ComposeConfig{Service: "runner"}}
+	provider := NewComposeLauncher(recording.runner(), ComposeConfig{Service: "runner"}, "member-a")
 
 	err := provider.Start(context.Background(), execution.StartRequest{
-		RunnerPool: "linux", RunnerName: "linux-1", Bootstrap: core.NewBootstrap([]byte(jitConfig)),
+		RunnerPool: "linux", RunnerName: "linux-1", Bootstrap: core.NewBootstrap([]byte(bootstrap)),
 	})
 	if err == nil {
 		t.Fatal("expected docker failure")
 	}
-	assertPrivateJITArguments(t, recording.arguments, jitConfig)
-	assertPrivateJITEnvironment(t, recording.commandEnvironment, parentEnvironment, jitConfig)
-	assertJITFailureRedacted(t, err, jitConfig)
+	assertPrivateBootstrapArguments(t, recording.arguments, bootstrap)
+	assertPrivateBootstrapEnvironment(t, recording.commandEnvironment, parentEnvironment, bootstrap)
+	assertBootstrapFailureRedacted(t, err, bootstrap)
 }
 
-func assertPrivateJITArguments(t *testing.T, arguments []string, jitConfig string) {
+func assertPrivateBootstrapArguments(t *testing.T, arguments []string, bootstrap string) {
 	t.Helper()
 	assertDockerArguments(t, arguments,
 		"compose", "-f", "", "run", "--detach", "--rm", "--name", "linux-1",
 		"--label", "runnerfoundry.runner-pool=linux", "--label", "runnerfoundry.runner=linux-1",
-		"--env", jitConfigEnvironment, "runner",
+		"--label", "runnerfoundry.endpoint=docker:member-a",
+		"--env", bootstrapEnvironment, "runner",
 	)
-	if jitConfig != "" && strings.Contains(fmt.Sprint(arguments), jitConfig) {
-		t.Fatalf("docker arguments disclosed JIT config: %#v", arguments)
+	if bootstrap != "" && strings.Contains(fmt.Sprint(arguments), bootstrap) {
+		t.Fatalf("Docker arguments disclosed bootstrap: %#v", arguments)
 	}
 }
 
-func assertJITFailureRedacted(t *testing.T, err error, jitConfig string) {
+func assertBootstrapFailureRedacted(t *testing.T, err error, bootstrap string) {
 	t.Helper()
-	if jitConfig == "" {
+	if bootstrap == "" {
 		return
 	}
-	if strings.Contains(err.Error(), jitConfig) {
-		t.Fatalf("docker failure disclosed JIT config: %q", err.Error())
+	if strings.Contains(err.Error(), bootstrap) {
+		t.Fatalf("Docker failure disclosed bootstrap: %q", err.Error())
 	}
 	if strings.Count(err.Error(), "[REDACTED]") < 2 {
 		t.Fatalf("docker failure did not redact diagnostic and execution errors: %q", err.Error())
@@ -165,7 +168,7 @@ func assertJITFailureRedacted(t *testing.T, err error, jitConfig string) {
 
 func TestExecCommandRunnerReportsFailureWithoutDiagnostics(t *testing.T) {
 	recording := &recordingDockerExecution{err: errors.New("missing")}
-	if _, err := recording.runner().ListComposeRunners(context.Background()); err == nil || strings.Contains(err.Error(), ": missing:") {
+	if _, err := recording.runner().listComposeRunners(context.Background()); err == nil || strings.Contains(err.Error(), ": missing:") {
 		t.Fatalf("docker failure = %v", err)
 	}
 }
@@ -204,16 +207,16 @@ func (recording *recordingDockerExecution) runner() ExecCommandRunner {
 	}
 }
 
-func assertPrivateJITEnvironment(t *testing.T, actual []string, inherited []string, jitConfig string) {
+func assertPrivateBootstrapEnvironment(t *testing.T, actual []string, inherited []string, bootstrap string) {
 	t.Helper()
 	expected := make([]string, 0, len(inherited))
-	prefix := jitConfigEnvironment + "="
+	prefix := bootstrapEnvironment + "="
 	for _, entry := range inherited {
 		if !strings.HasPrefix(entry, prefix) {
 			expected = append(expected, entry)
 		}
 	}
-	expected = append(expected, prefix+jitConfig)
+	expected = append(expected, prefix+bootstrap)
 	if !slices.Equal(actual, expected) {
 		t.Fatalf("docker environment = %#v, want %#v", actual, expected)
 	}

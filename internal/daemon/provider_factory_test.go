@@ -6,13 +6,19 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 )
 
 func TestBuildExecutionProviderValidatesConfiguredDockerComposeService(t *testing.T) {
+	var receivedConfig dockerprovider.ComposeConfig
 	dependencies := executionDependencies{
-		dockerCommands: dockerCommandsFake{services: "runner\n"},
+		newDockerLauncher: func(config dockerprovider.ComposeConfig, _ core.MemberID) execution.RunnerLauncher {
+			receivedConfig = config
+			return providerFactoryLauncherFake{endpointID: "docker:member-a"}
+		},
 	}
 	provider, err := buildExecutionProvider(context.Background(), config.RunnerPoolConfig{
 		Name: "linux",
@@ -21,7 +27,8 @@ func TestBuildExecutionProviderValidatesConfiguredDockerComposeService(t *testin
 			Service:     "runner",
 		},
 	}, dependencies)
-	if err != nil || provider.ExecutionProvider == nil {
+	if err != nil || provider.Launcher == nil || provider.Inventory != nil ||
+		receivedConfig != (dockerprovider.ComposeConfig{ComposeFile: "compose.yaml", Service: "runner"}) {
 		t.Fatalf("build provider = (%T, %v)", provider, err)
 	}
 }
@@ -47,8 +54,8 @@ func TestBuildExecutionProviderBuildsLibvirtProvider(t *testing.T) {
 		},
 		libvirtCommands: libvirtCommandsFake{},
 	})
-	if err != nil || provider.ExecutionProvider == nil {
-		t.Fatalf("build libvirt provider = %T, %v", provider.ExecutionProvider, err)
+	if err != nil || provider.Launcher == nil || provider.Inventory == nil {
+		t.Fatalf("build libvirt provider = (%T, %T), %v", provider.Launcher, provider.Inventory, err)
 	}
 }
 
@@ -58,7 +65,9 @@ func TestBuildExecutionProviderReportsValidationFailure(t *testing.T) {
 	wantErr := errors.New("validation failed")
 	_, err := buildExecutionProvider(context.Background(), config.RunnerPoolConfig{
 		Name: "linux", Docker: &config.DockerConfig{ComposeFile: "compose.yml", Service: "runner"},
-	}, executionDependencies{dockerCommands: dockerCommandsErrorFake{err: wantErr}})
+	}, executionDependencies{newDockerLauncher: func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher {
+		return providerFactoryLauncherFake{err: wantErr}
+	}})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("validation error = %v", err)
 	}
@@ -70,22 +79,27 @@ func TestBuildExecutionProviderRejectsMissingProvider(t *testing.T) {
 	}
 }
 
-type dockerCommandsFake struct {
-	services string
-	runners  string
+func TestDockerCompositionRequiresLauncherAndInventoryFactories(t *testing.T) {
+	configured := config.RunnerPoolConfig{Name: "linux", Docker: &config.DockerConfig{Service: "runner"}}
+	if _, err := buildExecutionProvider(context.Background(), configured, executionDependencies{}); err == nil {
+		t.Fatal("missing Docker launcher factory was accepted")
+	}
+	if _, err := configuredDockerInventory(executionDependencies{}); err == nil {
+		t.Fatal("missing Docker inventory factory was accepted")
+	}
 }
 
-type dockerCommandsErrorFake struct{ err error }
+type providerFactoryLauncherFake struct {
+	endpointID execution.InventoryEndpointID
+	err        error
+}
 
-func (fake dockerCommandsErrorFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.ComposeRunnerRequest) error {
+func (provider providerFactoryLauncherFake) EndpointID() execution.InventoryEndpointID {
+	return provider.endpointID
+}
+func (provider providerFactoryLauncherFake) Validate(context.Context) error { return provider.err }
+func (providerFactoryLauncherFake) Start(context.Context, execution.StartRequest) error {
 	return nil
-}
-func (fake dockerCommandsErrorFake) ListComposeRunners(context.Context) (string, error) {
-	return "", nil
-}
-func (fake dockerCommandsErrorFake) RemoveComposeRunner(context.Context, string) error { return nil }
-func (fake dockerCommandsErrorFake) ListComposeServices(context.Context, dockerprovider.ComposeConfig) (string, error) {
-	return "", fake.err
 }
 
 type libvirtCommandsFake struct{}
@@ -104,19 +118,3 @@ func (libvirtCommandsFake) ReadConnectionURI(context.Context, string) (string, e
 }
 
 var _ libvirtprovider.CommandRunner = libvirtCommandsFake{}
-
-func (dockerCommandsFake) StartComposeRunner(context.Context, dockerprovider.ComposeConfig, dockerprovider.ComposeRunnerRequest) error {
-	return nil
-}
-
-func (commands dockerCommandsFake) ListComposeRunners(context.Context) (string, error) {
-	return commands.runners, nil
-}
-
-func (dockerCommandsFake) RemoveComposeRunner(context.Context, string) error {
-	return nil
-}
-
-func (commands dockerCommandsFake) ListComposeServices(context.Context, dockerprovider.ComposeConfig) (string, error) {
-	return commands.services, nil
-}

@@ -13,14 +13,18 @@ import (
 )
 
 type executionDependencies struct {
-	dockerCommands   dockerprovider.CommandRunner
-	libvirtCommands  libvirtprovider.CommandRunner
-	readTemplate     func(string) ([]byte, error)
-	memberID         core.MemberID
-	providerObserver func(execution.ProviderActivity)
+	newDockerLauncher  func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory func(core.MemberID) execution.RunnerInventory
+	libvirtCommands    libvirtprovider.CommandRunner
+	readTemplate       func(string) ([]byte, error)
+	memberID           core.MemberID
+	providerObserver   func(execution.ProviderActivity)
 }
 
-type configuredExecutionProvider struct{ execution.ExecutionProvider }
+type configuredExecutionProvider struct {
+	Launcher  execution.RunnerLauncher
+	Inventory execution.RunnerInventory
+}
 
 func buildExecutionProvider(
 	ctx context.Context,
@@ -31,7 +35,7 @@ func buildExecutionProvider(
 	if err != nil {
 		return configuredExecutionProvider{}, err
 	}
-	if err = provider.Validate(ctx); err != nil {
+	if err = provider.Launcher.Validate(ctx); err != nil {
 		return configuredExecutionProvider{}, fmt.Errorf("validate execution provider for Runner Pool %q: %w", configured.Name, err)
 	}
 	return provider, nil
@@ -46,7 +50,7 @@ func configuredProvider(
 		return configuredExecutionProvider{}, fmt.Errorf("runner pool %q: %w", configured.Name, err)
 	}
 	if kind == config.ProviderKindDocker {
-		return configuredDockerProvider(configured, dependencies), nil
+		return configuredDockerProvider(configured, dependencies)
 	}
 	return configuredLibvirtProvider(configured, dependencies)
 }
@@ -54,18 +58,32 @@ func configuredProvider(
 func configuredDockerProvider(
 	configured config.RunnerPoolConfig,
 	dependencies executionDependencies,
-) configuredExecutionProvider {
-	provider := dockerprovider.NewComposeProvider(
-		dependencies.dockerCommands,
+) (configuredExecutionProvider, error) {
+	if dependencies.newDockerLauncher == nil {
+		return configuredExecutionProvider{}, errors.New("docker launcher factory is required")
+	}
+	launcher := dependencies.newDockerLauncher(
 		dockerprovider.ComposeConfig{
 			ComposeFile: configured.Docker.ComposeFile,
 			Service:     configured.Docker.Service,
 		}, dependencies.memberID,
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlinesAndMetadata(
-		provider, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
-			ComposeService: configured.Docker.Service}, dependencies.providerObserver,
-	)}
+	return configuredExecutionProvider{
+		Launcher: execution.WithLauncherOperationDeadlinesAndMetadata(
+			launcher, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
+				ComposeService: configured.Docker.Service}, dependencies.providerObserver,
+		),
+	}, nil
+}
+
+func configuredDockerInventory(dependencies executionDependencies) (execution.InventoryOperationDeadlineProvider, error) {
+	if dependencies.newDockerInventory == nil {
+		return execution.InventoryOperationDeadlineProvider{}, errors.New("docker inventory factory is required")
+	}
+	inventory := dependencies.newDockerInventory(dependencies.memberID)
+	return execution.WithInventoryOperationDeadlines(
+		inventory, execution.ProviderName(config.ProviderKindDocker), dependencies.providerObserver,
+	), nil
 }
 
 func configuredLibvirtProvider(
@@ -88,7 +106,8 @@ func configuredLibvirtProvider(
 		template,
 		dependencies.memberID,
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(
+	wrapped := execution.WithOperationDeadlines(
 		provider, execution.ProviderName(config.ProviderKindLibvirt), dependencies.providerObserver,
-	)}, nil
+	)
+	return configuredExecutionProvider{Launcher: wrapped, Inventory: wrapped}, nil
 }

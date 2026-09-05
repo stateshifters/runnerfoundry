@@ -34,7 +34,7 @@ Aggregate entries preserve the authoritative demand count, not an individual Git
 
 `JobStarted` is GitHub's runner-acceptance signal. Once it is durable, a missing or failed provider resource cannot return the job to the queue. The provisioned runner owns normal workflow-result delivery to GitHub.
 
-An actionable `JobCompleted` is GitHub's terminal source signal and is submitted to the core terminalization boundary regardless of its `Result` value. It removes matching queued demand immediately. Unmatched observations are reported without manufacturing state. Matching processing remains only while provider cleanup is incomplete or resource absence is not yet proven.
+An actionable `JobCompleted` is GitHub's terminal source signal and is submitted to the core terminalization boundary regardless of its `Result` value. It removes matching queued demand immediately. Unmatched observations are reported without manufacturing state. Matching processing remains until provider cleanup reaches an accepted result.
 
 A delayed `JobStarted` can arrive after an unstarted provisioning attempt has returned to the queue. The durable transition records a source tombstone and removes that queued retry. A matched, durably applied `JobCompleted` also records a tombstone and removes queued demand. Tombstones prevent redelivery of that source identity or a concurrent provisioning retry from recreating the same demand.
 

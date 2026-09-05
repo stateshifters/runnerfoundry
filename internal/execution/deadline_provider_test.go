@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,61 @@ func TestDeadlineProviderReportsProviderOperations(t *testing.T) {
 		if got.Operation+":"+got.Outcome != want || got.RunnerPool != "linux" || got.EndpointID != "endpoint-a" {
 			t.Fatalf("activity %d = %#v, want %s with context", index, got, want)
 		}
+	}
+}
+
+func TestSeparateDeadlineBoundariesKeepLauncherMetadataOutOfInventoryActivity(t *testing.T) {
+	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
+	var activities []ProviderActivity
+	observer := func(activity ProviderActivity) { activities = append(activities, activity) }
+	launcher := WithLauncherOperationDeadlinesAndMetadata(provider, ProviderMetadata{
+		Name: "docker", ComposeService: "runner",
+	}, observer)
+	inventory := WithInventoryOperationDeadlines(provider, "docker", observer)
+
+	launcherErr := launcher.Start(context.Background(), StartRequest{EndpointID: "endpoint-a"})
+	inventoryErr := inventory.Destroy(context.Background(), RunnerInstance{EndpointID: "endpoint-a"})
+	if err := errors.Join(launcherErr, inventoryErr); err != nil {
+		t.Fatal(err)
+	}
+	services := make([]string, 0, len(activities))
+	for _, activity := range activities {
+		services = append(services, activity.ComposeService)
+	}
+	if !reflect.DeepEqual(services, []string{"runner", "runner", "", ""}) {
+		t.Fatalf("activity Compose services = %#v", services)
+	}
+}
+
+func TestSeparateLauncherDeadlineBoundaryPreservesOperations(t *testing.T) {
+	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
+	launcher := WithLauncherOperationDeadlinesAndMetadata(provider, ProviderMetadata{Name: "docker"})
+
+	err := errors.Join(
+		launcher.Validate(context.Background()),
+		launcher.Start(context.Background(), StartRequest{EndpointID: "endpoint-a"}),
+	)
+	if err != nil || launcher.EndpointID() != "endpoint-a" {
+		t.Fatalf("launcher operations = endpoint %q, error %v", launcher.EndpointID(), err)
+	}
+}
+
+func TestSeparateInventoryDeadlineBoundaryPreservesOperations(t *testing.T) {
+	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
+	inventory := WithInventoryOperationDeadlines(provider, "docker")
+
+	_, inspectErr := inventory.Inspect(context.Background())
+	_, endpointErr := inventory.InspectEndpoint(context.Background(), "endpoint-a")
+	err := errors.Join(
+		inventory.Refresh(context.Background()),
+		inspectErr,
+		endpointErr,
+		inventory.Destroy(context.Background(), RunnerInstance{EndpointID: "endpoint-a"}),
+	)
+	ownsEndpoint := inventory.EndpointID() == "endpoint-a" && inventory.KnowsEndpoint("endpoint-a") &&
+		inventory.CanInspectEndpointForMember("endpoint-a", "member-a")
+	if err != nil || !ownsEndpoint {
+		t.Fatalf("inventory operations = owns endpoint %t, error %v", ownsEndpoint, err)
 	}
 }
 
