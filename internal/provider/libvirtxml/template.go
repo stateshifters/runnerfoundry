@@ -1,6 +1,8 @@
 package libvirtxml
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"strings"
 
@@ -38,14 +40,6 @@ type RenderRequest struct {
 	RunnerName     string
 	JITConfig      string
 }
-
-var xmlTextEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	`"`, "&#34;",
-	`'`, "&#39;",
-)
 
 // Render parses a fresh copy of the template, replaces RunnerFoundry-owned
 // metadata and JIT OEM data, and leaves the original template unchanged.
@@ -115,5 +109,7 @@ func runnerMetadata(request RenderRequest) string {
 }
 
 func escapeXML(value string) string {
-	return xmlTextEscaper.Replace(value)
+	var escaped bytes.Buffer
+	_ = xml.EscapeText(&escaped, []byte(value))
+	return escaped.String()
 }
