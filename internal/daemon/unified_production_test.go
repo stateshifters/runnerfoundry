@@ -240,7 +240,7 @@ func productionGitHubFactoryDependencies() (productionDependencies, *productionG
 		observed.discoverers = append(observed.discoverers, credentials.AppID)
 		return transport.Discoverer{}, nil
 	}
-	dependencies.newClient = func(_ transport.Repository, credentials transport.Credentials, _ http.RoundTripper) (*transport.Client, error) {
+	dependencies.newClient = func(_ transport.Repository, credentials transport.Credentials, _ transport.TransportFactory) (*transport.Client, error) {
 		observed.clients = append(observed.clients, credentials.AppID)
 		return &transport.Client{}, nil
 	}
@@ -328,7 +328,7 @@ func assertProductionClientFailure(
 		_, err := factory(context.Background(), transport.Repository{})
 		return nil, err
 	}
-	dependencies.newClient = func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error) {
+	dependencies.newClient = func(transport.Repository, transport.Credentials, transport.TransportFactory) (*transport.Client, error) {
 		return nil, wantErr
 	}
 	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {

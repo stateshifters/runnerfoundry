@@ -26,8 +26,6 @@ const (
 	deleteAndRemoveOwnership
 )
 
-// PruneRunnerPools removes absent registrations only when their settings
-// match the fingerprint used by EnsureRunnerPool. It never changes job state.
 func (client *Client) PruneRunnerPools(
 	ctx context.Context,
 	runnerGroupID RunnerGroupID,
@@ -37,6 +35,10 @@ func (client *Client) PruneRunnerPools(
 	if client == nil || client.registry == nil {
 		return PruneResult{}, errors.New("GitHub prune registry API is required")
 	}
+	if err := client.lockRepository(ctx); err != nil {
+		return PruneResult{}, err
+	}
+	defer client.unlockRepository()
 	runnerScaleSets, err := client.registry.ListRunnerScaleSets(ctx, int(runnerGroupID))
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("list runner scale sets for runner group %d: %w", runnerGroupID, err)

@@ -45,8 +45,9 @@ func (closer contextCloserFunc) Close(ctx context.Context) error { return closer
 type productionDependencies struct {
 	readFile                 config.ReadFile
 	httpTransport            http.RoundTripper
+	scaleSetTransportFactory transport.TransportFactory
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
-	newClient                func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
+	newClient                func(transport.Repository, transport.Credentials, transport.TransportFactory) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
 	dockerCommands           dockerprovider.ExecCommandRunner
 	libvirtCommands          libvirtprovider.CommandRunner
@@ -181,7 +182,7 @@ func productionManagerClientFactory(
 	dependencies productionDependencies,
 ) githubsource.ManagerClientFactoryFunc {
 	return func(_ context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
-		client, err := dependencies.newClient(repository, credentials, dependencies.httpTransport)
+		client, err := dependencies.newClient(repository, credentials, dependencies.scaleSetTransportFactory)
 		if err != nil {
 			return githubsource.ManagerClient{}, fmt.Errorf("create scale-set client: %w", err)
 		}

@@ -7,82 +7,57 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	"net/http"
-	"runtime"
-	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 )
 
-func TestTransportClientSerializesUpstreamSessionConstruction(t *testing.T) {
-	api := &sessionConstructionAPIFake{release: make(chan struct{})}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
-	sessionErrors := runConcurrentSessionConstruction(client, api.release)
-	for err := range sessionErrors {
+func TestTransportClientOpensSiblingSessionWhileAnotherOpenIsBlocked(t *testing.T) {
+	t.Parallel()
+	api := &sessionConstructionAPIFake{started: make(chan struct{}), release: make(chan struct{})}
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := client.OpenSession(t.Context(), Registration{ID: 29}, "member")
+		blocked <- err
+	}()
+	<-api.started
+	sibling := make(chan error, 1)
+	go func() {
+		_, err := client.OpenSession(t.Context(), Registration{ID: 30}, "member")
+		sibling <- err
+	}()
+	select {
+	case err := <-sibling:
 		if err != nil {
-			t.Fatalf("construct upstream session: %v", err)
+			t.Errorf("open sibling session: %v", err)
 		}
+	case <-time.After(time.Second):
+		t.Error("blocked session prevented sibling from opening")
 	}
-	if maximum := api.maximumActive.Load(); maximum != 1 {
-		t.Fatalf("concurrent upstream session constructions = %d, want 1", maximum)
-	}
-}
-
-func runConcurrentSessionConstruction(client *Client, release chan struct{}) <-chan error {
-	const callers = 32
-	start := make(chan struct{})
-	sessionErrors := make(chan error, callers)
-	var started sync.WaitGroup
-	var completed sync.WaitGroup
-	started.Add(callers)
-	completed.Add(callers)
-	for index := 0; index < callers; index++ {
-		go func() {
-			defer completed.Done()
-			<-start
-			started.Done()
-			_, err := client.openSession(context.Background(), 29, "member")
-			sessionErrors <- err
-		}()
-	}
-	close(start)
-	started.Wait()
-	yieldToSessionConstructors(callers)
-	close(release)
-	completed.Wait()
-	close(sessionErrors)
-	return sessionErrors
-}
-
-func yieldToSessionConstructors(callers int) {
-	for attempt := 0; attempt < callers; attempt++ {
-		runtime.Gosched()
+	close(api.release)
+	if err := <-blocked; err != nil {
+		t.Fatalf("open blocked session: %v", err)
 	}
 }
 
 type sessionConstructionAPIFake struct {
 	upstreamAPIFake
-	release       chan struct{}
-	active        atomic.Int64
-	maximumActive atomic.Int64
+	started chan struct{}
+	release chan struct{}
 }
 
 func (api *sessionConstructionAPIFake) MessageSessionClient(
-	context.Context,
-	int,
-	string,
-	...upstream.HTTPOption,
+	_ context.Context,
+	identifier int,
+	_ string,
+	_ ...upstream.HTTPOption,
 ) (*upstream.MessageSessionClient, error) {
-	active := api.active.Add(1)
-	for maximum := api.maximumActive.Load(); active > maximum; maximum = api.maximumActive.Load() {
-		if api.maximumActive.CompareAndSwap(maximum, active) {
-			break
-		}
+	if identifier == 29 {
+		close(api.started)
+		<-api.release
 	}
-	<-api.release
-	api.active.Add(-1)
 	return &upstream.MessageSessionClient{}, nil
 }
 
@@ -169,7 +144,7 @@ func TestEnsureRunnerPoolReportsBoundaryFailures(t *testing.T) {
 }
 
 func TestNewClientValidatesRepositoryAndUsesConfiguredRepository(t *testing.T) {
-	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, http.DefaultTransport); err == nil {
+	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, nil); err == nil {
 		t.Fatal("NewClient accepted invalid repository URL")
 	}
 	client, err := NewClient(
@@ -195,7 +170,7 @@ func TestClientFromUpstreamUsesNativeScaleSetRegistry(t *testing.T) {
 			RunnerGroupID: 7, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
 		}},
 	}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
 	if _, err := client.PruneRunnerPools(context.Background(), 7, nil, []OwnedRunnerPool{{
 		ID: 11, Name: "obsolete", RunnerGroupID: 7,
 	}}); err != nil {
@@ -229,7 +204,7 @@ func TestClientFromUpstreamBuildsAndReportsMessageSessions(t *testing.T) {
 	t.Parallel()
 
 	api := &upstreamAPIFake{session: &upstream.MessageSessionClient{}}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
 	if _, err := client.OpenSession(context.Background(), Registration{ID: 17}, "owner"); err != nil {
 		t.Fatalf("open adapted session: %v", err)
 	}

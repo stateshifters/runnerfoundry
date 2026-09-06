@@ -4,13 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"strconv"
 	"sync"
 
 	upstream "github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
-	"github.com/stateshifters/runnerfoundry/internal/buildinfo"
 )
 
 type Registration struct {
@@ -26,6 +22,7 @@ type registrationAPI interface {
 }
 
 type messageSessionAPI interface {
+	Session() upstream.RunnerScaleSetSession
 	GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*upstream.RunnerScaleSetMessage, error)
 	DeleteMessage(ctx context.Context, messageID int) error
 	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
@@ -42,10 +39,13 @@ type jitAPI interface {
 	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
-type upstreamClientAPI interface {
+type repositoryAPI interface {
 	registrationAPI
 	jitAPI
 	registryAPI
+}
+
+type sessionClientAPI interface {
 	MessageSessionClient(
 		ctx context.Context,
 		runnerScaleSetID int,
@@ -62,56 +62,43 @@ type registryAPI interface {
 // Client owns GitHub Actions runner scale-set registration, message sessions,
 // and runner bootstrap operations for one repository installation.
 type Client struct {
-	registrations registrationAPI
-	openSession   func(context.Context, int, string) (messageSessionAPI, error)
-	jit           jitAPI
-	registry      registryAPI
-	repositoryURL string
+	registrations    registrationAPI
+	openSession      func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error)
+	jit              jitAPI
+	registry         registryAPI
+	repositoryURL    string
+	transportFactory TransportFactory
+	gateOnce         sync.Once
+	repositoryGate   chan struct{}
 }
 
-// NewClient creates an authenticated GitHub Actions client for one repository.
-// All network traffic uses baseTransport; callers may pass nil for the process default.
-func NewClient(repository Repository, credentials Credentials, baseTransport http.RoundTripper) (*Client, error) {
-	if baseTransport == nil {
-		baseTransport = http.DefaultTransport
-	}
-	retryClient := retryablehttp.NewClient()
-	retryClient.HTTPClient.Transport = baseTransport
-	retryClient.Logger = nil
-	api, err := upstream.NewClientWithGitHubApp(upstream.ClientWithGitHubAppConfig{
-		GitHubConfigURL: repository.URL,
-		GitHubAppAuth: upstream.GitHubAppAuth{
-			ClientID:       strconv.FormatInt(credentials.AppID, 10),
-			InstallationID: int64(repository.InstallationID),
-			PrivateKey:     credentials.PrivateKey,
-		},
-		SystemInfo: upstream.SystemInfo{System: "runnerfoundry", Version: buildinfo.Version()},
-	}, upstream.WithRetryableHTTPClint(retryClient))
+func NewClient(repository Repository, credentials Credentials, factory TransportFactory) (*Client, error) {
+	api, err := newSDKClient(repository, credentials, factory)
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub Actions scale-set client: %w", err)
+		return nil, err
 	}
-	client := clientFromUpstream(repository.URL, api)
+	sessionAPI, err := newSDKClient(repository, credentials, factory)
+	if err != nil {
+		return nil, err
+	}
+	client := clientFromUpstream(repository.URL, api, sessionAPI, factory)
 	return client, nil
 }
 
-func clientFromUpstream(repositoryURL string, api upstreamClientAPI) *Client {
-	// actions/scaleset derives each session client by mutating shared HTTP
-	// options, so construction must not overlap across Runner Pools.
-	var sessionClientMutex sync.Mutex
+func clientFromUpstream(repositoryURL string, api repositoryAPI, sessionAPI sessionClientAPI, factory TransportFactory) *Client {
 	return &Client{
 		registrations: api,
-		openSession: func(ctx context.Context, runnerScaleSetID int, owner string) (messageSessionAPI, error) {
-			sessionClientMutex.Lock()
-			defer sessionClientMutex.Unlock()
-			session, sessionErr := api.MessageSessionClient(ctx, runnerScaleSetID, owner)
+		openSession: func(ctx context.Context, runnerScaleSetID int, owner string, options ...upstream.HTTPOption) (messageSessionAPI, error) {
+			session, sessionErr := sessionAPI.MessageSessionClient(ctx, runnerScaleSetID, owner, options...)
 			if sessionErr != nil {
 				return nil, fmt.Errorf("create upstream message session: %w", sessionErr)
 			}
-			return adaptUpstreamMessageSession(session), nil
+			return session, nil
 		},
-		jit:           api,
-		registry:      api,
-		repositoryURL: repositoryURL,
+		jit:              api,
+		registry:         api,
+		repositoryURL:    repositoryURL,
+		transportFactory: factory,
 	}
 }
 
@@ -125,7 +112,11 @@ func (client *Client) EnsureRunnerPool(
 	if client == nil || client.registrations == nil {
 		return Registration{}, errors.New("GitHub registration API is required")
 	}
-	runnerGroupID, err := client.runnerGroupID(ctx, runnerGroupName)
+	if err := client.lockRepository(ctx); err != nil {
+		return Registration{}, err
+	}
+	defer client.unlockRepository()
+	runnerGroupID, err := client.findRunnerGroup(ctx, runnerGroupName)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -147,16 +138,20 @@ func (client *Client) EnsureRunnerPool(
 	}, nil
 }
 
-func (client *Client) runnerGroupID(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
-	return client.ResolveRunnerGroup(ctx, runnerGroupName)
-}
-
 // ResolveRunnerGroup resolves a configured GitHub runner-group name to its
 // stable numeric identity for registration admission checks.
 func (client *Client) ResolveRunnerGroup(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
 	if client == nil || client.registrations == nil {
 		return 0, errors.New("GitHub registration API is required")
 	}
+	if err := client.lockRepository(ctx); err != nil {
+		return 0, err
+	}
+	defer client.unlockRepository()
+	return client.findRunnerGroup(ctx, runnerGroupName)
+}
+
+func (client *Client) findRunnerGroup(ctx context.Context, runnerGroupName string) (RunnerGroupID, error) {
 	runnerGroup, err := client.registrations.GetRunnerGroupByName(ctx, runnerGroupName)
 	if err != nil {
 		return 0, fmt.Errorf("get runner group %q: %w", runnerGroupName, err)
@@ -183,3 +178,19 @@ func (client *Client) createRunnerScaleSet(
 	}
 	return runnerScaleSet, nil
 }
+
+func (client *Client) lockRepository(ctx context.Context) error {
+	client.gateOnce.Do(func() { client.repositoryGate = make(chan struct{}, 1) })
+	select {
+	case client.repositoryGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			client.unlockRepository()
+			return fmt.Errorf("acquire GitHub repository operation: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for GitHub repository operation: %w", ctx.Err())
+	}
+}
+
+func (client *Client) unlockRepository() { <-client.repositoryGate }

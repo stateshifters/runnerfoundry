@@ -280,6 +280,9 @@ func productionCompositionDependencies(
 	t.Helper()
 	dependencies := newProductionDependencies()
 	dependencies.httpTransport = productionCompositionHTTPTransport(t, host)
+	dependencies.scaleSetTransportFactory = func() *http.Transport {
+		return productionCompositionHTTPTransport(t, host)
+	}
 	dependencies.dockerCommands, dependencies.libvirtCommands = dockerCommands, libvirtCommands
 	dependencies.readHostname = func() (string, error) { return "production-member", nil }
 	configureProductionCompositionClockAndLogging(&dependencies, tickers)
