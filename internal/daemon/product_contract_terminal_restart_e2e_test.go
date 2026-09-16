@@ -88,7 +88,7 @@ func terminalizeBeforeInterruptedCleanup(
 
 func assertTerminalProcessingRetained(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(),
 		harness.runtime.state.member,
 		"linux",
@@ -103,7 +103,7 @@ func assertTerminalProcessingRetained(t *testing.T, harness *e2eHarness, wantJob
 func assertTerminalCleanupResumed(t *testing.T, harness *e2eHarness) {
 	t.Helper()
 	harness.completeMaintenanceCycle(harness.execution)
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(),
 		harness.runtime.state.member,
 		"linux",

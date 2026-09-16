@@ -138,7 +138,7 @@ func assertAcquisitionRequest(t *testing.T, session *e2eGitHubSession, want ...i
 
 func assertNoAcquiredProcessing(t *testing.T, harness *e2eHarness, wantAttempts int, phase string) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByPool(context.Background(), core.RunnerPool("linux"))
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), core.RunnerPool("linux"))
 	if err != nil || len(processing) != 0 {
 		t.Fatalf("%s processing = %+v, error = %v, want empty", phase, processing, err)
 	}

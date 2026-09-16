@@ -189,7 +189,11 @@ func TestDomainTemplateSurfacesMarshalFailures(t *testing.T) {
 	template := domainTemplateWithMarshaler(`<domain type="kvm"><name>template</name></domain>`, func(*upstream.Domain) (string, error) {
 		return "", wantErr
 	})
-	if _, err := template.Render(RenderRequest{RunnerName: "runner"}); err == nil {
+	_, err := template.Render(RenderRequest{RunnerName: "runner"})
+	if err == nil {
 		t.Fatal("expected marshal failure")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected render error to retain marshal failure, got %v", err)
 	}
 }

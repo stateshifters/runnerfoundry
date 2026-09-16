@@ -308,5 +308,6 @@ func e2ePostgresWithStores(
 	}
 	defer pool.Close()
 	connection := postgresstate.NewPGXConnection(pool)
-	inspect(postgresstate.NewConnectionStore(connection), githubpostgres.NewStore(connection))
+	store := postgresstate.NewConnectionStore(connection)
+	inspect(store, githubpostgres.NewStore(connection.AdapterExtension(), store))
 }

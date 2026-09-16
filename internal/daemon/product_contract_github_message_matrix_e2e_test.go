@@ -171,7 +171,7 @@ func deliverIgnoredGitHubHistory(
 
 func messageMatrixProcessing(t *testing.T, harness *e2eHarness, wantJobID core.JobID) core.ProcessingJob {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID {
 		t.Fatalf("message-matrix processing = %+v, error = %v", processing, err)
 	}

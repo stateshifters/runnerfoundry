@@ -199,7 +199,7 @@ func e2eAwaitReloadProviderStart(t *testing.T, application *e2eApplication) exec
 	case started := <-application.replacementProvider.starts:
 		return started
 	case <-timer.C:
-		processing, processingErr := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+		processing, processingErr := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 		application.runtime.reporter.mutex.Lock()
 		failures := fmt.Sprintf("%+v", application.runtime.reporter.failures)
 		status := application.runtime.reporter.lastStatus
@@ -339,7 +339,7 @@ func e2eAssertSingleProviderAttempt(t *testing.T, application *e2eApplication, p
 
 func e2eAssertIndependentRunnerCleanup(t *testing.T, lifecycle e2eInFlightRunnerLifecycle) {
 	t.Helper()
-	processing, err := lifecycle.application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := lifecycle.application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	destroys := lifecycle.application.provider.destroyCount()
 	attempts := lifecycle.application.provider.attemptCount()
 	if err != nil || len(processing) != 0 || destroys != 1 || attempts != 1 {

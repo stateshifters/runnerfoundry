@@ -34,8 +34,10 @@ type e2eHarness struct {
 	host                      *e2eGitHost
 	provider                  *e2eProvider
 	windowsProvider           *e2eProvider
-	providerBoundary          execution.ExecutionProvider
-	windowsProviderBoundary   execution.ExecutionProvider
+	providerBoundary          execution.RunnerLauncher
+	windowsProviderBoundary   execution.RunnerLauncher
+	providerInventory         execution.RunnerInventory
+	windowsProviderInventory  execution.RunnerInventory
 	sourceRuntime             *githubSourceRuntime
 	membership                *e2eManualTicker
 	source                    *e2eManualTicker
@@ -257,17 +259,23 @@ func (harness *e2eHarness) buildProviderSet(
 	_ config.Config,
 	_ core.MemberID,
 	_ productionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	harness.providerBoundary = execution.WithOperationDeadlines(harness.provider, "e2e")
-	harness.windowsProviderBoundary = execution.WithOperationDeadlines(harness.windowsProvider, "e2e-windows")
+) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+	harness.providerBoundary = execution.WithLauncherOperationDeadlinesAndMetadata(
+		harness.provider, execution.ProviderMetadata{Name: "e2e"},
+	)
+	harness.windowsProviderBoundary = execution.WithLauncherOperationDeadlinesAndMetadata(
+		harness.windowsProvider, execution.ProviderMetadata{Name: "e2e-windows"},
+	)
+	harness.providerInventory = execution.WithInventoryOperationDeadlines(harness.provider, "e2e")
+	harness.windowsProviderInventory = execution.WithInventoryOperationDeadlines(harness.windowsProvider, "e2e-windows")
 	if err := harness.providerBoundary.Validate(ctx); err != nil {
 		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Linux provider: %w", err)
 	}
 	if err := harness.windowsProviderBoundary.Validate(ctx); err != nil {
 		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Windows provider: %w", err)
 	}
-	inventory := execution.NewAggregateRunnerInventory(harness.providerBoundary, harness.windowsProviderBoundary)
-	return map[core.RunnerPool]execution.ExecutionProvider{
+	inventory := execution.NewAggregateRunnerInventory(harness.providerInventory, harness.windowsProviderInventory)
+	return map[core.RunnerPool]execution.RunnerLauncher{
 		"linux": harness.providerBoundary, "windows": harness.windowsProviderBoundary,
 	}, inventory, nil
 }
@@ -631,7 +639,7 @@ func assertExactDemandState(
 	if err != nil {
 		t.Fatalf("encode GitHub demand scope: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), core.JobRequest{
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), core.JobRequest{
 		Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID}, Scope: scope,
 		RunnerPool: runnerPool, EnqueuedAt: harness.currentTime,
 	})

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
@@ -49,7 +51,8 @@ func newProductionProviderReadinessApplication(
 	application.configured.RunnerPools[0].Docker.ComposeFile = "compose.yaml"
 	commands := &readinessDockerCommands{delegate: newProductionCompositionDockerCommands()}
 	application.useProductionProviders = true
-	application.dockerCommands = commands
+	application.newDockerLauncher = commands.newLauncher
+	application.newDockerInventory = commands.newInventory
 	return application, commands
 }
 
@@ -139,39 +142,55 @@ func (commands *readinessDockerCommands) takeInventoryGate() *readinessCommandGa
 	return gate
 }
 
-func (commands *readinessDockerCommands) StartComposeRunner(
-	ctx context.Context,
+func (commands *readinessDockerCommands) newLauncher(
 	configured dockerprovider.ComposeConfig,
-	request dockerprovider.ComposeRunnerRequest,
-) error {
-	return commands.delegate.StartComposeRunner(ctx, configured, request)
+	memberID core.MemberID,
+) execution.RunnerLauncher {
+	return readinessDockerLauncher{RunnerLauncher: commands.delegate.newLauncher(configured, memberID), commands: commands}
 }
 
-func (commands *readinessDockerCommands) ListComposeRunners(
-	ctx context.Context,
-) (string, error) {
-	if gate := commands.takeInventoryGate(); gate != nil {
+func (commands *readinessDockerCommands) newInventory(memberID core.MemberID) execution.RunnerInventory {
+	return readinessDockerInventory{RunnerInventory: commands.delegate.newInventory(memberID), commands: commands}
+}
+
+type readinessDockerLauncher struct {
+	execution.RunnerLauncher
+	commands *readinessDockerCommands
+}
+
+func (launcher readinessDockerLauncher) Validate(ctx context.Context) error {
+	if gate := launcher.commands.takeValidationGate(); gate != nil {
 		if err := gate.wait(ctx); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return commands.delegate.ListComposeRunners(ctx)
+	return launcher.RunnerLauncher.Validate(ctx)
 }
 
-func (commands *readinessDockerCommands) RemoveComposeRunner(ctx context.Context, containerID string) error {
-	return commands.delegate.RemoveComposeRunner(ctx, containerID)
+type readinessDockerInventory struct {
+	execution.RunnerInventory
+	commands *readinessDockerCommands
 }
 
-func (commands *readinessDockerCommands) ListComposeServices(
-	ctx context.Context,
-	configured dockerprovider.ComposeConfig,
-) (string, error) {
-	if gate := commands.takeValidationGate(); gate != nil {
+func (inventory readinessDockerInventory) Refresh(ctx context.Context) error {
+	if err := inventory.wait(ctx); err != nil {
+		return err
+	}
+	return inventory.RunnerInventory.Refresh(ctx)
+}
+
+func (inventory readinessDockerInventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	if err := inventory.wait(ctx); err != nil {
+		return nil, err
+	}
+	return inventory.RunnerInventory.Inspect(ctx)
+}
+
+func (inventory readinessDockerInventory) wait(ctx context.Context) error {
+	if gate := inventory.commands.takeInventoryGate(); gate != nil {
 		if err := gate.wait(ctx); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return commands.delegate.ListComposeServices(ctx, configured)
+	return nil
 }
-
-var _ dockerprovider.CommandRunner = (*readinessDockerCommands)(nil)

@@ -3,6 +3,7 @@ package libvirtxml
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -51,12 +52,13 @@ func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	domain.Name = request.RunnerName
 	ensureSMBIOSSystemInfo(&domain)
 	addJITOEMString(&domain, request.JITConfig)
+	metadataXML, metadataErr := runnerMetadata(request)
 	domain.Metadata = &upstream.DomainMetadata{
-		XML: runnerMetadata(request),
+		XML: metadataXML,
 	}
-	renderedXML, err := template.marshal(&domain)
-	if err != nil {
-		return "", fmt.Errorf("marshal domain xml: %w", err)
+	renderedXML, marshalErr := template.marshal(&domain)
+	if err := errors.Join(metadataErr, marshalErr); err != nil {
+		return "", fmt.Errorf("render domain xml: %w", err)
 	}
 	return renderedXML, nil
 }
@@ -99,17 +101,19 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 	smbios.OEMStrings.Entry = append(oemStrings, jitOEMStringPrefix+jitConfig)
 }
 
-func runnerMetadata(request RenderRequest) string {
+func runnerMetadata(request RenderRequest) (string, error) {
+	escapedRunnerPoolName, runnerPoolErr := escapeXML(request.RunnerPoolName)
+	escapedRunnerName, runnerNameErr := escapeXML(request.RunnerName)
 	return fmt.Sprintf(
 		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:runner-pool>%s</runnerfoundry:runner-pool><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
 		metadataNamespace,
-		escapeXML(request.RunnerPoolName),
-		escapeXML(request.RunnerName),
-	)
+		escapedRunnerPoolName,
+		escapedRunnerName,
+	), errors.Join(runnerPoolErr, runnerNameErr)
 }
 
-func escapeXML(value string) string {
+func escapeXML(value string) (string, error) {
 	var escaped bytes.Buffer
-	_ = xml.EscapeText(&escaped, []byte(value))
-	return escaped.String()
+	err := xml.EscapeText(&escaped, []byte(value))
+	return escaped.String(), err
 }

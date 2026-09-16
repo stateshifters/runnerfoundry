@@ -52,7 +52,7 @@ func completeAcceptedPostgresProcessingAfterReconnect(
 	t.Helper()
 	second := newE2EHarness(t, state, "e2e-reconnect-member", false)
 	second.establishSourceSession()
-	processing, err := second.runtime.state.store.ProcessingByMember(
+	processing, err := second.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted {
@@ -64,7 +64,7 @@ func completeAcceptedPostgresProcessingAfterReconnect(
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 601}}},
 	})
 	second.completeMaintenanceCycle(second.execution)
-	processing, err = second.runtime.state.store.ProcessingByMember(
+	processing, err = second.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 0 {

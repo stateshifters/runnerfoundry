@@ -30,7 +30,7 @@ func TestProductContractRegistrationConvergenceSQLite(t *testing.T) {
 			t.Errorf("close SQLite convergence state: %v", closeErr)
 		}
 	})
-	exerciseRegistrationConvergence(t, store, githubsqlite.NewStore(store.Backend()))
+	exerciseRegistrationConvergence(t, store, githubsqlite.NewStore(store.AdapterExtension(), store))
 }
 
 func TestProductContractRegistrationConvergencePostgres(t *testing.T) {
@@ -57,7 +57,7 @@ func TestProductContractRegistrationConvergencePostgres(t *testing.T) {
 	if !ok {
 		t.Fatalf("PostgreSQL source state %T does not expose declaration persistence", state.registrationStore)
 	}
-	exerciseRegistrationConvergence(t, state.store, store)
+	exerciseRegistrationConvergence(t, state.store.members, store)
 }
 
 func TestProductContractPostgresRunnerGroupConflictIsolatedToRunnerPool(t *testing.T) {
@@ -155,9 +155,9 @@ func openPostgresConvergenceStore(
 			t.Errorf("close PostgreSQL convergence state: %v", closeErr)
 		}
 	})
-	store, valid := state.store.(*postgresstate.Store)
+	store, valid := state.store.members.(*postgresstate.Store)
 	if !valid {
-		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store)
+		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store.members)
 	}
 	registrations, valid := state.registrationStore.(registrationConvergenceStore)
 	if !valid {

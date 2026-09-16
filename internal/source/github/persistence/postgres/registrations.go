@@ -2,12 +2,12 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
@@ -30,13 +30,18 @@ const deleteOwnedRegistrationSQL = `DELETE FROM public.runnerfoundry_github_scal
 
 var _ githubsource.RegistrationRepository = (*Store)(nil)
 
-type Store struct{ executor postgresstate.Executor }
-
-func NewStore(connection postgresstate.Connection) *Store {
-	return newExecutorStore(connection.Executor())
+type Store struct {
+	transactions   transactionRunner
+	memberLiveness state.MemberLivenessReader
 }
 
-func newExecutorStore(executor postgresstate.Executor) *Store { return &Store{executor: executor} }
+type transactionRunner interface {
+	WithinTransaction(ctx context.Context, operation func(postgresstate.Transaction) error) error
+}
+
+func NewStore(transactions transactionRunner, memberLiveness state.MemberLivenessReader) *Store {
+	return &Store{transactions: transactions, memberLiveness: memberLiveness}
+}
 
 func (store *Store) UpsertRegistration(
 	ctx context.Context,
@@ -50,24 +55,19 @@ func (store *Store) mutateRegistrationPair(
 	ctx context.Context,
 	operation, activeStatement, ownedStatement string,
 	registration githubsource.Registration,
-) (resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin %s: %w", operation, err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
+) error {
 	arguments := registrationArguments(registration)
-	if _, err = transaction.Execute(ctx, activeStatement, arguments...); err != nil {
-		return fmt.Errorf("%s active state: %w", operation, err)
+	if err := store.transactions.WithinTransaction(ctx, func(transaction postgresstate.Transaction) error {
+		if _, err := transaction.Execute(ctx, activeStatement, arguments...); err != nil {
+			return fmt.Errorf("%s active state: %w", operation, err)
+		}
+		if _, err := transaction.Execute(ctx, ownedStatement, arguments...); err != nil {
+			return fmt.Errorf("%s ownership state: %w", operation, err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("%s transaction: %w", operation, err)
 	}
-	if _, err = transaction.Execute(ctx, ownedStatement, arguments...); err != nil {
-		return fmt.Errorf("%s ownership state: %w", operation, err)
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit %s: %w", operation, err)
-	}
-	open = false
 	return nil
 }
 
@@ -94,40 +94,35 @@ func (store *Store) DeleteOwnedRegistration(ctx context.Context, registration gi
 		registrationArguments(registration)...)
 }
 
-func (store *Store) Registrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
+func (store *Store) Registrations(ctx context.Context) ([]githubsource.Registration, error) {
 	return store.listRegistrations(ctx, "registrations", registrationsSQL)
 }
 
-func (store *Store) OwnedRegistrations(ctx context.Context) (_ []githubsource.Registration, resultErr error) {
+func (store *Store) OwnedRegistrations(ctx context.Context) ([]githubsource.Registration, error) {
 	return store.listRegistrations(ctx, "owned registrations", ownedRegistrationsSQL)
 }
 
 func (store *Store) listRegistrations(
 	ctx context.Context,
 	description, statement string,
-) (_ []githubsource.Registration, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin %s lookup: %w", description, err)
+) ([]githubsource.Registration, error) {
+	var registrations []githubsource.Registration
+	if err := store.transactions.WithinTransaction(ctx, func(transaction postgresstate.Transaction) error {
+		return transaction.VisitRows(ctx, statement, func(row postgresstate.Scanner) error {
+			registration, err := scanRegistration(row)
+			if err != nil {
+				return err
+			}
+			registrations = append(registrations, registration)
+			return nil
+		})
+	}); err != nil {
+		return nil, fmt.Errorf("%s lookup: %w", description, err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	rows, err := transaction.Query(ctx, statement)
-	if err != nil {
-		return nil, fmt.Errorf("query %s: %w", description, err)
-	}
-	registrations, err := scanRegistrations(rows)
-	if err != nil {
-		return nil, err
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit %s lookup: %w", description, err)
-	}
-	open = false
 	return registrations, nil
 }
 
-func scanRegistration(row scanner) (githubsource.Registration, error) {
+func scanRegistration(row postgresstate.Scanner) (githubsource.Registration, error) {
 	var registration githubsource.Registration
 	var runnerPool string
 	var installationID, runnerGroupID, scaleSetID int64
@@ -144,49 +139,19 @@ func scanRegistration(row scanner) (githubsource.Registration, error) {
 	return registration, nil
 }
 
-type scanner interface {
-	Scan(destinations ...any) error
-}
-
-func scanRegistrations(rows postgresstate.Rows) (registrations []githubsource.Registration, resultErr error) {
-	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
-	for rows.Next() {
-		registration, err := scanRegistration(rows)
-		if err != nil {
-			return nil, err
-		}
-		registrations = append(registrations, registration)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate registrations: %w", err)
-	}
-	return registrations, nil
-}
-
-func rollback(ctx context.Context, transaction postgresstate.Transaction, open *bool, resultErr *error) {
-	if *open {
-		*resultErr = errors.Join(*resultErr, transaction.Rollback(ctx))
-	}
-}
-
 func (store *Store) executeTransaction(
 	ctx context.Context,
 	description string,
 	statement string,
 	arguments ...any,
-) (resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin %s: %w", description, err)
+) error {
+	if err := store.transactions.WithinTransaction(ctx, func(transaction postgresstate.Transaction) error {
+		if _, err := transaction.Execute(ctx, statement, arguments...); err != nil {
+			return fmt.Errorf("%s: %w", description, err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("%s transaction: %w", description, err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, statement, arguments...); err != nil {
-		return fmt.Errorf("%s: %w", description, err)
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit %s: %w", description, err)
-	}
-	open = false
 	return nil
 }

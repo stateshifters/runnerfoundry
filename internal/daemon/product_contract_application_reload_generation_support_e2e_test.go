@@ -300,7 +300,7 @@ func e2eAssertReloadPolicyOutcome(
 	wantDestroys int,
 ) {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "windows")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "windows")
 	if destroys := application.windows.destroyCount(); destroys != wantDestroys {
 		instances, inspectErr := application.windows.Inspect(context.Background())
 		t.Fatalf("%s reload destroys = %d, want %d; processing=%+v processing_error=%v instances=%+v inspect_error=%v",
@@ -384,7 +384,7 @@ func e2eLoadSingleApplicationProcessing(
 	jobID core.JobID,
 ) core.ProcessingJob {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != jobID {
 		t.Fatalf("reload processing = %+v, error = %v", processing, err)
 	}

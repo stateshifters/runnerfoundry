@@ -29,22 +29,20 @@ func (store *Store) applyObservation(
 	identity core.JobIdentity,
 	begin string,
 	operation postgresObservationOperation,
-) (_ core.ObservationResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) (core.ObservationResult, error) {
+	outcome := core.ObservationUnmatched
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
+		if err != nil || !matched {
+			return err
+		}
+		outcome, err = operation(ctx, transaction, source, identity)
+		return err
+	})
 	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("begin %s: %w", begin, err)
+		return core.ObservationResult{}, fmt.Errorf("%s: %w", begin, err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
-	if err != nil || !matched {
-		return commitObservation(ctx, transaction, &open, core.ObservationUnmatched, err)
-	}
-	outcome, err := operation(ctx, transaction, source, identity)
-	if err != nil {
-		return core.ObservationResult{}, err
-	}
-	return commitObservation(ctx, transaction, &open, outcome, nil)
+	return core.ObservationResult{Outcome: outcome}, nil
 }
 
 func terminalizeResolvedSource(
@@ -191,7 +189,9 @@ func lookupSourceByJobID(
 ) (core.SourceReference, bool, error) {
 	var adapter string
 	var identifier string
-	err := transaction.QueryRow(ctx, sourceByJobIDSQL, jobID).Scan(&adapter, &identifier)
+	err := transaction.ReadRow(ctx, sourceByJobIDSQL, func(row Scanner) error {
+		return row.Scan(&adapter, &identifier)
+	}, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.SourceReference{}, false, nil
 	}
@@ -225,7 +225,9 @@ func classifyRunnerAcceptance(
 		arguments = append(arguments, core.AttemptRunnerName(identity.JobID, identity.AttemptID))
 	}
 	var accepted bool
-	if err := transaction.QueryRow(ctx, statement, arguments...).Scan(&accepted); err != nil {
+	if err := transaction.ReadRow(ctx, statement, func(row Scanner) error {
+		return row.Scan(&accepted)
+	}, arguments...); err != nil {
 		return "", fmt.Errorf("classify runner acceptance observation: %w", err)
 	}
 	if accepted {
@@ -241,15 +243,18 @@ func classifyProcessingAttempt(
 	identity core.JobIdentity,
 ) (bool, core.ObservationOutcome, error) {
 	var matched bool
-	if err := transaction.QueryRow(ctx, processingAttemptExistsSQL, source.Adapter, source.ID,
-		core.AttemptRunnerName(identity.JobID, identity.AttemptID)).Scan(&matched); err != nil {
+	if err := transaction.ReadRow(ctx, processingAttemptExistsSQL, func(row Scanner) error {
+		return row.Scan(&matched)
+	}, source.Adapter, source.ID, core.AttemptRunnerName(identity.JobID, identity.AttemptID)); err != nil {
 		return false, "", fmt.Errorf("match lifecycle processing attempt: %w", err)
 	}
 	if matched {
 		return true, "", nil
 	}
 	var tombstoned bool
-	if err := transaction.QueryRow(ctx, sourceTombstonedSQL, source.Adapter, source.ID).Scan(&tombstoned); err != nil {
+	if err := transaction.ReadRow(ctx, sourceTombstonedSQL, func(row Scanner) error {
+		return row.Scan(&tombstoned)
+	}, source.Adapter, source.ID); err != nil {
 		return false, "", fmt.Errorf("classify lifecycle processing attempt: %w", err)
 	}
 	if tombstoned {
@@ -264,26 +269,9 @@ func executeAffected(
 	statement string,
 	arguments ...any,
 ) (int64, error) {
-	result, err := transaction.Execute(ctx, statement, arguments...)
+	affected, err := transaction.Execute(ctx, statement, arguments...)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("execute observation statement: %w", err)
 	}
-	return result.RowsAffected()
-}
-
-func commitObservation(
-	ctx context.Context,
-	transaction Transaction,
-	open *bool,
-	outcome core.ObservationOutcome,
-	observationErr error,
-) (core.ObservationResult, error) {
-	if observationErr != nil {
-		return core.ObservationResult{}, observationErr
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return core.ObservationResult{}, fmt.Errorf("commit job observation: %w", err)
-	}
-	*open = false
-	return core.ObservationResult{Outcome: outcome}, nil
+	return affected, nil
 }

@@ -115,7 +115,7 @@ func startGuardedRecoveryCandidate(t *testing.T, harness *e2eHarness, requestID 
 
 func loadGuardedRaceProcessing(t *testing.T, harness *e2eHarness) []core.ProcessingJob {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil {

@@ -54,7 +54,7 @@ func (orchestrator *Orchestrator) recordReconciledProvisioningFailure(
 	ctx context.Context,
 	processing core.ProcessingJob,
 ) (reconciliationChange, error) {
-	recorded, err := orchestrator.store.RecordProvisioningFailureReported(ctx, processing)
+	recorded, err := orchestrator.failures.RecordProvisioningFailureReported(ctx, processing)
 	if err != nil {
 		return reconciliationChange{}, fmt.Errorf("record reported provisioning failure for job %s: %w", processing.Job.ID, err)
 	}

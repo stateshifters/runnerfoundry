@@ -275,7 +275,7 @@ func (orchestrator *Orchestrator) recoverExpiredClaim(
 		processing,
 		operations.RunnerBootstrapProvider,
 		func() (core.RetryResult, error) {
-			return orchestrator.store.RecoverUnstartedProcessing(ctx, processing)
+			return orchestrator.transitions.RecoverUnstartedProcessing(ctx, processing)
 		},
 	)
 	if err != nil {
@@ -305,7 +305,7 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 			return change, err
 		}
 	}
-	transition, err := orchestrator.store.RemoveTerminal(ctx, processing.Job.ID)
+	transition, err := orchestrator.transitions.RemoveTerminal(ctx, processing.Job.ID)
 	if err != nil {
 		return change, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
 	}
@@ -340,7 +340,7 @@ func (orchestrator *Orchestrator) retryIfUnstarted(
 		processing,
 		operations.RunnerBootstrapProvider,
 		func() (core.RetryResult, error) {
-			return orchestrator.store.RetryUnstarted(ctx, processing)
+			return orchestrator.transitions.RetryUnstarted(ctx, processing)
 		},
 	)
 	if err != nil {

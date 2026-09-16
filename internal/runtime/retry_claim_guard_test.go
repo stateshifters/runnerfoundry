@@ -41,7 +41,7 @@ func TestReconciliationRetryUsesClaimSnapshot(t *testing.T) {
 	store.retryOutcome = core.RetryClaimChanged
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store,
+		store, store, store,
 		sourceOperationsResolverFake{operations: &bootstrapGeneratorFake{}},
 		provider,
 		provider,

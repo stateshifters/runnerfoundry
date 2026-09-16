@@ -196,7 +196,7 @@ func assertMigratedPostgresState(
 	t.Cleanup(pool.Close)
 	connection := postgresstate.NewPGXConnection(pool)
 	store := postgresstate.NewConnectionStore(connection)
-	githubStore := githubpostgres.NewStore(connection)
+	githubStore := githubpostgres.NewStore(connection.AdapterExtension(), store)
 	assertMigratedQueueClassifications(ctx, t, store, core.QueueQueued)
 	assertRemigratedGitHubState(ctx, t, githubStore)
 	assertRemigratedCapacity(ctx, t, store, githubStore)

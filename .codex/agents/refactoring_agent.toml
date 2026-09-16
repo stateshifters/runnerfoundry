@@ -1,7 +1,7 @@
 name = "refactoring_agent"
 description = "Implementation agent for an approved refactoring plan already informed by the architecture_guardian. Use it to execute that plan without scope or intent drift, run every project verification gate including E2E, and obtain architecture_guardian approval."
-model = "gpt-6-astra"
-model_reasoning_effort = "low"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """

@@ -10,8 +10,8 @@ import (
 func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
-	transaction := Transaction{execute: successfulExecute, commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction)})
+	transaction := transactionStub{execute: successfulExecute, commit: successfulCompletion, rollback: successfulCompletion}
+	store := newStore(executorStub{begin: transactionBeginning(transaction)})
 	if err := store.PublishMemberState(context.Background(), testMemberIDA, now,
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 30}, {RunnerPool: "disabled", Capacity: 0}}); err != nil {
 		t.Fatalf("publish: %v", err)
@@ -24,7 +24,7 @@ func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
 func TestMemberQueries(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
-	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
+	store := newStore(executorStub{queryRow: func(context.Context, string, ...any) rowStub {
 		return rowFromValues([]any{1})
 	}})
 	if count, err := store.CountLiveMembers(context.Background(), now); err != nil || count != 1 {
@@ -34,7 +34,7 @@ func TestMemberQueries(t *testing.T) {
 
 func TestAvailableCapacity(t *testing.T) {
 	t.Parallel()
-	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
+	store := newStore(executorStub{queryRow: func(context.Context, string, ...any) rowStub {
 		return rowFromValues([]any{30, 7, 5})
 	}})
 	now := fixedTime()

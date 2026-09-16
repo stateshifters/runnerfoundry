@@ -141,7 +141,7 @@ func persistSQLiteDurabilityState(t *testing.T, databasePath string) sqliteDurab
 	publishSQLiteDurabilityMember(t, store, state)
 	state.claimed = persistSQLiteProcessing(t, store, state)
 	state.queued = persistSQLiteQueuedDemand(t, store, state)
-	persistSQLiteRegistration(t, githubsqlite.NewStore(store.Backend()), state.registration)
+	persistSQLiteRegistration(t, githubsqlite.NewStore(store.AdapterExtension(), store), state.registration)
 	if err = store.Close(); err != nil {
 		t.Fatalf("close SQLite store before restart: %v", err)
 	}
@@ -190,6 +190,7 @@ func persistSQLiteProcessing(t *testing.T, store *sqlite.Store, state sqliteDura
 		t.Fatalf("queue processing candidate = %+v, error = %v", queuedProcessing, err)
 	}
 	claim := core.ProcessingClaim{
+		AttemptID:           core.NewAttemptID(),
 		MemberID:            state.memberID,
 		ClaimedAt:           state.publishedAt.Add(-time.Minute),
 		InventoryEndpointID: "e2e:provider",
@@ -277,7 +278,7 @@ func assertSQLiteDurableProcessing(t *testing.T, reopened *sqlite.Store, state s
 
 func assertSQLiteDurableRegistrations(t *testing.T, reopened *sqlite.Store, state sqliteDurabilityState) {
 	t.Helper()
-	store := githubsqlite.NewStore(reopened.Backend())
+	store := githubsqlite.NewStore(reopened.AdapterExtension(), reopened)
 	registrations, err := store.Registrations(context.Background())
 	if err != nil || len(registrations) != 1 || registrations[0] != state.registration {
 		t.Fatalf("durable active registration after restart = %+v, error = %v", registrations, err)
@@ -298,7 +299,7 @@ func assertSQLiteRecoveryOrdering(t *testing.T, reopened *sqlite.Store, state sq
 		state.claimed.Job.Source.Adapter: {RunnerBootstrapProvider: bootstrap},
 	}}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		reopened,
+		reopened, reopened, reopened,
 		resolver,
 		provider,
 		provider,
@@ -324,7 +325,8 @@ func claimRecoveredJob(
 ) {
 	t.Helper()
 	claimed, err := store.ClaimOldest(context.Background(), state.runnerPool, core.ProcessingClaim{
-		MemberID: state.memberID, ClaimedAt: claimedAt, InventoryEndpointID: provider.EndpointID(),
+		AttemptID: core.NewAttemptID(),
+		MemberID:  state.memberID, ClaimedAt: claimedAt, InventoryEndpointID: provider.EndpointID(),
 	})
 	if err != nil || claimed.Outcome != core.ClaimClaimed || claimed.Processing.Job.ID != want {
 		t.Fatalf("%s claim after restart recovery = %+v, error = %v", position, claimed, err)

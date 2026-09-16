@@ -12,7 +12,7 @@ import (
 func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 	statements := make([]string, 0, 2)
 	arguments := make([][]any, 0, 2)
-	transaction := Transaction{execute: func(_ context.Context, statement string, supplied ...any) (Result, error) {
+	transaction := transactionStub{execute: func(_ context.Context, statement string, supplied ...any) (resultStub, error) {
 		statements = append(statements, statement)
 		arguments = append(arguments, supplied)
 		return successfulResult(), nil
@@ -20,7 +20,7 @@ func TestRecoverUnstartedProcessingRequestsGuardedTransition(t *testing.T) {
 	processing := core.ProcessingJob{Job: core.Job{ID: testJobID, RunnerPool: "linux", EnqueuedAt: fixedTime().Add(time.Minute)},
 		RunnerName: core.AttemptRunnerName(testJobID, core.AttemptID{1}),
 		ClaimedAt:  fixedTime(), InventoryEndpointID: "docker:member-a"}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
 		RecoverUnstartedProcessing(context.Background(), processing)
 	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 ||
 		!strings.Contains(statements[0], "claimed_at = ?") || !strings.Contains(statements[0], "runner_started = 0") ||
@@ -39,16 +39,16 @@ func TestRetryUnstartedProcessingRejectsReplacementClaim(t *testing.T) {
 	replacement.RunnerName = core.AttemptRunnerName(testJobID, core.AttemptID{2})
 	replacement.ClaimedAt = stale.ClaimedAt.Add(time.Minute)
 	replacement.InventoryEndpointID = "docker:member-b"
-	transaction := Transaction{
-		execute: func(context.Context, string, ...any) (Result, error) {
+	transaction := transactionStub{
+		execute: func(context.Context, string, ...any) (resultStub, error) {
 			t.Fatal("stale retry mutated replacement claim")
-			return Result{}, nil
+			return resultStub{}, nil
 		},
 		queryRow: constantRow(rowFromValues(sqliteClaimedValues(replacement, false, false))),
 		commit:   successfulCompletion, rollback: successfulCompletion,
 	}
 
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
 		RetryUnstarted(context.Background(), stale)
 	if err != nil || result.Outcome != core.RetryClaimChanged {
 		t.Fatalf("stale retry = (%#v, %v)", result, err)
@@ -89,8 +89,8 @@ func assertSQLiteReplacementRecovery(
 	values := sqliteClaimedValues(replacement, state.accepted, state.terminal)
 	values[10] = string(state.failure)
 	executeCalls := 0
-	transaction := Transaction{
-		execute: func(ctx context.Context, statement string, arguments ...any) (Result, error) {
+	transaction := transactionStub{
+		execute: func(ctx context.Context, statement string, arguments ...any) (resultStub, error) {
 			executeCalls++
 			return outcomeExecute(0)(ctx, statement, arguments...)
 		},
@@ -98,7 +98,7 @@ func assertSQLiteReplacementRecovery(
 		commit:   successfulCompletion, rollback: successfulCompletion,
 	}
 
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
 		RecoverUnstartedProcessing(context.Background(), stale)
 	if err != nil || result.Outcome != core.RetryClaimChanged || executeCalls != 1 {
 		t.Fatalf("recovery = (%#v, %v), execute calls=%d", result, err, executeCalls)

@@ -16,6 +16,11 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
+func builderStatePorts(store *builderStoreFake) runtimeStatePorts {
+	return runtimeStatePorts{jobs: store, processing: store, transitions: store,
+		provisioningFailures: store, members: store, capacity: store}
+}
+
 func daemonTestID(seed byte) core.MemberID {
 	return core.MemberID(fmt.Sprintf("runner-host-%d", seed))
 }
@@ -27,7 +32,7 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 	manager := newBuilderManager(t, store)
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
-		store: store, demandStore: store, manager: manager, member: daemonTestID(1),
+		state: builderStatePorts(store), demandStore: store, manager: manager, member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
@@ -113,7 +118,7 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 	t.Helper()
 	store := newBuilderStoreFake()
 	return unifiedBuilderDependencies{
-		store: store, demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
+		state: builderStatePorts(store), demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
@@ -174,7 +179,7 @@ func newBuilderOrchestrator(
 		t.Fatalf("source operations resolver: %v", err)
 	}
 	return runtimeengine.NewOrchestratorWithSourceOperations(
-		store, resolver, provider, provider, daemonTestID(1), builderTime,
+		store, store, store, resolver, provider, provider, daemonTestID(1), builderTime,
 	)
 }
 

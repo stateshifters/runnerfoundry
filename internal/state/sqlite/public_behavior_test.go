@@ -11,7 +11,7 @@ import (
 
 func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	t.Parallel()
-	store := NewStore(successfulBehaviorExecutor())
+	store := newStore(successfulBehaviorExecutor())
 	ctx := context.Background()
 	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-3"},
 		RunnerPool: "linux", EnqueuedAt: fixedTime()}
@@ -19,7 +19,7 @@ func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 	if err != nil || queued.Outcome != core.QueueQueued || queued.Job.ID != testJobID {
 		t.Fatalf("queue = %#v, %v", queued, err)
 	}
-	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}})
+	claimed, err := store.ClaimOldest(ctx, "linux", validProcessingClaim())
 	if err != nil || claimed.Outcome != core.ClaimClaimed || claimed.Processing.MemberID != testMemberID {
 		t.Fatalf("claim = %#v, %v", claimed, err)
 	}
@@ -33,7 +33,7 @@ func TestStorePublicQueueAndProcessingLookupBehaviors(t *testing.T) {
 
 func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
 	t.Parallel()
-	store := NewStore(successfulBehaviorExecutor())
+	store := newStore(successfulBehaviorExecutor())
 	ctx := context.Background()
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
 	if _, err := store.ObserveRunnerAcceptance(ctx, core.JobIdentity{Source: source}); err != nil {
@@ -49,7 +49,7 @@ func TestStorePublicSourceLifecycleBehaviors(t *testing.T) {
 
 func TestStorePublicCapacityBehaviors(t *testing.T) {
 	t.Parallel()
-	store := NewStore(successfulBehaviorExecutor())
+	store := newStore(successfulBehaviorExecutor())
 	ctx, now := context.Background(), fixedTime()
 	if err := store.PublishMemberState(ctx, testMemberID, now,
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); err != nil {
@@ -68,20 +68,20 @@ func TestStorePublicCapacityBehaviors(t *testing.T) {
 
 func TestStoreCloseUsesOptionalDatabaseCloser(t *testing.T) {
 	t.Parallel()
-	if err := NewStore(Executor{}).Close(); err != nil {
+	if err := newStore(executorStub{}).Close(); err != nil {
 		t.Fatalf("empty close: %v", err)
 	}
-	store := NewStore(Executor{})
+	store := newStore(executorStub{})
 	store.close = func() error { return errors.New("close") }
 	if err := store.Close(); err == nil {
 		t.Fatal("expected close error")
 	}
 }
 
-func successfulBehaviorExecutor() Executor {
-	transaction := Transaction{
+func successfulBehaviorExecutor() executorStub {
+	transaction := transactionStub{
 		execute: successfulExecute,
-		query: func(_ context.Context, statement string, _ ...any) (Rows, error) {
+		query: func(_ context.Context, statement string, _ ...any) (rowsStub, error) {
 			switch statement {
 			case processingByMemberSQL:
 				return rowsFromValues([][]any{claimedProcessingJobValues()}), nil
@@ -89,7 +89,7 @@ func successfulBehaviorExecutor() Executor {
 				return rowsFromValues(nil), nil
 			}
 		},
-		queryRow: func(_ context.Context, statement string, _ ...any) Row {
+		queryRow: func(_ context.Context, statement string, _ ...any) rowStub {
 			switch statement {
 			case countLiveMembersSQL:
 				return rowFromValues([]any{1})
@@ -101,7 +101,7 @@ func successfulBehaviorExecutor() Executor {
 		},
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	return Executor{begin: transactionBeginning(transaction), queryRow: transaction.queryRow}
+	return executorStub{begin: transactionBeginning(transaction), queryRow: transaction.queryRow}
 }
 
 func processingJobValues() []any {
@@ -114,13 +114,13 @@ func claimedProcessingJobValues() []any {
 		string(core.AttemptRunnerName(testJobID, core.AttemptID{1})), fixedTime().UnixNano(), "test:endpoint", true, true, ""}
 }
 
-func rowFromValues(values []any) Row {
-	return Row{scan: func(destinations ...any) error { return assignDestinations(destinations, values) }}
+func rowFromValues(values []any) rowStub {
+	return rowStub{scan: func(destinations ...any) error { return assignDestinations(destinations, values) }}
 }
 
-func rowsFromValues(values [][]any) Rows {
+func rowsFromValues(values [][]any) rowsStub {
 	index := -1
-	return Rows{close: func() error { return nil }, err: func() error { return nil },
+	return rowsStub{close: func() error { return nil }, err: func() error { return nil },
 		next: func() bool { index++; return index < len(values) },
 		scan: func(destinations ...any) error { return assignDestinations(destinations, values[index]) }}
 }

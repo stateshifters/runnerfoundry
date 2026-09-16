@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -16,8 +15,6 @@ const insertGitHubRunnerPoolDeclarationSQL = `INSERT INTO runnerfoundry_github_m
 	(member_id, runner_pool, runner_group) VALUES(?, ?, ?)`
 const liveGitHubRunnerPoolDeclarationsSQL = `SELECT declarations.member_id, declarations.runner_pool, declarations.runner_group
 	FROM runnerfoundry_github_member_runner_pools declarations
-	JOIN runnerfoundry_members members ON members.member_id = declarations.member_id
-	WHERE members.heartbeat_at >= ?
 	ORDER BY declarations.member_id, declarations.runner_pool`
 
 var _ githubsource.RunnerPoolDeclarationRepository = (*Store)(nil)
@@ -26,67 +23,65 @@ func (store *Store) ReplaceGitHubRunnerPoolDeclarations(
 	ctx context.Context,
 	memberID core.MemberID,
 	declarations []githubsource.RunnerPoolDeclaration,
-) (resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin GitHub Runner Pool declaration replacement: %w", err)
-	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if _, err = transaction.Execute(ctx, deleteGitHubRunnerPoolDeclarationsSQL, string(memberID)); err != nil {
-		return fmt.Errorf("remove GitHub Runner Pool declarations: %w", err)
-	}
-	for _, declaration := range declarations {
-		if _, err = transaction.Execute(ctx, insertGitHubRunnerPoolDeclarationSQL, string(memberID),
-			string(declaration.RunnerPool), declaration.RunnerGroup); err != nil {
-			return fmt.Errorf("insert GitHub Runner Pool declaration %q: %w", declaration.RunnerPool, err)
+) error {
+	if err := store.transactions.WithinTransaction(ctx, func(transaction sqlitestate.Transaction) error {
+		if _, err := transaction.Execute(ctx, deleteGitHubRunnerPoolDeclarationsSQL, string(memberID)); err != nil {
+			return fmt.Errorf("remove GitHub Runner Pool declarations: %w", err)
 		}
+		for _, declaration := range declarations {
+			if _, err := transaction.Execute(ctx, insertGitHubRunnerPoolDeclarationSQL, string(memberID),
+				string(declaration.RunnerPool), declaration.RunnerGroup); err != nil {
+				return fmt.Errorf("insert GitHub Runner Pool declaration %q: %w", declaration.RunnerPool, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("replace GitHub Runner Pool declarations transaction: %w", err)
 	}
-	if err = transaction.Commit(ctx); err != nil {
-		return fmt.Errorf("commit GitHub Runner Pool declaration replacement: %w", err)
-	}
-	open = false
 	return nil
 }
 
 func (store *Store) LiveGitHubRunnerPoolDeclarations(
 	ctx context.Context,
 	liveMemberCutoff time.Time,
-) (_ []githubsource.MemberRunnerPoolDeclaration, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) ([]githubsource.MemberRunnerPoolDeclaration, error) {
+	liveMemberIDs, err := store.memberLiveness.LiveMemberIDs(ctx, liveMemberCutoff)
 	if err != nil {
-		return nil, fmt.Errorf("begin live GitHub Runner Pool declaration lookup: %w", err)
+		return nil, fmt.Errorf("read live members for GitHub Runner Pool declarations: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	rows, err := transaction.Query(ctx, liveGitHubRunnerPoolDeclarationsSQL, liveMemberCutoff.UnixNano())
-	if err != nil {
-		return nil, fmt.Errorf("query live GitHub Runner Pool declarations: %w", err)
+	liveMembers := make(map[core.MemberID]struct{}, len(liveMemberIDs))
+	for _, memberID := range liveMemberIDs {
+		liveMembers[memberID] = struct{}{}
 	}
-	declarations, err := scanGitHubRunnerPoolDeclarations(rows)
-	if err != nil {
-		return nil, err
+	var declarations []githubsource.MemberRunnerPoolDeclaration
+	if err = store.transactions.WithinTransaction(ctx, func(transaction sqlitestate.Transaction) error {
+		return transaction.VisitRows(ctx, liveGitHubRunnerPoolDeclarationsSQL, func(row sqlitestate.Scanner) error {
+			declaration, live, scanErr := scanGitHubRunnerPoolDeclaration(row, liveMembers)
+			if scanErr != nil {
+				return scanErr
+			}
+			if live {
+				declarations = append(declarations, declaration)
+			}
+			return nil
+		})
+	}); err != nil {
+		return nil, fmt.Errorf("live GitHub Runner Pool declaration lookup: %w", err)
 	}
-	if err = transaction.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit live GitHub Runner Pool declaration lookup: %w", err)
-	}
-	open = false
 	return declarations, nil
 }
 
-func scanGitHubRunnerPoolDeclarations(rows sqlitestate.Rows) (declarations []githubsource.MemberRunnerPoolDeclaration, resultErr error) {
-	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
-	for rows.Next() {
-		var memberID, runnerPool, runnerGroup string
-		if err := rows.Scan(&memberID, &runnerPool, &runnerGroup); err != nil {
-			return nil, fmt.Errorf("scan GitHub Runner Pool declaration: %w", err)
-		}
-		declarations = append(declarations, githubsource.MemberRunnerPoolDeclaration{
-			MemberID: core.MemberID(memberID), RunnerPool: core.RunnerPool(runnerPool), RunnerGroup: runnerGroup,
-		})
+func scanGitHubRunnerPoolDeclaration(
+	row sqlitestate.Scanner,
+	liveMembers map[core.MemberID]struct{},
+) (githubsource.MemberRunnerPoolDeclaration, bool, error) {
+	var memberID, runnerPool, runnerGroup string
+	if err := row.Scan(&memberID, &runnerPool, &runnerGroup); err != nil {
+		return githubsource.MemberRunnerPoolDeclaration{}, false,
+			fmt.Errorf("scan GitHub Runner Pool declaration: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate GitHub Runner Pool declarations: %w", err)
-	}
-	return declarations, nil
+	_, live := liveMembers[core.MemberID(memberID)]
+	return githubsource.MemberRunnerPoolDeclaration{
+		MemberID: core.MemberID(memberID), RunnerPool: core.RunnerPool(runnerPool), RunnerGroup: runnerGroup,
+	}, live, nil
 }

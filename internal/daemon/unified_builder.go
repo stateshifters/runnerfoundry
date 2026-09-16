@@ -14,15 +14,17 @@ import (
 	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
-type unifiedStore interface {
-	statecontract.JobQueueStore
-	statecontract.ProcessingJobStore
-	runtimeengine.MembershipStore
-	statecontract.RunnerPoolCapacityStore
+type runtimeStatePorts struct {
+	jobs                 statecontract.JobQueueStore
+	processing           statecontract.ProcessingJobStore
+	transitions          statecontract.ProcessingTransitions
+	provisioningFailures statecontract.ProvisioningFailureTransitions
+	members              statecontract.MemberRegistry
+	capacity             statecontract.RunnerPoolCapacityStore
 }
 
 type unifiedBuilderDependencies struct {
-	store              unifiedStore
+	state              runtimeStatePorts
 	demandStore        githubsource.AssignedDemandRepository
 	manager            githubManagerComposition
 	member             core.MemberID
@@ -145,10 +147,10 @@ func buildConfiguredEngine(
 	enqueueWake func(core.RunnerPool),
 	stateBackend string,
 ) *UnifiedEngine {
-	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, enqueueWake, stateBackend)
+	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.state.jobs, enqueueWake, stateBackend)
 	handler := newGitHubDemandHandler(queue, dependencies.demandStore, enqueueWake, stateBackend)
 	capacity := runtimeengine.NewCapacitySnapshotService(
-		dependencies.store, dependencies.currentTime, dependencies.memberTTL,
+		dependencies.state.capacity, dependencies.currentTime, dependencies.memberTTL,
 	)
 	source := newGitHubSourceRuntime(
 		dependencies.manager, capacity, string(dependencies.member),
@@ -157,7 +159,7 @@ func buildConfiguredEngine(
 	)
 	source.report = dependencies.report
 	membership := runtimeengine.NewMembershipService(
-		dependencies.store, dependencies.member, assembled.localCapacity, dependencies.currentTime,
+		dependencies.state.members, dependencies.member, assembled.localCapacity, dependencies.currentTime,
 	)
 	return NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
@@ -241,7 +243,8 @@ func (assembled *assembledRuntime) appendRunnerPool(
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		dependencies.store, assembled.sourceOperations, provider, dependencies.inventory, dependencies.member,
+		dependencies.state.processing, dependencies.state.transitions, dependencies.state.provisioningFailures,
+		assembled.sourceOperations, provider, dependencies.inventory, dependencies.member,
 		dependencies.currentTime,
 	)
 	assembled.appendPoolConfiguration(runnerPoolConfig)
@@ -286,7 +289,8 @@ func newOrchestrationPool(
 }
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
-	if dependencies.store == nil || dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
+	if !hasCompleteRuntimeState(dependencies.state) ||
+		dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
 		dependencies.leadership == nil || dependencies.currentTime == nil ||
 		(dependencies.ticker == nil && dependencies.tickers == nil) ||
 		dependencies.processGate == nil || dependencies.inventory == nil {
@@ -296,6 +300,11 @@ func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error 
 		return errors.New("member TTL must be positive")
 	}
 	return nil
+}
+
+func hasCompleteRuntimeState(ports runtimeStatePorts) bool {
+	return ports.jobs != nil && ports.processing != nil && ports.transitions != nil &&
+		ports.provisioningFailures != nil && ports.members != nil && ports.capacity != nil
 }
 
 type orchestrationPool struct {

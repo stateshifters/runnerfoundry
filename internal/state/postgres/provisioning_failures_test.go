@@ -13,9 +13,9 @@ func TestProvisioningFailureTransitionsUseExactAttemptReservation(t *testing.T) 
 	processing := postgresProvisioningFailureProcessing()
 	reservedValues := postgresClaimedOutcomeValues(processing, false, false)
 	reservedValues[10] = string(core.ProvisioningFailureReporting)
-	protocol := &recordedTransaction{rows: []Row{rowFromValues(reservedValues)}}
+	protocol := &recordedTransaction{rows: []rowStub{rowFromValues(reservedValues)}}
 
-	result, err := NewStore(protocol.executor()).ReserveProvisioningFailure(context.Background(), processing)
+	result, err := newStore(protocol.executor()).ReserveProvisioningFailure(context.Background(), processing)
 	if err != nil || result.Outcome != core.RetryFailureReportingPending || protocol.commitCalls != 1 {
 		t.Fatalf("reserve = (%#v, %v), commits=%d", result, err, protocol.commitCalls)
 	}
@@ -29,8 +29,8 @@ func TestProvisioningFailureReservationClassifiesConcurrentLifecycleState(t *tes
 	processing := postgresProvisioningFailureProcessing()
 	for name, testCase := range postgresReservationClassificationCases(processing) {
 		t.Run(name, func(t *testing.T) {
-			protocol := &recordedTransaction{rows: []Row{testCase.row}}
-			result, err := NewStore(protocol.executor()).ReserveProvisioningFailure(context.Background(), processing)
+			protocol := &recordedTransaction{rows: []rowStub{testCase.row}}
+			result, err := newStore(protocol.executor()).ReserveProvisioningFailure(context.Background(), processing)
 			if err != nil || result.Outcome != testCase.want {
 				t.Fatalf("reserve = (%#v, %v)", result, err)
 			}
@@ -39,14 +39,14 @@ func TestProvisioningFailureReservationClassifiesConcurrentLifecycleState(t *tes
 }
 
 func postgresReservationClassificationCases(processing core.ProcessingJob) map[string]struct {
-	row  Row
+	row  rowStub
 	want core.RetryOutcome
 } {
 	return map[string]struct {
-		row  Row
+		row  rowStub
 		want core.RetryOutcome
 	}{
-		"missing": {row: Row{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
+		"missing": {row: rowStub{scan: func(...any) error { return sql.ErrNoRows }}, want: core.RetryMissing},
 		"claim changed": {row: rowFromValues(postgresProvisioningFailureValues(
 			processing, false, false, "", "another-runner")), want: core.RetryClaimChanged},
 		"reported": {row: rowFromValues(postgresProvisioningFailureValues(
@@ -84,12 +84,12 @@ func TestProvisioningFailureTransitionsRollbackProtocolFailures(t *testing.T) {
 			{failExecuteAt: 1, executeErr: wantErr},
 			{failExecuteAt: 2, executeErr: wantErr},
 			{failExecuteAt: 3, executeErr: wantErr},
-			{rows: []Row{{scan: func(...any) error { return wantErr }}}},
+			{rows: []rowStub{rowStub{scan: func(...any) error { return wantErr }}}},
 			{commitErr: wantErr},
 		} {
 			t.Run(name, func(t *testing.T) {
 				protocol := failure
-				if err := operation(NewStore(protocol.executor())); err == nil {
+				if err := operation(newStore(protocol.executor())); err == nil {
 					t.Fatal("expected transition failure")
 				}
 			})
@@ -106,11 +106,11 @@ func TestProvisioningFailureFinalizationReportsProtocolFailures(t *testing.T) {
 		{failExecuteAt: 2, executeErr: wantErr},
 		{failExecuteAt: 3, executeErr: wantErr},
 		{affectedErr: wantErr},
-		{affected: []int64{1, 1, 0}, rows: []Row{{scan: func(...any) error { return wantErr }}}, commitErr: wantErr},
+		{affected: []int64{1, 1, 0}, rows: []rowStub{rowStub{scan: func(...any) error { return wantErr }}}, commitErr: wantErr},
 		{commitErr: wantErr},
 	} {
 		protocol := failure
-		if _, err := NewStore(protocol.executor()).FinalizeProvisioningFailure(
+		if _, err := newStore(protocol.executor()).FinalizeProvisioningFailure(
 			context.Background(), processing,
 		); err == nil {
 			t.Fatal("expected finalization failure")
@@ -122,9 +122,9 @@ func TestProvisioningFailureReportAndFinalizationRemainSeparateTransactions(t *t
 	processing := postgresProvisioningFailureProcessing()
 	reportedValues := postgresClaimedOutcomeValues(processing, false, false)
 	reportedValues[10] = string(core.ProvisioningFailureReported)
-	recordProtocol := &recordedTransaction{rows: []Row{rowFromValues(reportedValues)}}
+	recordProtocol := &recordedTransaction{rows: []rowStub{rowFromValues(reportedValues)}}
 
-	recorded, err := NewStore(recordProtocol.executor()).RecordProvisioningFailureReported(
+	recorded, err := newStore(recordProtocol.executor()).RecordProvisioningFailureReported(
 		context.Background(), processing,
 	)
 	if err != nil || recorded.Outcome != core.RetryFailureFinalizationPending || recordProtocol.commitCalls != 1 {
@@ -136,7 +136,7 @@ func TestProvisioningFailureReportAndFinalizationRemainSeparateTransactions(t *t
 	}
 
 	finalizeProtocol := &recordedTransaction{}
-	finalized, err := NewStore(finalizeProtocol.executor()).FinalizeProvisioningFailure(
+	finalized, err := newStore(finalizeProtocol.executor()).FinalizeProvisioningFailure(
 		context.Background(), processing,
 	)
 	if err != nil || finalized.Outcome != core.TerminalRemoved || finalizeProtocol.commitCalls != 1 {
@@ -159,9 +159,9 @@ func TestProvisioningFailureFinalizationClassifiesReplayAndPendingState(t *testi
 	} {
 		t.Run(name, func(t *testing.T) {
 			protocol := &postgresProvisioningFailureProtocol{
-				affected: []int64{1, 1, 0}, rows: []Row{rowFromValues([]any{testCase.exists})},
+				affected: []int64{1, 1, 0}, rows: []rowStub{rowFromValues([]any{testCase.exists})},
 			}
-			result, err := NewStore(protocol.executor()).FinalizeProvisioningFailure(
+			result, err := newStore(protocol.executor()).FinalizeProvisioningFailure(
 				context.Background(), processing,
 			)
 			if err != nil || result.Outcome != testCase.want {
@@ -189,7 +189,7 @@ func postgresProvisioningFailureValues(
 }
 
 type postgresProvisioningFailureProtocol struct {
-	rows          []Row
+	rows          []rowStub
 	affected      []int64
 	beginErr      error
 	executeErr    error
@@ -199,15 +199,15 @@ type postgresProvisioningFailureProtocol struct {
 	executeCalls  int
 }
 
-func (protocol *postgresProvisioningFailureProtocol) executor() Executor {
-	return Executor{begin: protocol.begin}
+func (protocol *postgresProvisioningFailureProtocol) executor() executorStub {
+	return executorStub{begin: protocol.begin}
 }
 
-func (protocol *postgresProvisioningFailureProtocol) begin(context.Context) (Transaction, error) {
+func (protocol *postgresProvisioningFailureProtocol) begin(context.Context) (transactionStub, error) {
 	if protocol.beginErr != nil {
-		return Transaction{}, protocol.beginErr
+		return transactionStub{}, protocol.beginErr
 	}
-	return Transaction{
+	return transactionStub{
 		execute:  protocol.execute,
 		queryRow: protocol.queryRow,
 		commit:   func(context.Context) error { return protocol.commitErr },
@@ -219,22 +219,22 @@ func (protocol *postgresProvisioningFailureProtocol) execute(
 	context.Context,
 	string,
 	...any,
-) (Result, error) {
+) (resultStub, error) {
 	protocol.executeCalls++
 	if protocol.executeCalls == protocol.failExecuteAt {
-		return Result{}, protocol.executeErr
+		return resultStub{}, protocol.executeErr
 	}
 	rows := int64(1)
 	if len(protocol.affected) > 0 {
 		rows = protocol.affected[0]
 		protocol.affected = protocol.affected[1:]
 	}
-	return Result{rowsAffected: func() (int64, error) { return rows, protocol.affectedErr }}, nil
+	return resultStub{rowsAffected: func() (int64, error) { return rows, protocol.affectedErr }}, nil
 }
 
-func (protocol *postgresProvisioningFailureProtocol) queryRow(context.Context, string, ...any) Row {
+func (protocol *postgresProvisioningFailureProtocol) queryRow(context.Context, string, ...any) rowStub {
 	if len(protocol.rows) == 0 {
-		return Row{scan: func(...any) error { return sql.ErrNoRows }}
+		return rowStub{scan: func(...any) error { return sql.ErrNoRows }}
 	}
 	row := protocol.rows[0]
 	protocol.rows = protocol.rows[1:]

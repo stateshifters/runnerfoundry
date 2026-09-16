@@ -17,8 +17,6 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
-	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
-	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
@@ -192,15 +190,13 @@ func testProductionStateDependencies() productionDependencies {
 		return &sqlitestate.Store{}, nil
 	}
 	dependencies.closeSQLite = func(*sqlitestate.Store) error { return nil }
-	dependencies.newSQLiteGitHubStore = func(sqlitestate.Executor) *githubsqlite.Store { return &githubsqlite.Store{} }
 	dependencies.newConnections = func(postgresconfig.Settings) (*cluster.Connections, error) { return &cluster.Connections{}, nil }
 	dependencies.newMigrationCatalog = func() (*cluster.Catalog, error) { return &cluster.Catalog{}, nil }
 	dependencies.newMigrator = func(*cluster.Connections, *cluster.Catalog) *cluster.Migrator { return &cluster.Migrator{} }
 	dependencies.migratePostgreSQL = func(*cluster.Migrator, context.Context) error { return nil }
 	dependencies.openClusterPool = func(*cluster.Connections, context.Context) (*pgxpool.Pool, error) { return &pgxpool.Pool{}, nil }
-	dependencies.newPGConnection = func(*pgxpool.Pool) postgresstate.Connection { return postgresstate.Connection{} }
-	dependencies.newPGStore = func(postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
-	dependencies.newPGGitHubStore = func(postgresstate.Connection) *githubpostgres.Store { return &githubpostgres.Store{} }
+	dependencies.newPGConnection = func(*pgxpool.Pool) *postgresstate.Connection { return nil }
+	dependencies.newPGStore = func(*postgresstate.Connection) *postgresstate.Store { return &postgresstate.Store{} }
 	dependencies.newQueueNotificationPool = func(*pgxpool.Pool) queueNotificationPool {
 		return queueNotificationPool{maxConnections: 2}
 	}
@@ -372,7 +368,7 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 	}
 	dependencies.currentTime = builderTime
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: builderStatePorts(store), registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildTimedProductionGeneration(
 		builderConfig(), state, &localLeadershipGate{}, nil,
@@ -410,7 +406,7 @@ func TestTimedProductionGenerationStopsTickerWhenCompositionFails(t *testing.T) 
 		return &manualCycleTicker{ticks: make(chan time.Time)}
 	}
 	store := newBuilderStoreFake()
-	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: builderStatePorts(store), registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	if _, err := buildTimedProductionGeneration(
 		config.Config{}, state, &localLeadershipGate{}, nil,
@@ -426,7 +422,7 @@ func TestBuildProductionGenerationComposesInjectedBoundaries(t *testing.T) {
 	configured := builderConfig()
 	configured.GitHub.Apps = []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "key.pem"}}
 	dependencies.readFile = func(string) ([]byte, error) { return []byte("key"), nil }
-	state := &productionState{store: store, registrationStore: store, demandStore: store, member: daemonTestID(1),
+	state := &productionState{store: builderStatePorts(store), registrationStore: store, demandStore: store, member: daemonTestID(1),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} }}
 	generation, err := buildProductionGenerationWithDependencies(
 		context.Background(), configured, state, &localLeadershipGate{}, func(error) {}, dependencies,
@@ -488,7 +484,7 @@ func newProductionGenerationFailureFixture(t *testing.T) productionGenerationFai
 	store := newBuilderStoreFake()
 	return productionGenerationFailureFixture{
 		configured: configured,
-		state:      &productionState{store: store, registrationStore: store, member: daemonTestID(1)},
+		state:      &productionState{store: builderStatePorts(store), registrationStore: store, member: daemonTestID(1)},
 		manager:    newBuilderManager(t, store),
 		wantErr:    errors.New("composition failed"), dependencies: func() productionDependencies {
 			dependencies := newProductionDependencies()
@@ -626,5 +622,4 @@ func TestGenerationConfigLoaderReportsReloadFailureAndAcceptsSameBackend(t *test
 	}
 }
 
-var _ unifiedStore = (*builderStoreFake)(nil)
 var _ githubsource.RegistrationRepository = (*builderStoreFake)(nil)

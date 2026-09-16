@@ -283,7 +283,9 @@ func productionCompositionDependencies(
 	dependencies.scaleSetTransportFactory = func() *http.Transport {
 		return productionCompositionHTTPTransport(t, host)
 	}
-	dependencies.dockerCommands, dependencies.libvirtCommands = dockerCommands, libvirtCommands
+	dependencies.newDockerLauncher = dockerCommands.newLauncher
+	dependencies.newDockerInventory = dockerCommands.newInventory
+	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readHostname = func() (string, error) { return "production-member", nil }
 	configureProductionCompositionClockAndLogging(&dependencies, tickers)
 	dependencies.readFile = productionCompositionFileReader(t)
@@ -533,7 +535,7 @@ func assertProductionCompositionProcessing(
 	runnerPool core.RunnerPool,
 ) core.ProcessingJob {
 	t.Helper()
-	records, err := runtime.state.store.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
+	records, err := runtime.state.store.processing.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
 	if err != nil || len(records) != 1 || records[0].Job.RunnerPool != runnerPool || records[0].InventoryEndpointID == "" {
 		t.Fatalf("production processing for %q = (%s, %v)", runnerPool, describeProcessing(records), err)
 	}
@@ -560,7 +562,7 @@ func assertNoProductionCompositionProcessing(
 	runnerPool core.RunnerPool,
 ) {
 	t.Helper()
-	records, err := runtime.state.store.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
+	records, err := runtime.state.store.processing.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
 	if err != nil || len(records) != 0 {
 		t.Fatalf("production processing after cleanup for %q = (%s, %v)", runnerPool, describeProcessing(records), err)
 	}

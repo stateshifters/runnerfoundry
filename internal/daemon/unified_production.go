@@ -18,9 +18,11 @@ import (
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
 	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
@@ -49,22 +51,23 @@ type productionDependencies struct {
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
 	newClient                func(transport.Repository, transport.Credentials, transport.TransportFactory) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
-	dockerCommands           dockerprovider.ExecCommandRunner
+	newDockerLauncher        func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory       func(core.MemberID) execution.RunnerInventory
 	libvirtCommands          libvirtprovider.CommandRunner
 	newTicker                func(time.Duration) cycleTicker
 	currentTime              func() time.Time
 	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
 	openSQLite               func(context.Context, string, ...sqlitestate.SchemaExtension) (*sqlitestate.Store, error)
 	closeSQLite              func(*sqlitestate.Store) error
-	newSQLiteGitHubStore     func(sqlitestate.Executor) *githubsqlite.Store
+	newSQLiteGitHubStore     func(*sqlitestate.AdapterExtension, statecontract.MemberLivenessReader) *githubsqlite.Store
 	newConnections           func(postgresconfig.Settings) (*cluster.Connections, error)
 	newMigrationCatalog      func() (*cluster.Catalog, error)
 	newMigrator              func(*cluster.Connections, *cluster.Catalog) *cluster.Migrator
 	migratePostgreSQL        func(*cluster.Migrator, context.Context) error
 	openClusterPool          func(*cluster.Connections, context.Context) (*pgxpool.Pool, error)
-	newPGConnection          func(*pgxpool.Pool) postgresstate.Connection
-	newPGStore               func(postgresstate.Connection) *postgresstate.Store
-	newPGGitHubStore         func(postgresstate.Connection) *githubpostgres.Store
+	newPGConnection          func(*pgxpool.Pool) *postgresstate.Connection
+	newPGStore               func(*postgresstate.Connection) *postgresstate.Store
+	newPGGitHubStore         func(*postgresstate.AdapterExtension, statecontract.MemberLivenessReader) *githubpostgres.Store
 	newQueueNotificationPool func(*pgxpool.Pool) queueNotificationPool
 	closePool                func(*pgxpool.Pool)
 	newLeaderElector         func(*cluster.Connections) *cluster.LeaderElector
@@ -78,20 +81,26 @@ type productionDependencies struct {
 }
 
 func newProductionDependencies() productionDependencies {
+	dockerLauncher, dockerInventory := newProductionDockerFactories()
 	return productionDependencies{
 		readFile: os.ReadFile, httpTransport: http.DefaultTransport,
 		newDiscoverer: transport.NewDiscoverer, newClient: transport.NewClient, newManager: githubsource.NewManager,
-		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
+		newDockerLauncher: dockerLauncher, newDockerInventory: dockerInventory,
+		libvirtCommands: libvirtprovider.NewExecCommandRunner(),
 		newTicker: func(duration time.Duration) cycleTicker {
 			operatingSystemTicker := time.NewTicker(duration)
 			return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 		}, currentTime: time.Now,
 		openSQLite: sqlitestate.Open, closeSQLite: (*sqlitestate.Store).Close,
-		newSQLiteGitHubStore: githubsqlite.NewStore,
-		newConnections:       cluster.NewConnections, newMigrationCatalog: newPostgreSQLMigrationCatalog,
+		newSQLiteGitHubStore: func(extension *sqlitestate.AdapterExtension, members statecontract.MemberLivenessReader) *githubsqlite.Store {
+			return githubsqlite.NewStore(extension, members)
+		},
+		newConnections: cluster.NewConnections, newMigrationCatalog: newPostgreSQLMigrationCatalog,
 		newMigrator: cluster.NewMigrator, migratePostgreSQL: (*cluster.Migrator).Up,
 		openClusterPool: (*cluster.Connections).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
-		newPGStore: postgresstate.NewConnectionStore, newPGGitHubStore: githubpostgres.NewStore,
+		newPGStore: postgresstate.NewConnectionStore, newPGGitHubStore: func(extension *postgresstate.AdapterExtension, members statecontract.MemberLivenessReader) *githubpostgres.Store {
+			return githubpostgres.NewStore(extension, members)
+		},
 		newQueueNotificationPool: newPGXQueueNotificationPool,
 		closePool:                (*pgxpool.Pool).Close,
 		newLeaderElector:         cluster.NewLeaderElector, tryLeader: (*cluster.LeaderElector).TryAcquire,
@@ -99,6 +108,18 @@ func newProductionDependencies() productionDependencies {
 		readHostname:     os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
 		openState: openProductionStateWithDependencies, buildGeneration: buildProductionGenerationWithDependencies,
 	}
+}
+
+func newProductionDockerFactories() (
+	func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher,
+	func(core.MemberID) execution.RunnerInventory,
+) {
+	commands := dockerprovider.NewExecCommandRunner()
+	return func(config dockerprovider.ComposeConfig, member core.MemberID) execution.RunnerLauncher {
+			return dockerprovider.NewComposeLauncher(commands, config, member)
+		}, func(member core.MemberID) execution.RunnerInventory {
+			return dockerprovider.NewInventory(commands, member)
+		}
 }
 
 func buildProductionGenerationWithDependencies(
@@ -207,7 +228,7 @@ func buildTimedProductionGeneration(
 ) (*maintenanceGeneration, error) {
 	tickers := newProductionMaintenanceLaneTickers(dependencies.newTicker)
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{
-		store: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
+		state: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
 		tickers: &tickers, report: report,
@@ -245,7 +266,7 @@ func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {
 }
 
 type productionState struct {
-	store              unifiedStore
+	store              runtimeStatePorts
 	registrationStore  githubsource.RegistrationRepository
 	demandStore        githubsource.AssignedDemandRepository
 	member             core.MemberID
@@ -301,9 +322,11 @@ func openProductionSQLiteStateWithDependencies(
 		return nil, fmt.Errorf("open SQLite state: %w", err)
 	}
 	closer := contextCloserFunc(func(context.Context) error { return dependencies.closeSQLite(store) })
-	githubStore := dependencies.newSQLiteGitHubStore(store.Backend())
+	githubStore := dependencies.newSQLiteGitHubStore(store.AdapterExtension(), store)
 	return &productionState{
-		store: store, registrationStore: githubStore, demandStore: githubStore,
+		store: runtimeStatePorts{jobs: store, processing: store, transitions: store,
+			provisioningFailures: store, members: store, capacity: store},
+		registrationStore: githubStore, demandStore: githubpersistence.NewAssignedDemandStore(store),
 		newLeadership: func() leadershipRuntime { return permanentLeadership{} },
 		closers:       []runtimeCloser{closer},
 	}, nil
@@ -320,12 +343,14 @@ func openProductionPostgreSQLStateWithDependencies(
 	}
 	connection := dependencies.newPGConnection(pool)
 	store := dependencies.newPGStore(connection)
-	githubStore := dependencies.newPGGitHubStore(connection)
+	githubStore := dependencies.newPGGitHubStore(store.AdapterExtension(), store)
 	closer := contextCloserFunc(func(context.Context) error { dependencies.closePool(pool); return nil })
 	queueNotifications := dependencies.newQueueNotificationPool(pool)
 	elector := dependencies.newLeaderElector(connections)
 	return &productionState{
-		store: store, registrationStore: githubStore, demandStore: githubStore,
+		store: runtimeStatePorts{jobs: store, processing: store, transitions: store,
+			provisioningFailures: store, members: store, capacity: store},
+		registrationStore: githubStore, demandStore: githubpersistence.NewAssignedDemandStore(store),
 		queueNotifications: &queueNotifications,
 		newLeadership: func() leadershipRuntime {
 			return newExclusiveLeadership(cluster.ErrNotLeader, func(leaderContext context.Context) (leaderLease, error) {
@@ -380,14 +405,10 @@ func productionExecutionDependencies(
 	memberID core.MemberID,
 ) executionDependencies {
 	return executionDependencies{
-		newDockerLauncher: func(config dockerprovider.ComposeConfig, memberID core.MemberID) execution.RunnerLauncher {
-			return dockerprovider.NewComposeLauncher(dependencies.dockerCommands, config, memberID)
-		},
-		newDockerInventory: func(memberID core.MemberID) execution.RunnerInventory {
-			return dockerprovider.NewInventory(dependencies.dockerCommands, memberID)
-		},
-		libvirtCommands: dependencies.libvirtCommands,
-		readTemplate:    dependencies.readFile, memberID: memberID,
+		newDockerLauncher:  dependencies.newDockerLauncher,
+		newDockerInventory: dependencies.newDockerInventory,
+		libvirtCommands:    dependencies.libvirtCommands,
+		readTemplate:       dependencies.readFile, memberID: memberID,
 		providerObserver: dependencies.providerObserver,
 	}
 }

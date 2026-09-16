@@ -41,16 +41,23 @@ func TestProductionInventoryCombinesActiveProviderBackends(t *testing.T) {
 
 func TestDockerPoolsShareEndpointInventoryWithoutComposeServiceMetadata(t *testing.T) {
 	var activities []execution.ProviderActivity
+	var launcherConfigs []dockerprovider.ComposeConfig
 	inventoryBuilds := 0
-	providers, inventory, err := buildConfiguredProviders(context.Background(), twoDockerPoolConfiguration(), executionDependencies{
-		newDockerLauncher: func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher {
+	providers, inventory, err := buildProductionProvidersWithDependencies(context.Background(), twoDockerPoolConfiguration(), "member-a", productionDependencies{
+		newDockerLauncher: func(configured dockerprovider.ComposeConfig, member core.MemberID) execution.RunnerLauncher {
+			if member != "member-a" {
+				t.Fatalf("launcher member = %q, want member-a", member)
+			}
+			launcherConfigs = append(launcherConfigs, configured)
 			return providerFactoryLauncherFake{endpointID: "docker:member-a"}
 		},
-		newDockerInventory: func(core.MemberID) execution.RunnerInventory {
+		newDockerInventory: func(member core.MemberID) execution.RunnerInventory {
+			if member != "member-a" {
+				t.Fatalf("inventory member = %q, want member-a", member)
+			}
 			inventoryBuilds++
 			return &providerFactoryInventoryFake{endpointID: "docker:member-a"}
 		},
-		memberID: "member-a",
 		providerObserver: func(activity execution.ProviderActivity) {
 			activities = append(activities, activity)
 		},
@@ -61,8 +68,17 @@ func TestDockerPoolsShareEndpointInventoryWithoutComposeServiceMetadata(t *testi
 	if inventoryBuilds != 1 {
 		t.Fatalf("Docker inventory builds = %d, want 1", inventoryBuilds)
 	}
+	assertDockerFactoryConfigurations(t, launcherConfigs)
 	assertDockerLaunchersUseConfiguredServices(t, providers, &activities)
 	assertDockerInventoryHasNoComposeService(t, inventory, &activities)
+}
+
+func assertDockerFactoryConfigurations(t *testing.T, configurations []dockerprovider.ComposeConfig) {
+	t.Helper()
+	if len(configurations) != 2 || configurations[0] != (dockerprovider.ComposeConfig{ComposeFile: "a.yml", Service: "runner-a"}) ||
+		configurations[1] != (dockerprovider.ComposeConfig{ComposeFile: "b.yml", Service: "runner-b"}) {
+		t.Fatalf("launcher configurations = %#v, want the two configured Compose services", configurations)
+	}
 }
 
 func twoDockerPoolConfiguration() config.Config {
@@ -220,9 +236,7 @@ func TestProviderBuilderAcceptsEmptyConfiguration(t *testing.T) {
 }
 
 func TestProductionDockerFactoriesConstructSeparateBoundaries(t *testing.T) {
-	dependencies := productionExecutionDependencies(productionDependencies{
-		dockerCommands: dockerprovider.NewExecCommandRunner(),
-	}, "member-a")
+	dependencies := productionExecutionDependencies(newProductionDependencies(), "member-a")
 	launcher := dependencies.newDockerLauncher(dockerprovider.ComposeConfig{Service: "runner"}, "member-a")
 	inventory := dependencies.newDockerInventory("member-a")
 	if launcher == nil || inventory == nil || launcher.EndpointID() != inventory.EndpointID() {

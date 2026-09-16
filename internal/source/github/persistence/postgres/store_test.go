@@ -2,23 +2,22 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
 func TestStorePersistsGitHubRegistrationAndDeclarationState(t *testing.T) {
 	registration := githubsource.Registration{GitHubAppID: 7, RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	executor := postgresExecutor(func(statement string) [][]any {
+	transactions := successfulPostgresRunner(func(statement string) [][]any {
 		switch {
 		case strings.Contains(statement, "github_member_runner_pools"):
 			return [][]any{{"member-1", "linux", "default"}}
@@ -27,9 +26,8 @@ func TestStorePersistsGitHubRegistrationAndDeclarationState(t *testing.T) {
 		default:
 			return nil
 		}
-	}, []any{int64(7), registration.RepositoryURL, "linux", int64(1), int64(2), int64(3)})
-	store := newExecutorStore(executor)
-	_ = NewStore(postgresstate.Connection{})
+	})
+	store := NewStore(transactions, postgresMemberLiveness{members: []core.MemberID{"member-1"}})
 	_ = Migrations()
 	ctx := context.Background()
 	assertRegistrationMutations(ctx, t, store, registration)
@@ -76,10 +74,28 @@ func assertDeclarations(ctx context.Context, t *testing.T, store *Store) {
 	}
 }
 
-func TestStoreRejectsInvalidDemand(t *testing.T) {
-	store := newExecutorStore(postgresstate.Executor{})
-	if _, err := store.ReconcileAssignedDemand(context.Background(), githubsource.AssignedDemand{}); err == nil {
-		t.Fatal("expected invalid demand error")
+func TestLiveDeclarationsUseNeutralLiveMemberIDs(t *testing.T) {
+	var queryArguments []any
+	transaction := &postgresTransaction{visitRows: func(
+		_ context.Context,
+		_ string,
+		visit func(postgresstate.Scanner) error,
+		arguments ...any,
+	) error {
+		queryArguments = arguments
+		return visit(postgresScanner{values: []any{"member-1", "linux", "default"}})
+	}}
+	store := NewStore(&postgresTransactionRunner{transaction: transaction},
+		postgresMemberLiveness{members: []core.MemberID{"member-1", "member-2"}})
+
+	declarations, err := store.LiveGitHubRunnerPoolDeclarations(context.Background(), time.Time{})
+
+	if err != nil || len(declarations) != 1 || declarations[0].MemberID != "member-1" {
+		t.Fatalf("declarations = %#v, error = %v", declarations, err)
+	}
+	wantArguments := []any{[]string{"member-1", "member-2"}}
+	if !reflect.DeepEqual(queryArguments, wantArguments) {
+		t.Fatalf("query arguments = %#v, want %#v", queryArguments, wantArguments)
 	}
 }
 
@@ -95,140 +111,13 @@ func TestMigrationsExposeOnlyOwnerLocalFiles(t *testing.T) {
 	}
 }
 
-func TestStoreReportsTransactionFailure(t *testing.T) {
-	expectedErr := errors.New("begin")
-	store := newExecutorStore(postgresstate.NewExecutor(func(context.Context) (postgresstate.Transaction, error) {
-		return postgresstate.Transaction{}, expectedErr
-	}, nil))
-	if err := store.DeleteActiveRegistration(context.Background(), githubsource.Registration{}); !errors.Is(err, expectedErr) {
-		t.Fatalf("error = %v", err)
-	}
+type postgresMemberLiveness struct {
+	members []core.MemberID
+	err     error
 }
 
-func TestAssignedDemandAddsMissingAggregateJobs(t *testing.T) {
-	demand := githubsource.AssignedDemand{Repository: "owner/repo", RunnerPool: "linux",
-		ObservationID: "observation", DesiredJobs: 2, ObservedAt: time.Unix(1_700_000_000, 0).UTC()}
-	existingSource, err := githubsource.AggregateDemandSource(demand, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	addedSource, err := githubsource.AggregateDemandSource(demand, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
-	executor := postgresExecutor(func(statement string) [][]any {
-		if strings.Contains(statement, "UNION ALL") {
-			return [][]any{{uuid.MustParse("00000000-0000-0000-0000-000000000001"),
-				string(existingSource.Adapter), string(existingSource.ID), "queued", demand.ObservedAt}}
-		}
-		return nil
-	}, []any{jobID, string(addedSource.Adapter), string(addedSource.ID), "linux", demand.ObservedAt})
-	result, err := newExecutorStore(executor).ReconcileAssignedDemand(context.Background(), demand)
-	want := githubsource.AssignedDemandResult{ActiveJobs: 2, QueuedJobs: 2, JobsAdded: 1}
-	if err != nil || result != want {
-		t.Fatalf("result = %#v, error = %v", result, err)
-	}
+func (liveness postgresMemberLiveness) LiveMemberIDs(context.Context, time.Time) ([]core.MemberID, error) {
+	return liveness.members, liveness.err
 }
 
-func TestAssignedDemandRemovesNewestAggregateQueuedJob(t *testing.T) {
-	demand := githubsource.AssignedDemand{Repository: "owner/repo", RunnerPool: "linux",
-		ObservationID: "current", DesiredJobs: 3, ObservedAt: time.Unix(1_700_000_000, 0).UTC()}
-	previous := demand
-	previous.ObservationID = "previous"
-	first := aggregateDemandSource(t, previous, 1)
-	second := aggregateDemandSource(t, previous, 2)
-	third := aggregateDemandSource(t, previous, 3)
-	exactID := encodedSourceID(t, githubsource.SourceIdentity{
-		Repository: demand.Repository, RunnerPool: demand.RunnerPool, RequestID: 42,
-	})
-	exact := core.SourceReference{Adapter: githubsource.AdapterName, ID: exactID}
-	transaction := postgresRemovalTransaction(demand, first, second, third, exact)
-	executor := postgresstate.NewExecutor(func(context.Context) (postgresstate.Transaction, error) { return transaction, nil }, nil)
-	result, err := newExecutorStore(executor).ReconcileAssignedDemand(context.Background(), demand)
-	want := githubsource.AssignedDemandResult{ActiveJobs: 3, QueuedJobs: 2, ProcessingJobs: 1, JobsRemoved: 1}
-	if err != nil || result != want {
-		t.Fatalf("result = %#v, error = %v", result, err)
-	}
-}
-
-func postgresRemovalTransaction(
-	demand githubsource.AssignedDemand,
-	first, second, third, exact core.SourceReference,
-) postgresstate.Transaction {
-	return postgresstate.NewTransaction(
-		func(context.Context, string, ...any) (postgresstate.Result, error) {
-			return postgresstate.NewResult(func() (int64, error) { return 1, nil }), nil
-		},
-		func(context.Context, string, ...any) (postgresstate.Rows, error) {
-			return postgresRows([][]any{
-				{uuid.MustParse("00000000-0000-0000-0000-000000000001"), string(first.Adapter), string(first.ID), "queued", demand.ObservedAt.Add(-time.Minute)},
-				{uuid.MustParse("00000000-0000-0000-0000-000000000002"), string(second.Adapter), string(second.ID), "queued", demand.ObservedAt},
-				{uuid.MustParse("00000000-0000-0000-0000-000000000003"), string(third.Adapter), string(third.ID), "queued", demand.ObservedAt},
-				{uuid.MustParse("00000000-0000-0000-0000-000000000004"), string(exact.Adapter), string(exact.ID), "processing", demand.ObservedAt},
-			}), nil
-		}, nil, func(context.Context) error { return nil }, func(context.Context) error { return nil })
-}
-
-func aggregateDemandSource(t *testing.T, demand githubsource.AssignedDemand, ordinal int) core.SourceReference {
-	t.Helper()
-	source, err := githubsource.AggregateDemandSource(demand, ordinal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return source
-}
-
-func encodedSourceID(t *testing.T, identity githubsource.SourceIdentity) core.SourceIdentifier {
-	t.Helper()
-	sourceID, err := githubsource.EncodeSourceID(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sourceID
-}
-
-func postgresExecutor(rowsFor func(string) [][]any, queryRowValues []any) postgresstate.Executor {
-	return postgresstate.NewExecutor(func(context.Context) (postgresstate.Transaction, error) {
-		return postgresstate.NewTransaction(
-			func(context.Context, string, ...any) (postgresstate.Result, error) {
-				return postgresstate.NewResult(func() (int64, error) { return 1, nil }), nil
-			},
-			func(_ context.Context, statement string, _ ...any) (postgresstate.Rows, error) {
-				return postgresRows(rowsFor(statement)), nil
-			},
-			func(context.Context, string, ...any) postgresstate.Row { return postgresRow(queryRowValues) },
-			func(context.Context) error { return nil },
-			func(context.Context) error { return nil },
-		), nil
-	}, func(context.Context, string, ...any) postgresstate.Row { return postgresRow(queryRowValues) })
-}
-
-func postgresRow(values []any) postgresstate.Row {
-	return postgresstate.NewRow(func(destinations ...any) error { return assignPostgresValues(destinations, values) })
-}
-
-func postgresRows(values [][]any) postgresstate.Rows {
-	index := -1
-	return postgresstate.NewRows(func() error { return nil }, func() error { return nil },
-		func() bool { index++; return index < len(values) },
-		func(destinations ...any) error { return assignPostgresValues(destinations, values[index]) })
-}
-
-func assignPostgresValues(destinations, values []any) error {
-	if len(destinations) != len(values) {
-		return errors.New("destination count")
-	}
-	for index, destination := range destinations {
-		target := reflect.ValueOf(destination)
-		value := reflect.ValueOf(values[index])
-		if value.Type().AssignableTo(target.Elem().Type()) {
-			target.Elem().Set(value)
-		} else if value.Type().ConvertibleTo(target.Elem().Type()) {
-			target.Elem().Set(value.Convert(target.Elem().Type()))
-		} else {
-			return errors.New("value type")
-		}
-	}
-	return nil
-}
+var _ state.MemberLivenessReader = postgresMemberLiveness{}

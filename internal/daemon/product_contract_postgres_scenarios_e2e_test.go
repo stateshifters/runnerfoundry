@@ -224,7 +224,7 @@ func outstandingProcessingAfterFailover(
 	wantJobID core.JobID,
 ) core.ProcessingJob {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil {
 		t.Fatalf("read outstanding processing after failover: %v", err)
 	}
@@ -262,7 +262,7 @@ func newLivePostgresCluster(
 
 func assertPostgresFollowerState(t *testing.T, first *e2eHarness, second *e2eHarness) {
 	t.Helper()
-	capacity, err := first.runtime.state.store.AvailableRunnerPoolCapacity(
+	capacity, err := first.runtime.state.store.capacity.AvailableRunnerPoolCapacity(
 		context.Background(), "linux", first.currentTime.Add(-runtimeMemberTTL),
 	)
 	if err != nil || capacity != 2 {
@@ -278,7 +278,7 @@ func assertPostgresFollowerState(t *testing.T, first *e2eHarness, second *e2eHar
 func completePostgresLeaderFailover(t *testing.T, first *e2eHarness, second *e2eHarness) {
 	t.Helper()
 	first.close()
-	capacity, err := second.runtime.state.store.AvailableRunnerPoolCapacity(
+	capacity, err := second.runtime.state.store.capacity.AvailableRunnerPoolCapacity(
 		context.Background(), "linux", second.currentTime.Add(-runtimeMemberTTL),
 	)
 	if err != nil || capacity != 1 {
@@ -396,7 +396,7 @@ func recoverForeignProcessing(
 	if recovered.JobID != candidates.unstarted.JobID {
 		t.Fatalf("foreign recovery JobID = %s, want durable JobID %s", recovered.JobID, candidates.unstarted.JobID)
 	}
-	processing, err := second.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := second.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != candidates.unstarted.JobID ||
 		processing[0].MemberID != core.MemberID(second.memberName) {
 		t.Fatalf("recovered processing = %+v, error = %v", processing, err)
@@ -412,7 +412,7 @@ func assertForeignRecoveryRetention(
 	phase string,
 ) {
 	t.Helper()
-	linux, linuxErr := harness.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	linux, linuxErr := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if linuxErr != nil || len(linux) != 1 || linux[0].Job.ID != candidates.unstarted.JobID ||
 		linux[0].MemberID != core.MemberID(owner) || linux[0].RunnerAccepted {
 		t.Fatalf("unstarted foreign processing at %s = %+v, error = %v", phase, linux, linuxErr)
@@ -427,7 +427,7 @@ func assertAcceptedForeignProcessingRetained(
 	wantJobID core.JobID,
 ) {
 	t.Helper()
-	windows, err := harness.runtime.state.store.ProcessingByPool(context.Background(), "windows")
+	windows, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "windows")
 	if err != nil || len(windows) != 1 || windows[0].Job.ID != wantJobID ||
 		windows[0].MemberID != core.MemberID(owner) || !windows[0].RunnerAccepted {
 		t.Fatalf("accepted foreign processing = %+v, error = %v", windows, err)
@@ -512,7 +512,7 @@ func assertOldPostgresTermFenced(
 func assertAvailableClusterCapacity(t *testing.T, harness *e2eHarness, want int, phase string) {
 	t.Helper()
 	cutoff := harness.now().Add(-runtimeMemberTTL)
-	capacity, err := harness.runtime.state.store.AvailableRunnerPoolCapacity(context.Background(), "linux", cutoff)
+	capacity, err := harness.runtime.state.store.capacity.AvailableRunnerPoolCapacity(context.Background(), "linux", cutoff)
 	if err != nil || capacity != want {
 		t.Fatalf("%s available capacity = %d, error = %v, want %d", phase, capacity, err, want)
 	}
@@ -554,7 +554,7 @@ func assertSingleClusterClaim(
 	wantJobID core.JobID,
 ) {
 	t.Helper()
-	records, err := leader.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	records, err := leader.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(records) != 1 || records[0].Job.ID != wantJobID {
 		t.Fatalf("cluster processing = %+v, error = %v, want one claim for %s", records, err, wantJobID)
 	}

@@ -1,8 +1,6 @@
 package sqlite
 
-func NewStore(executor Executor) *Store { return &Store{executor: executor} }
-
-func (store *Store) Backend() Executor { return store.executor }
+func newStore(executor executor) *Store { return &Store{executor: executor} }
 
 func (store *Store) Close() error {
 	if store.close == nil {

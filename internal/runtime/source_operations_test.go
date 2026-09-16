@@ -19,7 +19,7 @@ func TestProvisioningFailureRequeuesWhenSourceCannotReportIt(t *testing.T) {
 	source := failingBootstrapSource(errors.New("bootstrap failed"))
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store,
+		store, store, store,
 		sourceOperationsResolverFake{operations: source},
 		provider,
 		provider,
@@ -183,7 +183,7 @@ func TestUnknownSourceRetainsProcessingWithoutBootstrap(t *testing.T) {
 	wantErr := errors.New("unknown source")
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store,
+		store, store, store,
 		sourceOperationsResolverFake{err: wantErr},
 		provider,
 		provider,
@@ -225,7 +225,7 @@ func assertReconciliationRetainsUnknownSource(t *testing.T, processing core.Proc
 	}}
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
+		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 || result.RemovedProcessing != 0 {
@@ -244,8 +244,9 @@ func TestMissingSourceOperationsRetainProcessing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			retried := false
 			provider := &providerFake{}
+			store := provisioningFailureStore(job, &retried)
 			orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-				provisioningFailureStore(job, &retried), resolver, provider, provider, "member", testCurrentTime,
+				store, store, store, resolver, provider, provider, "member", testCurrentTime,
 			)
 			result, err := orchestrator.Process(context.Background(), job.RunnerPool)
 			if err == nil || result.Outcome != runtimeengine.ProcessClaimed || retried {
@@ -389,7 +390,7 @@ func TestReconciliationRetainsReservedFailureWhenSourceResolutionFails(t *testin
 	wantErr := errors.New("unknown source")
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
+		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), processing.Job.RunnerPool)
 	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 || result.RemovedProcessing != 0 {
@@ -506,7 +507,7 @@ func newSourceOperationsOrchestrator(
 ) *runtimeengine.Orchestrator {
 	provider := &providerFake{}
 	return runtimeengine.NewOrchestratorWithSourceOperations(
-		store,
+		store, store, store,
 		sourceOperationsResolverFake{operations: source},
 		provider,
 		provider,

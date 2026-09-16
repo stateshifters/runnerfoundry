@@ -14,6 +14,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
 	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
@@ -58,7 +59,7 @@ func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 		t.Fatalf("publish multi-repository member: %v", err)
 	}
 
-	githubStore := githubsqlite.NewStore(store.Backend())
+	githubStore := githubsqlite.NewStore(store.AdapterExtension(), store)
 	fixture := &multiRepositoryFixture{store: store, host: newMultiRepositoryGitHost(6)}
 	fixture.discovery = newPaginatedRepositoryDiscovery(fixture.host.repositories)
 	manager, err := githubsource.NewManager(
@@ -70,7 +71,7 @@ func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 	}
 	fixture.manager = manager
 	fixture.config = githubsource.RunnerPoolConfig{RunnerPool: "linux", RunnerGroup: "default"}
-	fixture.handler = newGitHubDemandHandler(runtime.NewQueueHandler(store), githubStore, nil, "sqlite")
+	fixture.handler = newGitHubDemandHandler(runtime.NewQueueHandler(store), githubpersistence.NewAssignedDemandStore(store), nil, "sqlite")
 	return fixture
 }
 
@@ -198,7 +199,8 @@ func claimMultiRepositoryJob(
 ) core.ProcessingJob {
 	t.Helper()
 	result, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{
-		MemberID: "multi-repository-member", ClaimedAt: claimedAt, InventoryEndpointID: "multi-repository-endpoint",
+		AttemptID: core.NewAttemptID(),
+		MemberID:  "multi-repository-member", ClaimedAt: claimedAt, InventoryEndpointID: "multi-repository-endpoint",
 	})
 	if err != nil || result.Outcome != core.ClaimClaimed {
 		t.Fatalf("claim multi-repository job = %+v, error = %v", result, err)

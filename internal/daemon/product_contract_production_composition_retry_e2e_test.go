@@ -3,13 +3,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"testing"
 	"time"
-
-	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductionCompositionHTTPTransportFailsClosed(t *testing.T) {
@@ -89,7 +88,9 @@ func exerciseProductionCompositionProvisioningRetry(
 	tickers.complete(t, tickers.execution)
 	retried := awaitDockerCompositionStart(t, dockerCommands.starts)
 	processing := assertProductionCompositionProcessing(t, runtime, "docker-pool")
-	if processing.Job.ID != firstJobID || retried.RunnerName == firstAttempt.RunnerName {
+	if processing.Job.ID != firstJobID || firstAttempt.JobID != firstJobID || retried.JobID != firstAttempt.JobID ||
+		retried.RunnerPool != firstAttempt.RunnerPool || retried.EndpointID != firstAttempt.EndpointID ||
+		!bytes.Equal(retried.Bootstrap.Content(), firstAttempt.Bootstrap.Content()) || retried.RunnerName == firstAttempt.RunnerName {
 		t.Fatalf("retry identity = job %s runner %q, want job %s and a fresh attempt after %q",
 			processing.Job.ID, retried.RunnerName, firstJobID, firstAttempt.RunnerName)
 	}
@@ -97,8 +98,8 @@ func exerciseProductionCompositionProvisioningRetry(
 
 func awaitDockerCompositionStart(
 	t *testing.T,
-	values <-chan dockerprovider.ComposeRunnerRequest,
-) dockerprovider.ComposeRunnerRequest {
+	values <-chan productionCompositionDockerStart,
+) productionCompositionDockerStart {
 	t.Helper()
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
@@ -107,6 +108,6 @@ func awaitDockerCompositionStart(
 		return value
 	case <-timer.C:
 		t.Fatal("timed out waiting for production Docker start")
-		return dockerprovider.ComposeRunnerRequest{}
+		return productionCompositionDockerStart{}
 	}
 }

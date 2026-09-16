@@ -235,7 +235,7 @@ func e2eAssertApplicationRegistrationSnapshot(
 
 func e2eAssertApplicationProcessing(t *testing.T, application *e2eApplication, jobID core.JobID) {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != jobID {
 		t.Fatalf("application processing after rejected state reload = %+v, error = %v", processing, err)
 	}

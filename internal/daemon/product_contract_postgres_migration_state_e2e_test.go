@@ -33,7 +33,7 @@ func populateCurrentPostgresState(
 	defer pool.Close()
 	connection := postgresstate.NewPGXConnection(pool)
 	store := postgresstate.NewConnectionStore(connection)
-	githubStore := githubpostgres.NewStore(connection)
+	githubStore := githubpostgres.NewStore(connection.AdapterExtension(), store)
 	heartbeat := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	if err = store.PublishMemberState(ctx, "upgrade-member", heartbeat,
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 3}}); err != nil {
@@ -95,7 +95,8 @@ func claimAndAcceptMigrationDemand(
 ) {
 	t.Helper()
 	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{
-		MemberID: "upgrade-member", ClaimedAt: heartbeat.Add(-30 * time.Minute),
+		AttemptID: core.NewAttemptID(),
+		MemberID:  "upgrade-member", ClaimedAt: heartbeat.Add(-30 * time.Minute),
 		InventoryEndpointID: "e2e:provider",
 	})
 	if err != nil {

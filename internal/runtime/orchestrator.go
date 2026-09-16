@@ -11,15 +11,12 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/state"
 )
 
-type orchestrationStore interface {
-	state.JobQueueStore
-	state.ProcessingJobStore
-}
-
 // Orchestrator owns member-local processing from queue pickup through provider
 // cleanup. Workflow outcomes remain between the provisioned runner and source.
 type Orchestrator struct {
-	store       orchestrationStore
+	store       state.ProcessingJobStore
+	transitions state.ProcessingTransitions
+	failures    state.ProvisioningFailureTransitions
 	sources     core.SourceOperationsResolver
 	launcher    execution.RunnerLauncher
 	inventory   execution.RunnerInventory
@@ -56,7 +53,9 @@ type ProcessResult struct {
 // reconciliation service. The resolver must reject unknown job namespaces and
 // preserve optional capabilities on the selected source instance.
 func NewOrchestratorWithSourceOperations(
-	store orchestrationStore,
+	store state.ProcessingJobStore,
+	transitions state.ProcessingTransitions,
+	failures state.ProvisioningFailureTransitions,
 	sources core.SourceOperationsResolver,
 	launcher execution.RunnerLauncher,
 	inventory execution.RunnerInventory,
@@ -64,7 +63,7 @@ func NewOrchestratorWithSourceOperations(
 	currentTime func() time.Time,
 ) *Orchestrator {
 	return &Orchestrator{
-		store: store, sources: sources, launcher: launcher, inventory: inventory, member: member,
+		store: store, transitions: transitions, failures: failures, sources: sources, launcher: launcher, inventory: inventory, member: member,
 		currentTime: currentTime,
 	}
 }
@@ -170,7 +169,7 @@ func (orchestrator *Orchestrator) completeProvisioningFailure(
 		ctx,
 		processing,
 		operations,
-		func() (core.RetryResult, error) { return orchestrator.store.RetryUnstarted(ctx, processing) },
+		func() (core.RetryResult, error) { return orchestrator.transitions.RetryUnstarted(ctx, processing) },
 	)
 	if resolution.reported && completionErr == nil {
 		return ProcessResult{Outcome: ProcessProvisioningFailureReported, RetryOutcome: resolution.outcome,
@@ -267,7 +266,7 @@ func (orchestrator *Orchestrator) reserveAndReportProvisioningFailure(
 	processing core.ProcessingJob,
 	reporter core.ProvisioningFailureReporter,
 ) (provisioningFailureResolution, error) {
-	reservation, err := orchestrator.store.ReserveProvisioningFailure(ctx, processing)
+	reservation, err := orchestrator.failures.ReserveProvisioningFailure(ctx, processing)
 	if err != nil {
 		return pendingProvisioningFailure(),
 			fmt.Errorf("reserve provisioning failure for job %s: %w", processing.Job.ID, err)
@@ -297,7 +296,7 @@ func (orchestrator *Orchestrator) reportReservedProvisioningFailure(
 		return pendingProvisioningFailure(),
 			fmt.Errorf("report provisioning failure for job %s: %w", processing.Job.ID, reportErr)
 	}
-	recorded, err := orchestrator.store.RecordProvisioningFailureReported(ctx, processing)
+	recorded, err := orchestrator.failures.RecordProvisioningFailureReported(ctx, processing)
 	if err != nil {
 		return pendingProvisioningFailureFinalization(),
 			fmt.Errorf("record reported provisioning failure for job %s: %w", processing.Job.ID, err)
@@ -338,7 +337,7 @@ func (orchestrator *Orchestrator) removeReportedProvisioningFailure(
 	processing core.ProcessingJob,
 	reported bool,
 ) (provisioningFailureResolution, error) {
-	removal, err := orchestrator.store.FinalizeProvisioningFailure(ctx, processing)
+	removal, err := orchestrator.failures.FinalizeProvisioningFailure(ctx, processing)
 	if err != nil {
 		return pendingProvisioningFailureFinalization(),
 			fmt.Errorf("finalize reported provisioning failure for job %s: %w", processing.Job.ID, err)

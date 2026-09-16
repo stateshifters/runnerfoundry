@@ -9,25 +9,19 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-func (store *Store) ClaimOldest(
-	ctx context.Context,
-	runnerPool core.RunnerPool,
-	claim core.ProcessingClaim,
-) (_ core.ClaimResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+func (store *Store) ClaimOldest(ctx context.Context, runnerPool core.RunnerPool, claim core.ProcessingClaim) (core.ClaimResult, error) {
+	if err := claim.Validate(); err != nil {
+		return core.ClaimResult{}, fmt.Errorf("validate processing claim: %w", err)
+	}
+	var result core.ClaimResult
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		result, err = claimOldestInTransaction(ctx, transaction, runnerPool, claim)
+		return err
+	})
 	if err != nil {
-		return core.ClaimResult{}, fmt.Errorf("begin claim oldest job: %w", err)
+		return core.ClaimResult{}, fmt.Errorf("claim oldest job: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	result, err := claimOldestInTransaction(ctx, transaction, runnerPool, claim)
-	if err != nil {
-		return core.ClaimResult{}, err
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return core.ClaimResult{}, fmt.Errorf("commit job claim: %w", err)
-	}
-	open = false
 	return result, nil
 }
 
@@ -37,15 +31,12 @@ func claimOldestInTransaction(
 	runnerPool core.RunnerPool,
 	claim core.ProcessingClaim,
 ) (core.ClaimResult, error) {
-	job, err := scanJob(transaction.QueryRow(ctx, oldestQueuedJobSQL, string(runnerPool)))
+	job, err := readJob(ctx, transaction, oldestQueuedJobSQL, string(runnerPool))
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.ClaimResult{Outcome: core.ClaimEmpty}, nil
 	}
 	if err != nil {
 		return core.ClaimResult{}, fmt.Errorf("select oldest queued job: %w", err)
-	}
-	if !claim.AttemptID.IsValid() {
-		claim.AttemptID = core.NewAttemptID()
 	}
 	runnerName := core.AttemptRunnerName(job.ID, claim.AttemptID)
 	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID.String(), job.Source.Adapter,

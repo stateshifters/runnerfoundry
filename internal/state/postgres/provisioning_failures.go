@@ -90,24 +90,19 @@ func (store *Store) RecordProvisioningFailureReported(
 func (store *Store) FinalizeProvisioningFailure(
 	ctx context.Context,
 	processing core.ProcessingJob,
-) (_ core.TerminalRemovalResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) (core.TerminalRemovalResult, error) {
+	var outcome core.TerminalRemovalOutcome
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		if err := serializeProcessingRetry(ctx, transaction, processing.Job.Source); err != nil {
+			return err
+		}
+		var operationErr error
+		outcome, operationErr = finalizeProvisioningFailureTransaction(ctx, transaction, processing)
+		return operationErr
+	})
 	if err != nil {
-		return core.TerminalRemovalResult{}, fmt.Errorf("begin finalize provisioning failure: %w", err)
+		return core.TerminalRemovalResult{}, fmt.Errorf("finalize provisioning failure: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if err = serializeProcessingRetry(ctx, transaction, processing.Job.Source); err != nil {
-		return core.TerminalRemovalResult{}, err
-	}
-	outcome, err := finalizeProvisioningFailureTransaction(ctx, transaction, processing)
-	if err != nil {
-		return core.TerminalRemovalResult{}, err
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return core.TerminalRemovalResult{}, fmt.Errorf("commit finalize provisioning failure: %w", err)
-	}
-	open = false
 	return core.TerminalRemovalResult{Outcome: outcome}, nil
 }
 
@@ -121,13 +116,9 @@ func finalizeProvisioningFailureTransaction(
 	if _, err := transaction.Execute(ctx, deleteFinalizableProvisioningFailureSQL, arguments...); err != nil {
 		return "", fmt.Errorf("release provisioning failure reservation: %w", err)
 	}
-	result, err := transaction.Execute(ctx, deleteFinalizedProcessingSQL, processingFailureArguments(processing)...)
+	removed, err := transaction.Execute(ctx, deleteFinalizedProcessingSQL, processingFailureArguments(processing)...)
 	if err != nil {
 		return "", fmt.Errorf("remove finalized provisioning failure: %w", err)
-	}
-	removed, err := result.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("read finalized provisioning failure count: %w", err)
 	}
 	if removed > 0 {
 		return core.TerminalRemoved, nil
@@ -140,24 +131,19 @@ func (store *Store) applyProvisioningFailureTransition(
 	description string,
 	processing core.ProcessingJob,
 	transition func(context.Context, Transaction) (core.RetryOutcome, error),
-) (_ core.RetryResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) (core.RetryResult, error) {
+	var outcome core.RetryOutcome
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		if err := serializeProcessingRetry(ctx, transaction, processing.Job.Source); err != nil {
+			return err
+		}
+		var operationErr error
+		outcome, operationErr = transition(ctx, transaction)
+		return operationErr
+	})
 	if err != nil {
-		return core.RetryResult{}, fmt.Errorf("begin %s: %w", description, err)
+		return core.RetryResult{}, fmt.Errorf("%s: %w", description, err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	if err = serializeProcessingRetry(ctx, transaction, processing.Job.Source); err != nil {
-		return core.RetryResult{}, err
-	}
-	outcome, err := transition(ctx, transaction)
-	if err != nil {
-		return core.RetryResult{}, err
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return core.RetryResult{}, fmt.Errorf("commit %s: %w", description, err)
-	}
-	open = false
 	return core.RetryResult{Outcome: outcome}, nil
 }
 

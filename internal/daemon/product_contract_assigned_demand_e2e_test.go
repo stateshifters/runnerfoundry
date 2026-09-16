@@ -161,7 +161,7 @@ func assertAggregateState(
 	if err != nil {
 		t.Fatalf("identify aggregate assigned demand: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), request)
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), request)
 	if err != nil || result.Outcome != want {
 		t.Fatalf("aggregate demand state = %+v, error = %v, want %s", result, err, want)
 	}
@@ -186,7 +186,7 @@ func assertProcessingSource(
 	want core.SourceIdentifier,
 ) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, core.RunnerPool(runnerPool),
 	)
 	if err != nil {
@@ -217,7 +217,7 @@ func assertExactDemandStateForPool(
 	if err != nil {
 		t.Fatalf("encode exact GitHub demand scope: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), core.JobRequest{
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), core.JobRequest{
 		Source: core.SourceReference{Adapter: githubsource.AdapterName,
 			ID: exactSourceID(t, harness, runnerPool, requestID)},
 		Scope: scope, RunnerPool: core.RunnerPool(runnerPool), EnqueuedAt: harness.currentTime,

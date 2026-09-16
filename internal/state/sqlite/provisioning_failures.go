@@ -91,24 +91,16 @@ func (store *Store) RecordProvisioningFailureReported(
 		})
 }
 
-func (store *Store) FinalizeProvisioningFailure(
-	ctx context.Context,
-	processing core.ProcessingJob,
-) (_ core.TerminalRemovalResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+func (store *Store) FinalizeProvisioningFailure(ctx context.Context, processing core.ProcessingJob) (core.TerminalRemovalResult, error) {
+	var outcome core.TerminalRemovalOutcome
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		outcome, err = finalizeProvisioningFailureTransaction(ctx, transaction, processing)
+		return err
+	})
 	if err != nil {
-		return core.TerminalRemovalResult{}, fmt.Errorf("begin finalize provisioning failure: %w", err)
+		return core.TerminalRemovalResult{}, fmt.Errorf("finalize provisioning failure: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	outcome, err := finalizeProvisioningFailureTransaction(ctx, transaction, processing)
-	if err != nil {
-		return core.TerminalRemovalResult{}, err
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return core.TerminalRemovalResult{}, fmt.Errorf("commit finalize provisioning failure: %w", err)
-	}
-	open = false
 	return core.TerminalRemovalResult{Outcome: outcome}, nil
 }
 
@@ -122,13 +114,9 @@ func finalizeProvisioningFailureTransaction(
 	if _, err := transaction.Execute(ctx, deleteFinalizableProvisioningFailureSQL, arguments...); err != nil {
 		return "", fmt.Errorf("release provisioning failure reservation: %w", err)
 	}
-	result, err := transaction.Execute(ctx, deleteFinalizedProcessingSQL, processingFailureArguments(processing)...)
+	removed, err := transaction.Execute(ctx, deleteFinalizedProcessingSQL, processingFailureArguments(processing)...)
 	if err != nil {
 		return "", fmt.Errorf("remove finalized provisioning failure: %w", err)
-	}
-	removed, err := result.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("read finalized provisioning failure count: %w", err)
 	}
 	if removed > 0 {
 		return core.TerminalRemoved, nil
@@ -141,7 +129,7 @@ func classifyProvisioningFailure(
 	transaction Transaction,
 	expected core.ProcessingJob,
 ) (core.RetryOutcome, error) {
-	actual, err := scanProcessingJob(transaction.QueryRow(ctx, processingByIDSQL, expected.Job.ID.String()))
+	actual, err := readProcessingJob(ctx, transaction, processingByIDSQL, expected.Job.ID.String())
 	if err != nil {
 		return classifyMissingProcessing(err)
 	}

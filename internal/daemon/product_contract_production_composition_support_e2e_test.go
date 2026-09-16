@@ -23,6 +23,8 @@ import (
 	upstream "github.com/actions/scaleset"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
@@ -468,11 +470,18 @@ func productionCompositionPrivateKey(t *testing.T) []byte {
 
 type productionCompositionDockerCommands struct {
 	mutex          sync.Mutex
-	instances      map[string]dockerprovider.ComposeRunnerRequest
+	instances      map[string]execution.RunnerInstance
 	startBehaviors []productionCompositionDockerStartBehavior
 	contexts       chan productionCompositionCommandContext
-	starts         chan dockerprovider.ComposeRunnerRequest
+	starts         chan productionCompositionDockerStart
 	removals       chan string
+}
+
+type productionCompositionDockerStart struct {
+	execution.StartRequest
+	RunnerPoolName string
+	JITConfig      string
+	RunnerName     string
 }
 
 type productionCompositionCommandContext struct {
@@ -500,9 +509,9 @@ type productionCompositionDockerStartBehavior struct {
 
 func newProductionCompositionDockerCommands() *productionCompositionDockerCommands {
 	return &productionCompositionDockerCommands{
-		instances: make(map[string]dockerprovider.ComposeRunnerRequest),
+		instances: make(map[string]execution.RunnerInstance),
 		contexts:  make(chan productionCompositionCommandContext, 256),
-		starts:    make(chan dockerprovider.ComposeRunnerRequest, 8), removals: make(chan string, 8),
+		starts:    make(chan productionCompositionDockerStart, 8), removals: make(chan string, 8),
 	}
 }
 
@@ -516,22 +525,58 @@ func (commands *productionCompositionDockerCommands) blockNextStartWithPartial(e
 	return release
 }
 
-func (commands *productionCompositionDockerCommands) StartComposeRunner(
-	ctx context.Context, configured dockerprovider.ComposeConfig, request dockerprovider.ComposeRunnerRequest,
-) error {
-	recordProductionCompositionCommandContext(ctx, "start", commands.contexts)
-	if configured.ComposeFile != "compose.yaml" || configured.Service != "runner" {
-		return fmt.Errorf("unexpected Docker Compose config %+v", configured)
+func (commands *productionCompositionDockerCommands) newLauncher(
+	configured dockerprovider.ComposeConfig,
+	memberID core.MemberID,
+) execution.RunnerLauncher {
+	return productionCompositionDockerLauncher{
+		commands: commands, configured: configured, endpointID: productionCompositionDockerEndpoint(memberID),
 	}
-	commands.mutex.Lock()
-	commands.instances[productionCompositionDockerID(request.RunnerName)] = request
+}
+
+func (commands *productionCompositionDockerCommands) newInventory(memberID core.MemberID) execution.RunnerInventory {
+	return productionCompositionDockerInventory{commands: commands, endpointID: productionCompositionDockerEndpoint(memberID)}
+}
+
+type productionCompositionDockerLauncher struct {
+	commands   *productionCompositionDockerCommands
+	configured dockerprovider.ComposeConfig
+	endpointID execution.InventoryEndpointID
+}
+
+func (launcher productionCompositionDockerLauncher) EndpointID() execution.InventoryEndpointID {
+	return launcher.endpointID
+}
+
+func (launcher productionCompositionDockerLauncher) Validate(ctx context.Context) error {
+	recordProductionCompositionCommandContext(ctx, "validate", launcher.commands.contexts)
+	if launcher.configured.ComposeFile != "compose.yaml" || launcher.configured.Service != "runner" {
+		return fmt.Errorf("unexpected Docker Compose config %+v", launcher.configured)
+	}
+	return nil
+}
+
+func (launcher productionCompositionDockerLauncher) Start(ctx context.Context, request execution.StartRequest) error {
+	recordProductionCompositionCommandContext(ctx, "start", launcher.commands.contexts)
+	if request.EndpointID != launcher.endpointID {
+		return fmt.Errorf("Docker start endpoint = %q, want %q", request.EndpointID, launcher.endpointID)
+	}
+	identifier := productionCompositionDockerID(string(request.RunnerName))
+	launcher.commands.mutex.Lock()
+	launcher.commands.instances[identifier] = execution.RunnerInstance{
+		ID: identifier, RunnerName: request.RunnerName, RunnerPool: request.RunnerPool,
+		EndpointID: request.EndpointID, State: execution.RunnerStateRunning,
+	}
 	var behavior productionCompositionDockerStartBehavior
-	if len(commands.startBehaviors) != 0 {
-		behavior = commands.startBehaviors[0]
-		commands.startBehaviors = commands.startBehaviors[1:]
+	if len(launcher.commands.startBehaviors) != 0 {
+		behavior = launcher.commands.startBehaviors[0]
+		launcher.commands.startBehaviors = launcher.commands.startBehaviors[1:]
 	}
-	commands.mutex.Unlock()
-	commands.starts <- request
+	launcher.commands.mutex.Unlock()
+	launcher.commands.starts <- productionCompositionDockerStart{
+		StartRequest: request, RunnerPoolName: string(request.RunnerPool),
+		JITConfig: string(request.Bootstrap.Content()), RunnerName: string(request.RunnerName),
+	}
 	if behavior.release != nil {
 		select {
 		case <-behavior.release:
@@ -542,40 +587,66 @@ func (commands *productionCompositionDockerCommands) StartComposeRunner(
 	return behavior.err
 }
 
-func (commands *productionCompositionDockerCommands) ListComposeRunners(
-	ctx context.Context,
-) (string, error) {
-	recordProductionCompositionCommandContext(ctx, "inventory", commands.contexts)
-	commands.mutex.Lock()
-	containers := make([]map[string]string, 0, len(commands.instances))
-	for identifier, request := range commands.instances {
-		containers = append(containers, map[string]string{
-			"ID": identifier, "Names": request.RunnerName, "State": "running",
-			"Labels": "runnerfoundry.runner-pool=" + request.RunnerPoolName + "," +
-				"runnerfoundry.runner=" + request.RunnerName,
-		})
-	}
-	commands.mutex.Unlock()
-	encoded, err := json.Marshal(containers)
-	if err != nil {
-		return "", fmt.Errorf("marshal scripted Docker inventory: %w", err)
-	}
-	return string(encoded), nil
+type productionCompositionDockerInventory struct {
+	commands   *productionCompositionDockerCommands
+	endpointID execution.InventoryEndpointID
 }
 
-func (commands *productionCompositionDockerCommands) RemoveComposeRunner(ctx context.Context, identifier string) error {
-	recordProductionCompositionCommandContext(ctx, "destroy", commands.contexts)
-	commands.mutex.Lock()
-	delete(commands.instances, identifier)
-	commands.mutex.Unlock()
-	commands.removals <- identifier
+func (inventory productionCompositionDockerInventory) EndpointID() execution.InventoryEndpointID {
+	return inventory.endpointID
+}
+
+func (inventory productionCompositionDockerInventory) Refresh(ctx context.Context) error {
+	_, err := inventory.Inspect(ctx)
+	return err
+}
+
+func (inventory productionCompositionDockerInventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	recordProductionCompositionCommandContext(ctx, "inventory", inventory.commands.contexts)
+	inventory.commands.mutex.Lock()
+	instances := make([]execution.RunnerInstance, 0, len(inventory.commands.instances))
+	for _, instance := range inventory.commands.instances {
+		instances = append(instances, instance)
+	}
+	inventory.commands.mutex.Unlock()
+	return instances, nil
+}
+
+func (inventory productionCompositionDockerInventory) InspectEndpoint(
+	ctx context.Context,
+	endpointID execution.InventoryEndpointID,
+) ([]execution.RunnerInstance, error) {
+	if !inventory.KnowsEndpoint(endpointID) {
+		return nil, fmt.Errorf("Docker endpoint %q is not configured", endpointID)
+	}
+	return inventory.Inspect(ctx)
+}
+
+func (inventory productionCompositionDockerInventory) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	return endpointID == inventory.endpointID
+}
+
+func (inventory productionCompositionDockerInventory) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	return endpointID == inventory.endpointID && endpointID == productionCompositionDockerEndpoint(memberID)
+}
+
+func (inventory productionCompositionDockerInventory) Destroy(
+	ctx context.Context,
+	instance execution.RunnerInstance,
+) error {
+	recordProductionCompositionCommandContext(ctx, "destroy", inventory.commands.contexts)
+	inventory.commands.mutex.Lock()
+	delete(inventory.commands.instances, instance.ID)
+	inventory.commands.mutex.Unlock()
+	inventory.commands.removals <- instance.ID
 	return nil
 }
-func (commands *productionCompositionDockerCommands) ListComposeServices(
-	ctx context.Context, _ dockerprovider.ComposeConfig,
-) (string, error) {
-	recordProductionCompositionCommandContext(ctx, "validate", commands.contexts)
-	return "runner\n", nil
+
+func productionCompositionDockerEndpoint(memberID core.MemberID) execution.InventoryEndpointID {
+	return dockerprovider.NewInventory(dockerprovider.NewExecCommandRunner(), memberID).EndpointID()
 }
 
 func productionCompositionDockerID(runnerName string) string { return "container-" + runnerName }

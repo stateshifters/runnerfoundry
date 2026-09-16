@@ -137,7 +137,8 @@ type e2eApplication struct {
 	generationDecorator              func(int, generation) generation
 	replacementProviderValidationErr error
 	useProductionProviders           bool
-	dockerCommands                   dockerprovider.CommandRunner
+	newDockerLauncher                func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory               func(core.MemberID) execution.RunnerInventory
 }
 
 func (application *e2eApplication) enableSource(policy ActiveRunnerPolicy) {
@@ -209,7 +210,8 @@ func (application *e2eApplication) productionDependencies() productionDependenci
 	production.maintenanceLaneCompleted = application.tickers.observeMaintenanceLaneCompletion
 	production.newManager = application.newManager
 	if application.useProductionProviders {
-		production.dockerCommands = application.dockerCommands
+		production.newDockerLauncher = application.newDockerLauncher
+		production.newDockerInventory = application.newDockerInventory
 	} else {
 		production.buildProviderSet = application.buildProviderSet
 	}
@@ -490,7 +492,9 @@ func (application *e2eApplication) deliverWithSourceTicker(
 	select {
 	case <-acknowledged:
 	case <-acknowledgementTimer.C:
-		processing, processingErr := application.runtime.state.store.ProcessingByPool(context.Background(), core.RunnerPool(runnerPool))
+		processing, processingErr := application.runtime.state.store.processing.ProcessingByPool(
+			context.Background(), core.RunnerPool(runnerPool),
+		)
 		t.Fatalf("timed out waiting for application %s message %d acknowledgement; queued_messages=%d ack_attempts=%d processing=%+v processing_error=%v logs=%+v",
 			runnerPool, messageID, len(session.messages), len(session.ackAttempts), processing, processingErr,
 			e2eApplicationMessageLogs(application.logs.records(t), runnerPool, messageID))

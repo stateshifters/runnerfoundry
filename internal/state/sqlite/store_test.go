@@ -14,21 +14,21 @@ func TestTakeOldestMovesOneQueuedJobToProcessingAtomically(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 4)
 	commits := 0
-	transaction := Transaction{
-		queryRow: func(_ context.Context, statement string, _ ...any) Row {
+	transaction := transactionStub{
+		queryRow: func(_ context.Context, statement string, _ ...any) rowStub {
 			statements = append(statements, statement)
 			return rowFromValues(queuedJobValues())
 		},
-		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+		execute: func(_ context.Context, statement string, _ ...any) (resultStub, error) {
 			statements = append(statements, statement)
 			return successfulResult(), nil
 		},
 		commit: func(context.Context) error { commits++; return nil }, rollback: successfulCompletion,
 	}
-	store := NewStore(Executor{begin: transactionBeginning(transaction)})
+	store := newStore(executorStub{begin: transactionBeginning(transaction)})
 
 	result, err := store.ClaimOldest(context.Background(), "linux",
-		core.ProcessingClaim{MemberID: testMemberID, AttemptID: core.AttemptID{1}})
+		validProcessingClaim())
 
 	if err != nil || result.Outcome != core.ClaimClaimed || result.Processing.Job.ID != testJobID || result.Processing.MemberID != testMemberID {
 		t.Fatalf("claim oldest = %#v, %v", result, err)
@@ -54,20 +54,20 @@ func TestTakeOldestRollsBackEveryPartialMove(t *testing.T) {
 func assertPartialClaimRollback(t *testing.T, failureCall int, protocolErr error) {
 	t.Helper()
 	executeCalls, rollbacks := 0, 0
-	transaction := Transaction{
-		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(queuedJobValues()) },
-		execute: func(context.Context, string, ...any) (Result, error) {
+	transaction := transactionStub{
+		queryRow: func(context.Context, string, ...any) rowStub { return rowFromValues(queuedJobValues()) },
+		execute: func(context.Context, string, ...any) (resultStub, error) {
 			executeCalls++
 			if executeCalls == failureCall {
-				return Result{}, protocolErr
+				return resultStub{}, protocolErr
 			}
 			return successfulResult(), nil
 		},
 		commit:   successfulCompletion,
 		rollback: func(context.Context) error { rollbacks++; return nil },
 	}
-	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
+	_, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+		ClaimOldest(context.Background(), "linux", validProcessingClaim())
 	if err == nil || rollbacks != 1 {
 		t.Fatalf("err=%v rollbacks=%d", err, rollbacks)
 	}
@@ -75,14 +75,14 @@ func assertPartialClaimRollback(t *testing.T, failureCall int, protocolErr error
 
 func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 	t.Parallel()
-	transaction := Transaction{
-		queryRow: func(context.Context, string, ...any) Row {
-			return Row{scan: func(...any) error { return sql.ErrNoRows }}
+	transaction := transactionStub{
+		queryRow: func(context.Context, string, ...any) rowStub {
+			return rowStub{scan: func(...any) error { return sql.ErrNoRows }}
 		},
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
-		ClaimOldest(context.Background(), "linux", core.ProcessingClaim{MemberID: testMemberID})
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+		ClaimOldest(context.Background(), "linux", validProcessingClaim())
 	if err != nil || result.Outcome != core.ClaimEmpty {
 		t.Fatalf("empty queue = %#v, %v", result, err)
 	}
@@ -91,12 +91,12 @@ func TestTakeOldestReportsAnEmptyQueue(t *testing.T) {
 func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 2)
-	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+	transaction := transactionStub{execute: func(_ context.Context, statement string, _ ...any) (resultStub, error) {
 		statements = append(statements, statement)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 	source := core.SourceReference{Adapter: "github", ID: "request-3"}
-	if _, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+	if _, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
 		Terminalize(context.Background(), core.JobIdentity{Source: source}); err != nil {
 		t.Fatalf("terminalize source: %v", err)
 	}
@@ -109,11 +109,11 @@ func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 func TestObserveRunnerAcceptanceTombstonesAQueuedRetry(t *testing.T) {
 	t.Parallel()
 	statements := make([]string, 0, 3)
-	transaction := Transaction{execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+	transaction := transactionStub{execute: func(_ context.Context, statement string, _ ...any) (resultStub, error) {
 		statements = append(statements, statement)
 		return successfulResult(), nil
 	}, commit: successfulCompletion, rollback: successfulCompletion}
-	_, err := NewStore(Executor{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(context.Background(),
+	_, err := newStore(executorStub{begin: transactionBeginning(transaction)}).ObserveRunnerAcceptance(context.Background(),
 		core.JobIdentity{Source: core.SourceReference{Adapter: "github", ID: "request-3"}})
 	if err != nil || len(statements) != 3 || !strings.Contains(statements[0], "runner_started") ||
 		!strings.Contains(statements[0], "runner_started = 0") ||
@@ -127,15 +127,15 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 	statements := make([]string, 0, 2)
 	processingValues := claimedProcessingJobValues()
 	processingValues[8], processingValues[9] = false, false
-	transaction := Transaction{
-		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(processingValues) },
-		execute: func(_ context.Context, statement string, _ ...any) (Result, error) {
+	transaction := transactionStub{
+		queryRow: func(context.Context, string, ...any) rowStub { return rowFromValues(processingValues) },
+		execute: func(_ context.Context, statement string, _ ...any) (resultStub, error) {
 			statements = append(statements, statement)
 			return successfulResult(), nil
 		},
 		commit: successfulCompletion, rollback: successfulCompletion,
 	}
-	result, err := NewStore(Executor{begin: transactionBeginning(transaction)}).
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
 		RetryUnstarted(context.Background(), retryProcessingJob())
 	if err != nil || result.Outcome != core.RetryRequeued || len(statements) != 2 || !strings.Contains(statements[0], "julianday('now')") ||
 		!strings.Contains(statements[0], "runner_started = 0") {
@@ -147,6 +147,6 @@ func queuedJobValues() []any {
 	return []any{testJobIDText, "github", "request-3", "linux", fixedTime().UnixNano()}
 }
 
-func successfulResult() Result {
-	return Result{rowsAffected: func() (int64, error) { return 1, nil }}
+func successfulResult() resultStub {
+	return resultStub{rowsAffected: func() (int64, error) { return 1, nil }}
 }

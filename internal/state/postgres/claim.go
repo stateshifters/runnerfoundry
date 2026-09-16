@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
@@ -26,16 +27,16 @@ func claimOldestInTransaction(
 	if err != nil || !taken {
 		return core.ClaimResult{Outcome: core.ClaimEmpty}, err
 	}
-	if !claim.AttemptID.IsValid() {
-		claim.AttemptID = core.NewAttemptID()
-	}
 	runnerName := core.AttemptRunnerName(job.ID, claim.AttemptID)
-	if _, err = transaction.Execute(ctx, insertClaimedProcessingJobSQL, job.ID, job.Source.Adapter,
-		job.Source.ID, string(job.RunnerPool), claim.MemberID, runnerName, claim.ClaimedAt, claim.InventoryEndpointID); err != nil {
+	var persistedClaimedAt time.Time
+	if err = transaction.ReadRow(ctx, insertClaimedProcessingJobSQL, func(row Scanner) error {
+		return row.Scan(&persistedClaimedAt)
+	}, job.ID, job.Source.Adapter, job.Source.ID, string(job.RunnerPool), claim.MemberID,
+		runnerName, claim.ClaimedAt, claim.InventoryEndpointID); err != nil {
 		return core.ClaimResult{}, fmt.Errorf("insert processing claim: %w", err)
 	}
 	return core.ClaimResult{Processing: core.ProcessingJob{Job: job, MemberID: claim.MemberID,
-		RunnerName: runnerName, ClaimedAt: claim.ClaimedAt,
+		RunnerName: runnerName, ClaimedAt: persistedClaimedAt,
 		InventoryEndpointID: claim.InventoryEndpointID}, Outcome: core.ClaimClaimed}, nil
 }
 
@@ -44,7 +45,7 @@ func selectOldestQueuedJob(
 	transaction Transaction,
 	runnerPool core.RunnerPool,
 ) (core.Job, bool, error) {
-	candidate, err := scanQueuedJob(transaction.QueryRow(ctx, selectOldestQueuedJobSQL, string(runnerPool)))
+	candidate, err := readQueuedJob(ctx, transaction, selectOldestQueuedJobSQL, string(runnerPool))
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Job{}, false, nil
 	}
@@ -59,7 +60,7 @@ func takeQueuedJob(ctx context.Context, transaction Transaction, candidate core.
 		string(candidate.Source.Adapter), string(candidate.Source.ID))); err != nil {
 		return core.Job{}, false, fmt.Errorf("serialize source pickup: %w", err)
 	}
-	job, err := scanQueuedJob(transaction.QueryRow(ctx, takeQueuedJobSQL, candidate.ID))
+	job, err := readQueuedJob(ctx, transaction, takeQueuedJobSQL, candidate.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Job{}, false, nil
 	}

@@ -84,7 +84,9 @@ func TestDockerCompositionRequiresLauncherAndInventoryFactories(t *testing.T) {
 	if _, err := buildExecutionProvider(context.Background(), configured, executionDependencies{}); err == nil {
 		t.Fatal("missing Docker launcher factory was accepted")
 	}
-	if _, err := configuredDockerInventory(executionDependencies{}); err == nil {
+	if _, _, err := buildProductionProvidersWithDependencies(context.Background(), config.Config{
+		RunnerPools: []config.RunnerPoolConfig{configured},
+	}, "member-a", productionDependencies{}); err == nil {
 		t.Fatal("missing Docker inventory factory was accepted")
 	}
 }

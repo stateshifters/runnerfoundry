@@ -2,13 +2,12 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-func scanQueuedJob(row scanner) (core.Job, error) {
+func scanQueuedJob(row Scanner) (core.Job, error) {
 	var job core.Job
 	var sourceAdapter, sourceIdentifier, runnerPool string
 	if err := row.Scan(&job.ID, &sourceAdapter, &sourceIdentifier, &runnerPool, &job.EnqueuedAt); err != nil {
@@ -19,7 +18,7 @@ func scanQueuedJob(row scanner) (core.Job, error) {
 	return job, nil
 }
 
-func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
+func scanClaimedProcessingJob(row Scanner) (core.ProcessingJob, error) {
 	var processing core.ProcessingJob
 	var runnerAccepted bool
 	var sourceAdapter, sourceIdentifier, runnerPool, runnerName, provisioningFailure string
@@ -37,23 +36,54 @@ func scanClaimedProcessingJob(row scanner) (core.ProcessingJob, error) {
 	return processing, nil
 }
 
-func scanClaimedProcessingJobs(rows Rows) (jobs []core.ProcessingJob, resultErr error) {
-	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
-	for rows.Next() {
-		job, err := scanClaimedProcessingJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, job)
+func readQueuedJob(ctx context.Context, transaction Transaction, statement string, arguments ...any) (core.Job, error) {
+	var job core.Job
+	err := transaction.ReadRow(ctx, statement, func(row Scanner) error {
+		var err error
+		job, err = scanQueuedJob(row)
+		return err
+	}, arguments...)
+	if err != nil {
+		return core.Job{}, fmt.Errorf("read persisted job: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate claimed processing jobs: %w", err)
-	}
-	return jobs, nil
+	return job, nil
 }
 
-func rollback(ctx context.Context, transaction Transaction, open *bool, resultErr *error) {
-	if *open {
-		*resultErr = errors.Join(*resultErr, transaction.Rollback(context.WithoutCancel(ctx)))
+func readClaimedProcessingJob(
+	ctx context.Context,
+	transaction Transaction,
+	statement string,
+	arguments ...any,
+) (core.ProcessingJob, error) {
+	var processing core.ProcessingJob
+	err := transaction.ReadRow(ctx, statement, func(row Scanner) error {
+		var err error
+		processing, err = scanClaimedProcessingJob(row)
+		return err
+	}, arguments...)
+	if err != nil {
+		return core.ProcessingJob{}, fmt.Errorf("read persisted processing job: %w", err)
 	}
+	return processing, nil
+}
+
+func readClaimedProcessingJobs(
+	ctx context.Context,
+	transaction Transaction,
+	statement string,
+	arguments ...any,
+) ([]core.ProcessingJob, error) {
+	var jobs []core.ProcessingJob
+	err := transaction.VisitRows(ctx, statement, func(row Scanner) error {
+		job, err := scanClaimedProcessingJob(row)
+		if err != nil {
+			return err
+		}
+		jobs = append(jobs, job)
+		return nil
+	}, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("read processing jobs: %w", err)
+	}
+	return jobs, nil
 }
