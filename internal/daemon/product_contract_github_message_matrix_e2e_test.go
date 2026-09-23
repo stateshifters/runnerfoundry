@@ -117,12 +117,15 @@ func deliverWithAcknowledgementReplay(
 	messageID := session.assignMessageID(message)
 	wantErr := errors.New("scripted lifecycle acknowledgement failure")
 	session.failNextAcknowledgement(wantErr)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	if attempt := awaitInteger(t, "lifecycle acknowledgement failure", session.ackAttempts); attempt != messageID {
 		t.Fatalf("lifecycle acknowledgement attempt = %d, want %d", attempt, messageID)
 	}
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("lifecycle acknowledgement error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("lifecycle acknowledgement error = %v, want %v", pollErr, wantErr)
 	}
 	assertDurableEffect()
 	harness.completeMaintenanceCycle(harness.source)

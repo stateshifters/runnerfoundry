@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -12,7 +12,7 @@ func TestUnadmittedRegistrationRemovesDesiredRoute(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/missing", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
 	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		githubsource.ManagerConfig{}, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	term := branchLeadershipTerm(1)
 	source.term = term
@@ -38,7 +38,7 @@ func TestNilRegistrationSessionIsRetryableManagerFailure(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/retry", RunnerPool: "linux",
 		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
 	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		githubsource.ManagerConfig{}, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	term := branchLeadershipTerm(1)
 	source.term = term
@@ -58,7 +58,7 @@ func TestNilRegistrationSessionIsRetryableManagerFailure(t *testing.T) {
 func TestRemovingDesiredRegistrationWithoutActivationLeavesProgressInactive(t *testing.T) {
 	record := githubsource.Registration{RepositoryURL: "https://github.example/octo/inactive", RunnerPool: "linux"}
 	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		githubsource.ManagerConfig{}, func() time.Time { return time.Time{} })
 	key := registrationKey(record)
 	source.desired[key] = record
 

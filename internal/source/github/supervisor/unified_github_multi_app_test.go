@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -25,7 +25,7 @@ func TestGitHubSourceRuntimeReservesSessionAdmissionForEachApp(t *testing.T) {
 		InstallationID: 2, RunnerGroupID: 1, ScaleSetID: 100})
 	manager := &multiAppSessionAdmissionManager{records: records, healthyStarted: make(chan struct{}, 1)}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, time.Now)
+		githubsource.ManagerConfig{}, time.Now)
 	source.sessionOpenTimeout = time.Second
 
 	if err := source.OpenLeader(context.Background()); err != nil {
@@ -54,7 +54,7 @@ func TestGitHubSourceRuntimeActivatesHealthyAppFromDegradedCoordinatorPass(t *te
 		RunnerPool: "linux", RunnerGroup: "default",
 	}}}
 	source := newGitHubSourceRuntime(coordinator, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		configured, time.Minute, time.Now)
+		configured, time.Now)
 
 	if err = source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open multi-App source leader: %v", err)

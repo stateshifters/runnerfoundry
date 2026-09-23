@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -9,6 +9,30 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
+
+type githubSourceRuntime = Runtime
+
+func newGitHubSourceRuntime(
+	manager Manager,
+	capacityProvider core.CapacitySnapshotProvider,
+	owner string,
+	handler SessionHandler,
+	config githubsource.ManagerConfig,
+	currentTime func() time.Time,
+) *Runtime {
+	return New(manager, capacityProvider, owner, handler, config, time.Minute, currentTime,
+		githubsource.ManagerObserver{})
+}
+
+func occurrences(events []string, target string) int {
+	count := 0
+	for _, event := range events {
+		if event == target {
+			count++
+		}
+	}
+	return count
+}
 
 func mustOpenGitHubSource(t *testing.T, source *githubSourceRuntime) {
 	t.Helper()
@@ -126,7 +150,7 @@ func newGitHubPollingTestSource(
 ) *githubSourceRuntime {
 	manager := &githubManagerFake{adapters: adapters}
 	return newGitHubSourceRuntime(manager, capacities, "member-1", eventHandlerFake{},
-		managerConfigForAdapters(adapters), time.Minute, currentTime)
+		managerConfigForAdapters(adapters), currentTime)
 }
 
 func managerConfigForAdapters(adapters []*githubsource.Adapter) githubsource.ManagerConfig {

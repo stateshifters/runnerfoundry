@@ -1,10 +1,9 @@
-package daemon
+package supervisor
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -18,7 +17,7 @@ const (
 	githubRegistrationSessionOpenTimeout = time.Minute
 )
 
-type githubManagerRuntime interface {
+type Manager interface {
 	ActiveRegistrations(ctx context.Context) ([]githubsource.Registration, error)
 	Reconcile(ctx context.Context, config githubsource.ManagerConfig) ([]githubsource.Registration, error)
 	RefreshMembers(ctx context.Context, config githubsource.ManagerConfig) error
@@ -28,7 +27,7 @@ type githubManagerRuntime interface {
 		assignedDemand githubsource.AssignedDemandHandler) (*githubsource.RegistrationSession, error)
 }
 
-type githubSessionHandler interface {
+type SessionHandler interface {
 	core.SourceEventHandler
 	githubsource.AssignedDemandHandler
 }
@@ -68,11 +67,11 @@ type githubLeadershipTerm struct {
 	nextOperation   uint64
 }
 
-type githubSourceRuntime struct {
-	manager           githubManagerRuntime
+type Runtime struct {
+	manager           Manager
 	capacityProvider  core.CapacitySnapshotProvider
 	owner             string
-	handler           githubSessionHandler
+	handler           SessionHandler
 	config            githubsource.ManagerConfig
 	discoveryInterval time.Duration
 	currentTime       func() time.Time
@@ -82,7 +81,7 @@ type githubSourceRuntime struct {
 	polls             map[*githubsource.Adapter]*githubPollAttempt
 	publishedCapacity map[core.RunnerPool]int
 	leaderInstalled   bool
-	report            func(error)
+	observer          githubsource.ManagerObserver
 
 	epoch                   uint64
 	term                    *githubLeadershipTerm
@@ -98,18 +97,19 @@ type githubSourceRuntime struct {
 	sessionOpenTimeout      time.Duration
 }
 
-func newGitHubSourceRuntime(
-	manager githubManagerRuntime,
+func New(
+	manager Manager,
 	capacityProvider core.CapacitySnapshotProvider,
 	owner string,
-	handler githubSessionHandler,
+	handler SessionHandler,
 	config githubsource.ManagerConfig,
 	discoveryInterval time.Duration,
 	currentTime func() time.Time,
-) *githubSourceRuntime {
-	return &githubSourceRuntime{
+	observer githubsource.ManagerObserver,
+) *Runtime {
+	return &Runtime{
 		manager: manager, capacityProvider: capacityProvider, owner: owner, handler: handler,
-		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime,
+		config: config, discoveryInterval: discoveryInterval, currentTime: currentTime, observer: observer,
 		polls: make(map[*githubsource.Adapter]*githubPollAttempt), publishedCapacity: make(map[core.RunnerPool]int),
 		desired:            make(map[githubRegistrationKey]githubsource.Registration),
 		opening:            make(map[githubRegistrationKey]githubsource.Registration),
@@ -118,7 +118,7 @@ func newGitHubSourceRuntime(
 	}
 }
 
-func (source *githubSourceRuntime) RefreshMembers(ctx context.Context) error {
+func (source *Runtime) RefreshMembers(ctx context.Context) error {
 	if source.currentTime().Before(source.nextMemberRefresh) {
 		return nil
 	}
@@ -140,7 +140,7 @@ func (source *githubSourceRuntime) RefreshMembers(ctx context.Context) error {
 	return nil
 }
 
-func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
+func (source *Runtime) OpenLeader(ctx context.Context) error {
 	if source.leaderInstalled {
 		return nil
 	}
@@ -170,7 +170,7 @@ func (source *githubSourceRuntime) OpenLeader(ctx context.Context) error {
 	return nil
 }
 
-func (source *githubSourceRuntime) startDiscovery(
+func (source *Runtime) startDiscovery(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	configs ...githubsource.ManagerConfig,
@@ -198,7 +198,7 @@ func (source *githubSourceRuntime) startDiscovery(
 	}()
 }
 
-func (source *githubSourceRuntime) scheduleRequiredRegistrationSessions(
+func (source *Runtime) scheduleRequiredRegistrationSessions(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 ) {
@@ -216,7 +216,7 @@ func (source *githubSourceRuntime) scheduleRequiredRegistrationSessions(
 	}
 }
 
-func (source *githubSourceRuntime) startRegistrationSession(
+func (source *Runtime) startRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	key githubRegistrationKey,
@@ -231,7 +231,7 @@ func (source *githubSourceRuntime) startRegistrationSession(
 	}()
 }
 
-func (source *githubSourceRuntime) openRegistrationSession(
+func (source *Runtime) openRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	key githubRegistrationKey,
@@ -256,16 +256,24 @@ func (source *githubSourceRuntime) openRegistrationSession(
 		return
 	}
 	result := githubRegistrationOpenResult{epoch: term.epoch, key: key, requested: record, session: session, err: err}
+	source.publishRegistrationOpenResult(ctx, term, result)
+}
+
+func (source *Runtime) publishRegistrationOpenResult(
+	ctx context.Context,
+	term *githubLeadershipTerm,
+	result githubRegistrationOpenResult,
+) {
 	select {
 	case term.openResults <- result:
 	case <-ctx.Done():
-		if session != nil {
-			source.abandonSession(session)
+		if result.session != nil {
+			source.abandonSession(result.session)
 		}
 	}
 }
 
-func githubOpenSlotsPerApp(manager githubManagerRuntime, registrations []githubsource.Registration) int {
+func githubOpenSlotsPerApp(manager Manager, registrations []githubsource.Registration) int {
 	appIDs := make(map[githubsource.AppID]struct{})
 	if configured, available := manager.(interface{ GitHubAppIDs() []githubsource.AppID }); available {
 		for _, appID := range configured.GitHubAppIDs() {
@@ -326,7 +334,7 @@ func releaseGitHubOpenSlot(slots chan struct{}) {
 	}
 }
 
-func (source *githubSourceRuntime) CloseLeader(ctx context.Context) error {
+func (source *Runtime) CloseLeader(ctx context.Context) error {
 	if !source.leaderInstalled {
 		return source.retryRetiringSessions(ctx)
 	}
@@ -389,7 +397,7 @@ func (term *githubLeadershipTerm) cancelOperations() {
 	}
 }
 
-func (source *githubSourceRuntime) beginSessionActivation() {
+func (source *Runtime) beginSessionActivation() {
 	source.sessionActivationActive = false
 	required := 0
 	for key, record := range source.desired {
@@ -404,36 +412,39 @@ func (source *githubSourceRuntime) beginSessionActivation() {
 	source.sessionActivationActive = true
 	source.sessionActivationTotal = len(source.desired)
 	source.sessionActivationLast = source.readyRegistrationSessionCount()
-	reportProgress(source.report, slog.LevelInfo, operationalEvent{
-		operation: "source_sessions", stage: "open_sessions", outcome: "started",
-		total: source.sessionActivationTotal,
+	source.report(githubsource.ManagerActivity{
+		Visibility: githubsource.ActivityInfo,
+		Operation:  "source_sessions", Stage: "open_sessions", Outcome: "started",
+		Total: source.sessionActivationTotal,
 	})
 }
 
-func (source *githubSourceRuntime) reportSessionActivationProgress() {
+func (source *Runtime) reportSessionActivationProgress() {
 	if !source.sessionActivationActive {
 		return
 	}
 	current := source.readyRegistrationSessionCount()
 	total := source.sessionActivationTotal
 	if current == total {
-		reportProgress(source.report, slog.LevelInfo, operationalEvent{
-			operation: "source_sessions", stage: "open_sessions", outcome: "completed",
-			count: current, total: total,
+		source.report(githubsource.ManagerActivity{
+			Visibility: githubsource.ActivityInfo,
+			Operation:  "source_sessions", Stage: "open_sessions", Outcome: "completed",
+			Count: current, Total: total,
 		})
 		source.sessionActivationActive = false
 		return
 	}
 	if current == 1 || current*20/total > source.sessionActivationLast*20/total {
-		reportProgress(source.report, slog.LevelInfo, operationalEvent{
-			operation: "source_sessions", stage: "open_sessions", outcome: "progress",
-			current: current, total: total,
+		source.report(githubsource.ManagerActivity{
+			Visibility: githubsource.ActivityInfo,
+			Operation:  "source_sessions", Stage: "open_sessions", Outcome: "progress",
+			Current: current, Total: total,
 		})
 	}
 	source.sessionActivationLast = current
 }
 
-func (source *githubSourceRuntime) readyRegistrationSessionCount() int {
+func (source *Runtime) readyRegistrationSessionCount() int {
 	ready := 0
 	for key, record := range source.desired {
 		session := source.sessions[key]
@@ -444,7 +455,7 @@ func (source *githubSourceRuntime) readyRegistrationSessionCount() int {
 	return ready
 }
 
-func (source *githubSourceRuntime) waitForTerm(ctx context.Context, term *githubLeadershipTerm) error {
+func (source *Runtime) waitForTerm(ctx context.Context, term *githubLeadershipTerm) error {
 	finished := make(chan struct{})
 	go func() {
 		term.background.Wait()
@@ -458,7 +469,7 @@ func (source *githubSourceRuntime) waitForTerm(ctx context.Context, term *github
 	}
 }
 
-func (source *githubSourceRuntime) drainCancelledTerm(ctx context.Context, term *githubLeadershipTerm) error {
+func (source *Runtime) drainCancelledTerm(ctx context.Context, term *githubLeadershipTerm) error {
 	var joined error
 	for {
 		select {
@@ -475,13 +486,13 @@ func (source *githubSourceRuntime) drainCancelledTerm(ctx context.Context, term 
 	}
 }
 
-func (source *githubSourceRuntime) abandonSession(session *githubsource.RegistrationSession) {
+func (source *Runtime) abandonSession(session *githubsource.RegistrationSession) {
 	source.cleanupMu.Lock()
 	source.abandoned = append(source.abandoned, session)
 	source.cleanupMu.Unlock()
 }
 
-func (source *githubSourceRuntime) collectAbandonedSessions() {
+func (source *Runtime) collectAbandonedSessions() {
 	source.cleanupMu.Lock()
 	abandoned := source.abandoned
 	source.abandoned = nil

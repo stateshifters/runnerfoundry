@@ -1,10 +1,9 @@
-package daemon
+package supervisor
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
 	"time"
 
@@ -32,7 +31,7 @@ const githubSessionRetirementLimit = 4
 // Poll advances leader-owned GitHub message polling without waiting for an
 // upstream long poll. Calls must remain serialized with OpenLeader and
 // CloseLeader; each adapter has at most one in-flight request.
-func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff time.Time) error {
+func (source *Runtime) Poll(ctx context.Context, liveMemberCutoff time.Time) error {
 	if !source.leaderInstalled || source.term == nil {
 		return nil
 	}
@@ -50,7 +49,7 @@ func (source *githubSourceRuntime) Poll(ctx context.Context, liveMemberCutoff ti
 	return errors.Join(pollErrors...)
 }
 
-func (source *githubSourceRuntime) startDueDiscovery(
+func (source *Runtime) startDueDiscovery(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	liveMemberCutoff time.Time,
@@ -65,7 +64,7 @@ func (source *githubSourceRuntime) startDueDiscovery(
 	return resultErrors
 }
 
-func (source *githubSourceRuntime) clusterReconciliationConfig(
+func (source *Runtime) clusterReconciliationConfig(
 	ctx context.Context,
 	liveMemberCutoff time.Time,
 ) (githubsource.ManagerConfig, []error, bool) {
@@ -100,7 +99,7 @@ func declarationConflictErrors(runnerPools []core.RunnerPool) []error {
 	return resultErrors
 }
 
-func (source *githubSourceRuntime) harvestRegistrationOpenResults(
+func (source *Runtime) harvestRegistrationOpenResults(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 ) []error {
@@ -120,7 +119,7 @@ func (source *githubSourceRuntime) harvestRegistrationOpenResults(
 	return resultErrors
 }
 
-func (*githubSourceRuntime) drainRegistrationOpenResults(
+func (*Runtime) drainRegistrationOpenResults(
 	term *githubLeadershipTerm,
 ) []githubRegistrationOpenResult {
 	results := make([]githubRegistrationOpenResult, 0)
@@ -134,7 +133,7 @@ func (*githubSourceRuntime) drainRegistrationOpenResults(
 	}
 }
 
-func (source *githubSourceRuntime) installRegistrationSession(
+func (source *Runtime) installRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	result githubRegistrationOpenResult,
@@ -167,7 +166,7 @@ func (source *githubSourceRuntime) installRegistrationSession(
 	return source.installOpenedRegistrationSession(ctx, term, result)
 }
 
-func (source *githubSourceRuntime) removeDesiredRegistration(key githubRegistrationKey) {
+func (source *Runtime) removeDesiredRegistration(key githubRegistrationKey) {
 	delete(source.desired, key)
 	if !source.sessionActivationActive {
 		return
@@ -176,7 +175,7 @@ func (source *githubSourceRuntime) removeDesiredRegistration(key githubRegistrat
 	source.reportSessionActivationProgress()
 }
 
-func (source *githubSourceRuntime) installOpenedRegistrationSession(
+func (source *Runtime) installOpenedRegistrationSession(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	result githubRegistrationOpenResult,
@@ -204,7 +203,7 @@ func (source *githubSourceRuntime) installOpenedRegistrationSession(
 			result.key.runnerPool, result.key.repository))
 }
 
-func (source *githubSourceRuntime) acceptsRegistrationResult(
+func (source *Runtime) acceptsRegistrationResult(
 	term *githubLeadershipTerm,
 	result githubRegistrationOpenResult,
 ) bool {
@@ -212,7 +211,7 @@ func (source *githubSourceRuntime) acceptsRegistrationResult(
 		source.desired[result.key] == result.requested
 }
 
-func (source *githubSourceRuntime) stopRegistrationSessionPoll(
+func (source *Runtime) stopRegistrationSessionPoll(
 	ctx context.Context,
 	session *githubsource.RegistrationSession,
 ) error {
@@ -224,7 +223,7 @@ func (source *githubSourceRuntime) stopRegistrationSessionPoll(
 	})
 }
 
-func (source *githubSourceRuntime) closeRegistrationSession(
+func (source *Runtime) closeRegistrationSession(
 	ctx context.Context,
 	session *githubsource.RegistrationSession,
 	description string,
@@ -239,7 +238,7 @@ func (source *githubSourceRuntime) closeRegistrationSession(
 	return nil
 }
 
-func (source *githubSourceRuntime) harvestDiscovery(
+func (source *Runtime) harvestDiscovery(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 ) []error {
@@ -259,7 +258,7 @@ func (source *githubSourceRuntime) harvestDiscovery(
 	}
 }
 
-func (source *githubSourceRuntime) handleFailedDiscovery(
+func (source *Runtime) handleFailedDiscovery(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	result githubDiscoveryResult,
@@ -280,7 +279,7 @@ func (source *githubSourceRuntime) handleFailedDiscovery(
 	))
 }
 
-func (source *githubSourceRuntime) applyDiscoveredRegistrations(
+func (source *Runtime) applyDiscoveredRegistrations(
 	ctx context.Context,
 	term *githubLeadershipTerm,
 	registrations []githubsource.Registration,
@@ -292,7 +291,7 @@ func (source *githubSourceRuntime) applyDiscoveredRegistrations(
 	return nil
 }
 
-func (source *githubSourceRuntime) retireRemovedRegistrationSessions(ctx context.Context) []error {
+func (source *Runtime) retireRemovedRegistrationSessions(ctx context.Context) []error {
 	resultErrors := make([]error, 0)
 	for _, key := range sortedGitHubRegistrationKeys(source.sessions) {
 		if _, retained := source.desired[key]; retained {
@@ -312,7 +311,7 @@ func (source *githubSourceRuntime) retireRemovedRegistrationSessions(ctx context
 	return resultErrors
 }
 
-func (source *githubSourceRuntime) retryRetiringSessions(ctx context.Context) error {
+func (source *Runtime) retryRetiringSessions(ctx context.Context) error {
 	retiring := source.retiring
 	source.retiring = nil
 	limit := min(githubSessionRetirementLimit, len(retiring))
@@ -327,7 +326,7 @@ func (source *githubSourceRuntime) retryRetiringSessions(ctx context.Context) er
 	return joined
 }
 
-func (source *githubSourceRuntime) rebuildAdapters() {
+func (source *Runtime) rebuildAdapters() {
 	adapters := make([]*githubsource.Adapter, 0, len(source.sessions))
 	for _, key := range sortedGitHubRegistrationKeys(source.sessions) {
 		adapters = append(adapters, source.sessions[key].Adapter())
@@ -335,7 +334,7 @@ func (source *githubSourceRuntime) rebuildAdapters() {
 	source.adapters = adapters
 }
 
-func (source *githubSourceRuntime) harvestPolls() []error {
+func (source *Runtime) harvestPolls() []error {
 	pollErrors := make([]error, 0)
 	for _, adapter := range source.adapters {
 		attempt, exists := source.polls[adapter]
@@ -363,7 +362,7 @@ func completedPoll(attempt *githubPollAttempt) (githubPollResult, bool) {
 	}
 }
 
-func (source *githubSourceRuntime) launchIdlePolls(ctx context.Context) []error {
+func (source *Runtime) launchIdlePolls(ctx context.Context) []error {
 	capacityErrors := make([]error, 0)
 	capacities := make(map[core.RunnerPool]runnerPoolPublication)
 	for _, adapter := range source.adapters {
@@ -380,37 +379,38 @@ func (source *githubSourceRuntime) launchIdlePolls(ctx context.Context) []error 
 	return capacityErrors
 }
 
-func (source *githubSourceRuntime) launchAdapterPoll(ctx context.Context, adapter *githubsource.Adapter,
+func (source *Runtime) launchAdapterPoll(ctx context.Context, adapter *githubsource.Adapter,
 	capacities map[core.RunnerPool]runnerPoolPublication,
 ) (int, error) {
 	aggregate, observed := capacities[adapter.RunnerPool]
 	if observed {
 		aggregate.count++
 		capacities[adapter.RunnerPool] = aggregate
-		reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
-			outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository,
-			capacity: aggregate.capacity})
+		source.report(githubsource.ManagerActivity{Visibility: githubsource.ActivityDebug,
+			Operation: "capacity_publication", Stage: "session", Outcome: "published",
+			RunnerPool: adapter.RunnerPool, Repository: adapter.Repository, Capacity: aggregate.capacity})
 		return aggregate.capacity, nil
 	}
 	capacity, err := source.availableRunnerPoolCapacity(ctx, adapter.RunnerPool)
 	if err != nil {
-		reportOperational(source.report, operationalEvent{operation: "capacity_publication", outcome: "failed",
-			runnerPool: adapter.RunnerPool, err: err})
+		source.report(githubsource.ManagerActivity{Operation: "capacity_publication", Outcome: "failed",
+			RunnerPool: adapter.RunnerPool, Err: err})
 		aggregate.count = 1
 		capacities[adapter.RunnerPool] = aggregate
 		return aggregate.capacity, markOperationallyReported(fmt.Errorf(
 			"read Runner Pool %q available capacity: %w", adapter.RunnerPool, err,
 		))
 	}
-	reportProgress(source.report, slog.LevelDebug, operationalEvent{operation: "capacity_publication", stage: "session",
-		outcome: "published", runnerPool: adapter.RunnerPool, repository: adapter.Repository, capacity: capacity})
+	source.report(githubsource.ManagerActivity{Visibility: githubsource.ActivityDebug,
+		Operation: "capacity_publication", Stage: "session", Outcome: "published",
+		RunnerPool: adapter.RunnerPool, Repository: adapter.Repository, Capacity: capacity})
 	aggregate.capacity = capacity
 	aggregate.count = 1
 	capacities[adapter.RunnerPool] = aggregate
 	return capacity, nil
 }
 
-func (source *githubSourceRuntime) availableRunnerPoolCapacity(
+func (source *Runtime) availableRunnerPoolCapacity(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
 ) (int, error) {
@@ -421,19 +421,20 @@ func (source *githubSourceRuntime) availableRunnerPoolCapacity(
 	return snapshot.Available, nil
 }
 
-func (source *githubSourceRuntime) publishCapacityChanges(capacities map[core.RunnerPool]runnerPoolPublication) {
+func (source *Runtime) publishCapacityChanges(capacities map[core.RunnerPool]runnerPoolPublication) {
 	for runnerPool, aggregate := range capacities {
 		previous, exists := source.publishedCapacity[runnerPool]
 		if exists && previous == aggregate.capacity {
 			continue
 		}
 		source.publishedCapacity[runnerPool] = aggregate.capacity
-		reportProgress(source.report, slog.LevelInfo, operationalEvent{operation: "capacity_publication", stage: "runner_pool",
-			outcome: "published", runnerPool: runnerPool, capacity: aggregate.capacity, count: aggregate.count})
+		source.report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
+			Operation: "capacity_publication", Stage: "runner_pool",
+			Outcome: "published", RunnerPool: runnerPool, Capacity: aggregate.capacity, Count: aggregate.count})
 	}
 }
 
-func (source *githubSourceRuntime) launchPoll(
+func (source *Runtime) launchPoll(
 	ctx context.Context,
 	adapter *githubsource.Adapter,
 	capacity int,
@@ -447,11 +448,11 @@ func (source *githubSourceRuntime) launchPoll(
 	}()
 }
 
-func (source *githubSourceRuntime) stopAllPolls(ctx context.Context) error {
+func (source *Runtime) stopAllPolls(ctx context.Context) error {
 	return source.stopPolls(ctx, func(*githubsource.Adapter) bool { return true })
 }
 
-func (source *githubSourceRuntime) stopPolls(
+func (source *Runtime) stopPolls(
 	ctx context.Context,
 	shouldStop func(*githubsource.Adapter) bool,
 ) error {

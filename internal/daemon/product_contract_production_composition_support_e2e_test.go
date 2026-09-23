@@ -29,9 +29,10 @@ import (
 )
 
 type productionCompositionLogDestination struct {
-	mutex      sync.Mutex
-	content    bytes.Buffer
-	reconciled chan struct{}
+	mutex                    sync.Mutex
+	content                  bytes.Buffer
+	sessionActivations       uint64
+	sessionActivationChanged chan struct{}
 }
 
 func (destination *productionCompositionLogDestination) Open(config.LogConfig) (io.WriteCloser, error) {
@@ -41,21 +42,37 @@ func (destination *productionCompositionLogDestination) Open(config.LogConfig) (
 func (destination *productionCompositionLogDestination) Write(content []byte) (int, error) {
 	destination.mutex.Lock()
 	_, _ = destination.content.Write(content)
-	destination.mutex.Unlock()
-	if completedProductionCompositionReconciliation(content) {
-		destination.reconciled <- struct{}{}
+	if completedProductionCompositionSessionActivation(content) {
+		destination.sessionActivations++
+		close(destination.sessionActivationChanged)
+		destination.sessionActivationChanged = make(chan struct{})
 	}
+	destination.mutex.Unlock()
 	return len(content), nil
 }
 
-func completedProductionCompositionReconciliation(content []byte) bool {
-	textRecord := bytes.Contains(content, []byte("operation=source_reconciliation")) &&
-		bytes.Contains(content, []byte("stage=reconciliation")) &&
+func completedProductionCompositionSessionActivation(content []byte) bool {
+	textRecord := bytes.Contains(content, []byte("operation=source_sessions")) &&
+		bytes.Contains(content, []byte("stage=open_sessions")) &&
 		bytes.Contains(content, []byte("outcome=completed"))
-	jsonRecord := bytes.Contains(content, []byte(`"operation":"source_reconciliation"`)) &&
-		bytes.Contains(content, []byte(`"stage":"reconciliation"`)) &&
+	jsonRecord := bytes.Contains(content, []byte(`"operation":"source_sessions"`)) &&
+		bytes.Contains(content, []byte(`"stage":"open_sessions"`)) &&
 		bytes.Contains(content, []byte(`"outcome":"completed"`))
 	return textRecord || jsonRecord
+}
+
+func (destination *productionCompositionLogDestination) sessionActivationCheckpoint() uint64 {
+	destination.mutex.Lock()
+	defer destination.mutex.Unlock()
+	return destination.sessionActivations
+}
+
+func (destination *productionCompositionLogDestination) sessionActivationAfter(
+	checkpoint uint64,
+) (bool, <-chan struct{}) {
+	destination.mutex.Lock()
+	defer destination.mutex.Unlock()
+	return destination.sessionActivations > checkpoint, destination.sessionActivationChanged
 }
 
 func (*productionCompositionLogDestination) Close() error { return nil }
@@ -82,11 +99,14 @@ type productionCompositionGitHub struct {
 	mutex                 sync.Mutex
 	messages              map[string]*upstream.RunnerScaleSetMessage
 	unexpected            []string
-	registrations         chan string
-	sessions              chan string
 	acknowledged          chan string
 	scaleSetPools         map[string]string
+	registrations         map[string]uint64
+	sessions              map[string]uint64
+	polls                 map[string]uint64
+	observationChanged    chan struct{}
 	capacities            map[string]productionCompositionCapacity
+	capacityHistory       map[string][]productionCompositionCapacity
 	capacityTick          uint64
 	capacityChanged       chan struct{}
 	initialStatistics     map[string]*upstream.RunnerScaleSetStatistic
@@ -101,9 +121,11 @@ type productionCompositionCapacity struct {
 
 func newProductionCompositionGitHub() *productionCompositionGitHub {
 	return &productionCompositionGitHub{
-		messages:      make(map[string]*upstream.RunnerScaleSetMessage),
-		registrations: make(chan string, 16), sessions: make(chan string, 4), acknowledged: make(chan string, 16),
-		scaleSetPools: make(map[string]string), capacities: make(map[string]productionCompositionCapacity),
+		messages: make(map[string]*upstream.RunnerScaleSetMessage), acknowledged: make(chan string, 16),
+		scaleSetPools: make(map[string]string), registrations: make(map[string]uint64),
+		sessions: make(map[string]uint64), polls: make(map[string]uint64), observationChanged: make(chan struct{}),
+		capacities:            make(map[string]productionCompositionCapacity),
+		capacityHistory:       make(map[string][]productionCompositionCapacity),
 		capacityChanged:       make(chan struct{}),
 		initialStatistics:     make(map[string]*upstream.RunnerScaleSetStatistic),
 		omitInitialStatistics: make(map[string]bool),
@@ -243,6 +265,7 @@ func (host *productionCompositionGitHub) queueGetResponse(
 	host.mutex.Lock()
 	runnerPool := host.scaleSetPools[identifier]
 	guard := host.pollGuards[runnerPool]
+	host.recordRouteObservation(host.polls, runnerPool)
 	host.mutex.Unlock()
 	if guard != nil {
 		if err := guard(); err != nil {
@@ -265,9 +288,9 @@ func (host *productionCompositionGitHub) runnerScaleSetResponse(request *http.Re
 	if identifier == 0 || request.URL.Query().Get("runnerGroupId") != "11" {
 		return 0, "", fmt.Errorf("unexpected runner scale set query %q", request.URL.RawQuery)
 	}
-	host.registrations <- name
 	host.mutex.Lock()
 	host.scaleSetPools[fmt.Sprint(identifier)] = name
+	host.recordRouteObservation(host.registrations, name)
 	host.mutex.Unlock()
 	return http.StatusOK, fmt.Sprintf(`{"count":1,"value":[{"id":%d,"name":%q,"runnerGroupId":11}]}`, identifier, name), nil
 }
@@ -280,7 +303,9 @@ func (host *productionCompositionGitHub) recordCapacity(identifier, maximum stri
 		return fmt.Errorf("capacity observed for unknown production scale set %q", identifier)
 	}
 	host.capacityTick++
-	host.capacities[runnerPool] = productionCompositionCapacity{maximum: maximum, tick: host.capacityTick}
+	observation := productionCompositionCapacity{maximum: maximum, tick: host.capacityTick}
+	host.capacities[runnerPool] = observation
+	host.capacityHistory[runnerPool] = append(host.capacityHistory[runnerPool], observation)
 	close(host.capacityChanged)
 	host.capacityChanged = make(chan struct{})
 	return nil
@@ -298,9 +323,9 @@ func (host *productionCompositionGitHub) sessionResponse(path string) (int, stri
 }
 
 func (host *productionCompositionGitHub) sessionForIdentifier(identifier string) (int, string, error) {
-	host.sessions <- identifier
 	host.mutex.Lock()
 	runnerPool := host.scaleSetPools[identifier]
+	host.recordRouteObservation(host.sessions, runnerPool)
 	statistics := host.initialStatistics[runnerPool]
 	omitStatistics := host.omitInitialStatistics[runnerPool]
 	host.mutex.Unlock()
@@ -320,6 +345,39 @@ func (host *productionCompositionGitHub) sessionForIdentifier(identifier string)
 		return 0, "", fmt.Errorf("marshal scripted GitHub session: %w", err)
 	}
 	return http.StatusOK, string(encoded), nil
+}
+
+func (host *productionCompositionGitHub) recordRouteObservation(observations map[string]uint64, route string) {
+	observations[route]++
+	close(host.observationChanged)
+	host.observationChanged = make(chan struct{})
+}
+
+func (host *productionCompositionGitHub) routeObservation(
+	observations map[string]uint64,
+	route string,
+) (uint64, <-chan struct{}) {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	return observations[route], host.observationChanged
+}
+
+func (host *productionCompositionGitHub) registrationObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.registrations, route)
+}
+
+func (host *productionCompositionGitHub) sessionObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.sessions, route)
+}
+
+func (host *productionCompositionGitHub) pollObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.polls, route)
+}
+
+func (host *productionCompositionGitHub) omitsInitialStatistics(route string) bool {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	return host.omitInitialStatistics[route]
 }
 
 func (host *productionCompositionGitHub) messageResponse(identifier string) (int, string, error) {

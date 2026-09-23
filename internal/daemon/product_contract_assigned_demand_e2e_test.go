@@ -83,11 +83,12 @@ func exerciseMissingAssignedStatisticsRejected(t *testing.T, harness *e2eHarness
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{
 			RunnerRequestID: 901, QueueTime: harness.currentTime.AddDate(-10, 0, 0),
 		}}}}
-	session.assignMessageID(message)
+	messageID := session.assignMessageID(message)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
-	result := awaitRunnerPoolPollResult(t, harness)
-	if result.err == nil || !strings.Contains(result.err.Error(), "missing statistics") {
-		t.Fatalf("missing-statistics poll error = %v", result.err)
+	pollErr := awaitRunnerPoolPollError(t, harness, session, "linux", messageID, checkpoint, "missing statistics")
+	if pollErr == nil || !strings.Contains(pollErr.Error(), "missing statistics") {
+		t.Fatalf("missing-statistics poll error = %v", pollErr)
 	}
 	assertNoInteger(t, "missing-statistics acknowledgement", session.ackAttempts)
 	assertAssignedDemandSnapshot(t, harness, githubsource.AssignedDemand{
@@ -235,12 +236,15 @@ func assertAcknowledgementRedelivery(t *testing.T, harness *e2eHarness) {
 	messageID := session.assignMessageID(message)
 	wantErr := errors.New("scripted GitHub acknowledgement failure")
 	session.failNextAcknowledgement(wantErr)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	if attempt := awaitInteger(t, "failed GitHub acknowledgement", session.ackAttempts); attempt != messageID {
 		t.Fatalf("failed acknowledgement message = %d, want %d", attempt, messageID)
 	}
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("failed acknowledgement poll error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("failed acknowledgement poll error = %v, want %v", pollErr, wantErr)
 	}
 	harness.completeMaintenanceCycle(harness.source)
 	session.messages <- message
@@ -249,42 +253,41 @@ func assertAcknowledgementRedelivery(t *testing.T, harness *e2eHarness) {
 	assertAssignedDemandSnapshot(t, harness, assignedDemand(harness, "linux", message), 4, 3, 1)
 }
 
-func awaitRunnerPoolPollResult(t *testing.T, harness *e2eHarness) githubPollResult {
-	t.Helper()
-	attempt := runnerPoolPollAttempt(t, productionGitHubSource(t, harness), "linux")
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-attempt.result:
-		attempt.result <- result
-		return result
-	case <-timer.C:
-		t.Fatal("timed out waiting for linux GitHub poll result")
-		return githubPollResult{}
+type e2eRunnerPoolPollFailureCheckpoint struct {
+	activitySequence uint64
+	pollTarget       uint64
+}
+
+func runnerPoolPollFailureCheckpoint(
+	harness *e2eHarness,
+	session *e2eGitHubSession,
+) e2eRunnerPoolPollFailureCheckpoint {
+	pollSequence, _ := session.pollObservation()
+	return e2eRunnerPoolPollFailureCheckpoint{
+		activitySequence: harness.sourceActivities.checkpoint(),
+		pollTarget:       pollSequence + 1,
 	}
 }
 
-func productionGitHubSource(t *testing.T, harness *e2eHarness) *githubSourceRuntime {
-	t.Helper()
-	if harness.sourceRuntime == nil {
-		t.Fatal("production GitHub source was not captured during generation construction")
-	}
-	return harness.sourceRuntime
-}
-
-func runnerPoolPollAttempt(
+func awaitRunnerPoolPollError(
 	t *testing.T,
-	source *githubSourceRuntime,
+	harness *e2eHarness,
+	session *e2eGitHubSession,
 	runnerPool core.RunnerPool,
-) *githubPollAttempt {
+	messageID int,
+	checkpoint e2eRunnerPoolPollFailureCheckpoint,
+	description string,
+) error {
 	t.Helper()
-	for adapter, attempt := range source.polls {
-		if adapter.RunnerPool == runnerPool {
-			return attempt
-		}
-	}
-	t.Fatalf("active %s GitHub poll not found", runnerPool)
-	return nil
+	activity := harness.sourceActivities.awaitAfter(t, "GitHub poll failure: "+description,
+		checkpoint.activitySequence,
+		func(activity githubsource.ManagerActivity) bool {
+			return activity.RunnerPool == runnerPool && activity.MessageID == int64(messageID) && activity.Err != nil &&
+				strings.Contains(activity.Err.Error(), description)
+		})
+	e2eAwaitSessionPollWhileCycling(t, "GitHub failed poll harvest", session,
+		checkpoint.pollTarget, func() { harness.completeMaintenanceCycle(harness.source) })
+	return activity.Err
 }
 
 func awaitInteger(t *testing.T, description string, values <-chan int) int {

@@ -11,6 +11,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubsupervisor "github.com/stateshifters/runnerfoundry/internal/source/github/supervisor"
 	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
@@ -42,7 +43,7 @@ type unifiedBuilderDependencies struct {
 }
 
 type githubManagerComposition interface {
-	githubManagerRuntime
+	githubsupervisor.Manager
 	Source() *githubsource.Source
 }
 
@@ -152,12 +153,12 @@ func buildConfiguredEngine(
 	capacity := runtimeengine.NewCapacitySnapshotService(
 		dependencies.state.capacity, dependencies.currentTime, dependencies.memberTTL,
 	)
-	source := newGitHubSourceRuntime(
+	source := githubsupervisor.New(
 		dependencies.manager, capacity, string(dependencies.member),
 		handler,
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
+		newGitHubManagerObserver(dependencies.report, dependencies.currentTime),
 	)
-	source.report = dependencies.report
 	membership := runtimeengine.NewMembershipService(
 		dependencies.state.members, dependencies.member, assembled.localCapacity, dependencies.currentTime,
 	)

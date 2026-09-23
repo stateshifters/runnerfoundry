@@ -87,10 +87,13 @@ func exerciseFailedGitHubAcquisitionRedelivery(t *testing.T, harness *e2eHarness
 	session.scriptAcquisition(nil, wantErr)
 	message := githubAvailableRequests(harness.currentTime, 1, 821, 822)
 	messageID := session.assignMessageID(message)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	assertAcquisitionRequest(t, session, 821, 822)
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("failed acquisition poll error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("failed acquisition poll error = %v, want %v", pollErr, wantErr)
 	}
 	assertNoInteger(t, "failed acquisition acknowledgement", session.ackAttempts)
 	assertNoAcquiredProcessing(t, harness, 1, "failed acquisition")

@@ -70,6 +70,7 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 		stateOperation:     activity.StateOperation,
 		sourcePC:           activity.OriginPC,
 		count:              activity.Count,
+		capacity:           activity.Capacity,
 		repositoryCount:    activity.RepositoryCount,
 		installationCount:  activity.InstallationCount,
 		current:            activity.Current,

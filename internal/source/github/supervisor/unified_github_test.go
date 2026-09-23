@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func TestGitHubSourceRuntimePublishesAvailableCapacityWithEachPoll(t *testing.T)
 	source := newGitHubSourceRuntime(manager, capacities, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
 			RunnerPool: "linux", RunnerGroup: "default",
-		}}}, time.Minute, func() time.Time { return now })
+		}}}, func() time.Time { return now })
 
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
@@ -48,7 +48,7 @@ func TestGitHubSourceRuntimeReconcilesDiscoveryOnlyWhenDue(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		githubsource.ManagerConfig{}, func() time.Time { return now })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)
@@ -77,7 +77,7 @@ func TestGitHubSourceRuntimeActivatesReconciledRoutesWhenPruningFails(t *testing
 	}}}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}}},
-		time.Minute, func() time.Time { return time.Time{} })
+		func() time.Time { return time.Time{} })
 	term := &githubLeadershipTerm{epoch: 1, openResults: make(chan githubRegistrationOpenResult, 1),
 		discoveryResult: make(chan githubDiscoveryResult, 1), openSlots: make(chan struct{}, 1),
 		operations: make(map[uint64]context.CancelFunc), discoveryActive: true}
@@ -99,7 +99,7 @@ func TestGitHubSourceRuntimeActivatesTrustworthyRoutesWhenOneAppFails(t *testing
 	record := githubsource.Registration{GitHubAppID: 22, RepositoryURL: "https://github.example/healthy",
 		RunnerPool: "linux", InstallationID: 2, RunnerGroupID: 3, ScaleSetID: 4}
 	source := newGitHubSourceRuntime(&githubManagerFake{}, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		githubsource.ManagerConfig{}, func() time.Time { return time.Time{} })
 	term := &githubLeadershipTerm{epoch: 1, openResults: make(chan githubRegistrationOpenResult, 1),
 		discoveryResult: make(chan githubDiscoveryResult, 1), openSlots: make(chan struct{}, 1),
 		operations: make(map[uint64]context.CancelFunc), discoveryActive: true}
@@ -197,7 +197,7 @@ func newReorderedRegistrationFixture() *reorderedRegistrationFixture {
 	}}
 	fixture.source = newGitHubSourceRuntime(fixture.manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1, "windows": 1}},
-		"member-1", recordingQueueEventHandler{queued: fixture.queued}, managerConfigForAdapters(fixture.manager.adapters), time.Minute,
+		"member-1", recordingQueueEventHandler{queued: fixture.queued}, managerConfigForAdapters(fixture.manager.adapters),
 		func() time.Time { return fixture.now })
 	return fixture
 }
@@ -208,7 +208,7 @@ func TestGitHubSourceRuntimeRefreshesMemberRoutesAtDiscoveryCadence(t *testing.T
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		githubsource.ManagerConfig{}, func() time.Time { return now })
 
 	if err := source.RefreshMembers(context.Background()); err != nil {
 		t.Fatalf("refresh member routes: %v", err)
@@ -234,7 +234,7 @@ func TestGitHubSourceRuntimeRestoresExistingAdaptersAfterReplacementOpenFails(t 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
-		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
+		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 
 	now = now.Add(time.Minute)
@@ -267,7 +267,7 @@ func TestGitHubSourceRuntimeRetainsPollsWhenCancellationDeadlineExpires(t *testi
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
-		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
+		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, client.started, 1, "stubborn repository")
@@ -291,7 +291,7 @@ func TestGitHubSourceRuntimeKeepsInstalledAdaptersWhenOldSessionCloseFails(t *te
 		closeErr: closeErr,
 	}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), func() time.Time { return time.Time{} })
 
 	mustOpenGitHubSource(t, source)
 	if err := source.CloseLeader(context.Background()); !errors.Is(err, closeErr) {
@@ -309,7 +309,7 @@ func TestGitHubSourceRuntimeReportsLifecycleFailures(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{refreshErr: wantErr}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		githubsource.ManagerConfig{}, func() time.Time { return now })
 	if err := source.RefreshMembers(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("refresh error = %v", err)
 	}
@@ -328,7 +328,7 @@ func TestGitHubSourceRuntimeMarksMemberRefreshDueAfterDiscovery(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	manager := &githubManagerFake{refreshErr: errors.New("member refresh called during discovery")}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return now })
+		githubsource.ManagerConfig{}, func() time.Time { return now })
 	source.nextMemberRefresh = now.Add(time.Hour)
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)

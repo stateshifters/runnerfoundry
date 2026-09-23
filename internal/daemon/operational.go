@@ -117,7 +117,11 @@ func operationalErrorWasReported(err error) bool {
 		return everyOperationalErrorWasReported(joined.Unwrap())
 	}
 	var reported reportedOperationalError
-	return errors.As(err, &reported)
+	if errors.As(err, &reported) {
+		return true
+	}
+	var external interface{ OperationallyReported() bool }
+	return errors.As(err, &external) && external.OperationallyReported()
 }
 
 func everyOperationalErrorWasReported(errs []error) bool {

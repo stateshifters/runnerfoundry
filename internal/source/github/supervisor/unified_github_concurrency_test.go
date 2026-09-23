@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -25,7 +25,7 @@ func TestGitHubSourceRuntimeLaunchesRepositoryPollsWithoutBlockingMaintenance(t 
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}},
-		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
+		"member-1", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, firstClient.started, 7, "first repository")
@@ -50,7 +50,7 @@ func TestGitHubSourceRuntimeBoundsConcurrentSessionRestorationAtSixteen(t *testi
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	manager := &githubManagerFake{adapters: adapters, openStarted: started, openRelease: release}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		managerConfigForAdapters(adapters), time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(adapters), func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)
 	}
@@ -197,7 +197,7 @@ func TestGitHubSourceRuntimeDoesNotRefreshPeerCapacityAfterUnhandledMessage(t *t
 	manager := &githubManagerFake{adapters: adapters}
 	source := newGitHubSourceRuntime(manager, capacities, "member-1",
 		failingQueueEventHandler{err: errors.New("durable enqueue failed")},
-		managerConfigForAdapters(adapters), time.Minute, func() time.Time { return now })
+		managerConfigForAdapters(adapters), func() time.Time { return now })
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	assertPolledCapacity(t, failedClient.started, 7, "failed repository")
@@ -245,7 +245,7 @@ func newIgnoredLifecyclePollingFixture() *ignoredLifecyclePollingFixture {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 1}},
-		"member-1", handler, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
+		"member-1", handler, managerConfigForAdapters(manager.adapters), func() time.Time { return now })
 	return &ignoredLifecyclePollingFixture{source: source, lifecycleClient: lifecycleClient,
 		demandClient: demandClient, handler: handler, now: now}
 }
@@ -319,7 +319,7 @@ func TestGitHubSourceRuntimePollsSessionsIndependently(t *testing.T) {
 		{Client: secondClient, SourceEvents: eventHandlerFake{}, RunnerPool: "second"},
 	}}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), func() time.Time { return time.Time{} })
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("open leader: %v", err)
 	}

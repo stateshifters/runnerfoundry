@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -76,7 +76,7 @@ func newCapacityFailureFixture(t *testing.T, wantErr error) capacityFailureFixtu
 	}}
 	failedCapacities := &sourceCapacityProviderFake{err: wantErr}
 	source := newGitHubSourceRuntime(manager, failedCapacities, "member", eventHandlerFake{},
-		managerConfigForAdapters(manager.adapters), time.Minute, time.Now)
+		managerConfigForAdapters(manager.adapters), time.Now)
 	return capacityFailureFixture{source: source, first: messageClient, second: peerClient, capacities: failedCapacities}
 }
 
@@ -88,7 +88,7 @@ func TestGitHubSourceRuntimeReportsCloseFailure(t *testing.T) {
 		Client: &capacityMessageClientFake{}, SourceEvents: eventHandlerFake{}, Repository: "one", RunnerPool: "linux",
 	}}}
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member", eventHandlerFake{},
-		managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return time.Time{} })
+		managerConfigForAdapters(manager.adapters), func() time.Time { return time.Time{} })
 	mustOpenGitHubSource(t, source)
 	if err := source.CloseLeader(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("close error = %v", err)

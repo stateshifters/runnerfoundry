@@ -1,4 +1,4 @@
-package daemon
+package supervisor
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func TestGitHubLeadershipReconnectsCommittedRepositoryWhileDiscoveryIsBlocked(t 
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{{
 			RunnerPool: "linux", RunnerGroup: "default",
-		}}}, time.Minute, func() time.Time { return time.Time{} })
+		}}}, func() time.Time { return time.Time{} })
 
 	openContext, cancelOpen := context.WithTimeout(context.Background(), time.Second)
 	defer cancelOpen()
@@ -53,7 +53,7 @@ func TestGitHubLeadershipReconnectsCommittedRegistrationAbsentFromLocalConfigura
 		RunnerPool: "retired", RunnerGroupID: 2, ScaleSetID: 3}
 	manager := newTermManagerFake(t, githubsource.RegistrationSnapshot{Active: []githubsource.Registration{record}})
 	source := newGitHubSourceRuntime(manager, &sourceCapacityProviderFake{}, "member-1", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
+		githubsource.ManagerConfig{}, func() time.Time { return time.Time{} })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)
@@ -85,7 +85,7 @@ func TestGitHubLeadershipRestoresSiblingWhenScaleSetIsMissing(t *testing.T) {
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
-		}}, time.Minute, func() time.Time { return time.Time{} })
+		}}, func() time.Time { return time.Time{} })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)
@@ -116,7 +116,7 @@ func TestGitHubLeadershipActivatesSiblingWhileTransientFailureRetries(t *testing
 		githubsource.ManagerConfig{RunnerPools: []githubsource.RunnerPoolConfig{
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
-		}}, time.Minute, func() time.Time { return time.Time{} })
+		}}, func() time.Time { return time.Time{} })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)
@@ -170,7 +170,7 @@ func newAccumulatingSiblingFixture(
 			{RunnerPool: "linux", RunnerGroup: "default"},
 			{RunnerPool: "windows", RunnerGroup: "default"},
 			{RunnerPool: "macos", RunnerGroup: "default"},
-		}}, time.Minute, func() time.Time { return time.Time{} })
+		}}, func() time.Time { return time.Time{} })
 
 	if err := source.OpenLeader(context.Background()); err != nil {
 		t.Fatalf("OpenLeader() error = %v", err)

@@ -1,7 +1,6 @@
-package daemon
+package supervisor
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -19,20 +18,15 @@ func TestGitHubSourceRuntimeReportsAggregateCapacityOnlyWhenItChanges(t *testing
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	source := newGitHubSourceRuntime(manager,
 		&sourceCapacityProviderFake{capacities: map[core.RunnerPool]int{"linux": 7}},
-		"member", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), time.Minute, func() time.Time { return now })
-	var events []progressEventEnvelope
-	source.report = func(err error) {
-		var event progressEventEnvelope
-		if errors.As(err, &event) {
-			events = append(events, event)
-		}
-	}
+		"member", eventHandlerFake{}, managerConfigForAdapters(manager.adapters), func() time.Time { return now })
+	var events []githubsource.ManagerActivity
+	source.observer.Report = func(activity githubsource.ManagerActivity) { events = append(events, activity) }
 	mustOpenGitHubSource(t, source)
 	mustPollGitHubSource(t, source, now.Add(-time.Minute))
 	mustCloseGitHubSource(t, source)
 
 	infoCount, debugCount, aggregate := capacityPublicationCounts(events)
-	if aggregate.runnerPool != "linux" || aggregate.capacity != 7 || aggregate.count != 2 {
+	if aggregate.RunnerPool != "linux" || aggregate.Capacity != 7 || aggregate.Count != 2 {
 		t.Fatalf("aggregate capacity event = %#v", aggregate)
 	}
 	if infoCount != 1 || debugCount != 2 {
@@ -40,15 +34,16 @@ func TestGitHubSourceRuntimeReportsAggregateCapacityOnlyWhenItChanges(t *testing
 	}
 }
 
-func capacityPublicationCounts(events []progressEventEnvelope) (infoCount int, debugCount int, aggregate operationalEvent) {
-	for _, envelope := range events {
-		if envelope.event.operation != "capacity_publication" || envelope.event.outcome != "published" {
+func capacityPublicationCounts(events []githubsource.ManagerActivity) (infoCount int, debugCount int, aggregate githubsource.ManagerActivity) {
+	for _, event := range events {
+		if event.Operation != "capacity_publication" || event.Outcome != "published" {
 			continue
 		}
-		if envelope.level == 0 {
+		switch event.Visibility {
+		case githubsource.ActivityInfo:
 			infoCount++
-			aggregate = envelope.event
-		} else if envelope.level < 0 {
+			aggregate = event
+		case githubsource.ActivityDebug:
 			debugCount++
 		}
 	}

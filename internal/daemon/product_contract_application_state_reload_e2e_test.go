@@ -104,7 +104,7 @@ func e2eStartStateReloadApplication(
 	application.tickers.awaitInitialGeneration(t)
 	source := e2eAwaitGitHubSourceRuntime(t, direction+" source runtime", application.builtSources)
 	e2eEstablishReloadSource(
-		t, application, source, application.provider, application.windows, application.host,
+		t, application, source, application.provider, application.windows,
 	)
 	opened := e2eAwaitOpenedState(t, openedStates)
 	if !reflect.DeepEqual(opened, state) {
