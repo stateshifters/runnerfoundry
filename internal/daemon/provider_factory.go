@@ -10,6 +10,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 type executionDependencies struct {
@@ -18,7 +19,7 @@ type executionDependencies struct {
 	libvirtCommands    libvirtprovider.CommandRunner
 	readTemplate       func(string) ([]byte, error)
 	memberID           core.MemberID
-	providerObserver   func(execution.ProviderActivity)
+	providerObserver   providerActivityObserver
 }
 
 type configuredExecutionProvider struct {
@@ -69,20 +70,21 @@ func configuredDockerProvider(
 		}, dependencies.memberID,
 	)
 	return configuredExecutionProvider{
-		Launcher: execution.WithLauncherOperationDeadlinesAndMetadata(
-			launcher, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
-				ComposeService: configured.Docker.Service}, dependencies.providerObserver,
+		Launcher: runtimeservice.WithLauncherOperationDeadlines(
+			launcher, runtimeservice.ProviderName(config.ProviderKindDocker),
+			observeProviderActivity(dependencies.providerObserver, configured.Docker.Service),
 		),
 	}, nil
 }
 
-func configuredDockerInventory(dependencies executionDependencies) (execution.InventoryOperationDeadlineProvider, error) {
+func configuredDockerInventory(dependencies executionDependencies) (runtimeservice.InventoryOperationDeadlineProvider, error) {
 	if dependencies.newDockerInventory == nil {
-		return execution.InventoryOperationDeadlineProvider{}, errors.New("docker inventory factory is required")
+		return runtimeservice.InventoryOperationDeadlineProvider{}, errors.New("docker inventory factory is required")
 	}
 	inventory := dependencies.newDockerInventory(dependencies.memberID)
-	return execution.WithInventoryOperationDeadlines(
-		inventory, execution.ProviderName(config.ProviderKindDocker), dependencies.providerObserver,
+	return runtimeservice.WithInventoryOperationDeadlines(
+		inventory, runtimeservice.ProviderName(config.ProviderKindDocker),
+		observeProviderActivity(dependencies.providerObserver, ""),
 	), nil
 }
 
@@ -106,8 +108,9 @@ func configuredLibvirtProvider(
 		template,
 		dependencies.memberID,
 	)
-	wrapped := execution.WithOperationDeadlines(
-		provider, execution.ProviderName(config.ProviderKindLibvirt), dependencies.providerObserver,
+	wrapped := runtimeservice.WithOperationDeadlines(
+		provider, runtimeservice.ProviderName(config.ProviderKindLibvirt),
+		observeProviderActivity(dependencies.providerObserver, ""),
 	)
 	return configuredExecutionProvider{Launcher: wrapped, Inventory: wrapped}, nil
 }

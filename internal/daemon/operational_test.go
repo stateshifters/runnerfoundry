@@ -254,9 +254,9 @@ func TestProviderObserverUsesDebugLoggingAfterProviderProtection(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
 	observer := newProviderObserver(reporter.reportMaintenance)
-	observer(execution.ProviderActivity{Operation: "start", Outcome: "started", RunnerPool: "linux", EndpointID: "docker:member-a"})
-	observer(execution.ProviderActivity{Operation: "start", Outcome: "failed", RunnerPool: "linux", EndpointID: "docker:member-a",
-		Provider: "docker", JobID: core.JobID{1}, Duration: time.Second, Err: errors.New("protected provider failure")})
+	observer(runtimeengine.ProviderActivity{Operation: "start", Outcome: "started", RunnerPool: "linux", EndpointID: "docker:member-a"}, "runner")
+	observer(runtimeengine.ProviderActivity{Operation: "start", Outcome: "failed", RunnerPool: "linux", EndpointID: "docker:member-a",
+		Provider: "docker", JobID: core.JobID{1}, Duration: time.Second, Err: errors.New("protected provider failure")}, "runner")
 	output := destination.String()
 	assertLogFragments(t, output, []string{
 		"level=ERROR msg=\"Docker Compose runner start failed for job 01000000-0000-0000-0000-000000000000 in Runner Pool linux\"",
@@ -329,8 +329,9 @@ func TestGitHubAppObserverAttachesCredentialIdentityWithoutSecrets(t *testing.T)
 
 func assertJITRemainsAtProviderBoundary(t *testing.T, reporter *productionRuntimeReporter, jit string) {
 	t.Helper()
-	provider := execution.WithOperationDeadlines(
-		confidentialityProvider{}, "test", newProviderObserver(reporter.reportMaintenance),
+	provider := runtimeengine.WithOperationDeadlines(
+		confidentialityProvider{}, "test",
+		observeProviderActivity(newProviderObserver(reporter.reportMaintenance), ""),
 	)
 	if err := provider.Start(context.Background(), execution.StartRequest{RunnerPool: "linux", EndpointID: "test:endpoint",
 		Bootstrap: core.NewBootstrap([]byte(jit))}); err != nil {

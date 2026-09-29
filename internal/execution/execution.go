@@ -63,10 +63,6 @@ type StartRequest struct {
 	Bootstrap  core.Bootstrap
 }
 
-// ProviderName identifies the configured execution implementation in operator
-// diagnostics without relying on reflection or endpoint parsing.
-type ProviderName string
-
 // RunnerState is the provider-neutral lifecycle observation used by recovery.
 type RunnerState string
 
@@ -76,17 +72,13 @@ const (
 	RunnerStateUnknown   RunnerState = "unknown"
 )
 
-// RunnerInstance is one provider observation. Aggregate inventories attach a
-// transient origin so Destroy can route it back to the observing endpoint.
-type RunnerInstance struct {
-	ID         string
-	RunnerName core.RunnerName
-	RunnerPool core.RunnerPool
-	EndpointID InventoryEndpointID
-	State      RunnerState
-	origin     *runnerInventoryOrigin
-}
+type InventoryObservation [1]byte
 
-type runnerInventoryOrigin struct {
-	inventory RunnerInventory
+type RunnerInstance struct {
+	ID                   string
+	RunnerName           core.RunnerName
+	RunnerPool           core.RunnerPool
+	EndpointID           InventoryEndpointID
+	State                RunnerState
+	InventoryObservation *InventoryObservation
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 const (
@@ -200,7 +201,7 @@ func (commands *cancellationBlockingLibvirtCommands) CreateDomain(ctx context.Co
 
 func assertProductionCompositionDefaultDeadlines(
 	t *testing.T,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	dockerProvider, libvirtProvider execution.RunnerLauncher,
 	dockerCommands *productionCompositionDockerCommands,
 	libvirtCommands *productionCompositionLibvirtCommands,
@@ -233,7 +234,7 @@ func assertProductionCompositionDefaultDeadlines(
 
 func assertProductionCompositionEarlierCallerDeadlines(
 	t *testing.T,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	dockerProvider, libvirtProvider execution.RunnerLauncher,
 	dockerCommands *productionCompositionDockerCommands,
 	libvirtCommands *productionCompositionLibvirtCommands,
@@ -271,7 +272,7 @@ type productionCompositionDeadlineAssertion func(
 func startAndDestroyProductionCompositionRunners(
 	ctx context.Context,
 	t *testing.T,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	dockerProvider, libvirtProvider execution.RunnerLauncher,
 	dockerCommands *productionCompositionDockerCommands,
 	libvirtCommands *productionCompositionLibvirtCommands,
@@ -302,7 +303,7 @@ func requireProductionCompositionInspection(
 	ctx context.Context,
 	t *testing.T,
 	description string,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	endpointID execution.InventoryEndpointID,
 ) {
 	t.Helper()
@@ -330,7 +331,7 @@ func requireProductionCompositionStart(
 func requireProductionCompositionEndpointInstance(
 	ctx context.Context,
 	t *testing.T,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	endpointID execution.InventoryEndpointID,
 	runnerName core.RunnerName,
 ) execution.RunnerInstance {
@@ -351,7 +352,7 @@ func requireProductionCompositionEndpointInstance(
 func requireProductionCompositionDestroy(
 	ctx context.Context,
 	t *testing.T,
-	inventory execution.AggregateRunnerInventory,
+	inventory runtimeservice.AggregateRunnerInventory,
 	instance execution.RunnerInstance,
 ) {
 	t.Helper()

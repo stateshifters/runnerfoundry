@@ -16,6 +16,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
@@ -24,12 +25,12 @@ func (application *e2eApplication) buildProviderSet(
 	_ config.Config,
 	_ core.MemberID,
 	_ productionDependencies,
-) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 	providers := application.nextProviderBuild()
 	if err := validateE2EApplicationProviders(ctx, providers); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, err
+		return nil, runtimeservice.AggregateRunnerInventory{}, err
 	}
-	inventory := execution.NewAggregateRunnerInventory(providers.linuxInventory, providers.windowsInventory)
+	inventory := runtimeservice.NewAggregateRunnerInventory(providers.linuxInventory, providers.windowsInventory)
 	return map[core.RunnerPool]execution.RunnerLauncher{
 		"linux": providers.linuxLauncher, "windows": providers.windowsLauncher,
 	}, inventory, nil

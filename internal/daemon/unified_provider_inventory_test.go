@@ -8,7 +8,13 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
+
+type observedProviderActivity struct {
+	activity       runtimeservice.ProviderActivity
+	composeService string
+}
 
 func TestProductionProviderComposition(t *testing.T) {
 	providers, _, err := mixedConfiguredProviders()
@@ -40,7 +46,7 @@ func TestProductionInventoryCombinesActiveProviderBackends(t *testing.T) {
 }
 
 func TestDockerPoolsShareEndpointInventoryWithoutComposeServiceMetadata(t *testing.T) {
-	var activities []execution.ProviderActivity
+	var activities []observedProviderActivity
 	var launcherConfigs []dockerprovider.ComposeConfig
 	inventoryBuilds := 0
 	providers, inventory, err := buildProductionProvidersWithDependencies(context.Background(), twoDockerPoolConfiguration(), "member-a", productionDependencies{
@@ -58,8 +64,8 @@ func TestDockerPoolsShareEndpointInventoryWithoutComposeServiceMetadata(t *testi
 			inventoryBuilds++
 			return &providerFactoryInventoryFake{endpointID: "docker:member-a"}
 		},
-		providerObserver: func(activity execution.ProviderActivity) {
-			activities = append(activities, activity)
+		providerObserver: func(activity runtimeservice.ProviderActivity, composeService string) {
+			activities = append(activities, observedProviderActivity{activity: activity, composeService: composeService})
 		},
 	})
 	if err != nil {
@@ -93,7 +99,7 @@ func twoDockerPoolConfiguration() config.Config {
 func assertDockerLaunchersUseConfiguredServices(
 	t *testing.T,
 	providers map[core.RunnerPool]execution.RunnerLauncher,
-	activities *[]execution.ProviderActivity,
+	activities *[]observedProviderActivity,
 ) {
 	t.Helper()
 	if len(providers) != 2 {
@@ -108,7 +114,7 @@ func assertDockerLauncherUsesService(
 	launcher execution.RunnerLauncher,
 	runnerPool core.RunnerPool,
 	expectedService string,
-	activities *[]execution.ProviderActivity,
+	activities *[]observedProviderActivity,
 ) {
 	t.Helper()
 	if err := launcher.Start(context.Background(), execution.StartRequest{
@@ -118,8 +124,8 @@ func assertDockerLauncherUsesService(
 		t.Fatalf("start %s: %v", runnerPool, err)
 	}
 	for _, activity := range *activities {
-		if activity.Operation == "start" && activity.RunnerPool == runnerPool &&
-			activity.ComposeService == expectedService {
+		if activity.activity.Operation == "start" && activity.activity.RunnerPool == runnerPool &&
+			activity.composeService == expectedService {
 			return
 		}
 	}
@@ -129,14 +135,14 @@ func assertDockerLauncherUsesService(
 func assertDockerInventoryHasNoComposeService(
 	t *testing.T,
 	inventory execution.RunnerInventory,
-	activities *[]execution.ProviderActivity,
+	activities *[]observedProviderActivity,
 ) {
 	t.Helper()
 	if _, err := inventory.Inspect(context.Background()); err != nil {
 		t.Fatalf("inspect inventory: %v", err)
 	}
 	for _, activity := range *activities {
-		if activity.Operation == "inspect" && activity.ComposeService != "" {
+		if activity.activity.Operation == "inspect" && activity.composeService != "" {
 			t.Fatalf("inventory activity claimed Compose service: %#v", activity)
 		}
 	}
@@ -144,7 +150,7 @@ func assertDockerInventoryHasNoComposeService(
 
 func mixedConfiguredProviders() (
 	map[core.RunnerPool]execution.RunnerLauncher,
-	execution.AggregateRunnerInventory,
+	runtimeservice.AggregateRunnerInventory,
 	error,
 ) {
 	configured := config.Config{RunnerPools: []config.RunnerPoolConfig{

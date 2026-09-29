@@ -1,4 +1,4 @@
-package execution
+package runtime
 
 import (
 	"context"
@@ -7,16 +7,17 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func TestAggregateRunnerInventoryMergesActiveBackendsAndRoutesDestruction(t *testing.T) {
 	dockerInventory := &runnerInventoryFake{
 		identity:  "docker-compose",
-		instances: []RunnerInstance{{ID: "container-1", RunnerName: "runner-1", State: RunnerStateRunning}},
+		instances: []execution.RunnerInstance{{ID: "container-1", RunnerName: "runner-1", State: execution.RunnerStateRunning}},
 	}
 	libvirtInventory := &runnerInventoryFake{
 		identity:  "libvirt:qemu:///system",
-		instances: []RunnerInstance{{ID: "domain-2", RunnerName: "runner-2", State: RunnerStateCompleted}},
+		instances: []execution.RunnerInstance{{ID: "domain-2", RunnerName: "runner-2", State: execution.RunnerStateCompleted}},
 	}
 	inventory := NewAggregateRunnerInventory(dockerInventory, libvirtInventory)
 
@@ -43,7 +44,7 @@ func TestAggregateRunnerInventoryFailsClosedAfterInspectingEveryBackend(t *testi
 	failingInventory := &runnerInventoryFake{identity: "docker-compose", inspectErr: expectedErr}
 	availableInventory := &runnerInventoryFake{
 		identity:  "libvirt:qemu:///system",
-		instances: []RunnerInstance{{RunnerName: "runner-1"}},
+		instances: []execution.RunnerInstance{{RunnerName: "runner-1"}},
 	}
 	inventory := NewAggregateRunnerInventory(failingInventory, availableInventory)
 
@@ -61,8 +62,8 @@ func TestAggregateRunnerInventoryFailsClosedAfterInspectingEveryBackend(t *testi
 
 func TestAggregateRunnerInventoryRejectsDuplicateRunnerNames(t *testing.T) {
 	inventory := NewAggregateRunnerInventory(
-		&runnerInventoryFake{identity: "docker-compose", instances: []RunnerInstance{{RunnerName: "runner-1"}}},
-		&runnerInventoryFake{identity: "libvirt:qemu:///system", instances: []RunnerInstance{{RunnerName: "runner-1"}}},
+		&runnerInventoryFake{identity: "docker-compose", instances: []execution.RunnerInstance{{RunnerName: "runner-1"}}},
+		&runnerInventoryFake{identity: "libvirt:qemu:///system", instances: []execution.RunnerInstance{{RunnerName: "runner-1"}}},
 	)
 
 	instances, err := inventory.Inspect(context.Background())
@@ -100,9 +101,15 @@ func TestAggregateRunnerInventoryDeduplicatesEquivalentBackends(t *testing.T) {
 func TestAggregateRunnerInventoryRejectsDestructionWithoutObservedOrigin(t *testing.T) {
 	inventory := NewAggregateRunnerInventory()
 
-	err := inventory.Destroy(context.Background(), RunnerInstance{RunnerName: "runner-1"})
+	err := inventory.Destroy(context.Background(), execution.RunnerInstance{RunnerName: "runner-1"})
 	if err == nil || !strings.Contains(err.Error(), "no inventory origin") {
 		t.Fatalf("Destroy() error = %v, want missing origin", err)
+	}
+	err = inventory.Destroy(context.Background(), execution.RunnerInstance{
+		RunnerName: "runner-1", InventoryObservation: &execution.InventoryObservation{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not configured") {
+		t.Fatalf("Destroy() error = %v, want unavailable origin", err)
 	}
 }
 
@@ -110,7 +117,7 @@ func TestAggregateRunnerInventoryPreservesOriginDestroyFailure(t *testing.T) {
 	expectedErr := errors.New("destroy failed")
 	backend := &runnerInventoryFake{
 		identity:   "docker-compose",
-		instances:  []RunnerInstance{{RunnerName: "runner-1"}},
+		instances:  []execution.RunnerInstance{{RunnerName: "runner-1"}},
 		destroyErr: expectedErr,
 	}
 	inventory := NewAggregateRunnerInventory(backend)
@@ -123,13 +130,13 @@ func TestAggregateRunnerInventoryPreservesOriginDestroyFailure(t *testing.T) {
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("Destroy() error = %v, want wrapped %v", err, expectedErr)
 	}
-	if backend.destroyed[0].origin != nil {
+	if backend.destroyed[0].InventoryObservation != nil {
 		t.Fatal("origin routing data leaked into backend destruction")
 	}
 }
 
 func TestAggregateRunnerInventoryRefreshesAndReusesCycleSnapshot(t *testing.T) {
-	backend := &runnerInventoryFake{identity: "docker:member", instances: []RunnerInstance{{
+	backend := &runnerInventoryFake{identity: "docker:member", instances: []execution.RunnerInstance{{
 		RunnerName: "runner-1", RunnerPool: "linux",
 	}}}
 	inventory := NewAggregateRunnerInventory(backend)
@@ -176,9 +183,10 @@ func TestAggregateRunnerInventoryRefreshFailsClosed(t *testing.T) {
 
 func TestAggregateRunnerInventoryRefreshWithoutCacheReturnsInspectionFailure(t *testing.T) {
 	wantErr := errors.New("offline")
-	inventory := AggregateRunnerInventory{inventories: []RunnerInventory{
+	inventory := NewAggregateRunnerInventory(
 		&runnerInventoryFake{identity: "docker:member", inspectErr: wantErr},
-	}}
+	)
+	inventory.cache = nil
 
 	if err := inventory.Refresh(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("Refresh() error = %v, want wrapped %v", err, wantErr)
@@ -202,22 +210,22 @@ func TestAggregateRunnerInventoryInspectEndpointReturnsBackendFailure(t *testing
 
 type runnerInventoryFake struct {
 	identity    string
-	instances   []RunnerInstance
+	instances   []execution.RunnerInstance
 	inspectErr  error
 	inspections int
-	destroyed   []RunnerInstance
+	destroyed   []execution.RunnerInstance
 	destroyErr  error
 }
 
-func (inventory *runnerInventoryFake) EndpointID() InventoryEndpointID {
-	return InventoryEndpointID(inventory.identity)
+func (inventory *runnerInventoryFake) EndpointID() execution.InventoryEndpointID {
+	return execution.InventoryEndpointID(inventory.identity)
 }
-func (inventory *runnerInventoryFake) KnowsEndpoint(endpointID InventoryEndpointID) bool {
+func (inventory *runnerInventoryFake) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
 	return inventory.EndpointID() == endpointID
 }
 
 func (inventory *runnerInventoryFake) CanInspectEndpointForMember(
-	endpointID InventoryEndpointID,
+	endpointID execution.InventoryEndpointID,
 	_ core.MemberID,
 ) bool {
 	return inventory.KnowsEndpoint(endpointID)
@@ -226,19 +234,19 @@ func (inventory *runnerInventoryFake) Refresh(ctx context.Context) error {
 	_, err := inventory.Inspect(ctx)
 	return err
 }
-func (inventory *runnerInventoryFake) InspectEndpoint(ctx context.Context, endpointID InventoryEndpointID) ([]RunnerInstance, error) {
+func (inventory *runnerInventoryFake) InspectEndpoint(ctx context.Context, endpointID execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
 	if !inventory.KnowsEndpoint(endpointID) {
 		return nil, errors.New("unknown endpoint")
 	}
 	return inventory.Inspect(ctx)
 }
 
-func (inventory *runnerInventoryFake) Inspect(context.Context) ([]RunnerInstance, error) {
+func (inventory *runnerInventoryFake) Inspect(context.Context) ([]execution.RunnerInstance, error) {
 	inventory.inspections++
-	return append([]RunnerInstance(nil), inventory.instances...), inventory.inspectErr
+	return append([]execution.RunnerInstance(nil), inventory.instances...), inventory.inspectErr
 }
 
-func (inventory *runnerInventoryFake) Destroy(_ context.Context, instance RunnerInstance) error {
+func (inventory *runnerInventoryFake) Destroy(_ context.Context, instance execution.RunnerInstance) error {
 	inventory.destroyed = append(inventory.destroyed, instance)
 	return inventory.destroyErr
 }

@@ -1,15 +1,19 @@
-package execution
+package runtime
 
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
+
+type InventoryEndpointID = execution.InventoryEndpointID
+type RunnerInstance = execution.RunnerInstance
+type StartRequest = execution.StartRequest
 
 func TestDeadlineProviderAppliesValidationDeadline(t *testing.T) {
 	provider, wrapped := newDeadlineTestProvider()
@@ -83,13 +87,11 @@ func TestDeadlineProviderReportsProviderOperations(t *testing.T) {
 	}
 }
 
-func TestSeparateDeadlineBoundariesKeepLauncherMetadataOutOfInventoryActivity(t *testing.T) {
+func TestSeparateDeadlineBoundariesReportProviderIdentity(t *testing.T) {
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
 	var activities []ProviderActivity
 	observer := func(activity ProviderActivity) { activities = append(activities, activity) }
-	launcher := WithLauncherOperationDeadlinesAndMetadata(provider, ProviderMetadata{
-		Name: "docker", ComposeService: "runner",
-	}, observer)
+	launcher := WithLauncherOperationDeadlines(provider, "docker", observer)
 	inventory := WithInventoryOperationDeadlines(provider, "docker", observer)
 
 	launcherErr := launcher.Start(context.Background(), StartRequest{EndpointID: "endpoint-a"})
@@ -97,18 +99,16 @@ func TestSeparateDeadlineBoundariesKeepLauncherMetadataOutOfInventoryActivity(t 
 	if err := errors.Join(launcherErr, inventoryErr); err != nil {
 		t.Fatal(err)
 	}
-	services := make([]string, 0, len(activities))
 	for _, activity := range activities {
-		services = append(services, activity.ComposeService)
-	}
-	if !reflect.DeepEqual(services, []string{"runner", "runner", "", ""}) {
-		t.Fatalf("activity Compose services = %#v", services)
+		if activity.Provider != "docker" {
+			t.Fatalf("activity provider = %q, want docker", activity.Provider)
+		}
 	}
 }
 
 func TestSeparateLauncherDeadlineBoundaryPreservesOperations(t *testing.T) {
 	provider := &deadlineRecordingProvider{endpoint: "endpoint-a", remaining: make(map[string]time.Duration)}
-	launcher := WithLauncherOperationDeadlinesAndMetadata(provider, ProviderMetadata{Name: "docker"})
+	launcher := WithLauncherOperationDeadlines(provider, "docker")
 
 	err := errors.Join(
 		launcher.Validate(context.Background()),

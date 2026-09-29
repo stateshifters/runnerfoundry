@@ -17,6 +17,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
 	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
@@ -72,10 +73,10 @@ type productionDependencies struct {
 	closePool                func(*pgxpool.Pool)
 	newLeaderElector         func(*cluster.Connections) *cluster.LeaderElector
 	tryLeader                func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error)
-	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error)
+	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error)
 	readHostname             func() (string, error)
 	logDestinationFactory    logDestinationFactory
-	providerObserver         func(execution.ProviderActivity)
+	providerObserver         providerActivityObserver
 	openState                func(context.Context, config.Config, productionDependencies) (*productionState, error)
 	buildGeneration          func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error)
 }
@@ -390,10 +391,10 @@ func buildProductionProvidersWithDependencies(
 	configured config.Config,
 	member core.MemberID,
 	dependencies productionDependencies,
-) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 	hostname := strings.TrimSpace(string(member))
 	if len(configured.RunnerPools) != 0 && hostname == "" {
-		return nil, execution.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
+		return nil, runtimeservice.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
 	}
 	return buildConfiguredProviders(ctx, configured, productionExecutionDependencies(
 		dependencies, core.MemberID(hostname),
@@ -417,27 +418,27 @@ func buildConfiguredProviders(
 	ctx context.Context,
 	configured config.Config,
 	dependencies executionDependencies,
-) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 	providers := make(map[core.RunnerPool]execution.RunnerLauncher, len(configured.RunnerPools))
 	inventories := make([]execution.RunnerInventory, 0, len(configured.RunnerPools))
 	if configurationUsesDocker(configured) {
 		dockerInventory, err := configuredDockerInventory(dependencies)
 		if err != nil {
-			return nil, execution.AggregateRunnerInventory{}, err
+			return nil, runtimeservice.AggregateRunnerInventory{}, err
 		}
 		inventories = append(inventories, dockerInventory)
 	}
 	for _, runnerPoolConfig := range configured.RunnerPools {
 		provider, err := buildExecutionProvider(ctx, runnerPoolConfig, dependencies)
 		if err != nil {
-			return nil, execution.AggregateRunnerInventory{}, err
+			return nil, runtimeservice.AggregateRunnerInventory{}, err
 		}
 		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider.Launcher
 		if provider.Inventory != nil {
 			inventories = append(inventories, provider.Inventory)
 		}
 	}
-	inventory := execution.NewAggregateRunnerInventory(inventories...)
+	inventory := runtimeservice.NewAggregateRunnerInventory(inventories...)
 	return providers, inventory, nil
 }
 

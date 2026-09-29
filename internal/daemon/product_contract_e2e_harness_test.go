@@ -407,22 +407,22 @@ func (harness *e2eHarness) buildProviderSet(
 	_ config.Config,
 	_ core.MemberID,
 	_ productionDependencies,
-) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
-	harness.providerBoundary = execution.WithLauncherOperationDeadlinesAndMetadata(
-		harness.provider, execution.ProviderMetadata{Name: "e2e"},
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeengine.AggregateRunnerInventory, error) {
+	harness.providerBoundary = runtimeengine.WithLauncherOperationDeadlines(
+		harness.provider, "e2e",
 	)
-	harness.windowsProviderBoundary = execution.WithLauncherOperationDeadlinesAndMetadata(
-		harness.windowsProvider, execution.ProviderMetadata{Name: "e2e-windows"},
+	harness.windowsProviderBoundary = runtimeengine.WithLauncherOperationDeadlines(
+		harness.windowsProvider, "e2e-windows",
 	)
-	harness.providerInventory = execution.WithInventoryOperationDeadlines(harness.provider, "e2e")
-	harness.windowsProviderInventory = execution.WithInventoryOperationDeadlines(harness.windowsProvider, "e2e-windows")
+	harness.providerInventory = runtimeengine.WithInventoryOperationDeadlines(harness.provider, "e2e")
+	harness.windowsProviderInventory = runtimeengine.WithInventoryOperationDeadlines(harness.windowsProvider, "e2e-windows")
 	if err := harness.providerBoundary.Validate(ctx); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Linux provider: %w", err)
+		return nil, runtimeengine.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Linux provider: %w", err)
 	}
 	if err := harness.windowsProviderBoundary.Validate(ctx); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Windows provider: %w", err)
+		return nil, runtimeengine.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Windows provider: %w", err)
 	}
-	inventory := execution.NewAggregateRunnerInventory(harness.providerInventory, harness.windowsProviderInventory)
+	inventory := runtimeengine.NewAggregateRunnerInventory(harness.providerInventory, harness.windowsProviderInventory)
 	return map[core.RunnerPool]execution.RunnerLauncher{
 		"linux": harness.providerBoundary, "windows": harness.windowsProviderBoundary,
 	}, inventory, nil

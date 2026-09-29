@@ -16,6 +16,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
@@ -451,9 +452,9 @@ func productionGenerationDependencies() productionDependencies {
 		config.Config,
 		core.MemberID,
 		productionDependencies,
-	) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
+	) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 		provider := builderProviderFake{}
-		inventory := execution.NewAggregateRunnerInventory(provider)
+		inventory := runtimeservice.NewAggregateRunnerInventory(provider)
 		return map[core.RunnerPool]execution.RunnerLauncher{"linux": provider}, inventory, nil
 	}
 	dependencies.newTicker = func(time.Duration) cycleTicker {
@@ -529,8 +530,8 @@ func (fixture productionGenerationFailureFixture) assertProviderFailure(t *testi
 		config.Config,
 		core.MemberID,
 		productionDependencies,
-	) (map[core.RunnerPool]execution.RunnerLauncher, execution.AggregateRunnerInventory, error) {
-		return nil, execution.AggregateRunnerInventory{}, fixture.wantErr
+	) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
+		return nil, runtimeservice.AggregateRunnerInventory{}, fixture.wantErr
 	}
 	if _, err := fixture.build(dependencies); !errors.Is(err, fixture.wantErr) {
 		t.Fatalf("provider composition error = %v", err)
