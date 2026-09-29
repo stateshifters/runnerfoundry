@@ -37,8 +37,8 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 		_ func(error),
 	) (*maintenanceGeneration, error) {
 		members = append(members, state.member)
-		return newMaintenanceGeneration(
-			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+		return newTestMaintenanceGeneration(
+			&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
 			nil,
 		), nil
 	}
@@ -86,8 +86,8 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 		func(error),
 	) (*maintenanceGeneration, error) {
 		builds++
-		return newMaintenanceGeneration(
-			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+		return newTestMaintenanceGeneration(
+			&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
 			nil,
 		), nil
 	}

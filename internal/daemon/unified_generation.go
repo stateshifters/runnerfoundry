@@ -11,13 +11,6 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-type cycleEngine interface {
-	Activate() error
-	Deactivate(ctx context.Context) error
-	Cycle(ctx context.Context) error
-	Close(ctx context.Context) error
-}
-
 type maintenanceLaneRuntime interface {
 	MaintainMembership(ctx context.Context) error
 	MaintainSource(ctx context.Context) error
@@ -45,17 +38,16 @@ type runtimeFinalizer interface {
 }
 
 type queuedJobNotificationRuntime interface {
-	Start(ctx context.Context)
+	Start(startupContext, runtimeContext context.Context) error
 	Stop(ctx context.Context) error
 }
 
-type gatedCycleEngine struct {
-	engine     cycleEngineRuntime
+type gatedMaintenanceEngine struct {
+	engine     maintenanceEngineRuntime
 	leadership generationLeadership
 }
 
-type cycleEngineRuntime interface {
-	Cycle(ctx context.Context) error
+type maintenanceEngineRuntime interface {
 	Close(ctx context.Context) error
 	maintenanceLaneRuntime
 }
@@ -66,41 +58,37 @@ type generationLeadership interface {
 	Close(ctx context.Context) error
 }
 
-func newGatedCycleEngine(engine cycleEngineRuntime, leadership generationLeadership) *gatedCycleEngine {
-	return &gatedCycleEngine{engine: engine, leadership: leadership}
+func newGatedMaintenanceEngine(engine maintenanceEngineRuntime, leadership generationLeadership) *gatedMaintenanceEngine {
+	return &gatedMaintenanceEngine{engine: engine, leadership: leadership}
 }
 
-func (engine *gatedCycleEngine) Activate() error {
+func (engine *gatedMaintenanceEngine) Activate() error {
 	if err := engine.leadership.Activate(); err != nil {
 		return fmt.Errorf("activate local generation leadership: %w", err)
 	}
 	return nil
 }
 
-func (engine *gatedCycleEngine) Deactivate(ctx context.Context) error {
+func (engine *gatedMaintenanceEngine) Deactivate(ctx context.Context) error {
 	if err := engine.leadership.Close(ctx); err != nil {
 		return fmt.Errorf("deactivate local generation leadership: %w", err)
 	}
 	return nil
 }
 
-func (engine *gatedCycleEngine) Cycle(ctx context.Context) error {
-	return engine.runActive(ctx, "cycle", engine.engine.Cycle)
-}
-
-func (engine *gatedCycleEngine) MaintainMembership(ctx context.Context) error {
+func (engine *gatedMaintenanceEngine) MaintainMembership(ctx context.Context) error {
 	return engine.runActive(ctx, "membership", engine.engine.MaintainMembership)
 }
 
-func (engine *gatedCycleEngine) MaintainSource(ctx context.Context) error {
+func (engine *gatedMaintenanceEngine) MaintainSource(ctx context.Context) error {
 	return engine.runActive(ctx, "source", engine.engine.MaintainSource)
 }
 
-func (engine *gatedCycleEngine) MaintainExecution(ctx context.Context) error {
+func (engine *gatedMaintenanceEngine) MaintainExecution(ctx context.Context) error {
 	return engine.runActive(ctx, "execution", engine.engine.MaintainExecution)
 }
 
-func (engine *gatedCycleEngine) runActive(
+func (engine *gatedMaintenanceEngine) runActive(
 	ctx context.Context,
 	name string,
 	run func(context.Context) error,
@@ -118,7 +106,7 @@ func (engine *gatedCycleEngine) runActive(
 	return nil
 }
 
-func (engine *gatedCycleEngine) Close(ctx context.Context) error {
+func (engine *gatedMaintenanceEngine) Close(ctx context.Context) error {
 	return errors.Join(engine.engine.Close(ctx), engine.leadership.Close(ctx))
 }
 
@@ -158,20 +146,6 @@ type scheduledMaintenanceLane struct {
 	name   string
 	ticker cycleTicker
 	run    func(context.Context) error
-}
-
-func newMaintenanceGeneration(
-	engine cycleEngine,
-	ticker cycleTicker,
-	report func(error),
-	closers []runtimeCloser,
-	finalizers []runtimeFinalizer,
-) *maintenanceGeneration {
-	return newScheduledMaintenanceGeneration(
-		engine,
-		[]scheduledMaintenanceLane{{name: "cycle", ticker: ticker, run: engine.Cycle}},
-		report, closers, finalizers,
-	)
 }
 
 func newIndependentMaintenanceGeneration(
@@ -281,7 +255,13 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) error
 		}
 	}
 	if generation.notifications != nil {
-		generation.notifications.Start(runContext)
+		if err := generation.notifications.Start(ctx, runContext); err != nil {
+			cancel()
+			return errors.Join(
+				fmt.Errorf("start queued-job notifications: %w", err),
+				generation.stopQueuedJobProcessor(context.WithoutCancel(ctx)),
+			)
+		}
 	}
 	generation.mutex.Lock()
 	generation.runCancel = cancel
@@ -291,6 +271,13 @@ func (generation *maintenanceGeneration) startRunLoop(ctx context.Context) error
 	generation.mutex.Unlock()
 	go generation.run(runContext, done)
 	return nil
+}
+
+func (generation *maintenanceGeneration) stopQueuedJobProcessor(ctx context.Context) error {
+	if generation.processor == nil {
+		return nil
+	}
+	return generation.processor.Stop(ctx)
 }
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
@@ -340,10 +327,6 @@ func (generation *maintenanceGeneration) runCycle(
 		operation: "maintenance_" + lane.name, stage: stage, outcome: outcome,
 		duration: generation.currentTime().Sub(started),
 	})
-	if lane.name == "cycle" {
-		generation.reportCycle(err)
-		return
-	}
 	generation.reportLane(lane.name, err)
 }
 
@@ -357,14 +340,6 @@ func (generation *maintenanceGeneration) reportLane(name string, err error) {
 		event.err = err
 	}
 	reportOperational(generation.report, event)
-}
-
-func (generation *maintenanceGeneration) reportCycle(err error) {
-	if err == nil {
-		generation.report(nil)
-		return
-	}
-	generation.report(maintenanceCycleResult{cause: err})
 }
 
 func (generation *maintenanceGeneration) Deactivate(ctx context.Context) error {

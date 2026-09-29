@@ -26,9 +26,9 @@ func TestHermeticRuntimeCompositionReportsReadinessAndRuntimeProgress(t *testing
 	close(fixture.discoverer.release)
 	<-fixture.discoverer.finished
 	assertOperationalHealth(t, fixture.notifier.statuses)
-	<-fixture.cycleCompleted
-	runSnapshotCyclesUntil(t, fixture.ticker, fixture.cycleCompleted, fixture.sessionOpened)
-	runSnapshotCyclesUntil(t, fixture.ticker, fixture.cycleCompleted, fixture.pollStarted)
+	<-fixture.sourceCompleted
+	runSnapshotSourceUntil(t, fixture.sourceTicker, fixture.sourceCompleted, fixture.sessionOpened)
+	runSnapshotSourceUntil(t, fixture.sourceTicker, fixture.sourceCompleted, fixture.pollStarted)
 	cancel()
 	if err := <-result; err != nil {
 		t.Fatal(err)
@@ -37,15 +37,15 @@ func TestHermeticRuntimeCompositionReportsReadinessAndRuntimeProgress(t *testing
 }
 
 type runtimeLoggingFixture struct {
-	destination    *memoryLogDestination
-	notifier       *runtimeSnapshotNotifier
-	discoverer     *blockingRepositoryDiscoverer
-	reporter       *productionRuntimeReporter
-	generation     *maintenanceGeneration
-	ticker         *manualCycleTicker
-	cycleCompleted chan struct{}
-	sessionOpened  chan struct{}
-	pollStarted    chan struct{}
+	destination     *memoryLogDestination
+	notifier        *runtimeSnapshotNotifier
+	discoverer      *blockingRepositoryDiscoverer
+	reporter        *productionRuntimeReporter
+	generation      *maintenanceGeneration
+	sourceTicker    *manualCycleTicker
+	sourceCompleted chan struct{}
+	sessionOpened   chan struct{}
+	pollStarted     chan struct{}
 }
 
 func newRuntimeLoggingFixture(t *testing.T) runtimeLoggingFixture {
@@ -66,12 +66,12 @@ func newRuntimeLoggingFixture(t *testing.T) runtimeLoggingFixture {
 	sessionOpened := make(chan struct{})
 	pollStarted := make(chan struct{})
 	manager := newRuntimeSnapshotManager(t, discoverer, store, reporter, now, sessionOpened, pollStarted)
-	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	runtimeGeneration, cycleCompleted := newRuntimeSnapshotGeneration(manager, store, reporter, now, ticker)
+	sourceTicker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
+	runtimeGeneration, sourceCompleted := newRuntimeSnapshotGeneration(manager, store, reporter, now, sourceTicker)
 	return runtimeLoggingFixture{destination: destination, notifier: notifier, discoverer: discoverer,
-		reporter: reporter, generation: runtimeGeneration, ticker: ticker,
-		cycleCompleted: cycleCompleted,
-		sessionOpened:  sessionOpened, pollStarted: pollStarted}
+		reporter: reporter, generation: runtimeGeneration, sourceTicker: sourceTicker,
+		sourceCompleted: sourceCompleted,
+		sessionOpened:   sessionOpened, pollStarted: pollStarted}
 }
 
 func newRuntimeSnapshotManager(t *testing.T, discoverer githubsource.RepositoryDiscoverer, store *builderStoreFake,
@@ -88,35 +88,69 @@ func newRuntimeSnapshotManager(t *testing.T, discoverer githubsource.RepositoryD
 }
 
 func newRuntimeSnapshotGeneration(manager *githubsource.Manager, store *builderStoreFake,
-	reporter *productionRuntimeReporter, now time.Time, ticker *manualCycleTicker,
+	reporter *productionRuntimeReporter, now time.Time, sourceTicker *manualCycleTicker,
 ) (*maintenanceGeneration, chan struct{}) {
+	engine := newRuntimeSnapshotEngine(manager, store, reporter, now)
+	return newObservedRuntimeSnapshotGeneration(engine, reporter, now, sourceTicker)
+}
+
+func newRuntimeSnapshotEngine(
+	manager *githubsource.Manager,
+	store *builderStoreFake,
+	reporter *productionRuntimeReporter,
+	now time.Time,
+) *UnifiedEngine {
 	capacity := runtimeengine.NewCapacitySnapshotService(store, func() time.Time { return now }, time.Minute)
 	source := githubsupervisor.New(manager, capacity, "member-a", runtimeSnapshotEventHandler{}, githubsource.ManagerConfig{
 		RunnerPools: []githubsource.RunnerPoolConfig{{RunnerPool: "linux", RunnerGroup: "default"}},
 	}, time.Hour, func() time.Time { return now }, newGitHubManagerObserver(reporter.reportMaintenance, func() time.Time { return now }))
-	events := make([]string, 0)
+	membershipEvents := make([]string, 0)
+	executionEvents := make([]string, 0)
 	engine := NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: func() time.Time { return now }, MemberTTL: time.Minute,
-		Membership: membershipFake{events: &events}, Leadership: leadershipFake{leader: true, events: &events},
-		Source: source, Pools: []RunnerPoolRuntime{{RunnerPool: "linux", runtime: poolRuntimeFake{events: &events}}},
-		Inventory: inventoryRuntimeFake{events: &events}, Report: reporter.reportMaintenance,
+		Membership: membershipFake{events: &membershipEvents}, Leadership: permanentLeadership{},
+		Source: source, Pools: []RunnerPoolRuntime{{RunnerPool: "linux", runtime: poolRuntimeFake{events: &executionEvents}}},
+		Inventory: inventoryRuntimeFake{events: &executionEvents}, Report: reporter.reportMaintenance,
 	})
-	cycleCompleted := make(chan struct{}, 1)
-	observedEngine := &cycleCompletionEngine{cycleEngine: newGatedCycleEngine(
-		engine, leadershipFake{leader: true, events: &events}), completed: cycleCompleted}
-	runtimeGeneration := newMaintenanceGeneration(observedEngine,
-		ticker, reporter.reportMaintenance, nil, nil)
-	runtimeGeneration.currentTime = func() time.Time { return now }
-	return runtimeGeneration, cycleCompleted
+	return engine
 }
 
-func runSnapshotCycle(t *testing.T, ticker *manualCycleTicker, completed <-chan struct{}) {
+func newObservedRuntimeSnapshotGeneration(
+	engine *UnifiedEngine,
+	reporter *productionRuntimeReporter,
+	now time.Time,
+	sourceTicker *manualCycleTicker,
+) (*maintenanceGeneration, chan struct{}) {
+	sourceCompleted := make(chan struct{}, 1)
+	gatedEngine := newGatedMaintenanceEngine(engine, (&localLeadershipGate{}).NewLeadership())
+	runtimeGeneration := newIndependentMaintenanceGeneration(
+		gatedEngine,
+		gatedEngine,
+		maintenanceLaneTickers{
+			membership: &manualCycleTicker{ticks: make(chan time.Time)},
+			source:     sourceTicker,
+			execution:  &manualCycleTicker{ticks: make(chan time.Time)},
+		},
+		reporter.reportMaintenance,
+		nil,
+		nil,
+	)
+	runtimeGeneration.maintenanceLaneCompleted = func(laneName string, _ cycleTicker) {
+		if laneName == "source" {
+			sourceCompleted <- struct{}{}
+		}
+	}
+	runtimeGeneration.currentTime = func() time.Time { return now }
+	return runtimeGeneration, sourceCompleted
+}
+
+func runSnapshotSource(t *testing.T, ticker *manualCycleTicker, completed <-chan struct{}) {
 	t.Helper()
 	ticker.ticks <- time.Time{}
 	<-completed
 }
 
-func runSnapshotCyclesUntil(t *testing.T, ticker *manualCycleTicker, completed <-chan struct{}, signal <-chan struct{}) {
+func runSnapshotSourceUntil(t *testing.T, ticker *manualCycleTicker, completed <-chan struct{}, signal <-chan struct{}) {
 	t.Helper()
 	deadline := time.After(time.Second)
 	for {
@@ -125,7 +159,7 @@ func runSnapshotCyclesUntil(t *testing.T, ticker *manualCycleTicker, completed <
 			return
 		default:
 		}
-		runSnapshotCycle(t, ticker, completed)
+		runSnapshotSource(t, ticker, completed)
 		select {
 		case <-signal:
 			return
@@ -134,20 +168,6 @@ func runSnapshotCyclesUntil(t *testing.T, ticker *manualCycleTicker, completed <
 		default:
 		}
 	}
-}
-
-type cycleCompletionEngine struct {
-	cycleEngine
-	completed chan<- struct{}
-}
-
-func (engine *cycleCompletionEngine) Cycle(ctx context.Context) error {
-	err := engine.cycleEngine.Cycle(ctx)
-	engine.completed <- struct{}{}
-	if err != nil {
-		return fmt.Errorf("run observed cycle: %w", err)
-	}
-	return nil
 }
 
 func (fixture runtimeLoggingFixture) start(ctx context.Context) <-chan error {
@@ -175,7 +195,7 @@ func assertOperationalHealth(t *testing.T, statuses <-chan operationalStatus) {
 func assertRuntimeLogSnapshot(t *testing.T, output string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"operation=maintenance_cycle member=member-a stage=immediate outcome=started",
+		"operation=maintenance_source member=member-a stage=immediate outcome=started",
 		"operation=source_reconciliation member=member-a stage=reconciliation outcome=started",
 		"operation=source_sessions member=member-a stage=open_sessions outcome=completed",
 		"operation=capacity_publication member=member-a stage=runner_pool outcome=published runner_pool=linux",

@@ -12,12 +12,12 @@ import (
 )
 
 func TestQueuedJobProcessorStopBeforeStartIsIdempotent(t *testing.T) {
-	processor := newQueuedJobProcessor(queuedJobRequesterFake{request: func(
+	processor := newQueuedJobProcessorForPools(queuedJobRequesterFake{request: func(
 		context.Context,
 		core.RunnerPool,
 	) (runtimeengine.ProcessResult, error) {
 		return runtimeengine.ProcessResult{}, nil
-	}}, newQueuedJobEligibilityGate(), nil)
+	}}, newQueuedJobEligibilityGate(), nil, nil)
 	if err := processor.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() before start error = %v", err)
 	}
@@ -34,7 +34,7 @@ func TestQueuedJobProcessorStopDeadlineRemainsRetryable(t *testing.T) {
 		<-release
 		return runtimeengine.ProcessResult{}, nil
 	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
-	markQueuedJobPoolsEligible(processor.gate, "linux")
+	markQueuedJobPoolsEligible(t, processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -69,13 +69,13 @@ func TestUnifiedGenerationReportsQueuedJobProcessorStartFailure(t *testing.T) {
 	) (runtimeengine.ProcessResult, error) {
 		return runtimeengine.ProcessResult{}, nil
 	}}
-	processor := newQueuedJobProcessor(requester, newQueuedJobEligibilityGate(), nil)
+	processor := newQueuedJobProcessorForPools(requester, newQueuedJobEligibilityGate(), nil, nil)
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("pre-start processor: %v", err)
 	}
 	cycles := make(chan struct{}, 1)
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.processor = processor
 	mustPrepareGeneration(t, generation)
@@ -96,7 +96,7 @@ func TestUnifiedGenerationReportsQueuedJobProcessorStopFailure(t *testing.T) {
 		<-release
 		return runtimeengine.ProcessResult{}, nil
 	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
-	markQueuedJobPoolsEligible(processor.gate, "linux")
+	markQueuedJobPoolsEligible(t, processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}

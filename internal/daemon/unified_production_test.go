@@ -383,7 +383,6 @@ func TestTimedProductionGenerationBuildsWithInjectedTicker(t *testing.T) {
 		t.Fatalf("timed generation = (%v, %v)", generation, err)
 	}
 	assertTimedProductionLaneObserver(t, generation, completed)
-	generation.reportCycle(errors.New("ignored report"))
 }
 
 func assertTimedProductionLaneObserver(
@@ -551,8 +550,8 @@ func TestOpenProductionRuntimeUsesLoggingAndStateBoundaries(t *testing.T) {
 		return &productionState{}, nil
 	}
 	dependencies.buildGeneration = func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error) {
-		return newMaintenanceGeneration(
-			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+		return newTestMaintenanceGeneration(
+			&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 		), nil
 	}
 	runtime, err := openProductionRuntimeWithDependencies(context.Background(), config.Config{}, dependencies)

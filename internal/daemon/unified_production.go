@@ -232,7 +232,7 @@ func buildTimedProductionGeneration(
 		state: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
-		tickers: &tickers, report: report,
+		tickers: tickers, report: report,
 		processGate: processGate, queueNotifications: state.queueNotifications,
 	})
 	if err != nil {

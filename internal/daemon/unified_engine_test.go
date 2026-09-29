@@ -13,7 +13,7 @@ import (
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
-func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
+func TestUnifiedEngineExposesTheSameMaintenanceLanesForEveryStateBackend(t *testing.T) {
 	t.Parallel()
 
 	for _, backend := range []string{"sqlite", "postgres"} {
@@ -23,13 +23,13 @@ func TestUnifiedEngineRunsOneLifecycleForEveryStateBackend(t *testing.T) {
 			events := make([]string, 0)
 			engine := unifiedEngineFixture(&events)
 
-			if err := engine.Cycle(context.Background()); err != nil {
-				t.Fatalf("cycle %s runtime: %v", backend, err)
-			}
+			mustMaintainMembership(t, engine)
+			mustMaintainSource(t, engine)
+			mustMaintainExecution(t, engine)
 
 			want := []string{
 				"heartbeat", "refresh-members", "leadership", "open-leader",
-				"poll", "reconcile:linux",
+				"poll", "leadership", "reconcile:linux",
 			}
 			if !reflect.DeepEqual(events, want) {
 				t.Fatalf("events = %#v, want %#v", events, want)
@@ -45,11 +45,11 @@ func TestUnifiedEngineKeepsMemberWorkIndependentOfLeadership(t *testing.T) {
 	engine := unifiedEngineFixture(&events)
 	engine.leadership = leadershipFake{leader: false, events: &events}
 
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("cycle follower runtime: %v", err)
-	}
+	mustMaintainMembership(t, engine)
+	mustMaintainSource(t, engine)
+	mustMaintainExecution(t, engine)
 
-	want := []string{"heartbeat", "refresh-members", "leadership", "reconcile:linux"}
+	want := []string{"heartbeat", "refresh-members", "leadership", "leadership", "reconcile:linux"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
@@ -102,9 +102,9 @@ func TestUnifiedEngineSkipsRecoveryAndLocalWorkWhenInventoryRefreshFails(t *test
 	engine := unifiedEngineFixture(&events)
 	engine.inventory = inventoryRuntimeFake{events: &events, err: wantErr}
 
-	err := engine.Cycle(context.Background())
+	err := engine.MaintainExecution(context.Background())
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("Cycle() error = %v, want inventory failure", err)
+		t.Fatalf("MaintainExecution() error = %v, want inventory failure", err)
 	}
 	if occurrences(events, "recover-foreign:linux") != 0 || occurrences(events, "reconcile:linux") != 0 {
 		t.Fatalf("events = %#v, want no recovery or local work after failed refresh", events)
@@ -120,10 +120,10 @@ func TestUnifiedEngineReportsForeignRecoveryFailureAndContinuesLocalWork(t *test
 	engine.jobGate = newQueuedJobEligibilityGate()
 	engine.wakeJobs = func(runnerPool core.RunnerPool) { woken = append(woken, runnerPool) }
 	engine.pools[0].runtime = poolRuntimeFake{events: &events, recoverErr: wantErr}
-	err := engine.Cycle(context.Background())
+	err := engine.MaintainExecution(context.Background())
 	if !errors.Is(err, wantErr) || occurrences(events, "reconcile:linux") != 1 ||
 		!reflect.DeepEqual(woken, []core.RunnerPool{"linux"}) {
-		t.Fatalf("Cycle() = %v, events=%#v, wakes=%#v", err, events, woken)
+		t.Fatalf("MaintainExecution() = %v, events=%#v, wakes=%#v", err, events, woken)
 	}
 }
 
@@ -135,11 +135,11 @@ func TestUnifiedEngineClosesLeaderResourcesWhenLeadershipIsLost(t *testing.T) {
 	engine := unifiedEngineFixture(&events)
 	engine.leadership = leadership
 
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("leader cycle: %v", err)
+	if err := engine.MaintainSource(context.Background()); err != nil {
+		t.Fatalf("leader source maintenance: %v", err)
 	}
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("follower cycle: %v", err)
+	if err := engine.MaintainSource(context.Background()); err != nil {
+		t.Fatalf("follower source maintenance: %v", err)
 	}
 	if occurrences(events, "close-leader") != 1 {
 		t.Fatalf("events = %#v, want leader resources closed once", events)
@@ -155,9 +155,11 @@ func TestUnifiedEngineContinuesIndependentMaintenanceAfterFailures(t *testing.T)
 	engine.membership = membershipFake{events: &events, heartbeatErr: heartbeatErr}
 	engine.pools[0].runtime = poolRuntimeFake{events: &events, reconcileErr: errors.New("reconcile unavailable")}
 
-	err := engine.Cycle(context.Background())
-	if err == nil || !errors.Is(err, heartbeatErr) {
-		t.Fatalf("cycle error = %v, want heartbeat error", err)
+	if err := engine.MaintainMembership(context.Background()); !errors.Is(err, heartbeatErr) {
+		t.Fatalf("membership error = %v, want heartbeat error", err)
+	}
+	if err := engine.MaintainExecution(context.Background()); err == nil {
+		t.Fatal("failed execution maintenance unexpectedly succeeded")
 	}
 	if occurrences(events, "reconcile:linux") != 1 || occurrences(events, "request:linux") != 0 {
 		t.Fatalf("events = %#v, want maintenance to avoid claims", events)
@@ -170,8 +172,8 @@ func TestUnifiedEngineNeverClaimsWorkInsideMaintenance(t *testing.T) {
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
 	engine.pools[0].runtime = poolRuntimeFake{events: &events, requestErr: errors.New("claim unavailable")}
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("cycle error = %v", err)
+	if err := engine.MaintainExecution(context.Background()); err != nil {
+		t.Fatalf("execution maintenance error = %v", err)
 	}
 	if occurrences(events, "request:linux") != 0 {
 		t.Fatalf("maintenance requested work: %#v", events)
@@ -185,8 +187,8 @@ func TestUnifiedEngineWakesOnlySuccessfullyReconciledRunnerPools(t *testing.T) {
 	engine.jobGate = newQueuedJobEligibilityGate()
 	engine.wakeJobs = func(runnerPool core.RunnerPool) { woken = append(woken, runnerPool) }
 
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("successful cycle: %v", err)
+	if err := engine.MaintainExecution(context.Background()); err != nil {
+		t.Fatalf("successful execution maintenance: %v", err)
 	}
 	if !reflect.DeepEqual(woken, []core.RunnerPool{"linux"}) {
 		t.Fatalf("successful wakes = %#v, want linux", woken)
@@ -194,7 +196,7 @@ func TestUnifiedEngineWakesOnlySuccessfullyReconciledRunnerPools(t *testing.T) {
 
 	woken = nil
 	engine.pools[0].runtime = poolRuntimeFake{events: &events, reconcileErr: errors.New("reconcile failed")}
-	if err := engine.Cycle(context.Background()); err == nil {
+	if err := engine.MaintainExecution(context.Background()); err == nil {
 		t.Fatal("failed reconciliation unexpectedly succeeded")
 	}
 	if len(woken) != 0 {
@@ -218,8 +220,8 @@ func TestStandbyUnifiedEngineWakesIndependentQueuedJobProcessor(t *testing.T) {
 	}
 	t.Cleanup(func() { stopQueuedJobProcessor(t, processor) })
 
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("standby Cycle() error = %v", err)
+	if err := engine.MaintainExecution(context.Background()); err != nil {
+		t.Fatalf("standby MaintainExecution() error = %v", err)
 	}
 	select {
 	case runnerPool := <-requests:
@@ -242,15 +244,15 @@ func TestUnifiedEngineDoesNotHoldProviderGateDuringSourcePolling(t *testing.T) {
 		release:           releasePoll,
 	}
 	engine.jobGate = newQueuedJobEligibilityGate()
-	markQueuedJobPoolsEligible(engine.jobGate, "linux")
+	markQueuedJobPoolsEligible(t, engine.jobGate, "linux")
 
-	cycleDone := make(chan error, 1)
-	go func() { cycleDone <- engine.Cycle(context.Background()) }()
+	maintenanceDone := make(chan error, 1)
+	go func() { maintenanceDone <- engine.MaintainSource(context.Background()) }()
 	<-pollStarted
 	assertProviderGateAvailable(t, engine.jobGate)
 	close(releasePoll)
-	if err := <-cycleDone; err != nil {
-		t.Fatalf("Cycle() error = %v", err)
+	if err := <-maintenanceDone; err != nil {
+		t.Fatalf("MaintainSource() error = %v", err)
 	}
 }
 
@@ -279,9 +281,7 @@ func TestUnifiedEngineCloseReleasesOnlyOwnedSourceLeadership(t *testing.T) {
 
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("cycle runtime: %v", err)
-	}
+	mustMaintainSource(t, engine)
 	if err := engine.Close(context.Background()); err != nil {
 		t.Fatalf("close runtime: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestUnifiedEngineCloseReleasesOnlyOwnedSourceLeadership(t *testing.T) {
 	}
 }
 
-func TestUnifiedEngineJoinsIndependentOperationFailures(t *testing.T) {
+func TestUnifiedEngineReportsIndependentOperationFailures(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("operation failed")
@@ -306,8 +306,14 @@ func TestUnifiedEngineJoinsIndependentOperationFailures(t *testing.T) {
 	engine.pools[0].runtime = poolRuntimeFake{
 		events: &events, requestErr: wantErr, reconcileErr: wantErr,
 	}
-	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("cycle error = %v", err)
+	if err := engine.MaintainMembership(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("membership error = %v", err)
+	}
+	if err := engine.MaintainSource(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("source error = %v", err)
+	}
+	if err := engine.MaintainExecution(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("execution error = %v", err)
 	}
 }
 
@@ -321,12 +327,12 @@ func TestUnifiedEngineReportsLeadershipLifecycleFailures(t *testing.T) {
 	if err := engine.MaintainExecution(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("execution leadership error = %v", err)
 	}
-	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
+	if err := engine.MaintainSource(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("inspect leadership error = %v", err)
 	}
 	engine.leadership = leadershipFake{leader: true, events: &events}
 	engine.source = sourceRuntimeFake{events: &events, openErr: wantErr}
-	if err := engine.Cycle(context.Background()); !errors.Is(err, wantErr) {
+	if err := engine.MaintainSource(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("open leadership error = %v", err)
 	}
 }
@@ -337,18 +343,18 @@ func TestUnifiedEngineReportsLeadershipCloseFailures(t *testing.T) {
 	events := make([]string, 0)
 	engine := unifiedEngineFixture(&events)
 	engine.source = sourceRuntimeFake{events: &events, closeErr: wantErr}
-	mustRunEngineCycle(t, engine)
+	mustMaintainSource(t, engine)
 	engine.leadership = leadershipFake{events: &events}
-	assertEngineCycleError(t, engine, wantErr, "lost leadership close")
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("standby cycle after failed cleanup: %v", err)
+	assertSourceMaintenanceError(t, engine, wantErr, "lost leadership close")
+	if err := engine.MaintainSource(context.Background()); err != nil {
+		t.Fatalf("standby source maintenance after failed cleanup: %v", err)
 	}
 	if occurrences(events, "close-leader") != 1 {
 		t.Fatalf("close attempts = %d, want hard fence without retry", occurrences(events, "close-leader"))
 	}
 	engine.leadership = leadershipFake{leader: true, events: &events}
 	engine.source = sourceRuntimeFake{events: &events}
-	mustRunEngineCycle(t, engine)
+	mustMaintainSource(t, engine)
 	if err := engine.openLeadership(context.Background()); err != nil {
 		t.Fatalf("open existing leadership: %v", err)
 	}
@@ -374,16 +380,30 @@ func (fake blockingPollSourceRuntime) Poll(ctx context.Context, _ time.Time) err
 	}
 }
 
-func mustRunEngineCycle(t *testing.T, engine *UnifiedEngine) {
+func mustMaintainSource(t *testing.T, engine *UnifiedEngine) {
 	t.Helper()
-	if err := engine.Cycle(context.Background()); err != nil {
-		t.Fatalf("run engine cycle: %v", err)
+	if err := engine.MaintainSource(context.Background()); err != nil {
+		t.Fatalf("maintain source: %v", err)
 	}
 }
 
-func assertEngineCycleError(t *testing.T, engine *UnifiedEngine, want error, operation string) {
+func mustMaintainMembership(t *testing.T, engine *UnifiedEngine) {
 	t.Helper()
-	if err := engine.Cycle(context.Background()); !errors.Is(err, want) {
+	if err := engine.MaintainMembership(context.Background()); err != nil {
+		t.Fatalf("maintain membership: %v", err)
+	}
+}
+
+func mustMaintainExecution(t *testing.T, engine *UnifiedEngine) {
+	t.Helper()
+	if err := engine.MaintainExecution(context.Background()); err != nil {
+		t.Fatalf("maintain execution: %v", err)
+	}
+}
+
+func assertSourceMaintenanceError(t *testing.T, engine *UnifiedEngine, want error, operation string) {
+	t.Helper()
+	if err := engine.MaintainSource(context.Background()); !errors.Is(err, want) {
 		t.Fatalf("%s error = %v, want %v", operation, err, want)
 	}
 }

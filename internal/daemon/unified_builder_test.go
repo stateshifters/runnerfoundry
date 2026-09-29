@@ -30,13 +30,12 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 
 	store := newBuilderStoreFake()
 	manager := newBuilderManager(t, store)
-	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
 		state: builderStatePorts(store), demandStore: store, manager: manager, member: daemonTestID(1),
 		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
-		ticker: ticker, processGate: &localLeadershipGate{},
+		tickers: newManualMaintenanceLaneTickers(), processGate: &localLeadershipGate{},
 	})
 	if err != nil {
 		t.Fatalf("build generation: %v", err)
@@ -122,7 +121,7 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
-		ticker: &manualCycleTicker{ticks: make(chan time.Time)}, processGate: &localLeadershipGate{},
+		tickers: newManualMaintenanceLaneTickers(), processGate: &localLeadershipGate{},
 	}
 }
 

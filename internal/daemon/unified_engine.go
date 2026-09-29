@@ -94,18 +94,6 @@ func NewUnifiedEngine(config UnifiedEngineConfig) *UnifiedEngine {
 	}
 }
 
-// Cycle preserves the former test and diagnostic entry point. Production
-// scheduling invokes the three maintenance lanes independently.
-func (engine *UnifiedEngine) Cycle(ctx context.Context) error {
-	membershipErr := engine.MaintainMembership(ctx)
-	leader, sourceErr := engine.runSourceMaintenance(ctx)
-	var foreignWork foreignRecovery
-	if leader {
-		foreignWork = engine.recoverForeignPool
-	}
-	return errors.Join(membershipErr, sourceErr, engine.runExecutionMaintenance(ctx, foreignWork))
-}
-
 func (engine *UnifiedEngine) MaintainMembership(ctx context.Context) error {
 	started := engine.phaseStarted("heartbeat", "membership", "")
 	err := engine.membership.Heartbeat(ctx)

@@ -429,7 +429,7 @@ func TestOperationalReporterRecoversEverySubjectForAnOperation(t *testing.T) {
 
 func TestOperationalErrorWrappersDescribeAndPreserveTheirCause(t *testing.T) {
 	cause := errors.New("reported")
-	if (maintenanceCycleResult{}).Error() == "" || (reportedOperationalError{cause: cause}).Error() == "" {
+	if (reportedOperationalError{cause: cause}).Error() == "" {
 		t.Fatal("error wrappers did not describe their purpose")
 	}
 	if !errors.Is(reportedOperationalError{cause: cause}, cause) {
@@ -565,14 +565,13 @@ func emitDebugProvenance(report func(error)) {
 	})
 }
 
-func TestMaintenancePhaseReportsItsOwningFailureWithoutGenericDuplicate(t *testing.T) {
+func TestMaintenancePhaseReportsItsOwningFailure(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
 	engine := &UnifiedEngine{report: reporter.reportMaintenance, currentTime: builderTime}
 	wantErr := errors.New("inventory endpoint unavailable")
 
 	engine.phaseCompleted("refresh_inventory", "inventory", "linux", builderTime(), wantErr)
-	(&maintenanceGeneration{report: reporter.reportMaintenance}).reportCycle(wantErr)
 
 	output := destination.String()
 	assertLogFragments(t, output, []string{
@@ -580,9 +579,6 @@ func TestMaintenancePhaseReportsItsOwningFailureWithoutGenericDuplicate(t *testi
 		"component=runner_inventory operation=refresh_inventory", "stage=inventory outcome=failed",
 		"runner_pool=linux", "error_category=operation",
 	})
-	if strings.Contains(output, "Maintenance cycle failed unexpectedly") {
-		t.Fatalf("owning failure was duplicated as generic maintenance: %q", output)
-	}
 }
 
 func TestMaintenancePhaseDoesNotRepeatAnOwningBoundaryFailure(t *testing.T) {

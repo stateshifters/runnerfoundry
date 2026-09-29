@@ -34,8 +34,7 @@ type unifiedBuilderDependencies struct {
 	leadership         leadershipRuntime
 	currentTime        func() time.Time
 	memberTTL          time.Duration
-	ticker             cycleTicker
-	tickers            *maintenanceLaneTickers
+	tickers            maintenanceLaneTickers
 	report             func(error)
 	closers            []runtimeCloser
 	processGate        *localLeadershipGate
@@ -81,27 +80,16 @@ func buildValidatedUnifiedGeneration(
 		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, enqueueWake, stateBackendName(configured.State),
 	)
 	processor = newQueuedJobProcessorForPools(engine, jobGate, dependencies.report, configuredRunnerPoolNames(assembled.pools))
-	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
-	generation := newConfiguredMaintenanceGeneration(processEngine, dependencies, assembled.finalizers)
+	processEngine := newGatedMaintenanceEngine(engine, dependencies.processGate.NewLeadership())
+	generation := newIndependentMaintenanceGeneration(
+		processEngine, processEngine, dependencies.tickers, dependencies.report,
+		configuredClosers(dependencies), assembled.finalizers,
+	)
 	generation.processor = processor
 	if notifications := configuredQueueNotifications(dependencies, wakeJobs); notifications != nil {
 		generation.notifications = notifications
 	}
 	return generation, nil
-}
-
-func newConfiguredMaintenanceGeneration(
-	engine *gatedCycleEngine,
-	dependencies unifiedBuilderDependencies,
-	finalizers []runtimeFinalizer,
-) *maintenanceGeneration {
-	closers := configuredClosers(dependencies)
-	if dependencies.tickers != nil {
-		return newIndependentMaintenanceGeneration(
-			engine, engine, *dependencies.tickers, dependencies.report, closers, finalizers,
-		)
-	}
-	return newMaintenanceGeneration(engine, dependencies.ticker, dependencies.report, closers, finalizers)
 }
 
 func configuredRunnerPoolNames(pools []RunnerPoolRuntime) []core.RunnerPool {
@@ -293,7 +281,7 @@ func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error 
 	if !hasCompleteRuntimeState(dependencies.state) ||
 		dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
 		dependencies.leadership == nil || dependencies.currentTime == nil ||
-		(dependencies.ticker == nil && dependencies.tickers == nil) ||
+		!hasCompleteMaintenanceLaneTickers(dependencies.tickers) ||
 		dependencies.processGate == nil || dependencies.inventory == nil {
 		return errors.New("state, GitHub manager, member, leadership, clock, ticker, and process gate are required")
 	}
@@ -301,6 +289,10 @@ func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error 
 		return errors.New("member TTL must be positive")
 	}
 	return nil
+}
+
+func hasCompleteMaintenanceLaneTickers(tickers maintenanceLaneTickers) bool {
+	return tickers.membership != nil && tickers.source != nil && tickers.execution != nil
 }
 
 func hasCompleteRuntimeState(ports runtimeStatePorts) bool {

@@ -92,13 +92,6 @@ type progressEventEnvelope struct {
 	event operationalEvent
 }
 
-type maintenanceCycleResult struct{ cause error }
-
-func (result maintenanceCycleResult) Error() string {
-	return "maintenance cycle contained reported failures"
-}
-func (result maintenanceCycleResult) Unwrap() error { return result.cause }
-
 type reportedOperationalError struct{ cause error }
 
 func (reported reportedOperationalError) Error() string { return reported.cause.Error() }
@@ -199,10 +192,6 @@ func newProductionRuntimeReporter(
 }
 
 func (reporter *productionRuntimeReporter) reportMaintenance(err error) {
-	var cycleResult maintenanceCycleResult
-	if errors.As(err, &cycleResult) {
-		return
-	}
 	var progress progressEventEnvelope
 	if errors.As(err, &progress) {
 		reporter.ReportProgress(progress.level, progress.event)
