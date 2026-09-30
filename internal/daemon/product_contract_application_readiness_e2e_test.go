@@ -51,8 +51,12 @@ func newProductionProviderReadinessApplication(
 	application.configured.RunnerPools[0].Docker.ComposeFile = "compose.yaml"
 	commands := &readinessDockerCommands{delegate: newProductionCompositionDockerCommands()}
 	application.useProductionProviders = true
-	application.newDockerLauncher = commands.newLauncher
-	application.newDockerInventory = commands.newInventory
+	application.newDockerLauncher = func(configured dockerprovider.ComposeConfig, memberID core.MemberID) execution.RunnerLauncher {
+		return commands.newLauncher(configured, memberID)
+	}
+	application.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return commands.newInventory(memberID)
+	}
 	return application, commands
 }
 
@@ -145,11 +149,11 @@ func (commands *readinessDockerCommands) takeInventoryGate() *readinessCommandGa
 func (commands *readinessDockerCommands) newLauncher(
 	configured dockerprovider.ComposeConfig,
 	memberID core.MemberID,
-) execution.RunnerLauncher {
+) readinessDockerLauncher {
 	return readinessDockerLauncher{RunnerLauncher: commands.delegate.newLauncher(configured, memberID), commands: commands}
 }
 
-func (commands *readinessDockerCommands) newInventory(memberID core.MemberID) execution.RunnerInventory {
+func (commands *readinessDockerCommands) newInventory(memberID core.MemberID) readinessDockerInventory {
 	return readinessDockerInventory{RunnerInventory: commands.delegate.newInventory(memberID), commands: commands}
 }
 
@@ -164,7 +168,10 @@ func (launcher readinessDockerLauncher) Validate(ctx context.Context) error {
 			return err
 		}
 	}
-	return launcher.RunnerLauncher.Validate(ctx)
+	if err := launcher.RunnerLauncher.Validate(ctx); err != nil {
+		return fmt.Errorf("validate Docker launcher: %w", err)
+	}
+	return nil
 }
 
 type readinessDockerInventory struct {
@@ -176,14 +183,21 @@ func (inventory readinessDockerInventory) Refresh(ctx context.Context) error {
 	if err := inventory.wait(ctx); err != nil {
 		return err
 	}
-	return inventory.RunnerInventory.Refresh(ctx)
+	if err := inventory.RunnerInventory.Refresh(ctx); err != nil {
+		return fmt.Errorf("refresh Docker inventory: %w", err)
+	}
+	return nil
 }
 
 func (inventory readinessDockerInventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
 	if err := inventory.wait(ctx); err != nil {
 		return nil, err
 	}
-	return inventory.RunnerInventory.Inspect(ctx)
+	instances, err := inventory.RunnerInventory.Inspect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Docker inventory: %w", err)
+	}
+	return instances, nil
 }
 
 func (inventory readinessDockerInventory) wait(ctx context.Context) error {

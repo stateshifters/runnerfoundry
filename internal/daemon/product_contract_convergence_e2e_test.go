@@ -11,6 +11,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
@@ -136,7 +137,7 @@ func assertRunnerGroupConflict(
 func openPostgresConvergenceStore(
 	t *testing.T,
 	memberName string,
-) (*postgresstate.Store, registrationConvergenceStore) {
+) (*postgresstate.Store, *githubpostgres.Store) {
 	t.Helper()
 	fixture := e2ePostgresStart(t)
 	ctx := context.Background()
@@ -159,7 +160,7 @@ func openPostgresConvergenceStore(
 	if !valid {
 		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store.members)
 	}
-	registrations, valid := state.registrationStore.(registrationConvergenceStore)
+	registrations, valid := state.registrationStore.(*githubpostgres.Store)
 	if !valid {
 		t.Fatalf("PostgreSQL source state %T does not expose declaration persistence", state.registrationStore)
 	}
@@ -172,7 +173,12 @@ type registrationConvergenceStore interface {
 }
 
 type convergenceMembershipStore interface {
-	PublishMemberState(context.Context, core.MemberID, time.Time, []core.RunnerPoolCapacity) error
+	PublishMemberState(
+		ctx context.Context,
+		memberID core.MemberID,
+		observedAt time.Time,
+		capacities []core.RunnerPoolCapacity,
+	) error
 }
 
 func exerciseRegistrationConvergence(

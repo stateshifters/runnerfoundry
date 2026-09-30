@@ -73,7 +73,7 @@ func (runtime *githubSourceRuntime) AvailableRunnerPoolCapacity(
 ) (int, error) {
 	snapshot, err := runtime.capacityProvider.CapacitySnapshot(ctx, runnerPool)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read available Runner Pool capacity: %w", err)
 	}
 	return snapshot.Available, nil
 }
@@ -123,14 +123,6 @@ func (recorder *e2eSupervisorActivityRecorder) checkpoint() uint64 {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
 	return recorder.nextSequence
-}
-
-func (recorder *e2eSupervisorActivityRecorder) await(
-	t *testing.T,
-	description string,
-	matches func(githubsource.ManagerActivity) bool,
-) githubsource.ManagerActivity {
-	return recorder.awaitAfter(t, description, 0, matches)
 }
 
 func (recorder *e2eSupervisorActivityRecorder) awaitAfter(
@@ -200,7 +192,24 @@ func newE2EHarnessWithProviderEndpoints(
 ) *e2eHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	harness := &e2eHarness{
+	harness := newE2EHarnessFixture(t, cancel, memberName, disableQueueNotifications, linuxEndpoint, windowsEndpoint)
+	harness.initializeObservationTargets()
+	harness.configured = e2eConfiguration(state)
+	harness.openAndActivate(ctx)
+	t.Cleanup(harness.close)
+	return harness
+}
+
+func newE2EHarnessFixture(
+	t *testing.T,
+	cancel context.CancelFunc,
+	memberName string,
+	disableQueueNotifications bool,
+	linuxEndpoint execution.InventoryEndpointID,
+	windowsEndpoint execution.InventoryEndpointID,
+) *e2eHarness {
+	t.Helper()
+	return &e2eHarness{
 		t: t, cancel: cancel, host: newE2EGitHost(),
 		provider:        newE2EProviderForEndpoint(linuxEndpoint),
 		windowsProvider: newE2EProviderForEndpoint(windowsEndpoint),
@@ -212,6 +221,9 @@ func newE2EHarnessWithProviderEndpoints(
 		sourceRuntime:             &githubSourceRuntime{},
 		sourceActivities:          newE2ESupervisorActivityRecorder(),
 	}
+}
+
+func (harness *e2eHarness) initializeObservationTargets() {
 	runnerPools := []string{"linux", "windows"}
 	harness.registrationTargets = e2eRouteTargets(runnerPools, harness.host.registrationObservation)
 	harness.sessionTargets = e2eRouteTargets(runnerPools, harness.host.sessionObservation)
@@ -219,10 +231,6 @@ func newE2EHarnessWithProviderEndpoints(
 	for _, ticker := range []*e2eManualTicker{harness.membership, harness.source, harness.execution} {
 		harness.laneCompleted[ticker] = newE2ELaneBarrier()
 	}
-	harness.configured = e2eConfiguration(state)
-	harness.openAndActivate(ctx)
-	t.Cleanup(harness.close)
-	return harness
 }
 
 func (harness *e2eHarness) openAndActivate(ctx context.Context) {
@@ -263,6 +271,11 @@ func (harness *e2eHarness) dependencies() productionDependencies {
 	dependencies.maintenanceLaneCompleted = harness.observeMaintenanceLaneCompletion
 	dependencies.newManager = harness.newManager
 	dependencies.buildProviderSet = harness.buildProviderSet
+	harness.captureMaintenanceGeneration(&dependencies)
+	return dependencies
+}
+
+func (harness *e2eHarness) captureMaintenanceGeneration(dependencies *productionDependencies) {
 	buildGeneration := dependencies.buildGeneration
 	dependencies.buildGeneration = func(
 		ctx context.Context,
@@ -284,53 +297,6 @@ func (harness *e2eHarness) dependencies() productionDependencies {
 		}
 		harness.maintenanceGeneration = generation
 		return generation, nil
-	}
-	return dependencies
-}
-
-func e2eSignalsReady(signals ...<-chan struct{}) bool {
-	for _, signal := range signals {
-		select {
-		case <-signal:
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func e2eAwaitSignalsWhileCycling(
-	t *testing.T,
-	description string,
-	cycle func(),
-	signals ...<-chan struct{},
-) {
-	t.Helper()
-	observed := make([]bool, len(signals))
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	for {
-		complete := true
-		for index, signal := range signals {
-			if observed[index] {
-				continue
-			}
-			select {
-			case <-signal:
-				observed[index] = true
-			default:
-				complete = false
-			}
-		}
-		if complete {
-			return
-		}
-		cycle()
-		select {
-		case <-timer.C:
-			t.Fatalf("timed out waiting for %s", description)
-		default:
-		}
 	}
 }
 
@@ -471,7 +437,10 @@ func e2eConfiguration(state config.StateConfig) config.Config {
 	}
 }
 
-func e2eAppRegistrations(t *testing.T, store githubsource.RegistrationRepository) githubsource.RegistrationRepository {
+func e2eAppRegistrations(
+	t *testing.T,
+	store githubsource.RegistrationRepository,
+) *githubsource.AppScopedRegistrationRepository {
 	t.Helper()
 	scoped, err := githubsource.ScopeRegistrationRepository(store, 1)
 	if err != nil {
@@ -570,17 +539,7 @@ func e2eAwaitTargetsWhileCycling(
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
 	for {
-		pending := make([]string, 0, len(targets))
-		for runnerPool, target := range targets {
-			if completed[runnerPool] {
-				continue
-			}
-			if sequence(runnerPool) >= target {
-				completed[runnerPool] = true
-				continue
-			}
-			pending = append(pending, runnerPool)
-		}
+		pending := e2ePendingTargets(targets, completed, sequence)
 		if len(pending) == 0 {
 			return
 		}
@@ -591,6 +550,25 @@ func e2eAwaitTargetsWhileCycling(
 		default:
 		}
 	}
+}
+
+func e2ePendingTargets(
+	targets map[string]uint64,
+	completed map[string]bool,
+	sequence func(string) uint64,
+) []string {
+	pending := make([]string, 0, len(targets))
+	for runnerPool, target := range targets {
+		if completed[runnerPool] {
+			continue
+		}
+		if sequence(runnerPool) >= target {
+			completed[runnerPool] = true
+			continue
+		}
+		pending = append(pending, runnerPool)
+	}
+	return pending
 }
 
 func (harness *e2eHarness) runSourceAtNextDiscovery(discoveryInterval time.Duration) {

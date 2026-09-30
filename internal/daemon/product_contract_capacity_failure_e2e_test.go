@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -57,7 +58,11 @@ func (provider *failOnceCapacityProvider) CapacitySnapshot(
 	if provider.called.CompareAndSwap(false, true) {
 		return core.CapacitySnapshot{}, errors.New("scripted capacity read failure")
 	}
-	return provider.delegate.CapacitySnapshot(ctx, runnerPool)
+	snapshot, err := provider.delegate.CapacitySnapshot(ctx, runnerPool)
+	if err != nil {
+		return core.CapacitySnapshot{}, fmt.Errorf("read delegated capacity snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 var _ core.CapacitySnapshotProvider = (*failOnceCapacityProvider)(nil)

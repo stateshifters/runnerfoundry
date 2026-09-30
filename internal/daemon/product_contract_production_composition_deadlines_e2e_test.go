@@ -26,8 +26,7 @@ func TestProductContractProductionCompositionAppliesProviderDeadlines(t *testing
 	dockerCommands := newProductionCompositionDockerCommands()
 	libvirtCommands := newProductionCompositionLibvirtCommands()
 	dependencies := newProductionDependencies()
-	dependencies.newDockerLauncher = dockerCommands.newLauncher
-	dependencies.newDockerInventory = dockerCommands.newInventory
+	configureProductionCompositionDockerFactories(&dependencies, dockerCommands)
 	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readFile = productionCompositionFileReader(t)
 
@@ -42,13 +41,12 @@ func TestProductContractProductionCompositionAppliesProviderDeadlines(t *testing
 	if !dockerExists || !libvirtExists {
 		t.Fatalf("production-composed providers = %v, want Docker and libvirt pools", providers)
 	}
-
-	assertProductionCompositionDefaultDeadlines(
-		t, inventory, dockerProvider, libvirtProvider, dockerCommands, libvirtCommands,
-	)
-	assertProductionCompositionEarlierCallerDeadlines(
-		t, inventory, dockerProvider, libvirtProvider, dockerCommands, libvirtCommands,
-	)
+	fixture := productionCompositionDeadlineFixture{
+		inventory: inventory, dockerProvider: dockerProvider, libvirtProvider: libvirtProvider,
+		dockerCommands: dockerCommands, libvirtCommands: libvirtCommands,
+	}
+	assertProductionCompositionDefaultDeadlines(t, fixture)
+	assertProductionCompositionEarlierCallerDeadlines(t, fixture)
 }
 
 func TestProductContractProductionCompositionProviderCommandsHonorCallerCancellation(t *testing.T) {
@@ -56,8 +54,15 @@ func TestProductContractProductionCompositionProviderCommandsHonorCallerCancella
 	dockerCommands := newCancellationBlockingDockerCommands()
 	libvirtCommands := newCancellationBlockingLibvirtCommands()
 	dependencies := newProductionDependencies()
-	dependencies.newDockerLauncher = dockerCommands.newLauncher
-	dependencies.newDockerInventory = dockerCommands.newInventory
+	dependencies.newDockerLauncher = func(
+		configured dockerprovider.ComposeConfig,
+		memberID core.MemberID,
+	) execution.RunnerLauncher {
+		return dockerCommands.newLauncher(configured, memberID)
+	}
+	dependencies.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return dockerCommands.newInventory(memberID)
+	}
 	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readFile = productionCompositionFileReader(t)
 
@@ -84,8 +89,15 @@ func TestProductContractProductionCompositionProviderCommandsHonorEarlierCallerD
 	dockerCommands := newCancellationBlockingDockerCommands()
 	libvirtCommands := newCancellationBlockingLibvirtCommands()
 	dependencies := newProductionDependencies()
-	dependencies.newDockerLauncher = dockerCommands.newLauncher
-	dependencies.newDockerInventory = dockerCommands.newInventory
+	dependencies.newDockerLauncher = func(
+		configured dockerprovider.ComposeConfig,
+		memberID core.MemberID,
+	) execution.RunnerLauncher {
+		return dockerCommands.newLauncher(configured, memberID)
+	}
+	dependencies.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return dockerCommands.newInventory(memberID)
+	}
 	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readFile = productionCompositionFileReader(t)
 
@@ -120,6 +132,21 @@ func startProductionCompositionRunner(
 		})
 	}()
 	return result
+}
+
+func configureProductionCompositionDockerFactories(
+	dependencies *productionDependencies,
+	commands *productionCompositionDockerCommands,
+) {
+	dependencies.newDockerLauncher = func(
+		configured dockerprovider.ComposeConfig,
+		memberID core.MemberID,
+	) execution.RunnerLauncher {
+		return commands.newLauncher(configured, memberID)
+	}
+	dependencies.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return commands.newInventory(memberID)
+	}
 }
 
 func awaitProductionCompositionCommandEntry(t *testing.T, description string, entered <-chan struct{}) {
@@ -163,15 +190,15 @@ func newCancellationBlockingDockerCommands() *cancellationBlockingDockerCommands
 func (commands *cancellationBlockingDockerCommands) newLauncher(
 	configured dockerprovider.ComposeConfig,
 	memberID core.MemberID,
-) execution.RunnerLauncher {
+) cancellationBlockingDockerLauncher {
 	return cancellationBlockingDockerLauncher{
-		RunnerLauncher: commands.productionCompositionDockerCommands.newLauncher(configured, memberID),
-		entered:        commands.entered,
+		productionCompositionDockerLauncher: commands.productionCompositionDockerCommands.newLauncher(configured, memberID),
+		entered:                             commands.entered,
 	}
 }
 
 type cancellationBlockingDockerLauncher struct {
-	execution.RunnerLauncher
+	productionCompositionDockerLauncher
 	entered chan<- struct{}
 }
 
@@ -184,6 +211,14 @@ func (launcher cancellationBlockingDockerLauncher) Start(ctx context.Context, _ 
 type cancellationBlockingLibvirtCommands struct {
 	*productionCompositionLibvirtCommands
 	entered chan struct{}
+}
+
+type productionCompositionDeadlineFixture struct {
+	inventory       runtimeservice.AggregateRunnerInventory
+	dockerProvider  execution.RunnerLauncher
+	libvirtProvider execution.RunnerLauncher
+	dockerCommands  *productionCompositionDockerCommands
+	libvirtCommands *productionCompositionLibvirtCommands
 }
 
 func newCancellationBlockingLibvirtCommands() *cancellationBlockingLibvirtCommands {
@@ -201,31 +236,28 @@ func (commands *cancellationBlockingLibvirtCommands) CreateDomain(ctx context.Co
 
 func assertProductionCompositionDefaultDeadlines(
 	t *testing.T,
-	inventory runtimeservice.AggregateRunnerInventory,
-	dockerProvider, libvirtProvider execution.RunnerLauncher,
-	dockerCommands *productionCompositionDockerCommands,
-	libvirtCommands *productionCompositionLibvirtCommands,
+	fixture productionCompositionDeadlineFixture,
 ) {
 	t.Helper()
-	assertProductionCompositionTimeout(t, "Docker validation", dockerCommands.contexts, "validate",
+	assertProductionCompositionTimeout(t, "Docker validation", fixture.dockerCommands.contexts, "validate",
 		productionCompositionOperationDeadline)
-	assertProductionCompositionTimeout(t, "libvirt validation", libvirtCommands.contexts, "validate",
+	assertProductionCompositionTimeout(t, "libvirt validation", fixture.libvirtCommands.contexts, "validate",
 		productionCompositionOperationDeadline)
 
-	requireProductionCompositionOperation(t, "refresh aggregate inventory", inventory.Refresh(context.Background()))
-	assertProductionCompositionInventoryTimeouts(t, dockerCommands, libvirtCommands,
+	requireProductionCompositionOperation(t, "refresh aggregate inventory", fixture.inventory.Refresh(context.Background()))
+	assertProductionCompositionInventoryTimeouts(t, fixture.dockerCommands, fixture.libvirtCommands,
 		productionCompositionOperationDeadline)
 	requireProductionCompositionInspection(
-		context.Background(), t, "inspect Docker inventory", inventory, dockerProvider.EndpointID(),
+		context.Background(), t, "inspect Docker inventory", fixture.inventory, fixture.dockerProvider.EndpointID(),
 	)
 	requireProductionCompositionInspection(
-		context.Background(), t, "inspect libvirt inventory", inventory, libvirtProvider.EndpointID(),
+		context.Background(), t, "inspect libvirt inventory", fixture.inventory, fixture.libvirtProvider.EndpointID(),
 	)
-	assertProductionCompositionInventoryTimeouts(t, dockerCommands, libvirtCommands,
+	assertProductionCompositionInventoryTimeouts(t, fixture.dockerCommands, fixture.libvirtCommands,
 		productionCompositionOperationDeadline)
 
 	startAndDestroyProductionCompositionRunners(
-		context.Background(), t, inventory, dockerProvider, libvirtProvider, dockerCommands, libvirtCommands, "default",
+		context.Background(), t, fixture, "default",
 		func(description string, observations <-chan productionCompositionCommandContext, operation string, timeout time.Duration) {
 			assertProductionCompositionTimeout(t, description, observations, operation, timeout)
 		},
@@ -234,28 +266,25 @@ func assertProductionCompositionDefaultDeadlines(
 
 func assertProductionCompositionEarlierCallerDeadlines(
 	t *testing.T,
-	inventory runtimeservice.AggregateRunnerInventory,
-	dockerProvider, libvirtProvider execution.RunnerLauncher,
-	dockerCommands *productionCompositionDockerCommands,
-	libvirtCommands *productionCompositionLibvirtCommands,
+	fixture productionCompositionDeadlineFixture,
 ) {
 	t.Helper()
 	callerDeadline := time.Now().Add(5 * time.Second)
 	ctx, cancel := context.WithDeadline(context.Background(), callerDeadline)
 	defer cancel()
 
-	requireProductionCompositionOperation(t, "validate Docker with caller deadline", dockerProvider.Validate(ctx))
-	requireProductionCompositionOperation(t, "validate libvirt with caller deadline", libvirtProvider.Validate(ctx))
-	assertProductionCompositionCallerDeadline(t, "Docker validation", dockerCommands.contexts, "validate", callerDeadline)
-	assertProductionCompositionCallerDeadline(t, "libvirt validation", libvirtCommands.contexts, "validate", callerDeadline)
-	requireProductionCompositionOperation(t, "refresh aggregate inventory with caller deadline", inventory.Refresh(ctx))
-	assertProductionCompositionInventoryCallerDeadlines(t, dockerCommands, libvirtCommands, callerDeadline)
-	requireProductionCompositionInspection(ctx, t, "inspect Docker with caller deadline", inventory, dockerProvider.EndpointID())
-	requireProductionCompositionInspection(ctx, t, "inspect libvirt with caller deadline", inventory, libvirtProvider.EndpointID())
-	assertProductionCompositionInventoryCallerDeadlines(t, dockerCommands, libvirtCommands, callerDeadline)
+	requireProductionCompositionOperation(t, "validate Docker with caller deadline", fixture.dockerProvider.Validate(ctx))
+	requireProductionCompositionOperation(t, "validate libvirt with caller deadline", fixture.libvirtProvider.Validate(ctx))
+	assertProductionCompositionCallerDeadline(t, "Docker validation", fixture.dockerCommands.contexts, "validate", callerDeadline)
+	assertProductionCompositionCallerDeadline(t, "libvirt validation", fixture.libvirtCommands.contexts, "validate", callerDeadline)
+	requireProductionCompositionOperation(t, "refresh aggregate inventory with caller deadline", fixture.inventory.Refresh(ctx))
+	assertProductionCompositionInventoryCallerDeadlines(t, fixture.dockerCommands, fixture.libvirtCommands, callerDeadline)
+	requireProductionCompositionInspection(ctx, t, "inspect Docker with caller deadline", fixture.inventory, fixture.dockerProvider.EndpointID())
+	requireProductionCompositionInspection(ctx, t, "inspect libvirt with caller deadline", fixture.inventory, fixture.libvirtProvider.EndpointID())
+	assertProductionCompositionInventoryCallerDeadlines(t, fixture.dockerCommands, fixture.libvirtCommands, callerDeadline)
 
 	startAndDestroyProductionCompositionRunners(
-		ctx, t, inventory, dockerProvider, libvirtProvider, dockerCommands, libvirtCommands, "caller",
+		ctx, t, fixture, "caller",
 		func(description string, observations <-chan productionCompositionCommandContext, operation string, _ time.Duration) {
 			assertProductionCompositionCallerDeadline(t, description, observations, operation, callerDeadline)
 		},
@@ -272,31 +301,28 @@ type productionCompositionDeadlineAssertion func(
 func startAndDestroyProductionCompositionRunners(
 	ctx context.Context,
 	t *testing.T,
-	inventory runtimeservice.AggregateRunnerInventory,
-	dockerProvider, libvirtProvider execution.RunnerLauncher,
-	dockerCommands *productionCompositionDockerCommands,
-	libvirtCommands *productionCompositionLibvirtCommands,
+	fixture productionCompositionDeadlineFixture,
 	suffix string,
 	assertDeadline productionCompositionDeadlineAssertion,
 ) {
 	t.Helper()
 	dockerRunner := core.RunnerName("deadline-docker-" + suffix)
 	libvirtRunner := core.RunnerName("deadline-libvirt-" + suffix)
-	requireProductionCompositionStart(ctx, t, dockerProvider, "docker-pool", dockerRunner)
-	requireProductionCompositionStart(ctx, t, libvirtProvider, "libvirt-pool", libvirtRunner)
-	assertDeadline("Docker start", dockerCommands.contexts, "start", productionCompositionStartDeadline)
-	assertDeadline("libvirt start", libvirtCommands.contexts, "start", productionCompositionStartDeadline)
+	requireProductionCompositionStart(ctx, t, fixture.dockerProvider, "docker-pool", dockerRunner)
+	requireProductionCompositionStart(ctx, t, fixture.libvirtProvider, "libvirt-pool", libvirtRunner)
+	assertDeadline("Docker start", fixture.dockerCommands.contexts, "start", productionCompositionStartDeadline)
+	assertDeadline("libvirt start", fixture.libvirtCommands.contexts, "start", productionCompositionStartDeadline)
 
-	dockerInstance := requireProductionCompositionEndpointInstance(ctx, t, inventory, dockerProvider.EndpointID(), dockerRunner)
-	assertDeadline("Docker inventory before destroy", dockerCommands.contexts, "inventory", productionCompositionOperationDeadline)
-	libvirtInstance := requireProductionCompositionEndpointInstance(ctx, t, inventory, libvirtProvider.EndpointID(), libvirtRunner)
-	assertDeadline("libvirt inventory before destroy", libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
-	assertDeadline("libvirt XML inventory before destroy", libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
-	assertDeadline("libvirt state inventory before destroy", libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
-	requireProductionCompositionDestroy(ctx, t, inventory, dockerInstance)
-	requireProductionCompositionDestroy(ctx, t, inventory, libvirtInstance)
-	assertDeadline("Docker destroy", dockerCommands.contexts, "destroy", productionCompositionOperationDeadline)
-	assertDeadline("libvirt destroy", libvirtCommands.contexts, "destroy", productionCompositionOperationDeadline)
+	dockerInstance := requireProductionCompositionEndpointInstance(ctx, t, fixture.inventory, fixture.dockerProvider.EndpointID(), dockerRunner)
+	assertDeadline("Docker inventory before destroy", fixture.dockerCommands.contexts, "inventory", productionCompositionOperationDeadline)
+	libvirtInstance := requireProductionCompositionEndpointInstance(ctx, t, fixture.inventory, fixture.libvirtProvider.EndpointID(), libvirtRunner)
+	assertDeadline("libvirt inventory before destroy", fixture.libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
+	assertDeadline("libvirt XML inventory before destroy", fixture.libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
+	assertDeadline("libvirt state inventory before destroy", fixture.libvirtCommands.contexts, "inventory", productionCompositionOperationDeadline)
+	requireProductionCompositionDestroy(ctx, t, fixture.inventory, dockerInstance)
+	requireProductionCompositionDestroy(ctx, t, fixture.inventory, libvirtInstance)
+	assertDeadline("Docker destroy", fixture.dockerCommands.contexts, "destroy", productionCompositionOperationDeadline)
+	assertDeadline("libvirt destroy", fixture.libvirtCommands.contexts, "destroy", productionCompositionOperationDeadline)
 }
 
 func requireProductionCompositionInspection(

@@ -586,13 +586,15 @@ func (commands *productionCompositionDockerCommands) blockNextStartWithPartial(e
 func (commands *productionCompositionDockerCommands) newLauncher(
 	configured dockerprovider.ComposeConfig,
 	memberID core.MemberID,
-) execution.RunnerLauncher {
+) productionCompositionDockerLauncher {
 	return productionCompositionDockerLauncher{
 		commands: commands, configured: configured, endpointID: productionCompositionDockerEndpoint(memberID),
 	}
 }
 
-func (commands *productionCompositionDockerCommands) newInventory(memberID core.MemberID) execution.RunnerInventory {
+func (commands *productionCompositionDockerCommands) newInventory(
+	memberID core.MemberID,
+) productionCompositionDockerInventory {
 	return productionCompositionDockerInventory{commands: commands, endpointID: productionCompositionDockerEndpoint(memberID)}
 }
 

@@ -230,16 +230,6 @@ func (host *e2eGitHost) ensureRunnerPool(
 	return registration, nil
 }
 
-func (host *e2eGitHost) callSummary() (repositories []int, clientCalls int, ensures map[string]int) {
-	host.mutex.Lock()
-	defer host.mutex.Unlock()
-	ensures = make(map[string]int, len(host.ensureCalls))
-	for runnerPool, calls := range host.ensureCalls {
-		ensures[runnerPool] = calls
-	}
-	return append([]int(nil), host.discoveredRepositories...), host.clientCalls, ensures
-}
-
 func (host *e2eGitHost) resolveRunnerGroup(context.Context, string) (transport.RunnerGroupID, error) {
 	return 11, nil
 }

@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,7 +15,27 @@ import (
 
 func exerciseDemandTransactionContract(t *testing.T, store stateConformanceStore) {
 	t.Helper()
+	fixture := prepareDemandTransactionFixture(t, store)
 	ctx := context.Background()
+	err := store.WithDemandTransaction(ctx, fixture.key, func(transaction statecontract.DemandTransaction) error {
+		return removeDemandTransactionJobs(ctx, t, transaction, fixture)
+	})
+	if err != nil {
+		t.Fatalf("commit typed demand transaction: %v", err)
+	}
+	requireQueued(t, store, fixture.queuedRequest, core.QueueQueued)
+	exerciseDemandTransactionRollback(t, store, fixture.key.RunnerPool)
+}
+
+type demandTransactionFixture struct {
+	key           statecontract.DemandTransactionKey
+	processing    core.ProcessingJob
+	queuedJob     core.Job
+	queuedRequest core.JobRequest
+}
+
+func prepareDemandTransactionFixture(t *testing.T, store stateConformanceStore) demandTransactionFixture {
+	t.Helper()
 	runnerPool := core.RunnerPool("state-conformance-demand")
 	processingRequest := stateConformanceRequest("demand-processing", runnerPool, stateConformanceEpoch.Add(2*time.Hour))
 	queuedRequest := stateConformanceRequest("demand-queued", runnerPool, stateConformanceEpoch.Add(2*time.Hour+time.Second))
@@ -26,34 +47,41 @@ func exerciseDemandTransactionContract(t *testing.T, store stateConformanceStore
 	if processing.Job.ID != processingJob.ID {
 		t.Fatalf("demand processing job = %s, want %s", processing.Job.ID, processingJob.ID)
 	}
-
 	scope := core.DemandScope{Adapter: "state-conformance", ID: "typed-active-demand"}
-	err := store.WithDemandTransaction(ctx, statecontract.DemandTransactionKey{Scope: scope, RunnerPool: runnerPool}, func(transaction statecontract.DemandTransaction) error {
-		activeJobs, activeErr := transaction.ActiveJobs(ctx)
-		if activeErr != nil {
-			return activeErr
-		}
-		assertStateConformanceActiveJobs(t, activeJobs, processing, queuedJob, queuedRequest.EnqueuedAt)
-		processingRemoval, removalErr := transaction.RemoveQueued(ctx, activeJobByID(t, activeJobs, processing.Job.ID))
-		if removalErr != nil || processingRemoval != statecontract.QueuedJobMissing {
-			t.Fatalf("processing demand removal = %q, error = %v", processingRemoval, removalErr)
-		}
-		queued := activeJobByID(t, activeJobs, queuedJob.ID)
-		removed, removalErr := transaction.RemoveQueued(ctx, queued)
-		if removalErr != nil || removed != statecontract.QueuedJobRemoved {
-			t.Fatalf("queued demand removal = %q, error = %v", removed, removalErr)
-		}
-		removed, removalErr = transaction.RemoveQueued(ctx, queued)
-		if removalErr != nil || removed != statecontract.QueuedJobMissing {
-			t.Fatalf("repeated queued demand removal = %q, error = %v", removed, removalErr)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("commit typed demand transaction: %v", err)
+	return demandTransactionFixture{
+		key:           statecontract.DemandTransactionKey{Scope: scope, RunnerPool: runnerPool},
+		processing:    processing,
+		queuedJob:     queuedJob,
+		queuedRequest: queuedRequest,
 	}
-	requireQueued(t, store, queuedRequest, core.QueueQueued)
-	exerciseDemandTransactionRollback(t, store, runnerPool)
+}
+
+func removeDemandTransactionJobs(
+	ctx context.Context,
+	t *testing.T,
+	transaction statecontract.DemandTransaction,
+	fixture demandTransactionFixture,
+) error {
+	t.Helper()
+	activeJobs, err := transaction.ActiveJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("list active jobs before demand removal: %w", err)
+	}
+	assertStateConformanceActiveJobs(t, activeJobs, fixture.processing, fixture.queuedJob, fixture.queuedRequest.EnqueuedAt)
+	processingRemoval, removalErr := transaction.RemoveQueued(ctx, activeJobByID(t, activeJobs, fixture.processing.Job.ID))
+	if removalErr != nil || processingRemoval != statecontract.QueuedJobMissing {
+		t.Fatalf("processing demand removal = %q, error = %v", processingRemoval, removalErr)
+	}
+	queued := activeJobByID(t, activeJobs, fixture.queuedJob.ID)
+	removed, removalErr := transaction.RemoveQueued(ctx, queued)
+	if removalErr != nil || removed != statecontract.QueuedJobRemoved {
+		t.Fatalf("queued demand removal = %q, error = %v", removed, removalErr)
+	}
+	removed, removalErr = transaction.RemoveQueued(ctx, queued)
+	if removalErr != nil || removed != statecontract.QueuedJobMissing {
+		t.Fatalf("repeated queued demand removal = %q, error = %v", removed, removalErr)
+	}
+	return nil
 }
 
 func assertStateConformanceActiveJobs(
@@ -102,22 +130,34 @@ func exerciseDemandTransactionRollback(t *testing.T, store stateConformanceStore
 	err := store.WithDemandTransaction(ctx,
 		statecontract.DemandTransactionKey{Scope: scope, RunnerPool: runnerPool},
 		func(transaction statecontract.DemandTransaction) error {
-			jobs, activeErr := transaction.ActiveJobs(ctx)
-			if activeErr != nil {
-				return activeErr
-			}
-			if result, queueErr := transaction.Queue(ctx, transientRequest); queueErr != nil || result.Outcome != core.QueueQueued {
-				t.Fatalf("transactional queue before rollback = %+v, error = %v", result, queueErr)
-			}
-			removed, removalErr := transaction.RemoveQueued(ctx, activeJobByID(t, jobs, retained.ID))
-			if removalErr != nil || removed != statecontract.QueuedJobRemoved {
-				t.Fatalf("transactional removal before rollback = %q, error = %v", removed, removalErr)
-			}
-			return wantErr
+			return rollBackDemandTransaction(ctx, t, transaction, transientRequest, retained.ID, wantErr)
 		})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("demand transaction rollback error = %v, want %v", err, wantErr)
 	}
 	requireQueued(t, store, retainedRequest, core.QueueAlreadyQueued)
 	requireQueued(t, store, transientRequest, core.QueueQueued)
+}
+
+func rollBackDemandTransaction(
+	ctx context.Context,
+	t *testing.T,
+	transaction statecontract.DemandTransaction,
+	transientRequest core.JobRequest,
+	retainedJobID core.JobID,
+	wantErr error,
+) error {
+	t.Helper()
+	jobs, err := transaction.ActiveJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("list active jobs before demand rollback: %w", err)
+	}
+	if result, queueErr := transaction.Queue(ctx, transientRequest); queueErr != nil || result.Outcome != core.QueueQueued {
+		t.Fatalf("transactional queue before rollback = %+v, error = %v", result, queueErr)
+	}
+	removed, removalErr := transaction.RemoveQueued(ctx, activeJobByID(t, jobs, retainedJobID))
+	if removalErr != nil || removed != statecontract.QueuedJobRemoved {
+		t.Fatalf("transactional removal before rollback = %q, error = %v", removed, removalErr)
+	}
+	return wantErr
 }

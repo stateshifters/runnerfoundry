@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func TestProductionCompositionHTTPTransportFailsClosed(t *testing.T) {
@@ -88,12 +90,25 @@ func exerciseProductionCompositionProvisioningRetry(
 	tickers.complete(t, tickers.execution)
 	retried := awaitDockerCompositionStart(t, dockerCommands.starts)
 	processing := assertProductionCompositionProcessing(t, runtime, "docker-pool")
-	if processing.Job.ID != firstJobID || firstAttempt.JobID != firstJobID || retried.JobID != firstAttempt.JobID ||
-		retried.RunnerPool != firstAttempt.RunnerPool || retried.EndpointID != firstAttempt.EndpointID ||
-		!bytes.Equal(retried.Bootstrap.Content(), firstAttempt.Bootstrap.Content()) || retried.RunnerName == firstAttempt.RunnerName {
-		t.Fatalf("retry identity = job %s runner %q, want job %s and a fresh attempt after %q",
-			processing.Job.ID, retried.RunnerName, firstJobID, firstAttempt.RunnerName)
+	assertProductionCompositionRetryIdentity(t, firstJobID, processing, firstAttempt, retried)
+}
+
+func assertProductionCompositionRetryIdentity(
+	t *testing.T,
+	firstJobID core.JobID,
+	processing core.ProcessingJob,
+	firstAttempt productionCompositionDockerStart,
+	retried productionCompositionDockerStart,
+) {
+	t.Helper()
+	sameJob := processing.Job.ID == firstJobID && firstAttempt.JobID == firstJobID && retried.JobID == firstAttempt.JobID
+	sameRequest := retried.RunnerPool == firstAttempt.RunnerPool && retried.EndpointID == firstAttempt.EndpointID &&
+		bytes.Equal(retried.Bootstrap.Content(), firstAttempt.Bootstrap.Content())
+	if sameJob && sameRequest && retried.RunnerName != firstAttempt.RunnerName {
+		return
 	}
+	t.Fatalf("retry identity = job %s runner %q, want job %s and a fresh attempt after %q",
+		processing.Job.ID, retried.RunnerName, firstJobID, firstAttempt.RunnerName)
 }
 
 func awaitDockerCompositionStart(

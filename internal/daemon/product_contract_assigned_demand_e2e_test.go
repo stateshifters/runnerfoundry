@@ -86,7 +86,8 @@ func exerciseMissingAssignedStatisticsRejected(t *testing.T, harness *e2eHarness
 	messageID := session.assignMessageID(message)
 	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
-	pollErr := awaitRunnerPoolPollError(t, harness, session, "linux", messageID, checkpoint, "missing statistics")
+	runnerPool := core.RunnerPool(harness.configured.RunnerPools[0].Name)
+	pollErr := awaitRunnerPoolPollError(t, harness, session, runnerPool, messageID, checkpoint, "missing statistics")
 	if pollErr == nil || !strings.Contains(pollErr.Error(), "missing statistics") {
 		t.Fatalf("missing-statistics poll error = %v", pollErr)
 	}

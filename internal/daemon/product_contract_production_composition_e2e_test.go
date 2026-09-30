@@ -15,6 +15,8 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductContractProductionCompositionReachesDurableLifecycle(t *testing.T) {
@@ -257,6 +259,7 @@ func openProductionComposition(
 		tickers.barriers[ticker] = newE2ELaneBarrier()
 	}
 	tickers.awaitPublishedPolls = func(t *testing.T, runnerPools ...core.RunnerPool) {
+		t.Helper()
 		awaitProductionCompositionPollHarvest(t, tickers, host, runnerPools)
 	}
 	dependencies := productionCompositionDependencies(t, host, dockerCommands, libvirtCommands, &tickers)
@@ -285,8 +288,15 @@ func productionCompositionDependencies(
 	dependencies.scaleSetTransportFactory = func() *http.Transport {
 		return productionCompositionHTTPTransport(t, host)
 	}
-	dependencies.newDockerLauncher = dockerCommands.newLauncher
-	dependencies.newDockerInventory = dockerCommands.newInventory
+	dependencies.newDockerLauncher = func(
+		configured dockerprovider.ComposeConfig,
+		memberID core.MemberID,
+	) execution.RunnerLauncher {
+		return dockerCommands.newLauncher(configured, memberID)
+	}
+	dependencies.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return dockerCommands.newInventory(memberID)
+	}
 	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readHostname = func() (string, error) { return "production-member", nil }
 	configureProductionCompositionClockAndLogging(&dependencies, tickers)
@@ -472,29 +482,9 @@ func awaitProductionCompositionPollHarvest(
 	t.Helper()
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
-	targets := make(map[core.RunnerPool]uint64, len(runnerPools))
-	completed := make(map[core.RunnerPool]bool, len(runnerPools))
-	for _, runnerPool := range runnerPools {
-		if host.omitsInitialStatistics(string(runnerPool)) {
-			completed[runnerPool] = true
-			continue
-		}
-		targets[runnerPool] = tickers.pollCheckpoints[runnerPool] + 2
-	}
+	targets, completed := productionCompositionPollTargets(tickers, host, runnerPools)
 	for {
-		pending := make([]core.RunnerPool, 0, len(runnerPools))
-		for _, runnerPool := range runnerPools {
-			if completed[runnerPool] {
-				continue
-			}
-			sequence, _ := host.pollObservation(string(runnerPool))
-			if sequence < targets[runnerPool] {
-				pending = append(pending, runnerPool)
-				continue
-			}
-			completed[runnerPool] = true
-			tickers.pollCheckpoints[runnerPool] = sequence
-		}
+		pending := pendingProductionCompositionPolls(tickers, host, runnerPools, targets, completed)
 		if len(pending) == 0 {
 			tickers.complete(t, tickers.source)
 			return
@@ -506,6 +496,46 @@ func awaitProductionCompositionPollHarvest(
 		default:
 		}
 	}
+}
+
+func productionCompositionPollTargets(
+	tickers productionCompositionTickers,
+	host *productionCompositionGitHub,
+	runnerPools []core.RunnerPool,
+) (map[core.RunnerPool]uint64, map[core.RunnerPool]bool) {
+	targets := make(map[core.RunnerPool]uint64, len(runnerPools))
+	completed := make(map[core.RunnerPool]bool, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		if host.omitsInitialStatistics(string(runnerPool)) {
+			completed[runnerPool] = true
+			continue
+		}
+		targets[runnerPool] = tickers.pollCheckpoints[runnerPool] + 2
+	}
+	return targets, completed
+}
+
+func pendingProductionCompositionPolls(
+	tickers productionCompositionTickers,
+	host *productionCompositionGitHub,
+	runnerPools []core.RunnerPool,
+	targets map[core.RunnerPool]uint64,
+	completed map[core.RunnerPool]bool,
+) []core.RunnerPool {
+	pending := make([]core.RunnerPool, 0, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		if completed[runnerPool] {
+			continue
+		}
+		sequence, _ := host.pollObservation(string(runnerPool))
+		if sequence < targets[runnerPool] {
+			pending = append(pending, runnerPool)
+			continue
+		}
+		completed[runnerPool] = true
+		tickers.pollCheckpoints[runnerPool] = sequence
+	}
+	return pending
 }
 
 func loadProductionCompositionConfig(t *testing.T) config.Config {
@@ -654,22 +684,24 @@ func pendingProductionCompositionCapacities(
 	defer host.mutex.Unlock()
 	pending := make(map[string]productionCompositionCapacity, 2)
 	for _, runnerPool := range []string{"docker-pool", "libvirt-pool"} {
-		minimumTick := uint64(0)
-		if after != nil {
-			minimumTick = after[runnerPool]
-		}
-		matched := false
-		for _, observation := range host.capacityHistory[runnerPool] {
-			if observation.tick > minimumTick && observation.maximum == maximum {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if !productionCompositionCapacityObserved(host.capacityHistory[runnerPool], maximum, after[runnerPool]) {
 			pending[runnerPool] = host.capacities[runnerPool]
 		}
 	}
 	return pending, host.capacityChanged
+}
+
+func productionCompositionCapacityObserved(
+	history []productionCompositionCapacity,
+	maximum string,
+	after uint64,
+) bool {
+	for _, observation := range history {
+		if observation.tick > after && observation.maximum == maximum {
+			return true
+		}
+	}
+	return false
 }
 
 func productionCompositionCapacityCheckpoint(host *productionCompositionGitHub) map[string]uint64 {

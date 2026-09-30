@@ -343,7 +343,18 @@ func (application *e2eApplication) newManager(
 	registrations githubsource.RegistrationRepository,
 	observer githubsource.ManagerObserver,
 ) (*githubsource.Manager, error) {
+	host, source := application.beginManagerBuild()
+	observer = e2eObserveHostManagerActivities(host, observer)
+	manager, err := githubsource.NewManager(host, observedManagerClientFactory(host, source), registrations, observer)
+	if err != nil {
+		return nil, fmt.Errorf("create E2E GitHub manager: %w", err)
+	}
+	return manager, nil
+}
+
+func (application *e2eApplication) beginManagerBuild() (*e2eGitHost, e2eGitHubSourceRuntimeResult) {
 	application.mutex.Lock()
+	defer application.mutex.Unlock()
 	host := application.host
 	if application.managerBuilds > 0 && application.replacementHost != nil {
 		host = application.replacementHost
@@ -351,45 +362,49 @@ func (application *e2eApplication) newManager(
 	source := e2eGitHubSourceRuntime(application.managerBuilds, host)
 	application.buildingSource = source
 	application.managerBuilds++
-	application.mutex.Unlock()
-	observer = e2eObserveHostManagerActivities(host, observer)
-	clientFactory := func(ctx context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
+	return host, source
+}
+
+func observedManagerClientFactory(
+	host *e2eGitHost,
+	source e2eGitHubSourceRuntimeResult,
+) githubsource.ManagerClientFactoryFunc {
+	return func(ctx context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
 		client, err := host.Client(ctx, repository)
 		if err != nil {
 			return githubsource.ManagerClient{}, err
 		}
-		ensureRunnerPool := client.EnsureRunnerPool
-		client.EnsureRunnerPool = func(
-			ctx context.Context,
-			runnerPool string,
-			runnerGroup string,
-		) (transport.Registration, error) {
-			registration, ensureErr := ensureRunnerPool(ctx, runnerPool, runnerGroup)
-			if ensureErr == nil {
-				source.registrations.record(runnerPool)
-			}
-			return registration, ensureErr
-		}
-		openSession := client.OpenSession
-		client.OpenSession = func(
-			ctx context.Context,
-			registration transport.Registration,
-			name string,
-		) (githubsource.ManagedSession, error) {
-			_, openErr := openSession(ctx, registration, name)
-			if openErr != nil {
-				return nil, openErr
-			}
-			source.sessions.record(registration.Name)
-			return source.pollSessions[registration.Name], nil
-		}
+		client.EnsureRunnerPool = observedEnsureRunnerPool(client.EnsureRunnerPool, source)
+		client.OpenSession = observedOpenSession(client.OpenSession, source)
 		return client, nil
 	}
-	manager, err := githubsource.NewManager(host, clientFactory, registrations, observer)
-	if err != nil {
-		return nil, fmt.Errorf("create E2E GitHub manager: %w", err)
+}
+
+func observedEnsureRunnerPool(
+	ensureRunnerPool func(context.Context, string, string) (transport.Registration, error),
+	source e2eGitHubSourceRuntimeResult,
+) func(context.Context, string, string) (transport.Registration, error) {
+	return func(ctx context.Context, runnerPool string, runnerGroup string) (transport.Registration, error) {
+		registration, err := ensureRunnerPool(ctx, runnerPool, runnerGroup)
+		if err == nil {
+			source.registrations.record(runnerPool)
+		}
+		return registration, err
 	}
-	return manager, nil
+}
+
+func observedOpenSession(
+	openSession func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error),
+	source e2eGitHubSourceRuntimeResult,
+) func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error) {
+	return func(ctx context.Context, registration transport.Registration, name string) (githubsource.ManagedSession, error) {
+		_, err := openSession(ctx, registration, name)
+		if err != nil {
+			return nil, err
+		}
+		source.sessions.record(registration.Name)
+		return source.pollSessions[registration.Name], nil
+	}
 }
 
 func (application *e2eApplication) rejectInvalidReload(t *testing.T) {
@@ -462,20 +477,6 @@ func (application *e2eApplication) establishSource(t *testing.T) {
 	application.mutex.Unlock()
 }
 
-func (application *e2eApplication) awaitRegistration(t *testing.T, runnerPool string) {
-	t.Helper()
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case <-application.host.registrationOK[runnerPool]:
-		return
-	case <-timer.C:
-		repositories, clientCalls, ensures := application.host.callSummary()
-		t.Fatalf("timed out waiting for application registration for %s; discovered repository counts=%v clients=%d ensures=%v",
-			runnerPool, repositories, clientCalls, ensures)
-	}
-}
-
 func (application *e2eApplication) startShutdownPolicyJobs(
 	t *testing.T,
 ) (linuxStart execution.StartRequest, windowsStart execution.StartRequest) {
@@ -520,25 +521,56 @@ func (application *e2eApplication) deliverWithSourceTicker(
 	sourceTicker *e2eManualTicker,
 ) {
 	t.Helper()
-	var session *e2eObservedGitHubSession
-	application.mutex.Lock()
-	if application.activeSource.host != nil {
-		session = application.activeSource.pollSessions[runnerPool]
-	}
-	application.mutex.Unlock()
-	if session == nil {
-		t.Fatalf("application has no active GitHub session for Runner Pool %q", runnerPool)
-	}
+	session := application.activeSession(t, runnerPool)
 	messageID := session.assignMessageID(message)
-	acknowledged := session.acknowledgement(messageID)
+	application.sendMessage(t, runnerPool, session, message, messageID)
+	application.awaitMessageAcknowledgement(t, runnerPool, session, messageID)
 	pollCompleted := session.pollCompletion(messageID)
+	awaitSignal(t, fmt.Sprintf("application %s message %d poll completion", runnerPool, messageID), pollCompleted)
+	pollSequence, _ := session.pollObservation()
+	e2eAwaitSessionPollWhileCycling(t, fmt.Sprintf("application %s message %d poll harvest", runnerPool, messageID),
+		session, pollSequence+1,
+		func() { application.tickers.cycleTicker(t, sourceTicker, "application source maintenance") })
+}
+
+func (application *e2eApplication) activeSession(t *testing.T, runnerPool string) *e2eObservedGitHubSession {
+	t.Helper()
+	application.mutex.Lock()
+	defer application.mutex.Unlock()
+	if application.activeSource.host != nil {
+		if session := application.activeSource.pollSessions[runnerPool]; session != nil {
+			return session
+		}
+	}
+	t.Fatalf("application has no active GitHub session for Runner Pool %q", runnerPool)
+	return nil
+}
+
+func (application *e2eApplication) sendMessage(
+	t *testing.T,
+	runnerPool string,
+	session *e2eObservedGitHubSession,
+	message *upstream.RunnerScaleSetMessage,
+	messageID int,
+) {
+	t.Helper()
 	deliveryTimer := time.NewTimer(e2eWaitLimit)
+	defer deliveryTimer.Stop()
 	select {
 	case session.messages <- message:
-		deliveryTimer.Stop()
 	case <-deliveryTimer.C:
 		t.Fatalf("timed out waiting for application %s poll to receive message %d", runnerPool, messageID)
 	}
+}
+
+func (application *e2eApplication) awaitMessageAcknowledgement(
+	t *testing.T,
+	runnerPool string,
+	session *e2eObservedGitHubSession,
+	messageID int,
+) {
+	t.Helper()
+	acknowledged := session.acknowledgement(messageID)
 	acknowledgementTimer := time.NewTimer(e2eWaitLimit)
 	defer acknowledgementTimer.Stop()
 	select {
@@ -551,11 +583,6 @@ func (application *e2eApplication) deliverWithSourceTicker(
 			runnerPool, messageID, len(session.messages), len(session.ackAttempts), processing, processingErr,
 			e2eApplicationMessageLogs(application.logs.records(t), runnerPool, messageID))
 	}
-	awaitSignal(t, fmt.Sprintf("application %s message %d poll completion", runnerPool, messageID), pollCompleted)
-	pollSequence, _ := session.pollObservation()
-	e2eAwaitSessionPollWhileCycling(t, fmt.Sprintf("application %s message %d poll harvest", runnerPool, messageID),
-		session, pollSequence+1,
-		func() { application.tickers.cycleTicker(t, sourceTicker, "application source maintenance") })
 }
 
 func (application *e2eApplication) assertShutdownPolicyState(

@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,39 +18,62 @@ func TestPostgresDemandSerializesItsReadDomainAndOpaqueScope(t *testing.T) {
 		return
 	}
 	store := openPostgresStateConformanceStore(t)
+	conformanceStore := postgresStateConformanceStore(store)
 	key := state.DemandTransactionKey{Scope: core.DemandScope{Adapter: "state-conformance", ID: "held-scope"}, RunnerPool: "held-pool"}
-	release := holdDemandTransaction(t, store, key)
+	release := holdDemandTransaction(t, conformanceStore, key)
 	otherScope := state.DemandTransactionKey{Scope: core.DemandScope{Adapter: key.Scope.Adapter, ID: "other-scope"}, RunnerPool: key.RunnerPool}
+	assertDemandTransactionIsolation(t, conformanceStore, key, otherScope)
+	requests := blockedDemandRequests(key.RunnerPool)
+	for _, request := range requests {
+		assertDemandEnqueueBlocked(t, conformanceStore, request)
+	}
+	release()
+	requireEmptyDemandTransaction(t, conformanceStore, otherScope)
+	for _, request := range requests {
+		requireQueued(t, conformanceStore, request, core.QueueQueued)
+	}
+	assertDemandTransactionAvailable(t, conformanceStore, state.DemandTransactionKey{Scope: key.Scope, RunnerPool: "other-pool"})
+}
+
+func assertDemandTransactionIsolation(
+	t *testing.T,
+	store stateConformanceStore,
+	key state.DemandTransactionKey,
+	otherScope state.DemandTransactionKey,
+) {
+	t.Helper()
 	assertDemandTransactionBlocked(t, store, otherScope)
 	assertDemandTransactionBlocked(t, store, state.DemandTransactionKey{Scope: key.Scope, RunnerPool: "other-pool"})
 	assertDemandTransactionAvailable(t, store, state.DemandTransactionKey{Scope: otherScope.Scope, RunnerPool: "other-pool"})
-	assertDemandTransactionAvailable(t, store, state.DemandTransactionKey{Scope: core.DemandScope{Adapter: "other-adapter", ID: "held-scope"}, RunnerPool: key.RunnerPool})
+	assertDemandTransactionAvailable(t, store, state.DemandTransactionKey{
+		Scope: core.DemandScope{Adapter: "other-adapter", ID: "held-scope"}, RunnerPool: key.RunnerPool,
+	})
+}
+
+func blockedDemandRequests(runnerPool core.RunnerPool) []core.JobRequest {
 	requests := []core.JobRequest{
-		stateConformanceRequest("domain-scoped-enqueue", key.RunnerPool, stateConformanceEpoch),
-		stateConformanceRequest("domain-unscoped-enqueue", key.RunnerPool, stateConformanceEpoch),
+		stateConformanceRequest("domain-scoped-enqueue", runnerPool, stateConformanceEpoch),
+		stateConformanceRequest("domain-unscoped-enqueue", runnerPool, stateConformanceEpoch),
 	}
 	requests[1].Scope = core.DemandScope{}
-	for _, request := range requests {
-		assertDemandEnqueueBlocked(t, store, request)
-	}
-	release()
-	err := store.WithDemandTransaction(context.Background(), otherScope, func(transaction state.DemandTransaction) error {
+	return requests
+}
+
+func requireEmptyDemandTransaction(t *testing.T, store stateConformanceStore, key state.DemandTransactionKey) {
+	t.Helper()
+	err := store.WithDemandTransaction(context.Background(), key, func(transaction state.DemandTransaction) error {
 		jobs, err := transaction.ActiveJobs(context.Background())
 		if err != nil {
-			return err
+			return fmt.Errorf("list active jobs after canceled enqueue: %w", err)
 		}
 		if len(jobs) != 0 {
-			t.Errorf("cancelled enqueue persisted demand: %#v", jobs)
+			t.Errorf("canceled enqueue persisted demand: %#v", jobs)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("released demand domain unavailable: %v", err)
 	}
-	for _, request := range requests {
-		requireQueued(t, store, request, core.QueueQueued)
-	}
-	assertDemandTransactionAvailable(t, store, state.DemandTransactionKey{Scope: key.Scope, RunnerPool: "other-pool"})
 }
 
 func holdDemandTransaction(t *testing.T, store state.DemandTransactionStore, key state.DemandTransactionKey) func() {
@@ -102,7 +126,10 @@ func assertDemandTransactionAvailable(t *testing.T, store state.DemandTransactio
 	defer cancel()
 	err := store.WithDemandTransaction(ctx, key, func(transaction state.DemandTransaction) error {
 		_, err := transaction.ActiveJobs(ctx)
-		return err
+		if err != nil {
+			return fmt.Errorf("list active jobs in available demand transaction: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("independent or released demand transaction: %v", err)

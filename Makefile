@@ -41,7 +41,7 @@ endif
 lint lint-config lint-fix: export GOTOOLCHAIN := $(GOLANGCI_LINT_TOOLCHAIN)
 
 lint: lint-no-nolint lint-config
-	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
+	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --build-tags=e2e
 ifeq ($(OSFAMILY),Windows)
 	@$$violations = go tool github.com/boyter/scc/v3 --by-file --include-ext go --no-gen --format csv . | ConvertFrom-Csv | Where-Object { [int]$$_.Complexity -gt 100 }; if ($$violations) { $$violations | ForEach-Object { Write-Host "$$($$_.Provider) complexity=$$($$_.Complexity)" }; exit 1 }
 else

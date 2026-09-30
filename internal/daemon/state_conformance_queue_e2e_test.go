@@ -12,7 +12,20 @@ import (
 
 func exerciseQueueRetryContract(t *testing.T, store stateConformanceStore) {
 	t.Helper()
-	ctx := context.Background()
+	fixture := prepareQueueRetryFixture(t, store)
+	firstAttempt := retryFirstQueueAttempt(t, store, fixture)
+	assertQueueRetryOrdering(t, store, fixture, firstAttempt)
+	exerciseReturnedClaimPrecisionContract(t, store)
+}
+
+type queueRetryFixture struct {
+	runnerPool core.RunnerPool
+	firstJob   core.Job
+	secondJob  core.Job
+}
+
+func prepareQueueRetryFixture(t *testing.T, store stateConformanceStore) queueRetryFixture {
+	t.Helper()
 	runnerPool := core.RunnerPool("state-conformance-queue")
 	firstRequest := stateConformanceRequest("queue-first", runnerPool, stateConformanceEpoch)
 	secondRequest := stateConformanceRequest("queue-second", runnerPool, stateConformanceEpoch.Add(time.Second))
@@ -23,30 +36,42 @@ func exerciseQueueRetryContract(t *testing.T, store stateConformanceStore) {
 	}
 	secondJob := requireQueued(t, store, secondRequest, core.QueueQueued)
 	requireStateConformanceMember(t, store, "queue-member", stateConformanceEpoch.Add(2*time.Second))
+	return queueRetryFixture{runnerPool: runnerPool, firstJob: firstJob, secondJob: secondJob}
+}
 
-	firstAttempt := requireClaimed(t, store, runnerPool,
+func retryFirstQueueAttempt(t *testing.T, store stateConformanceStore, fixture queueRetryFixture) core.ProcessingJob {
+	t.Helper()
+	firstAttempt := requireClaimed(t, store, fixture.runnerPool,
 		stateConformanceClaim("queue-member", stateConformanceEpoch.Add(2*time.Second)))
-	if firstAttempt.Job.ID != firstJob.ID {
-		t.Fatalf("first FIFO claim = %s, want %s", firstAttempt.Job.ID, firstJob.ID)
+	if firstAttempt.Job.ID != fixture.firstJob.ID {
+		t.Fatalf("first FIFO claim = %s, want %s", firstAttempt.Job.ID, fixture.firstJob.ID)
 	}
 	requireRetry(t, "retry first provisioning attempt", func() (core.RetryResult, error) {
-		return store.RetryUnstarted(ctx, firstAttempt)
+		return store.RetryUnstarted(context.Background(), firstAttempt)
 	}, core.RetryRequeued)
+	return firstAttempt
+}
 
-	secondAttempt := requireClaimed(t, store, runnerPool,
+func assertQueueRetryOrdering(
+	t *testing.T,
+	store stateConformanceStore,
+	fixture queueRetryFixture,
+	firstAttempt core.ProcessingJob,
+) {
+	t.Helper()
+	secondAttempt := requireClaimed(t, store, fixture.runnerPool,
 		stateConformanceClaim("queue-member", stateConformanceEpoch.Add(3*time.Second)))
-	if secondAttempt.Job.ID != secondJob.ID {
-		t.Fatalf("claim after retry = %s, want queued follower %s", secondAttempt.Job.ID, secondJob.ID)
+	if secondAttempt.Job.ID != fixture.secondJob.ID {
+		t.Fatalf("claim after retry = %s, want queued follower %s", secondAttempt.Job.ID, fixture.secondJob.ID)
 	}
-	retriedAttempt := requireClaimed(t, store, runnerPool,
+	retriedAttempt := requireClaimed(t, store, fixture.runnerPool,
 		stateConformanceClaim("queue-member", stateConformanceEpoch.Add(4*time.Second)))
-	if retriedAttempt.Job.ID != firstJob.ID || retriedAttempt.RunnerName == firstAttempt.RunnerName {
-		t.Fatalf("tail retry = %+v, want job %s with a new attempt", retriedAttempt, firstJob.ID)
+	if retriedAttempt.Job.ID != fixture.firstJob.ID || retriedAttempt.RunnerName == firstAttempt.RunnerName {
+		t.Fatalf("tail retry = %+v, want job %s with a new attempt", retriedAttempt, fixture.firstJob.ID)
 	}
 	requireRetry(t, "stale retry from replaced attempt", func() (core.RetryResult, error) {
-		return store.RetryUnstarted(ctx, firstAttempt)
+		return store.RetryUnstarted(context.Background(), firstAttempt)
 	}, core.RetryClaimChanged)
-	exerciseReturnedClaimPrecisionContract(t, store)
 }
 
 func exerciseReturnedClaimPrecisionContract(t *testing.T, store stateConformanceStore) {

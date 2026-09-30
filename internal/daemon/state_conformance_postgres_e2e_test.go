@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -13,18 +14,31 @@ import (
 	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
+const postgresConcurrentClaimantCount = 8
+
 func TestStateStorePostgresConcurrentClaimsAndDemandTransactions(t *testing.T) {
 	if !e2eBackendEnabled("postgres") {
 		return
 	}
 	store := openPostgresStateConformanceStore(t)
-	exerciseConcurrentPostgresClaims(t, store)
-	exerciseConcurrentPostgresDemand(t, store)
+	conformanceStore := postgresStateConformanceStore(store)
+	exerciseConcurrentPostgresClaims(t, conformanceStore)
+	exerciseConcurrentPostgresDemand(t, conformanceStore)
 }
 
 func exerciseConcurrentPostgresClaims(t *testing.T, store stateConformanceStore) {
 	t.Helper()
-	runnerPool := core.RunnerPool("state-conformance-concurrent-claims")
+	runnerPool, firstJobID, secondJobID := prepareConcurrentClaims(t, store)
+	results := runConcurrentClaims(store, runnerPool)
+	assertConcurrentClaims(t, results, firstJobID, secondJobID)
+}
+
+func prepareConcurrentClaims(
+	t *testing.T,
+	store stateConformanceStore,
+) (runnerPool core.RunnerPool, firstJobID core.JobID, secondJobID core.JobID) {
+	t.Helper()
+	runnerPool = core.RunnerPool("state-conformance-concurrent-claims")
 	first := requireQueued(t, store,
 		stateConformanceRequest("concurrent-claim-first", runnerPool, stateConformanceEpoch.Add(4*time.Hour)),
 		core.QueueQueued)
@@ -32,17 +46,20 @@ func exerciseConcurrentPostgresClaims(t *testing.T, store stateConformanceStore)
 		stateConformanceRequest("concurrent-claim-second", runnerPool, stateConformanceEpoch.Add(4*time.Hour+time.Second)),
 		core.QueueQueued)
 
-	const claimantCount = 8
-	for claimant := 0; claimant < claimantCount; claimant++ {
+	for claimant := 0; claimant < postgresConcurrentClaimantCount; claimant++ {
 		requireStateConformanceMember(
 			t, store, core.MemberID("concurrent-claimant-"+strconv.Itoa(claimant)),
 			stateConformanceEpoch.Add(4*time.Hour+2*time.Second),
 		)
 	}
+	return runnerPool, first.ID, second.ID
+}
+
+func runConcurrentClaims(store stateConformanceStore, runnerPool core.RunnerPool) <-chan concurrentClaimResult {
 	start := make(chan struct{})
-	results := make(chan concurrentClaimResult, claimantCount)
+	results := make(chan concurrentClaimResult, postgresConcurrentClaimantCount)
 	var claimants sync.WaitGroup
-	for claimant := 0; claimant < claimantCount; claimant++ {
+	for claimant := 0; claimant < postgresConcurrentClaimantCount; claimant++ {
 		claimants.Add(1)
 		go func(claimant int) {
 			defer claimants.Done()
@@ -56,7 +73,7 @@ func exerciseConcurrentPostgresClaims(t *testing.T, store stateConformanceStore)
 	close(start)
 	claimants.Wait()
 	close(results)
-	assertConcurrentClaims(t, results, first.ID, second.ID)
+	return results
 }
 
 type concurrentClaimResult struct {
@@ -112,7 +129,10 @@ func exerciseConcurrentPostgresDemand(t *testing.T, store stateConformanceStore)
 				func(transaction statecontract.DemandTransaction) error {
 					var queueErr error
 					enqueue, queueErr = transaction.Queue(context.Background(), request)
-					return queueErr
+					if queueErr != nil {
+						return fmt.Errorf("queue concurrent demand: %w", queueErr)
+					}
+					return nil
 				})
 			results <- concurrentDemandResult{result: enqueue, err: err}
 		}()
@@ -146,6 +166,8 @@ func assertConcurrentDemand(t *testing.T, results <-chan concurrentDemandResult)
 			queued++
 		case core.QueueAlreadyQueued:
 			replayed++
+		case core.QueueProcessing, core.QueueSourceTerminal:
+			t.Fatalf("concurrent PostgreSQL demand outcome = %q", demand.result.Outcome)
 		default:
 			t.Fatalf("concurrent PostgreSQL demand outcome = %q", demand.result.Outcome)
 		}

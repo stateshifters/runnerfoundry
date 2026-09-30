@@ -13,7 +13,7 @@ import (
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
-type stateConformanceStore interface {
+type stateConformanceStore struct {
 	statecontract.JobQueueStore
 	statecontract.ProcessingJobStore
 	statecontract.ProcessingTransitions
@@ -22,6 +22,32 @@ type stateConformanceStore interface {
 	statecontract.RunnerPoolCapacityStore
 	statecontract.DemandTransactionStore
 	statecontract.MemberLivenessReader
+}
+
+func sqliteStateConformanceStore(store *sqlitestate.Store) stateConformanceStore {
+	return stateConformanceStore{
+		JobQueueStore:                  store,
+		ProcessingJobStore:             store,
+		ProcessingTransitions:          store,
+		ProvisioningFailureTransitions: store,
+		MemberRegistry:                 store,
+		RunnerPoolCapacityStore:        store,
+		DemandTransactionStore:         store,
+		MemberLivenessReader:           store,
+	}
+}
+
+func postgresStateConformanceStore(store *postgresstate.Store) stateConformanceStore {
+	return stateConformanceStore{
+		JobQueueStore:                  store,
+		ProcessingJobStore:             store,
+		ProcessingTransitions:          store,
+		ProvisioningFailureTransitions: store,
+		MemberRegistry:                 store,
+		RunnerPoolCapacityStore:        store,
+		DemandTransactionStore:         store,
+		MemberLivenessReader:           store,
+	}
 }
 
 func TestStateStoreContractSQLite(t *testing.T) {
@@ -37,7 +63,7 @@ func TestStateStoreContractSQLite(t *testing.T) {
 			t.Errorf("close SQLite state conformance store: %v", closeErr)
 		}
 	})
-	exerciseStateStoreContract(t, store)
+	exerciseStateStoreContract(t, sqliteStateConformanceStore(store))
 }
 
 func TestStateStoreContractPostgres(t *testing.T) {
@@ -45,7 +71,7 @@ func TestStateStoreContractPostgres(t *testing.T) {
 		return
 	}
 	store := openPostgresStateConformanceStore(t)
-	exerciseStateStoreContract(t, store)
+	exerciseStateStoreContract(t, postgresStateConformanceStore(store))
 }
 
 func openPostgresStateConformanceStore(t *testing.T) *postgresstate.Store {
