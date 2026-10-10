@@ -116,6 +116,7 @@ func (engine *gatedMaintenanceEngine) Close(ctx context.Context) error {
 type maintenanceGeneration struct {
 	engine                   generationLifecycleEngine
 	lanes                    []scheduledMaintenanceLane
+	startupPrerequisite      string
 	report                   func(error)
 	currentTime              func() time.Time
 	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
@@ -160,12 +161,13 @@ func newIndependentMaintenanceGeneration(
 		{name: "membership", ticker: tickers.membership, run: runtime.MaintainMembership},
 		{name: "source", ticker: tickers.source, run: runtime.MaintainSource},
 		{name: "execution", ticker: tickers.execution, run: runtime.MaintainExecution},
-	}, report, closers, finalizers)
+	}, "membership", report, closers, finalizers)
 }
 
 func newScheduledMaintenanceGeneration(
 	engine generationLifecycleEngine,
 	lanes []scheduledMaintenanceLane,
+	startupPrerequisite string,
 	report func(error),
 	closers []runtimeCloser,
 	finalizers []runtimeFinalizer,
@@ -174,7 +176,8 @@ func newScheduledMaintenanceGeneration(
 		report = func(error) {}
 	}
 	return &maintenanceGeneration{
-		engine: engine, lanes: append([]scheduledMaintenanceLane(nil), lanes...), report: report,
+		engine: engine, lanes: append([]scheduledMaintenanceLane(nil), lanes...),
+		startupPrerequisite: startupPrerequisite, report: report,
 		currentTime: time.Now,
 		closers:     append([]runtimeCloser(nil), closers...), finalizers: append([]runtimeFinalizer(nil), finalizers...),
 		closerClosed: make([]bool, len(closers)),
@@ -281,12 +284,17 @@ func (generation *maintenanceGeneration) stopQueuedJobProcessor(ctx context.Cont
 }
 
 func (generation *maintenanceGeneration) run(ctx context.Context, done chan struct{}) {
+	prerequisiteReady := make(chan struct{})
 	var lanes sync.WaitGroup
 	lanes.Add(len(generation.lanes))
 	for _, lane := range generation.lanes {
 		go func() {
 			defer lanes.Done()
-			generation.runLane(ctx, lane)
+			if lane.name == generation.startupPrerequisite {
+				generation.runPrerequisiteLane(ctx, lane, prerequisiteReady)
+				return
+			}
+			generation.runLaneAfterPrerequisite(ctx, lane, prerequisiteReady)
 		}()
 	}
 	lanes.Wait()
@@ -295,6 +303,46 @@ func (generation *maintenanceGeneration) run(ctx context.Context, done chan stru
 
 func (generation *maintenanceGeneration) runLane(ctx context.Context, lane scheduledMaintenanceLane) {
 	generation.runCycle(ctx, lane, "immediate", slog.LevelInfo)
+	generation.runScheduledLane(ctx, lane)
+}
+
+func (generation *maintenanceGeneration) runPrerequisiteLane(
+	ctx context.Context,
+	lane scheduledMaintenanceLane,
+	ready chan<- struct{},
+) {
+	stage := "immediate"
+	level := slog.LevelInfo
+	for {
+		if generation.runCycle(ctx, lane, stage, level) {
+			close(ready)
+			generation.runScheduledLane(ctx, lane)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-lane.ticker.Ticks():
+			stage = "scheduled"
+			level = slog.LevelDebug
+		}
+	}
+}
+
+func (generation *maintenanceGeneration) runLaneAfterPrerequisite(
+	ctx context.Context,
+	lane scheduledMaintenanceLane,
+	ready <-chan struct{},
+) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-ready:
+		generation.runLane(ctx, lane)
+	}
+}
+
+func (generation *maintenanceGeneration) runScheduledLane(ctx context.Context, lane scheduledMaintenanceLane) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -310,7 +358,7 @@ func (generation *maintenanceGeneration) runCycle(
 	lane scheduledMaintenanceLane,
 	stage string,
 	startLevel slog.Level,
-) {
+) bool {
 	started := generation.currentTime()
 	reportProgress(generation.report, startLevel, operationalEvent{
 		operation: "maintenance_" + lane.name, stage: stage, outcome: "started",
@@ -328,6 +376,7 @@ func (generation *maintenanceGeneration) runCycle(
 		duration: generation.currentTime().Sub(started),
 	})
 	generation.reportLane(lane.name, err)
+	return err == nil
 }
 
 func (generation *maintenanceGeneration) reportLane(name string, err error) {
