@@ -20,12 +20,12 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-#    env:
-#      GOCACHE: /cache/go-build
-#      GOMODCACHE: /cache/go-mod
-#      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/embedded-postgres
-#      npm_config_cache: /cache/npm
+    runs-on: meza-ubuntu-slim
+    env:
+      GOCACHE: /cache/go-build
+      GOMODCACHE: /cache/go-mod
+      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
+      npm_config_cache: /cache/npm
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

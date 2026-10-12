@@ -14,6 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+env:
+  GOCACHE: /cache/go-build
+  GOMODCACHE: /cache/go-mod
+  RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
+  npm_config_cache: /cache/npm
+
 jobs:
   sqlite:
     name: SQLite (${{ matrix.platform }})
@@ -24,10 +30,10 @@ jobs:
       matrix:
         include:
           - platform: Linux
-            runner: ubuntu-latest
+            runner: meza-ubuntu-slim
             prepare_postgres: false
           - platform: Windows
-            runner: windows-latest
+            runner: meza-windows-slim
             prepare_postgres: true
     steps:
       - name: Checkout code
@@ -130,7 +136,7 @@ jobs:
       matrix:
         include:
           - platform: Windows
-            runner: windows-latest
+            runner: meza-windows-slime
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
