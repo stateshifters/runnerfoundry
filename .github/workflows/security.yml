@@ -2,6 +2,12 @@ name: Security Scan
 on:
   pull_request: {}
 
+env:
+  GOCACHE: /cache/go-build
+  GOMODCACHE: /cache/go-mod
+  RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
+  npm_config_cache: /cache/npm
+
 jobs:
   osv:
     name: OSV Scan

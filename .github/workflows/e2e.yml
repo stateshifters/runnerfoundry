@@ -14,12 +14,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
-env:
-  GOCACHE: /cache/go-build
-  GOMODCACHE: /cache/go-mod
-  RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
-  npm_config_cache: /cache/npm
-
 jobs:
   sqlite:
     name: SQLite (${{ matrix.platform }})
@@ -35,6 +29,13 @@ jobs:
           - platform: Windows
             runner: meza-windows-slim
             prepare_postgres: true
+
+    env: &mixed-env
+      GOCACHE: ${{ matrix.platform == 'Linux' && '/cache/go-build' || 'Z:\cache\go-build'}}
+      GOMODCACHE: ${{ matrix.platform == 'Linux' && '/cache/go-mod' || 'Z:\cache\go-mod' }}
+      RUNNERFOUNDRY_POSTGRES_CACHE: ${{ matrix.platform == 'Linux' && '/cache/runnerfoundry/embedded-postgres' || 'Z:\cache\runnerfoundry\embedded-postgres'}}
+      npm_config_cache: ${{ matrix.platform == 'Linux' && '/cache/npm' || 'Z:\cache\npm' }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,8 +61,13 @@ jobs:
 
   tagged-static-analysis:
     name: Tagged E2E static analysis
-    runs-on: ubuntu-latest
+    runs-on: meza-ubuntu-slim
     timeout-minutes: 15
+    env: &ubuntu-env
+      GOCACHE: /cache/go-build
+      GOMODCACHE: /cache/go-mod
+      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
+      npm_config_cache: /cache/npm
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,8 +85,9 @@ jobs:
 
   sqlite-race:
     name: SQLite (race detector)
-    runs-on: ubuntu-latest
+    runs-on: meza-ubuntu-slim
     timeout-minutes: 15
+    env: *ubuntu-env
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,7 +104,8 @@ jobs:
 
   postgres-race:
     name: PostgreSQL 18 (focused race detector)
-    runs-on: ubuntu-latest
+    runs-on: meza-ubuntu-slim
+    env: *ubuntu-env
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -131,6 +139,7 @@ jobs:
     name: PostgreSQL 18 (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
+    env: *mixed-env
     strategy:
       fail-fast: false
       matrix:
@@ -160,7 +169,8 @@ jobs:
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }}
-    runs-on: ubuntu-latest
+    runs-on: meza-ubuntu-slim
+    env: *ubuntu-env
     timeout-minutes: 35
     strategy:
       fail-fast: false
