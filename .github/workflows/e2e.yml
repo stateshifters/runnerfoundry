@@ -113,7 +113,7 @@ jobs:
       matrix:
         include:
           - platform: Windows
-            runner: meza-windows-slime
+            runner: meza-windows-slim
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -138,6 +138,7 @@ jobs:
   postgres:
     name: PostgreSQL ${{ matrix.postgres }}
     runs-on: meza-ubuntu-slim
+    needs: [postgres-platform]
     env: *ubuntu-env
     timeout-minutes: 35
     strategy:
