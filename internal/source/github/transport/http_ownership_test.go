@@ -43,7 +43,7 @@ func TestClientKeepsRepositoryAuthenticationAndSessionHTTPIndependent(t *testing
 
 func newOwnershipClient(t *testing.T, boundary *ownershipHTTPBoundary) *Client {
 	t.Helper()
-	client, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), boundary.newTransport)
+	client, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), boundary.newTransport, false)
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
@@ -173,7 +173,7 @@ func exerciseMissingTransport(t *testing.T, failingOwner int) {
 		}
 		return &http.Transport{DialContext: rejectHTTPDial, DialTLSContext: rejectHTTPDial}
 	}
-	client, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), factory)
+	client, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), factory, false)
 	if failingOwner < 2 {
 		if err == nil {
 			t.Fatal("nil parent transport accepted")
@@ -197,7 +197,7 @@ func TestClientPreservesConfiguredIdleRetentionAndBoundsUnsetRetention(t *testin
 			transports = append(transports, transport)
 			return transport
 		}
-		_, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), factory)
+		_, err := NewClient(Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"}, deterministicCredentials(t), factory, false)
 		if err != nil {
 			t.Fatalf("create client: %v", err)
 		}

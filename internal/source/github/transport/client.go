@@ -19,6 +19,7 @@ type registrationAPI interface {
 	GetRunnerGroupByName(ctx context.Context, name string) (*upstream.RunnerGroup, error)
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, name string) (*upstream.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
+	UpdateRunnerScaleSet(ctx context.Context, runnerScaleSetID int, runnerScaleSet *upstream.RunnerScaleSet) (*upstream.RunnerScaleSet, error)
 }
 
 type messageSessionAPI interface {
@@ -62,17 +63,23 @@ type registryAPI interface {
 // Client owns GitHub Actions runner scale-set registration, message sessions,
 // and runner bootstrap operations for one repository installation.
 type Client struct {
-	registrations    registrationAPI
-	openSession      func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error)
-	jit              jitAPI
-	registry         registryAPI
-	repositoryURL    string
-	transportFactory TransportFactory
-	gateOnce         sync.Once
-	repositoryGate   chan struct{}
+	registrations     registrationAPI
+	openSession       func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error)
+	jit               jitAPI
+	registry          registryAPI
+	repositoryURL     string
+	autoUpdateRunners bool
+	transportFactory  TransportFactory
+	gateOnce          sync.Once
+	repositoryGate    chan struct{}
 }
 
-func NewClient(repository Repository, credentials Credentials, factory TransportFactory) (*Client, error) {
+func NewClient(
+	repository Repository,
+	credentials Credentials,
+	factory TransportFactory,
+	autoUpdateRunners bool,
+) (*Client, error) {
 	api, err := newSDKClient(repository, credentials, factory)
 	if err != nil {
 		return nil, err
@@ -82,6 +89,7 @@ func NewClient(repository Repository, credentials Credentials, factory Transport
 		return nil, err
 	}
 	client := clientFromUpstream(repository.URL, api, sessionAPI, factory)
+	client.autoUpdateRunners = autoUpdateRunners
 	return client, nil
 }
 
@@ -102,8 +110,6 @@ func clientFromUpstream(repositoryURL string, api repositoryAPI, sessionAPI sess
 	}
 }
 
-// EnsureRunnerPool returns the existing GitHub runner scale set for the named
-// Runner Pool, or creates it with a matching system label and disabled updates.
 func (client *Client) EnsureRunnerPool(
 	ctx context.Context,
 	runnerPoolName string,
@@ -120,13 +126,7 @@ func (client *Client) EnsureRunnerPool(
 	if err != nil {
 		return Registration{}, err
 	}
-	runnerScaleSet, err := client.registrations.GetRunnerScaleSet(ctx, int(runnerGroupID), runnerPoolName)
-	if err != nil {
-		return Registration{}, fmt.Errorf("get runner scale set %q: %w", runnerPoolName, err)
-	}
-	if runnerScaleSet == nil {
-		runnerScaleSet, err = client.createRunnerScaleSet(ctx, runnerPoolName, runnerGroupID)
-	}
+	runnerScaleSet, err := client.ensureRunnerScaleSet(ctx, runnerPoolName, runnerGroupID)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -136,6 +136,36 @@ func (client *Client) EnsureRunnerPool(
 	return Registration{
 		ID: ScaleSetID(runnerScaleSet.ID), Name: runnerScaleSet.Name, RunnerGroupID: RunnerGroupID(runnerScaleSet.RunnerGroupID),
 	}, nil
+}
+
+func (client *Client) ensureRunnerScaleSet(
+	ctx context.Context,
+	runnerPoolName string,
+	runnerGroupID RunnerGroupID,
+) (*upstream.RunnerScaleSet, error) {
+	runnerScaleSet, err := client.registrations.GetRunnerScaleSet(ctx, int(runnerGroupID), runnerPoolName)
+	if err != nil {
+		return nil, fmt.Errorf("get runner scale set %q: %w", runnerPoolName, err)
+	}
+	if runnerScaleSet == nil {
+		return client.createRunnerScaleSet(ctx, runnerPoolName, runnerGroupID)
+	}
+	if err = client.convergeRunnerUpdateSetting(ctx, runnerScaleSet); err != nil {
+		return nil, err
+	}
+	return runnerScaleSet, nil
+}
+
+func (client *Client) convergeRunnerUpdateSetting(ctx context.Context, runnerScaleSet *upstream.RunnerScaleSet) error {
+	disableUpdate := !client.autoUpdateRunners
+	if runnerScaleSet.RunnerSetting.DisableUpdate == disableUpdate {
+		return nil
+	}
+	update := &upstream.RunnerScaleSet{RunnerSetting: upstream.RunnerSetting{DisableUpdate: disableUpdate}}
+	if _, err := client.registrations.UpdateRunnerScaleSet(ctx, runnerScaleSet.ID, update); err != nil {
+		return fmt.Errorf("update runner scale set %q: %w", runnerScaleSet.Name, err)
+	}
+	return nil
 }
 
 // ResolveRunnerGroup resolves a configured GitHub runner-group name to its
@@ -171,7 +201,7 @@ func (client *Client) createRunnerScaleSet(
 		Name:          runnerPoolName,
 		RunnerGroupID: int(runnerGroupID),
 		Labels:        []upstream.Label{{Name: runnerPoolName, Type: "System"}},
-		RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+		RunnerSetting: upstream.RunnerSetting{DisableUpdate: !client.autoUpdateRunners},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runner scale set %q: %w", runnerPoolName, err)

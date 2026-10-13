@@ -216,6 +216,7 @@ func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
 		{AppID: 11, PrivateKeyFile: "first.pem"},
 		{AppID: 22, PrivateKeyFile: "second.pem"},
 	}
+	configured.AutoUpdateRunners = true
 	built, err := buildProductionGitHubManagerWithDependencies(configured, newBuilderStoreFake(), nil, dependencies)
 	if err != nil || built == nil {
 		t.Fatalf("GitHub manager = (%v, %v)", built, err)
@@ -223,11 +224,15 @@ func TestProductionGitHubManagerUsesTransportFactories(t *testing.T) {
 	if !reflect.DeepEqual(observed.discoverers, []int64{11, 22}) || !reflect.DeepEqual(observed.clients, []int64{11, 22}) {
 		t.Fatalf("credential factory order = discoverers %#v clients %#v", observed.discoverers, observed.clients)
 	}
+	if !reflect.DeepEqual(observed.autoUpdateRunners, []bool{true, true}) {
+		t.Fatalf("runner auto-update settings = %#v", observed.autoUpdateRunners)
+	}
 }
 
 type productionGitHubFactoryObservation struct {
-	discoverers []int64
-	clients     []int64
+	discoverers       []int64
+	clients           []int64
+	autoUpdateRunners []bool
 }
 
 func productionGitHubFactoryDependencies() (productionDependencies, *productionGitHubFactoryObservation) {
@@ -237,8 +242,9 @@ func productionGitHubFactoryDependencies() (productionDependencies, *productionG
 		observed.discoverers = append(observed.discoverers, credentials.AppID)
 		return transport.Discoverer{}, nil
 	}
-	dependencies.newClient = func(_ transport.Repository, credentials transport.Credentials, _ transport.TransportFactory) (*transport.Client, error) {
+	dependencies.newClient = func(_ transport.Repository, credentials transport.Credentials, _ transport.TransportFactory, autoUpdateRunners bool) (*transport.Client, error) {
 		observed.clients = append(observed.clients, credentials.AppID)
+		observed.autoUpdateRunners = append(observed.autoUpdateRunners, autoUpdateRunners)
 		return &transport.Client{}, nil
 	}
 	dependencies.newManager = func(
@@ -282,7 +288,7 @@ func TestProductionGitHubCoordinatorRejectsMissingAndInvalidAppScopes(t *testing
 		t.Fatal("missing GitHub Apps were accepted")
 	}
 	if _, err := buildGitHubAppManagers([]config.GitHubAppCredentials{{AppID: 0, PrivateKey: "key"}},
-		store, nil, dependencies); err == nil {
+		false, store, nil, dependencies); err == nil {
 		t.Fatal("invalid GitHub App scope was accepted")
 	}
 }
@@ -325,7 +331,7 @@ func assertProductionClientFailure(
 		_, err := factory(context.Background(), transport.Repository{})
 		return nil, err
 	}
-	dependencies.newClient = func(transport.Repository, transport.Credentials, transport.TransportFactory) (*transport.Client, error) {
+	dependencies.newClient = func(transport.Repository, transport.Credentials, transport.TransportFactory, bool) (*transport.Client, error) {
 		return nil, wantErr
 	}
 	if _, err := buildProductionGitHubManagerWithDependencies(configured, store, nil, dependencies); !errors.Is(err, wantErr) {

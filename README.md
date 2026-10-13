@@ -591,13 +591,14 @@ The keys documented in this section are the complete valid YAML configuration su
 
 ### Top-level settings
 
-| Setting      | Type    | Default          | Requirements                 |
-| ------------ | ------- | ---------------- | ---------------------------- |
-| `github`     | mapping | none             | Required                     |
-| `log`        | mapping | defaults applied | Optional                     |
-| `state`      | mapping | none             | Required                     |
-| `prune`      | boolean | `false`          | `true` or `false`            |
-| `scale_sets` | list    | none             | Required, at least one entry |
+| Setting             | Type    | Default          | Requirements                 |
+| ------------------- | ------- | ---------------- | ---------------------------- |
+| `autoUpdateRunners` | boolean | `false`          | `true` or `false`            |
+| `github`            | mapping | none             | Required                     |
+| `log`               | mapping | defaults applied | Optional                     |
+| `state`             | mapping | none             | Required                     |
+| `prune`             | boolean | `false`          | `true` or `false`            |
+| `scale_sets`        | list    | none             | Required, at least one entry |
 
 A complete PostgreSQL-backed example showing all major configuration areas looks like:
 
@@ -631,6 +632,7 @@ state:
       user: env://RUNNERFOUNDRY_POSTGRES_USER
       password: file:///run/secrets/runnerfoundry-postgres-password
 
+autoUpdateRunners: false
 prune: false
 
 scale_sets:
@@ -641,6 +643,36 @@ scale_sets:
       compose_file: /etc/runnerfoundry/compose.yaml
       service: runner
 ```
+
+### Runner software updates
+
+#### `autoUpdateRunners`
+
+Optional boolean.
+
+Default:
+
+```yaml
+autoUpdateRunners: false
+```
+
+Set this to `true` to allow automatic GitHub Actions runner software updates:
+
+```yaml
+autoUpdateRunners: true
+```
+
+This setting controls the GitHub runner scale-set setting. Changing it does not restart or replace runner instances.
+
+When this is `false`, RunnerFoundry disables automatic runner software updates on every GitHub runner scale set it manages.
+
+You must then keep the GitHub Actions runner software current in every Docker or libvirt runner image. GitHub requires an update within 30 days of each new runner release and stops queueing jobs to outdated runners. A required critical security update can stop job queueing sooner. See [GitHub's runner software update requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#runner-software-updates-on-self-hosted-runners).
+
+This global setting applies to every configured GitHub App, repository and Runner Pool. It applies to Docker-backed and libvirt-backed pools.
+
+Reload the configuration or restart RunnerFoundry after changing the setting. RunnerFoundry applies it as each repository's Runner Pools are reconciled. It updates existing scale sets when their current setting differs and uses the setting when it creates new scale sets.
+
+If the GitHub API update fails, reconciliation for that repository fails and RunnerFoundry reports the error in its logs.
 
 ### GitHub configuration
 

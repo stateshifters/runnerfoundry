@@ -20,11 +20,12 @@ const (
 // Config is the validated daemon configuration. RunnerPools is decoded from
 // the external scale_sets key for configuration compatibility.
 type Config struct {
-	GitHub      GitHubConfig       `yaml:"github"`
-	Log         LogConfig          `yaml:"log"`
-	State       StateConfig        `yaml:"state"`
-	Prune       bool               `yaml:"prune"`
-	RunnerPools []RunnerPoolConfig `yaml:"scale_sets"`
+	AutoUpdateRunners bool               `yaml:"autoUpdateRunners"`
+	GitHub            GitHubConfig       `yaml:"github"`
+	Log               LogConfig          `yaml:"log"`
+	State             StateConfig        `yaml:"state"`
+	Prune             bool               `yaml:"prune"`
+	RunnerPools       []RunnerPoolConfig `yaml:"scale_sets"`
 }
 
 // StateConfig selects exactly one state backend: Path for SQLite or Postgres

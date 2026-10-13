@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"reflect"
 	"testing"
 	"time"
 
@@ -86,6 +87,20 @@ func TestEnsureRunnerPoolCreatesMissingScaleSetWithRequiredSettings(t *testing.T
 	}
 }
 
+func TestEnsureRunnerPoolCreatesMissingScaleSetWithRunnerAutoUpdatesEnabled(t *testing.T) {
+	t.Parallel()
+
+	api := &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}}
+	client := Client{registrations: api, autoUpdateRunners: true}
+
+	if _, err := client.EnsureRunnerPool(context.Background(), "linux", "default"); err != nil {
+		t.Fatalf("ensure runner pool: %v", err)
+	}
+	if api.createdScaleSet == nil || api.createdScaleSet.RunnerSetting.DisableUpdate {
+		t.Fatalf("created scale set = %#v", api.createdScaleSet)
+	}
+}
+
 func TestResolveRunnerGroupReturnsConfiguredGroupID(t *testing.T) {
 	t.Parallel()
 
@@ -143,20 +158,42 @@ func TestEnsureRunnerPoolReportsBoundaryFailures(t *testing.T) {
 	}
 }
 
+func TestEnsureRunnerPoolReportsRunnerUpdateFailure(t *testing.T) {
+	t.Parallel()
+
+	expectedErr := errors.New("API unavailable")
+	api := &actionsAPIFake{
+		runnerGroup: &upstream.RunnerGroup{ID: 17},
+		runnerScaleSet: &upstream.RunnerScaleSet{
+			ID: 23, Name: "linux", RunnerGroupID: 17,
+		},
+		updateErr: expectedErr,
+	}
+	client := Client{registrations: api}
+
+	if _, err := client.EnsureRunnerPool(context.Background(), "linux", "default"); !errors.Is(err, expectedErr) {
+		t.Fatalf("update error = %v", err)
+	}
+}
+
 func TestNewClientValidatesRepositoryAndUsesConfiguredRepository(t *testing.T) {
-	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, nil); err == nil {
+	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, nil, false); err == nil {
 		t.Fatal("NewClient accepted invalid repository URL")
 	}
 	client, err := NewClient(
 		Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"},
 		deterministicCredentials(t),
 		nil,
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	if client.repositoryURL != "https://github.com/acme/widgets" {
 		t.Fatalf("repository URL = %q", client.repositoryURL)
+	}
+	if !client.autoUpdateRunners {
+		t.Fatal("runner auto-update setting was not retained")
 	}
 }
 
@@ -220,8 +257,11 @@ func TestEnsureRunnerPoolReusesExistingScaleSet(t *testing.T) {
 	t.Parallel()
 
 	api := &actionsAPIFake{
-		runnerGroup:    &upstream.RunnerGroup{ID: 17},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 23, Name: "linux", RunnerGroupID: 17},
+		runnerGroup: &upstream.RunnerGroup{ID: 17},
+		runnerScaleSet: &upstream.RunnerScaleSet{
+			ID: 23, Name: "linux", RunnerGroupID: 17,
+			RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+		},
 	}
 	client := Client{registrations: api}
 
@@ -235,6 +275,36 @@ func TestEnsureRunnerPoolReusesExistingScaleSet(t *testing.T) {
 	if api.createdScaleSet != nil {
 		t.Fatalf("unexpected create = %#v", api.createdScaleSet)
 	}
+	if api.updatedScaleSet != nil {
+		t.Fatalf("unexpected update = %#v", api.updatedScaleSet)
+	}
+}
+
+func TestEnsureRunnerPoolConvergesExistingRunnerUpdateSetting(t *testing.T) {
+	t.Parallel()
+
+	createdOn := time.Date(2026, time.October, 13, 9, 0, 0, 0, time.UTC)
+	existing := &upstream.RunnerScaleSet{
+		ID: 23, Name: "linux", RunnerGroupID: 17, RunnerGroupName: "default",
+		Labels:        []upstream.Label{{Name: "linux", Type: "System"}},
+		RunnerSetting: upstream.RunnerSetting{DisableUpdate: true}, CreatedOn: createdOn,
+		RunnerJitConfigURL: "https://example.test/jit",
+		Statistics:         &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	}
+	api := &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}, runnerScaleSet: existing}
+	client := Client{registrations: api, autoUpdateRunners: true}
+
+	registration, err := client.EnsureRunnerPool(context.Background(), "linux", "default")
+	if err != nil {
+		t.Fatalf("ensure runner pool: %v", err)
+	}
+	if registration != (Registration{ID: 23, Name: "linux", RunnerGroupID: 17}) {
+		t.Fatalf("registration = %#v", registration)
+	}
+	expected := &upstream.RunnerScaleSet{RunnerSetting: upstream.RunnerSetting{DisableUpdate: false}}
+	if api.updatedScaleSetID != 23 || !reflect.DeepEqual(api.updatedScaleSet, expected) {
+		t.Fatalf("updated scale set = (%d, %#v), want (23, %#v)", api.updatedScaleSetID, api.updatedScaleSet, expected)
+	}
 }
 
 type actionsAPIFake struct {
@@ -245,6 +315,9 @@ type actionsAPIFake struct {
 	createdScaleSet   *upstream.RunnerScaleSet
 	createErr         error
 	emptyCreate       bool
+	updatedScaleSetID int
+	updatedScaleSet   *upstream.RunnerScaleSet
+	updateErr         error
 }
 
 type upstreamAPIFake struct {
@@ -293,4 +366,14 @@ func (api *actionsAPIFake) CreateRunnerScaleSet(
 	return &upstream.RunnerScaleSet{
 		ID: runnerScaleSet.RunnerGroupID + 12, Name: runnerScaleSet.Name, RunnerGroupID: runnerScaleSet.RunnerGroupID,
 	}, nil
+}
+
+func (api *actionsAPIFake) UpdateRunnerScaleSet(
+	_ context.Context,
+	runnerScaleSetID int,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (*upstream.RunnerScaleSet, error) {
+	api.updatedScaleSetID = runnerScaleSetID
+	api.updatedScaleSet = runnerScaleSet
+	return runnerScaleSet, api.updateErr
 }

@@ -164,7 +164,7 @@ func newProductionTransportPruningManager(
 	) (githubsource.ManagerClient, error) {
 		client, clientErr := githubtransport.NewClient(repository, credentials, func() *http.Transport {
 			return githubPruningHTTPTransport(t, host)
-		})
+		}, false)
 		if clientErr != nil {
 			return githubsource.ManagerClient{}, fmt.Errorf("build production GitHub client: %w", clientErr)
 		}

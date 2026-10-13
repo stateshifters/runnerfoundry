@@ -50,7 +50,7 @@ type productionDependencies struct {
 	httpTransport            http.RoundTripper
 	scaleSetTransportFactory transport.TransportFactory
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
-	newClient                func(transport.Repository, transport.Credentials, transport.TransportFactory) (*transport.Client, error)
+	newClient                func(transport.Repository, transport.Credentials, transport.TransportFactory, bool) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
 	newDockerLauncher        func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
 	newDockerInventory       func(core.MemberID) execution.RunnerInventory
@@ -157,7 +157,7 @@ func buildProductionGitHubManagerWithDependencies(
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub App credentials: %w", err)
 	}
-	managers, err := buildGitHubAppManagers(credentials, store, report, dependencies)
+	managers, err := buildGitHubAppManagers(credentials, configured.AutoUpdateRunners, store, report, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +170,7 @@ func buildProductionGitHubManagerWithDependencies(
 
 func buildGitHubAppManagers(
 	credentials []config.GitHubAppCredentials,
+	autoUpdateRunners bool,
 	store githubsource.RegistrationRepository,
 	report func(error),
 	dependencies productionDependencies,
@@ -187,7 +188,7 @@ func buildGitHubAppManagers(
 		}
 		manager, managerErr := dependencies.newManager(
 			discoverer,
-			productionManagerClientFactory(transportCredentials, dependencies),
+			productionManagerClientFactory(transportCredentials, autoUpdateRunners, dependencies),
 			scopedStore,
 			newGitHubManagerObserverForApp(report, dependencies.currentTime, githubsource.AppID(appCredentials.AppID)),
 		)
@@ -201,10 +202,16 @@ func buildGitHubAppManagers(
 
 func productionManagerClientFactory(
 	credentials transport.Credentials,
+	autoUpdateRunners bool,
 	dependencies productionDependencies,
 ) githubsource.ManagerClientFactoryFunc {
 	return func(_ context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
-		client, err := dependencies.newClient(repository, credentials, dependencies.scaleSetTransportFactory)
+		client, err := dependencies.newClient(
+			repository,
+			credentials,
+			dependencies.scaleSetTransportFactory,
+			autoUpdateRunners,
+		)
 		if err != nil {
 			return githubsource.ManagerClient{}, fmt.Errorf("create scale-set client: %w", err)
 		}
