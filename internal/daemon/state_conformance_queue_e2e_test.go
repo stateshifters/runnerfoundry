@@ -7,8 +7,101 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
+
+func exerciseConditionalTerminalContract(t *testing.T, store stateConformanceStore) {
+	t.Helper()
+	memberID := core.MemberID("conditional-terminal-member")
+	requireStateConformanceMember(t, store, memberID, stateConformanceEpoch)
+	exerciseWithdrawnProcessingContract(t, store, memberID)
+	exerciseProtectedProcessingContract(t, store, memberID)
+	exerciseQueuedAndMissingConditionalTerminalContract(t, store)
+}
+
+func exerciseWithdrawnProcessingContract(t *testing.T, store stateConformanceStore, memberID core.MemberID) {
+	t.Helper()
+	ctx := context.Background()
+	withdrawnRequest := stateConformanceRequest("conditional-terminal-withdrawn",
+		"state-conformance-conditional", stateConformanceEpoch.Add(time.Hour))
+	withdrawnJob := requireQueued(t, store, withdrawnRequest, core.QueueQueued)
+	withdrawn := requireClaimed(t, store, withdrawnRequest.RunnerPool,
+		stateConformanceClaim(memberID, stateConformanceEpoch.Add(time.Hour+time.Second)))
+	withdrawnIdentity := core.JobIdentity{JobID: withdrawnJob.ID, Source: withdrawnJob.Source}
+	requireConditionalTerminal(t, "withdraw processing", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, withdrawnIdentity)
+	}, core.ConditionalTerminalApplied)
+	requireConditionalTerminal(t, "replay processing withdrawal", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, withdrawnIdentity)
+	}, core.ConditionalTerminalAlreadyApplied)
+	requireObservation(t, "late acceptance after withdrawal", func() (core.ObservationResult, error) {
+		return store.ObserveRunnerAcceptance(ctx, withdrawnIdentity)
+	}, core.ObservationAlreadyApplied)
+	requireRetry(t, "withdrawn processing does not retry", func() (core.RetryResult, error) {
+		return store.RetryUnstarted(ctx, withdrawn)
+	}, core.RetrySourceTerminal)
+}
+
+func exerciseProtectedProcessingContract(t *testing.T, store stateConformanceStore, memberID core.MemberID) {
+	t.Helper()
+	ctx := context.Background()
+	acceptedRequest := stateConformanceRequest("conditional-terminal-accepted",
+		"state-conformance-conditional-accepted", stateConformanceEpoch.Add(2*time.Hour))
+	acceptedJob := requireQueued(t, store, acceptedRequest, core.QueueQueued)
+	requireClaimed(t, store, acceptedRequest.RunnerPool,
+		stateConformanceClaim(memberID, stateConformanceEpoch.Add(2*time.Hour+time.Second)))
+	requireObservation(t, "accept protected processing", func() (core.ObservationResult, error) {
+		return store.ObserveRunnerAcceptance(ctx, core.JobIdentity{JobID: acceptedJob.ID, Source: acceptedJob.Source})
+	}, core.ObservationApplied)
+	requireConditionalTerminal(t, "protect accepted processing", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, core.JobIdentity{JobID: acceptedJob.ID, Source: acceptedJob.Source})
+	}, core.ConditionalTerminalProtected)
+
+	reservedRequest := stateConformanceRequest("conditional-terminal-reserved",
+		"state-conformance-conditional-reserved", stateConformanceEpoch.Add(3*time.Hour))
+	reservedJob := requireQueued(t, store, reservedRequest, core.QueueQueued)
+	reserved := requireClaimed(t, store, reservedRequest.RunnerPool,
+		stateConformanceClaim(memberID, stateConformanceEpoch.Add(3*time.Hour+time.Second)))
+	requireRetry(t, "reserve protected processing failure", func() (core.RetryResult, error) {
+		return store.ReserveProvisioningFailure(ctx, reserved)
+	}, core.RetryFailureReportingPending)
+	requireConditionalTerminal(t, "protect failure reservation", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, core.JobIdentity{JobID: reservedJob.ID, Source: reservedJob.Source})
+	}, core.ConditionalTerminalProtected)
+}
+
+func exerciseQueuedAndMissingConditionalTerminalContract(t *testing.T, store stateConformanceStore) {
+	t.Helper()
+	ctx := context.Background()
+	queuedRequest := stateConformanceRequest("conditional-terminal-queued",
+		"state-conformance-conditional-queued", stateConformanceEpoch.Add(4*time.Hour))
+	queuedJob := requireQueued(t, store, queuedRequest, core.QueueQueued)
+	requireConditionalTerminal(t, "withdraw queued race", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, core.JobIdentity{JobID: queuedJob.ID, Source: queuedJob.Source})
+	}, core.ConditionalTerminalApplied)
+	requireQueued(t, store, queuedRequest, core.QueueSourceTerminal)
+
+	requireConditionalTerminal(t, "missing exact job", func() (core.ConditionalTerminalResult, error) {
+		return store.ObserveTerminalIfUnaccepted(ctx, core.JobIdentity{JobID: uuid.New(), Source: core.SourceReference{
+			Adapter: "state-conformance", ID: "missing-conditional-terminal",
+		}})
+	}, core.ConditionalTerminalMissing)
+}
+
+func requireConditionalTerminal(
+	t *testing.T,
+	description string,
+	operation func() (core.ConditionalTerminalResult, error),
+	want core.ConditionalTerminalOutcome,
+) {
+	t.Helper()
+	result, err := operation()
+	if err != nil || result.Outcome != want {
+		t.Fatalf("%s = (%#v, %v), want %q", description, result, err, want)
+	}
+}
 
 func exerciseQueueRetryContract(t *testing.T, store stateConformanceStore) {
 	t.Helper()

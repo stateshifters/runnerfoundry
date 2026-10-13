@@ -19,6 +19,24 @@ const sourceTombstonedSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_source_t
 	WHERE source_name = ? AND source_reference = ?)`
 const processingAttemptExistsSQL = `SELECT EXISTS (SELECT 1 FROM runnerfoundry_processing_jobs
 	WHERE source_name = ? AND source_reference = ? AND runner_name = ?)`
+const insertConditionalTombstoneSQL = `INSERT INTO runnerfoundry_source_tombstones(source_name, source_reference)
+	SELECT ?, ? WHERE EXISTS (
+		SELECT 1 FROM runnerfoundry_queued_jobs
+		WHERE job_id = ? AND source_name = ? AND source_reference = ?
+		UNION ALL
+		SELECT 1 FROM runnerfoundry_processing_jobs
+		WHERE job_id = ? AND source_name = ? AND source_reference = ?
+			AND runner_started = 0 AND provisioning_failure_reserved = 0)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const deleteConditionalQueuedJobSQL = `DELETE FROM runnerfoundry_queued_jobs
+	WHERE job_id = ? AND source_name = ? AND source_reference = ?`
+const classifyConditionalTerminalSQL = `SELECT CASE
+	WHEN EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones
+		WHERE source_name = ? AND source_reference = ?) THEN 'already_applied'
+	WHEN EXISTS (SELECT 1 FROM runnerfoundry_processing_jobs
+		WHERE job_id = ? AND source_name = ? AND source_reference = ?
+		AND (runner_started = 1 OR provisioning_failure_reserved = 1)) THEN 'protected'
+	ELSE 'missing' END`
 
 func (store *Store) Terminalize(
 	ctx context.Context,
@@ -27,6 +45,53 @@ func (store *Store) Terminalize(
 	return store.applyObservation(ctx, identity, sqliteObservationOperation{
 		name: "source terminalization", apply: terminalizeSource,
 	})
+}
+
+func (store *Store) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	outcome := core.ConditionalTerminalMissing
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		outcome, err = applyConditionalTerminal(ctx, transaction, identity)
+		return err
+	})
+	if err != nil {
+		return core.ConditionalTerminalResult{}, fmt.Errorf("conditionally terminalize job: %w", err)
+	}
+	return core.ConditionalTerminalResult{Outcome: outcome}, nil
+}
+
+func applyConditionalTerminal(
+	ctx context.Context,
+	transaction Transaction,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalOutcome, error) {
+	source, matched, err := resolveJobIdentity(ctx, transaction, identity)
+	if err != nil || !matched {
+		return core.ConditionalTerminalMissing, err
+	}
+	arguments := []any{source.Adapter, source.ID, identity.JobID.String(), source.Adapter, source.ID,
+		identity.JobID.String(), source.Adapter, source.ID}
+	inserted, err := transaction.Execute(ctx, insertConditionalTombstoneSQL, arguments...)
+	if err != nil {
+		return "", fmt.Errorf("tombstone unaccepted job: %w", err)
+	}
+	if _, err = transaction.Execute(ctx, deleteConditionalQueuedJobSQL,
+		identity.JobID.String(), source.Adapter, source.ID); err != nil {
+		return "", fmt.Errorf("remove conditionally terminal queued job: %w", err)
+	}
+	if inserted > 0 {
+		return core.ConditionalTerminalApplied, nil
+	}
+	var classified string
+	if err = transaction.ReadRow(ctx, classifyConditionalTerminalSQL, func(row Scanner) error {
+		return row.Scan(&classified)
+	}, source.Adapter, source.ID, identity.JobID.String(), source.Adapter, source.ID); err != nil {
+		return "", fmt.Errorf("classify conditional terminal observation: %w", err)
+	}
+	return core.ConditionalTerminalOutcome(classified), nil
 }
 
 func (store *Store) ObserveRunnerAcceptance(

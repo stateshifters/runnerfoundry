@@ -185,6 +185,13 @@ func (*runtimeCompositionStore) Terminalize(
 	return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
 }
 
+func (*runtimeCompositionStore) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{}, nil
+}
+
 func TestPollAcknowledgesRunnerNameOnlyAcceptanceObservation(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 211, JobStartedMessages: []*upstream.JobStarted{{
@@ -379,10 +386,17 @@ func (handler *recordingEventHandler) ReconcileAssignedDemand(
 		*handler.events = append(*handler.events, "demand:"+strconv.Itoa(demand.DesiredJobs))
 	}
 	result := handler.demandResult
-	if result == (githubsource.AssignedDemandResult{}) && demand.DesiredJobs > 0 {
+	if reflect.DeepEqual(result, githubsource.AssignedDemandResult{}) && demand.DesiredJobs > 0 {
 		result.JobsAdded = demand.DesiredJobs
 	}
 	return result, handler.demandErr
+}
+
+func (*recordingEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
 }
 
 func (handler *recordingEventHandler) IngestDemand(

@@ -59,8 +59,11 @@ func (demand demandTransaction) ActiveJobs(ctx context.Context) ([]state.ActiveJ
 	err := demand.transaction.VisitRows(ctx, `SELECT job_id, source_name, source_reference, runner_pool, enqueued_at, 'queued'
  FROM runnerfoundry_queued_jobs WHERE source_name = ? AND runner_pool = ?
  UNION ALL
- SELECT job_id, source_name, source_reference, runner_pool, claimed_at, 'processing'
- FROM runnerfoundry_processing_jobs WHERE source_name = ? AND runner_pool = ?`,
+ SELECT job_id, processing.source_name, processing.source_reference, runner_pool, claimed_at, 'processing'
+ FROM runnerfoundry_processing_jobs processing WHERE source_name = ? AND runner_pool = ?
+ AND NOT EXISTS (SELECT 1 FROM runnerfoundry_source_tombstones tombstones
+	WHERE tombstones.source_name = processing.source_name
+	AND tombstones.source_reference = processing.source_reference)`,
 		func(row Scanner) error {
 			job, err := scanActiveJob(row)
 			if err != nil {

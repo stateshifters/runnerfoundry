@@ -296,6 +296,13 @@ func (*cancelingLifecycleEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{}, nil
 }
 
+func (*cancelingLifecycleEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
+}
+
 type cancellationEventHandler struct {
 	requests           int
 	handling           chan struct{}
@@ -336,6 +343,13 @@ func (*cancellationEventHandler) ReconcileAssignedDemand(
 	githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	return githubsource.AssignedDemandResult{}, nil
+}
+
+func (*cancellationEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
 }
 
 func acquiredAvailableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {

@@ -257,6 +257,13 @@ func (runtimeSnapshotEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
+func (runtimeSnapshotEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
+}
+
 func (runtimeSnapshotEventHandler) IngestDemand(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }

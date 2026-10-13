@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
@@ -25,7 +26,7 @@ func TestGitHubDemandHandlerWakesOnlyAfterCommittedAddition(t *testing.T) {
 		Repository: "https://github.com/example/project", RunnerPool: runnerPool,
 		ObservationID: "message:17", DesiredJobs: 3,
 	})
-	if err != nil || result != repository.result {
+	if err != nil || !reflect.DeepEqual(result, repository.result) {
 		t.Fatalf("reconcile assigned demand = (%+v, %v), want (%+v, nil)", result, err, repository.result)
 	}
 	if len(wakes) != 1 || wakes[0] != runnerPool {
@@ -63,15 +64,26 @@ func TestGitHubDemandHandlerDoesNotWakeAfterFailureOrRemoval(t *testing.T) {
 }
 
 func TestGitHubDemandHandlerDelegatesExactLifecycleEvents(t *testing.T) {
-	store := &githubDemandQueueStoreFake{}
+	identity := core.JobIdentity{JobID: core.JobID{1},
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	store := &githubDemandQueueStoreFake{conditionalResults: map[core.JobIdentity]core.ConditionalTerminalOutcome{
+		identity: core.ConditionalTerminalApplied,
+	}}
 	handler := newGitHubDemandHandler(runtimeengine.NewQueueHandler(store), &assignedDemandRepositoryFake{}, nil, "")
 	source := core.SourceReference{Adapter: "github", ID: "request"}
 	request := core.JobRequest{Source: source, RunnerPool: "linux"}
 	observation := core.RunnerObservation{Source: source}
 	assertGitHubDemandLifecycleSuccess(t, handler, request, observation)
+	if result, err := handler.ObserveTerminalIfUnaccepted(context.Background(), identity); err != nil ||
+		result.Outcome != core.ConditionalTerminalApplied {
+		t.Fatalf("conditional terminal = (%#v, %v)", result, err)
+	}
 
 	store.err = errors.New("state failed")
 	assertGitHubDemandLifecycleFailure(t, handler, request, observation, store.err)
+	if _, err := handler.ObserveTerminalIfUnaccepted(context.Background(), identity); !errors.Is(err, store.err) {
+		t.Fatalf("conditional terminal error = %v, want %v", err, store.err)
+	}
 }
 
 func assertGitHubDemandLifecycleSuccess(
@@ -114,11 +126,17 @@ func assertGitHubDemandLifecycleFailure(
 }
 
 type assignedDemandRepositoryFake struct {
-	result githubsource.AssignedDemandResult
-	err    error
+	result  githubsource.AssignedDemandResult
+	results []githubsource.AssignedDemandResult
+	err     error
+	calls   int
 }
 
-type githubDemandQueueStoreFake struct{ err error }
+type githubDemandQueueStoreFake struct {
+	err                   error
+	conditionalResults    map[core.JobIdentity]core.ConditionalTerminalOutcome
+	conditionalIdentities []core.JobIdentity
+}
 
 func (store *githubDemandQueueStoreFake) Queue(
 	context.Context,
@@ -141,9 +159,24 @@ func (store *githubDemandQueueStoreFake) Terminalize(
 	return core.ObservationResult{Outcome: core.ObservationApplied}, store.err
 }
 
+func (store *githubDemandQueueStoreFake) ObserveTerminalIfUnaccepted(
+	_ context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	store.conditionalIdentities = append(store.conditionalIdentities, identity)
+	if store.err != nil {
+		return core.ConditionalTerminalResult{}, store.err
+	}
+	return core.ConditionalTerminalResult{Outcome: store.conditionalResults[identity]}, nil
+}
+
 func (repository *assignedDemandRepositoryFake) ReconcileAssignedDemand(
 	context.Context,
 	githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
+	repository.calls++
+	if len(repository.results) >= repository.calls {
+		return repository.results[repository.calls-1], repository.err
+	}
 	return repository.result, repository.err
 }

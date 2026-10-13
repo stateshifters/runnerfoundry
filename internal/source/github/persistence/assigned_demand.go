@@ -68,9 +68,7 @@ func reconcileAssignedDemand(
 	}
 	matchingJobs := matchingAssignedDemandJobs(jobs, demand)
 	result := summarizeAssignedDemand(matchingJobs)
-	if err = removeAggregateSurplus(ctx, transaction, matchingJobs, demand, &result); err != nil {
-		return githubsource.AssignedDemandResult{}, err
-	}
+	planAggregateSurplus(matchingJobs, demand, &result)
 	if err = addAggregateDeficit(ctx, transaction, requests, demand.DesiredJobs, &result); err != nil {
 		return githubsource.AssignedDemandResult{}, err
 	}
@@ -100,28 +98,46 @@ func summarizeAssignedDemand(jobs []state.ActiveJob) githubsource.AssignedDemand
 	return result
 }
 
-func removeAggregateSurplus(
-	ctx context.Context,
-	transaction state.DemandTransaction,
+func planAggregateSurplus(
 	jobs []state.ActiveJob,
 	demand githubsource.AssignedDemand,
 	result *githubsource.AssignedDemandResult,
-) error {
-	for _, candidate := range aggregateRemovalCandidates(jobs, demand) {
-		if result.ActiveJobs <= demand.DesiredJobs {
-			break
-		}
-		outcome, err := transaction.RemoveQueued(ctx, candidate)
-		if err != nil {
-			return fmt.Errorf("remove surplus aggregate demand: %w", err)
-		}
-		if outcome == state.QueuedJobRemoved {
-			result.ActiveJobs--
-			result.QueuedJobs--
-			result.JobsRemoved++
+) {
+	if result.ActiveJobs > demand.DesiredJobs {
+		result.SurplusQueued = jobIdentities(aggregateRemovalCandidates(jobs, demand))
+		result.SurplusProcessing = aggregateProcessingCandidates(jobs, demand)
+	}
+}
+
+func aggregateProcessingCandidates(
+	jobs []state.ActiveJob,
+	demand githubsource.AssignedDemand,
+) []core.JobIdentity {
+	candidates := make([]state.ActiveJob, 0, len(jobs))
+	for _, job := range jobs {
+		_, aggregate := githubsource.ClassifyDemandIdentity(job.Source, demand.Repository, demand.RunnerPool)
+		if job.Phase == state.ActiveJobProcessing && aggregate {
+			candidates = append(candidates, job)
 		}
 	}
-	return nil
+	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].StateChangedAt.Equal(candidates[right].StateChangedAt) {
+			return candidates[left].ID.String() > candidates[right].ID.String()
+		}
+		return candidates[left].StateChangedAt.After(candidates[right].StateChangedAt)
+	})
+	return jobIdentities(candidates)
+}
+
+func jobIdentities(candidates []state.ActiveJob) []core.JobIdentity {
+	if len(candidates) == 0 {
+		return nil
+	}
+	identities := make([]core.JobIdentity, len(candidates))
+	for index, candidate := range candidates {
+		identities[index] = core.JobIdentity{JobID: candidate.ID, Source: candidate.Source}
+	}
+	return identities
 }
 
 func aggregateRemovalCandidates(jobs []state.ActiveJob, demand githubsource.AssignedDemand) []state.ActiveJob {

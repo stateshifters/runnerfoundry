@@ -19,6 +19,35 @@ func TestObserveRunnerAcceptanceReportsEveryTransactionalFailure(t *testing.T) {
 		})
 }
 
+func TestConditionalTerminalObservationReportsTransactionalFailures(t *testing.T) {
+	protocolErr := errors.New("protocol")
+	identity := core.JobIdentity{JobID: testJobID,
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	source := rowFromValues([]any{"github", "aggregate"})
+	insertFailure := transactionFailingExecute(1, protocolErr)
+	insertFailure.queryRow = constantRow(source)
+	deleteFailure := transactionFailingExecute(2, protocolErr)
+	deleteFailure.queryRow = constantRow(source)
+	classificationFailure := transactionStub{
+		queryRow: rowsInOrder(source, rowStub{scan: func(...any) error { return protocolErr }}),
+		execute:  outcomeExecute(0), rollback: successfulCompletion,
+	}
+	for name, executor := range map[string]executorStub{
+		"begin":          {begin: failingBegin(protocolErr)},
+		"tombstone":      {begin: transactionBeginning(insertFailure)},
+		"queued removal": {begin: transactionBeginning(deleteFailure)},
+		"classification": {begin: transactionBeginning(classificationFailure)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newStore(executor).ObserveTerminalIfUnaccepted(context.Background(), identity); !errors.Is(
+				err, protocolErr,
+			) {
+				t.Fatalf("conditional terminal error = %v, want %v", err, protocolErr)
+			}
+		})
+	}
+}
+
 func TestRetryUnstartedProcessingHandlesIneligibleTransition(t *testing.T) {
 	t.Parallel()
 	ineligible := transactionStub{execute: func(context.Context, string, ...any) (resultStub, error) {

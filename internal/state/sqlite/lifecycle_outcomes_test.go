@@ -8,6 +8,69 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
+func TestConditionalTerminalObservationTombstonesExactUnacceptedProcessing(t *testing.T) {
+	identity := core.JobIdentity{JobID: testJobID, Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	executeCalls := 0
+	transaction := transactionStub{
+		queryRow: constantRow(rowFromValues([]any{"github", "aggregate"})),
+		execute: func(context.Context, string, ...any) (resultStub, error) {
+			executeCalls++
+			rows := int64(0)
+			if executeCalls == 1 {
+				rows = 1
+			}
+			return resultStub{rowsAffected: func() (int64, error) { return rows, nil }}, nil
+		},
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+		ObserveTerminalIfUnaccepted(context.Background(), identity)
+
+	if err != nil || result.Outcome != core.ConditionalTerminalApplied || executeCalls != 2 {
+		t.Fatalf("conditional terminal = (%#v, %v), writes = %d", result, err, executeCalls)
+	}
+}
+
+func TestConditionalTerminalObservationClassifiesProtectedReplayAndMissing(t *testing.T) {
+	identity := core.JobIdentity{JobID: testJobID, Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	for name, test := range map[string]struct {
+		rows []rowStub
+		want core.ConditionalTerminalOutcome
+	}{
+		"accepted or reserved": {rows: []rowStub{
+			rowFromValues([]any{"github", "aggregate"}), rowFromValues([]any{"protected"}),
+		}, want: core.ConditionalTerminalProtected},
+		"tombstone replay": {rows: []rowStub{
+			rowFromValues([]any{"github", "aggregate"}), rowFromValues([]any{"already_applied"}),
+		}, want: core.ConditionalTerminalAlreadyApplied},
+		"missing": {rows: []rowStub{{scan: func(...any) error { return sql.ErrNoRows }}},
+			want: core.ConditionalTerminalMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertConditionalTerminalOutcome(t, identity, test.rows, test.want)
+		})
+	}
+}
+
+func assertConditionalTerminalOutcome(
+	t *testing.T,
+	identity core.JobIdentity,
+	rows []rowStub,
+	want core.ConditionalTerminalOutcome,
+) {
+	t.Helper()
+	transaction := transactionStub{
+		queryRow: rowsInOrder(rows...), execute: outcomeExecute(0),
+		commit: successfulCompletion, rollback: successfulCompletion,
+	}
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+		ObserveTerminalIfUnaccepted(context.Background(), identity)
+	if err != nil || result.Outcome != want {
+		t.Fatalf("conditional terminal = (%#v, %v), want %q", result, err, want)
+	}
+}
+
 func TestQueueClassifiesProcessingAndTerminalSources(t *testing.T) {
 	t.Parallel()
 	for name, want := range map[string]core.QueueOutcome{

@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestAssignedDemandAddsMissingAggregateJobs(t *testing.T) {
 	result, err := store.ReconcileAssignedDemand(context.Background(), demand)
 
 	want := githubsource.AssignedDemandResult{ActiveJobs: 2, QueuedJobs: 2, JobsAdded: 1}
-	if err != nil || result != want {
+	if err != nil || !reflect.DeepEqual(result, want) {
 		t.Fatalf("result = %#v, error = %v, want %#v", result, err, want)
 	}
 	if len(transaction.queued) != 2 {
@@ -41,19 +42,74 @@ func TestAssignedDemandAddsMissingAggregateJobs(t *testing.T) {
 	}
 }
 
-func TestAssignedDemandRemovesNewestAggregateQueuedJobs(t *testing.T) {
+func TestAssignedDemandPlansNewestAggregateQueuedJobsBeforeProcessing(t *testing.T) {
 	demand := assignedDemand(3)
 	transaction := &demandTransaction{jobs: assignedDemandContractionJobs(t, demand)}
 	store := NewAssignedDemandStore(&demandTransactionStore{transaction: transaction})
 
 	result, err := store.ReconcileAssignedDemand(context.Background(), demand)
 
-	want := githubsource.AssignedDemandResult{ActiveJobs: 3, QueuedJobs: 2, ProcessingJobs: 1, JobsRemoved: 1}
-	if err != nil || result != want {
+	want := githubsource.AssignedDemandResult{ActiveJobs: 4, QueuedJobs: 3, ProcessingJobs: 1,
+		SurplusQueued: []core.JobIdentity{
+			{JobID: transaction.jobs[2].ID, Source: transaction.jobs[2].Source},
+			{JobID: transaction.jobs[1].ID, Source: transaction.jobs[1].Source},
+			{JobID: transaction.jobs[0].ID, Source: transaction.jobs[0].Source},
+		}}
+	if err != nil || !reflect.DeepEqual(result, want) {
 		t.Fatalf("result = %#v, error = %v, want %#v", result, err, want)
 	}
-	if len(transaction.removed) != 1 || transaction.removed[0].ID != jobID("00000000-0000-0000-0000-000000000003") {
-		t.Fatalf("removed jobs = %#v", transaction.removed)
+}
+
+func TestAssignedDemandReturnsNewestAggregateProcessingSurplusWithoutExactJobs(t *testing.T) {
+	demand := assignedDemand(1)
+	previous := demand
+	previous.ObservationID = "previous"
+	jobs := []state.ActiveJob{
+		activeJob("00000000-0000-0000-0000-000000000001", aggregateSource(t, previous, 1),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt),
+		activeJob("00000000-0000-0000-0000-000000000002", aggregateSource(t, previous, 2),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt),
+		activeJob("00000000-0000-0000-0000-000000000003", exactSource(t, demand, 42),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt.Add(time.Minute)),
+	}
+	store := NewAssignedDemandStore(&demandTransactionStore{transaction: &demandTransaction{jobs: jobs}})
+
+	result, err := store.ReconcileAssignedDemand(context.Background(), demand)
+
+	if err != nil {
+		t.Fatalf("reconcile assigned demand: %v", err)
+	}
+	want := []core.JobIdentity{
+		{JobID: jobs[1].ID, Source: jobs[1].Source},
+		{JobID: jobs[0].ID, Source: jobs[0].Source},
+	}
+	if !reflect.DeepEqual(result.SurplusProcessing, want) {
+		t.Fatalf("surplus processing = %#v, want %#v", result.SurplusProcessing, want)
+	}
+}
+
+func TestAssignedDemandReturnsAllProcessingCandidatesSoProtectedWorkCannotHideEligibleSurplus(t *testing.T) {
+	demand := assignedDemand(2)
+	previous := demand
+	previous.ObservationID = "previous"
+	jobs := []state.ActiveJob{
+		activeJob("00000000-0000-0000-0000-000000000001", aggregateSource(t, previous, 1),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt.Add(-time.Minute)),
+		activeJob("00000000-0000-0000-0000-000000000002", aggregateSource(t, previous, 2),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt),
+		activeJob("00000000-0000-0000-0000-000000000003", exactSource(t, demand, 42),
+			demand.RunnerPool, state.ActiveJobProcessing, demand.ObservedAt.Add(time.Minute)),
+	}
+	store := NewAssignedDemandStore(&demandTransactionStore{transaction: &demandTransaction{jobs: jobs}})
+
+	result, err := store.ReconcileAssignedDemand(context.Background(), demand)
+
+	want := []core.JobIdentity{
+		{JobID: jobs[1].ID, Source: jobs[1].Source},
+		{JobID: jobs[0].ID, Source: jobs[0].Source},
+	}
+	if err != nil || !reflect.DeepEqual(result.SurplusProcessing, want) {
+		t.Fatalf("surplus processing = %#v, error = %v, want %#v", result.SurplusProcessing, err, want)
 	}
 }
 
@@ -90,55 +146,10 @@ func TestAssignedDemandReturnsNoResultWhenQueueingFails(t *testing.T) {
 	assertAssignedDemandFailure(t, assignedDemandTestStore(transaction, nil), assignedDemand(1), expectedErr)
 }
 
-func TestAssignedDemandReturnsNoResultWhenRemovalFails(t *testing.T) {
-	expectedErr := errors.New("state failure")
-	demand := assignedDemand(1)
-	previous := demand
-	previous.ObservationID = "previous"
-	transaction := &demandTransaction{jobs: []state.ActiveJob{
-		activeJob("00000000-0000-0000-0000-000000000001", aggregateSource(t, previous, 1),
-			demand.RunnerPool, state.ActiveJobQueued, demand.ObservedAt),
-		activeJob("00000000-0000-0000-0000-000000000002", aggregateSource(t, previous, 2),
-			demand.RunnerPool, state.ActiveJobQueued, demand.ObservedAt),
-	}, removeErr: expectedErr}
-	assertAssignedDemandFailure(t, assignedDemandTestStore(transaction, nil), demand, expectedErr)
-}
-
 func TestAssignedDemandReturnsNoResultWhenTransactionCompletionFails(t *testing.T) {
 	expectedErr := errors.New("state failure")
 	store := assignedDemandTestStore(&demandTransaction{}, expectedErr)
 	assertAssignedDemandFailure(t, store, assignedDemand(1), expectedErr)
-}
-
-func TestAssignedDemandContinuesAfterAQueuedCandidateIsAlreadyMissing(t *testing.T) {
-	demand := assignedDemand(1)
-	previous := demand
-	previous.ObservationID = "previous"
-	transaction := &demandTransaction{
-		jobs: []state.ActiveJob{
-			{ID: jobID("00000000-0000-0000-0000-000000000001"), Source: aggregateSource(t, previous, 1),
-				RunnerPool: demand.RunnerPool, Phase: state.ActiveJobQueued, StateChangedAt: demand.ObservedAt},
-			{ID: jobID("00000000-0000-0000-0000-000000000002"), Source: aggregateSource(t, previous, 2),
-				RunnerPool: demand.RunnerPool, Phase: state.ActiveJobQueued, StateChangedAt: demand.ObservedAt},
-		},
-		remove: func(job state.ActiveJob) (state.QueuedRemovalOutcome, error) {
-			if job.ID == jobID("00000000-0000-0000-0000-000000000002") {
-				return state.QueuedJobMissing, nil
-			}
-			return state.QueuedJobRemoved, nil
-		},
-	}
-	store := NewAssignedDemandStore(&demandTransactionStore{transaction: transaction})
-
-	result, err := store.ReconcileAssignedDemand(context.Background(), demand)
-
-	want := githubsource.AssignedDemandResult{ActiveJobs: 1, QueuedJobs: 1, JobsRemoved: 1}
-	if err != nil || result != want {
-		t.Fatalf("result = %#v, error = %v, want %#v", result, err, want)
-	}
-	if len(transaction.removed) != 2 {
-		t.Fatalf("removal attempts = %d, want 2", len(transaction.removed))
-	}
 }
 
 func TestAssignedDemandRejectsInvalidDemandBeforeStartingTransaction(t *testing.T) {
@@ -153,7 +164,7 @@ func TestAssignedDemandRejectsInvalidDemandBeforeStartingTransaction(t *testing.
 	if transactionStore.called {
 		t.Fatal("transaction started for invalid demand")
 	}
-	if result != (githubsource.AssignedDemandResult{}) {
+	if !reflect.DeepEqual(result, githubsource.AssignedDemandResult{}) {
 		t.Fatalf("result = %#v, want zero", result)
 	}
 }
@@ -183,10 +194,7 @@ type demandTransaction struct {
 	activeJobsErr error
 	queue         func(core.JobRequest) (core.EnqueueResult, error)
 	queueOutcomes []core.QueueOutcome
-	remove        func(state.ActiveJob) (state.QueuedRemovalOutcome, error)
-	removeErr     error
 	queued        []core.JobRequest
-	removed       []state.ActiveJob
 }
 
 func (transaction *demandTransaction) ActiveJobs(
@@ -210,17 +218,10 @@ func (transaction *demandTransaction) Queue(
 }
 
 func (transaction *demandTransaction) RemoveQueued(
-	_ context.Context,
-	job state.ActiveJob,
+	context.Context,
+	state.ActiveJob,
 ) (state.QueuedRemovalOutcome, error) {
-	transaction.removed = append(transaction.removed, job)
-	if transaction.removeErr != nil {
-		return "", transaction.removeErr
-	}
-	if transaction.remove != nil {
-		return transaction.remove(job)
-	}
-	return state.QueuedJobRemoved, nil
+	return state.QueuedJobMissing, nil
 }
 
 func assignedDemand(desiredJobs int) githubsource.AssignedDemand {
@@ -250,7 +251,7 @@ func assertAssignedDemandFailure(
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("error = %v, want %v", err, expectedErr)
 	}
-	if result != (githubsource.AssignedDemandResult{}) {
+	if !reflect.DeepEqual(result, githubsource.AssignedDemandResult{}) {
 		t.Fatalf("result = %#v, want zero", result)
 	}
 }

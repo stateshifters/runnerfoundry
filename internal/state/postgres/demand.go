@@ -14,10 +14,13 @@ const activeJobsSQL = `SELECT job_id, source_name, source_reference, runner_pool
 	FROM public.runnerfoundry_queued_jobs
 	WHERE source_name = $1 AND runner_pool = $2
 	UNION ALL
-	SELECT job_id, source_name, source_reference, runner_pool, 'processing' AS job_phase,
+	SELECT job_id, processing.source_name, processing.source_reference, runner_pool, 'processing' AS job_phase,
 		claimed_at AS state_changed_at
-	FROM public.runnerfoundry_processing_jobs
-	WHERE source_name = $1 AND runner_pool = $2`
+	FROM public.runnerfoundry_processing_jobs processing
+	WHERE source_name = $1 AND runner_pool = $2
+	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
+		WHERE tombstones.source_name = processing.source_name
+		AND tombstones.source_reference = processing.source_reference)`
 
 const removeQueuedJobSQL = `DELETE FROM public.runnerfoundry_queued_jobs
 	WHERE job_id = $1 AND source_name = $2 AND source_reference = $3

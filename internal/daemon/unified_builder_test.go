@@ -358,6 +358,9 @@ func (*builderStoreFake) Terminalize(context.Context, core.JobIdentity) (core.Ob
 func (*builderStoreFake) ObserveRunnerAcceptance(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
+func (*builderStoreFake) ObserveTerminalIfUnaccepted(context.Context, core.JobIdentity) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{}, nil
+}
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }

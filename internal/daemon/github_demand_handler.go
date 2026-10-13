@@ -75,3 +75,14 @@ func (handler *githubDemandHandler) ReconcileAssignedDemand(
 	}
 	return result, nil
 }
+
+func (handler *githubDemandHandler) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	result, err := handler.queue.ObserveTerminalIfUnaccepted(ctx, identity)
+	if err != nil {
+		return result, fmt.Errorf("handle GitHub conditional terminal observation: %w", err)
+	}
+	return result, nil
+}

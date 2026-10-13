@@ -17,6 +17,52 @@ func (store *Store) Terminalize(
 	return store.applyObservation(ctx, identity, "terminalize job", terminalizeResolvedSource)
 }
 
+func (store *Store) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	outcome := core.ConditionalTerminalMissing
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		outcome, err = applyConditionalTerminal(ctx, transaction, identity)
+		return err
+	})
+	if err != nil {
+		return core.ConditionalTerminalResult{}, fmt.Errorf("conditionally terminalize job: %w", err)
+	}
+	return core.ConditionalTerminalResult{Outcome: outcome}, nil
+}
+
+func applyConditionalTerminal(
+	ctx context.Context,
+	transaction Transaction,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalOutcome, error) {
+	source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
+	if err != nil || !matched {
+		return core.ConditionalTerminalMissing, err
+	}
+	inserted, err := executeAffected(ctx, transaction, insertConditionalTombstoneSQL,
+		source.Adapter, source.ID, identity.JobID)
+	if err != nil {
+		return "", fmt.Errorf("tombstone unaccepted job: %w", err)
+	}
+	if _, err = transaction.Execute(ctx, deleteConditionalQueuedJobSQL,
+		identity.JobID, source.Adapter, source.ID); err != nil {
+		return "", fmt.Errorf("remove conditionally terminal queued job: %w", err)
+	}
+	if inserted > 0 {
+		return core.ConditionalTerminalApplied, nil
+	}
+	var classified string
+	if err = transaction.ReadRow(ctx, classifyConditionalTerminalSQL, func(row Scanner) error {
+		return row.Scan(&classified)
+	}, source.Adapter, source.ID, identity.JobID); err != nil {
+		return "", fmt.Errorf("classify conditional terminal observation: %w", err)
+	}
+	return core.ConditionalTerminalOutcome(classified), nil
+}
+
 type postgresObservationOperation func(
 	context.Context,
 	Transaction,

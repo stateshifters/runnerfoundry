@@ -34,6 +34,7 @@ type MessageClient interface {
 // AssignedDemandHandler durably reconciles GitHub's aggregate assigned-job
 // observation after actionable lifecycle events have been applied.
 type AssignedDemandHandler interface {
+	core.ConditionalTerminalObserver
 	ReconcileAssignedDemand(ctx context.Context, demand AssignedDemand) (AssignedDemandResult, error)
 }
 

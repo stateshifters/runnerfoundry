@@ -19,6 +19,36 @@ func TestObserveRunnerAcceptanceReportsEveryTransactionalFailure(t *testing.T) {
 		})
 }
 
+func TestConditionalTerminalObservationReportsTransactionalFailures(t *testing.T) {
+	protocolErr := errors.New("protocol")
+	identity := core.JobIdentity{JobID: testJobID1,
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	source := rowFromValues([]any{"github", "aggregate"})
+	classificationFailure := rowStub{scan: func(...any) error { return protocolErr }}
+	for name, executor := range map[string]executorStub{
+		"begin": {begin: func(context.Context) (transactionStub, error) {
+			return transactionStub{}, protocolErr
+		}},
+		"tombstone": {begin: transactionBeginning(transactionFailingAtExecuteWithRows(
+			2, protocolErr, source, source,
+		))},
+		"queued removal": {begin: transactionBeginning(transactionFailingAtExecuteWithRows(
+			3, protocolErr, source, source,
+		))},
+		"classification": {begin: transactionBeginning(postgresOutcomeTransaction(
+			[]rowStub{source, source, classificationFailure}, 0, new(int),
+		))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newStore(executor).ObserveTerminalIfUnaccepted(context.Background(), identity); !errors.Is(
+				err, protocolErr,
+			) {
+				t.Fatalf("conditional terminal error = %v, want %v", err, protocolErr)
+			}
+		})
+	}
+}
+
 func TestLifecycleObservationsRejectInvalidIdentityBeforeMutation(t *testing.T) {
 	t.Parallel()
 	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){

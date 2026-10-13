@@ -17,6 +17,10 @@ type SourceEventHandler interface {
 	ObserveTerminal(ctx context.Context, observation RunnerObservation) (ObservationResult, error)
 }
 
+type ConditionalTerminalObserver interface {
+	ObserveTerminalIfUnaccepted(ctx context.Context, identity JobIdentity) (ConditionalTerminalResult, error)
+}
+
 // IsValidSourceEventHandler prevents composition from retaining an interface
 // whose dynamic value is nil and would panic when an adapter delivers an event.
 func IsValidSourceEventHandler(handler SourceEventHandler) bool {

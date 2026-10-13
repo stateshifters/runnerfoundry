@@ -106,6 +106,9 @@ func exerciseStateStoreContract(t *testing.T, store stateConformanceStore) {
 	t.Run("delayed and repeated lifecycle observations", func(t *testing.T) {
 		exerciseLifecycleObservationContract(t, store)
 	})
+	t.Run("conditional terminal observations", func(t *testing.T) {
+		exerciseConditionalTerminalContract(t, store)
+	})
 	t.Run("provisioning failure reporting phases", func(t *testing.T) {
 		exerciseProvisioningFailureContract(t, store)
 	})

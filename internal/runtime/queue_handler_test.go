@@ -70,6 +70,67 @@ func TestQueueHandlerPersistsLifecycleEventsBySource(t *testing.T) {
 	}
 }
 
+func TestQueueHandlerConditionallyTerminalizesExactUnacceptedJob(t *testing.T) {
+	want := core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate-request"},
+	}
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		_ context.Context,
+		actual core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		if actual != want {
+			t.Fatalf("conditional terminal identity = %#v, want %#v", actual, want)
+		}
+		return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalApplied}, nil
+	}}
+
+	result, err := runtimeengine.NewQueueHandler(store).ObserveTerminalIfUnaccepted(context.Background(), want)
+
+	if err != nil || result.Outcome != core.ConditionalTerminalApplied {
+		t.Fatalf("conditional terminal result = (%#v, %v)", result, err)
+	}
+}
+
+func TestQueueHandlerRejectsIncompleteConditionalTerminalIdentity(t *testing.T) {
+	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
+	for _, identity := range []core.JobIdentity{
+		{Source: core.SourceReference{Adapter: "github", ID: "aggregate"}},
+		{JobID: uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8")},
+		{JobID: uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+			Source: core.SourceReference{Adapter: "github"}},
+	} {
+		if _, err := handler.ObserveTerminalIfUnaccepted(context.Background(), identity); !errors.Is(
+			err, core.ErrInvalidJobIdentity,
+		) {
+			t.Fatalf("ObserveTerminalIfUnaccepted(%#v) error = %v", identity, err)
+		}
+	}
+}
+
+func TestQueueHandlerClassifiesConditionalTerminalBackendFailure(t *testing.T) {
+	wantErr := errors.New("driver detail")
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		context.Context,
+		core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		return core.ConditionalTerminalResult{}, wantErr
+	}}
+	handler := runtimeengine.NewQueueHandlerWithWakeAndBackend(store, nil, "postgresql")
+	_, err := handler.ObserveTerminalIfUnaccepted(context.Background(), core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"},
+	})
+	var stateFailure interface {
+		StateBackend() string
+		StateOperation() string
+	}
+	if !errors.As(err, &stateFailure) || stateFailure.StateBackend() != "postgresql" ||
+		stateFailure.StateOperation() != "terminalize_unaccepted_job" || !errors.Is(err, wantErr) {
+		t.Fatalf("conditional terminal error = %v", err)
+	}
+}
+
 func TestQueueHandlerResolvesCanonicalRunnerNameToJobID(t *testing.T) {
 	jobID := uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8")
 	attemptID := core.AttemptID(uuid.MustParse("b73851b8-7df5-4d4c-bc8e-2381926746d8"))
@@ -241,6 +302,23 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 	}
 }
 
+func TestQueueHandlerReportsConditionalTerminalStoreFailure(t *testing.T) {
+	wantErr := errors.New("state unavailable")
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		context.Context,
+		core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		return core.ConditionalTerminalResult{}, wantErr
+	}}
+	handler := runtimeengine.NewQueueHandler(store)
+	if _, err := handler.ObserveTerminalIfUnaccepted(context.Background(), core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "test-source", ID: "request-1"},
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("ObserveTerminalIfUnaccepted() error = %v", err)
+	}
+}
+
 func TestQueueHandlerClassifiesBackendFailureWithoutExposingDriverDetail(t *testing.T) {
 	wantErr := errors.New("driver included a PostgreSQL DSN")
 	store := &jobStoreFake{enqueue: func(context.Context, core.JobRequest) (core.Job, bool, error) {
@@ -297,4 +375,7 @@ func (queueOutcomeStoreFake) ObserveRunnerAcceptance(context.Context, core.JobId
 }
 func (queueOutcomeStoreFake) Terminalize(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
+}
+func (queueOutcomeStoreFake) ObserveTerminalIfUnaccepted(context.Context, core.JobIdentity) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{}, nil
 }

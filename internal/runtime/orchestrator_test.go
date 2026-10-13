@@ -123,24 +123,25 @@ func newProcessOneEvidence(t *testing.T) *processOneEvidence {
 }
 
 type jobStoreFake struct {
-	lastClaim       core.ProcessingClaim
-	persistAttempt  bool
-	enqueue         func(context.Context, core.JobRequest) (core.Job, bool, error)
-	take            func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
-	terminalize     func(context.Context, core.JobIdentity) (core.ObservationResult, error)
-	accepted        func(context.Context, core.JobIdentity) (core.ObservationResult, error)
-	list            func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
-	poolList        func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error)
-	retry           func(context.Context, core.JobID) (bool, error)
-	retried         []core.ProcessingJob
-	retryOutcome    core.RetryOutcome
-	recover         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
-	remove          func(context.Context, core.JobID) error
-	removeTerminal  func(context.Context, core.JobID) (bool, error)
-	terminalOutcome core.TerminalRemovalOutcome
-	reserve         func(context.Context, core.ProcessingJob) (core.RetryResult, error)
-	recordReported  func(context.Context, core.ProcessingJob) (core.RetryResult, error)
-	finalizeFailure func(context.Context, core.ProcessingJob) (core.TerminalRemovalResult, error)
+	lastClaim               core.ProcessingClaim
+	persistAttempt          bool
+	enqueue                 func(context.Context, core.JobRequest) (core.Job, bool, error)
+	take                    func(context.Context, core.RunnerPool, core.MemberID) (core.ProcessingJob, bool, error)
+	terminalize             func(context.Context, core.JobIdentity) (core.ObservationResult, error)
+	terminalizeIfUnaccepted func(context.Context, core.JobIdentity) (core.ConditionalTerminalResult, error)
+	accepted                func(context.Context, core.JobIdentity) (core.ObservationResult, error)
+	list                    func(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error)
+	poolList                func(context.Context, core.RunnerPool) ([]core.ProcessingJob, error)
+	retry                   func(context.Context, core.JobID) (bool, error)
+	retried                 []core.ProcessingJob
+	retryOutcome            core.RetryOutcome
+	recover                 func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	remove                  func(context.Context, core.JobID) error
+	removeTerminal          func(context.Context, core.JobID) (bool, error)
+	terminalOutcome         core.TerminalRemovalOutcome
+	reserve                 func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	recordReported          func(context.Context, core.ProcessingJob) (core.RetryResult, error)
+	finalizeFailure         func(context.Context, core.ProcessingJob) (core.TerminalRemovalResult, error)
 }
 
 func (store *jobStoreFake) ClaimOldest(ctx context.Context, pool core.RunnerPool, claim core.ProcessingClaim) (core.ClaimResult, error) {
@@ -168,6 +169,9 @@ func (store *jobStoreFake) Queue(ctx context.Context, request core.JobRequest) (
 }
 func (store *jobStoreFake) Terminalize(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
 	return store.terminalize(ctx, identity)
+}
+func (store *jobStoreFake) ObserveTerminalIfUnaccepted(ctx context.Context, identity core.JobIdentity) (core.ConditionalTerminalResult, error) {
+	return store.terminalizeIfUnaccepted(ctx, identity)
 }
 func (store *jobStoreFake) ObserveRunnerAcceptance(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
 	return store.accepted(ctx, identity)

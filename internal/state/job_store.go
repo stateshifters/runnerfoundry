@@ -18,6 +18,7 @@ type JobQueueStore interface {
 	// ObserveRunnerAcceptance records the source-observed no-retry boundary and
 	// resolves an acceptance that races ahead of the local claim.
 	ObserveRunnerAcceptance(ctx context.Context, identity core.JobIdentity) (core.ObservationResult, error)
+	ObserveTerminalIfUnaccepted(ctx context.Context, identity core.JobIdentity) (core.ConditionalTerminalResult, error)
 }
 
 type ProcessingJobStore interface {

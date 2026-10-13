@@ -8,6 +8,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
 func (adapter *Adapter) reconcileInitialAssignedDemand(ctx context.Context, observedAt time.Time) (bool, error) {
@@ -70,7 +71,51 @@ func (adapter *Adapter) executeAssignedDemandReconciliation(
 	if err != nil {
 		return result, fmt.Errorf("persist assigned demand: %w", err)
 	}
+	if err = adapter.withdrawAssignedDemandSurplus(ctx, demand.DesiredJobs, &result); err != nil {
+		return result, fmt.Errorf("persist assigned demand: %w", err)
+	}
 	return result, nil
+}
+
+func (adapter *Adapter) withdrawAssignedDemandSurplus(
+	ctx context.Context,
+	desiredJobs int,
+	result *AssignedDemandResult,
+) error {
+	if err := adapter.withdrawAssignedDemandCandidates(ctx, desiredJobs, result, result.SurplusQueued, &result.QueuedJobs); err != nil {
+		return err
+	}
+	return adapter.withdrawAssignedDemandCandidates(ctx, desiredJobs, result, result.SurplusProcessing, &result.ProcessingJobs)
+}
+
+func (adapter *Adapter) withdrawAssignedDemandCandidates(
+	ctx context.Context,
+	desiredJobs int,
+	result *AssignedDemandResult,
+	candidates []core.JobIdentity,
+	phaseJobs *int,
+) error {
+	for _, identity := range candidates {
+		if result.ActiveJobs <= desiredJobs {
+			break
+		}
+		observation, err := adapter.AssignedDemand.ObserveTerminalIfUnaccepted(ctx, identity)
+		if err != nil {
+			return fmt.Errorf("observe surplus demand withdrawal: %w", err)
+		}
+		switch observation.Outcome {
+		case core.ConditionalTerminalProtected:
+			continue
+		case core.ConditionalTerminalApplied:
+			result.JobsRemoved++
+		case core.ConditionalTerminalAlreadyApplied, core.ConditionalTerminalMissing:
+		default:
+			return fmt.Errorf("conditional terminal observation returned outcome %q", observation.Outcome)
+		}
+		result.ActiveJobs--
+		*phaseJobs--
+	}
+	return nil
 }
 
 func (adapter *Adapter) reportAssignedDemand(

@@ -689,6 +689,13 @@ func (failingQueueEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
+func (failingQueueEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
+}
+
 func (handler failingQueueEventHandler) IngestDemand(
 	context.Context,
 	core.JobRequest,
@@ -719,6 +726,13 @@ func (*lifecycleThenQueueEventHandler) ReconcileAssignedDemand(
 	demand githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
+}
+
+func (*lifecycleThenQueueEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
 }
 
 func (handler *lifecycleThenQueueEventHandler) IngestDemand(
@@ -776,6 +790,13 @@ func (eventHandlerFake) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
 }
 
+func (eventHandlerFake) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
+}
+
 type recordingQueueEventHandler struct{ queued chan core.JobRequest }
 
 func (recordingQueueEventHandler) ReconcileAssignedDemand(
@@ -783,6 +804,13 @@ func (recordingQueueEventHandler) ReconcileAssignedDemand(
 	demand githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	return githubsource.AssignedDemandResult{ActiveJobs: demand.DesiredJobs}, nil
+}
+
+func (recordingQueueEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
 }
 
 func (handler recordingQueueEventHandler) IngestDemand(

@@ -112,6 +112,27 @@ func (handler *QueueHandler) ObserveTerminal(
 	return result, nil
 }
 
+func (handler *QueueHandler) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	if err := identity.Validate(); err != nil || identity.JobID == (core.JobID{}) || !identity.Source.IsValid() {
+		if err == nil {
+			err = core.ErrInvalidJobIdentity
+		}
+		return core.ConditionalTerminalResult{}, fmt.Errorf("validate conditional terminal job identity: %w", err)
+	}
+	result, err := handler.store.ObserveTerminalIfUnaccepted(ctx, identity)
+	if err != nil {
+		if handler.stateBackend != "" {
+			return result, DurableStateError{Backend: handler.stateBackend,
+				Operation: "terminalize_unaccepted_job", cause: err}
+		}
+		return result, fmt.Errorf("terminalize unaccepted source request %q: %w", identity.Source.ID, err)
+	}
+	return result, nil
+}
+
 func identityFromObservation(observation core.RunnerObservation) (core.JobIdentity, bool, error) {
 	identity := core.JobIdentity{Source: observation.Source}
 	if !observation.Source.IsEmpty() && !observation.Source.IsValid() {

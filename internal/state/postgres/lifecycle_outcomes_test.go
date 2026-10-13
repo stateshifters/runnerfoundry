@@ -8,6 +8,47 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
+func TestConditionalTerminalObservationTombstonesExactUnacceptedProcessing(t *testing.T) {
+	identity := core.JobIdentity{JobID: retryProcessingJob().Job.ID,
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	commits := 0
+	source := rowFromValues([]any{"github", "aggregate"})
+	transaction := postgresOutcomeTransaction([]rowStub{source, source}, 1, &commits)
+
+	result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+		ObserveTerminalIfUnaccepted(context.Background(), identity)
+
+	if err != nil || result.Outcome != core.ConditionalTerminalApplied || commits != 1 {
+		t.Fatalf("conditional terminal = (%#v, %v), commits = %d", result, err, commits)
+	}
+}
+
+func TestConditionalTerminalObservationClassifiesProtectedReplayAndMissing(t *testing.T) {
+	identity := core.JobIdentity{JobID: retryProcessingJob().Job.ID,
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"}}
+	source := rowFromValues([]any{"github", "aggregate"})
+	for name, test := range map[string]struct {
+		rows []rowStub
+		want core.ConditionalTerminalOutcome
+	}{
+		"accepted or reserved": {rows: []rowStub{source, source, rowFromValues([]any{"protected"})},
+			want: core.ConditionalTerminalProtected},
+		"tombstone replay": {rows: []rowStub{source, source, rowFromValues([]any{"already_applied"})},
+			want: core.ConditionalTerminalAlreadyApplied},
+		"missing": {rows: []rowStub{noPostgresRow()}, want: core.ConditionalTerminalMissing},
+	} {
+		t.Run(name, func(t *testing.T) {
+			commits := 0
+			transaction := postgresOutcomeTransaction(test.rows, 0, &commits)
+			result, err := newStore(executorStub{begin: transactionBeginning(transaction)}).
+				ObserveTerminalIfUnaccepted(context.Background(), identity)
+			if err != nil || result.Outcome != test.want || commits != 1 {
+				t.Fatalf("conditional terminal = (%#v, %v), commits = %d, want %q", result, err, commits, test.want)
+			}
+		})
+	}
+}
+
 func TestQueueClassifiesProcessingAndTerminalSources(t *testing.T) {
 	t.Parallel()
 	for name, want := range map[string]core.QueueOutcome{

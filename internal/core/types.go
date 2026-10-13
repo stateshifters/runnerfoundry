@@ -12,6 +12,17 @@ const (
 	ObservationUnmatched      ObservationOutcome = "unmatched"
 )
 
+type ConditionalTerminalResult struct{ Outcome ConditionalTerminalOutcome }
+
+type ConditionalTerminalOutcome string
+
+const (
+	ConditionalTerminalApplied        ConditionalTerminalOutcome = "applied"
+	ConditionalTerminalAlreadyApplied ConditionalTerminalOutcome = "already_applied"
+	ConditionalTerminalMissing        ConditionalTerminalOutcome = "missing"
+	ConditionalTerminalProtected      ConditionalTerminalOutcome = "protected"
+)
+
 type JobRequest struct {
 	Source     SourceReference
 	Scope      DemandScope

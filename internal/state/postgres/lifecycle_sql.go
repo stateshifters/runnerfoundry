@@ -9,6 +9,24 @@ const insertTombstoneSQL = `INSERT INTO public.runnerfoundry_source_tombstones(s
 	VALUES($1, $2) ON CONFLICT(source_name, source_reference) DO NOTHING`
 const processingAttemptExistsSQL = `SELECT EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
 	WHERE source_name = $1 AND source_reference = $2 AND runner_name = $3)`
+const insertConditionalTombstoneSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
+	SELECT $1, $2 WHERE EXISTS (
+		SELECT 1 FROM public.runnerfoundry_queued_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+		UNION ALL
+		SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+			AND NOT runner_started AND NOT provisioning_failure_reserved)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const deleteConditionalQueuedJobSQL = `DELETE FROM public.runnerfoundry_queued_jobs
+	WHERE job_id = $1 AND source_name = $2 AND source_reference = $3`
+const classifyConditionalTerminalSQL = `SELECT CASE
+	WHEN EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
+		WHERE source_name = $1 AND source_reference = $2) THEN 'already_applied'
+	WHEN EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+		AND (runner_started OR provisioning_failure_reserved)) THEN 'protected'
+	ELSE 'missing' END`
 const sourceTombstonedSQL = `SELECT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
 	WHERE source_name = $1 AND source_reference = $2)`
 const markProcessingAcceptedSQL = `UPDATE public.runnerfoundry_processing_jobs SET runner_started = true
