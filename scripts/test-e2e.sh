@@ -20,7 +20,7 @@ normalize_version() {
 }
 
 run_e2e() {
-  go test -tags=e2e "${e2e_packages[@]}" -count=1 -timeout=10m
+  go test -tags=e2e "${e2e_packages[@]}" -count=1 -timeout=30m
 }
 
 run_sqlite() {

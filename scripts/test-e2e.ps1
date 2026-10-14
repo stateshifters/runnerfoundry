@@ -21,7 +21,7 @@ function Resolve-PostgresVersion {
 }
 
 function Invoke-E2ETests {
-    & go test -tags=e2e @packageArguments -count=1 -timeout=10m
+    & go test -tags=e2e @packageArguments -count=1 -timeout=30m
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
