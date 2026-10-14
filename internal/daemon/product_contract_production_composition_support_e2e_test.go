@@ -292,7 +292,7 @@ func (host *productionCompositionGitHub) runnerScaleSetResponse(request *http.Re
 	host.scaleSetPools[fmt.Sprint(identifier)] = name
 	host.recordRouteObservation(host.registrations, name)
 	host.mutex.Unlock()
-	return http.StatusOK, fmt.Sprintf(`{"count":1,"value":[{"id":%d,"name":%q,"runnerGroupId":11}]}`, identifier, name), nil
+	return http.StatusOK, fmt.Sprintf(`{"count":1,"value":[{"id":%d,"name":%q,"runnerGroupId":11,"runnerSetting":{"disableUpdate":true}}]}`, identifier, name), nil
 }
 
 func (host *productionCompositionGitHub) recordCapacity(identifier, maximum string) error {

@@ -38,7 +38,9 @@ func TestProductContractGitHubPruningDeletesOnlyExactSafeStaleOwnershipPostgres(
 
 func exerciseGitHubPruningSafetyMatrix(t *testing.T, stateFactory githubPruningStateFactory) {
 	t.Helper()
-	exact := upstream.RunnerScaleSet{ID: 29, Name: "linux", RunnerGroupID: 11}
+	exact := upstream.RunnerScaleSet{
+		ID: 29, Name: "linux", RunnerGroupID: 11, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+	}
 	scenarios := []githubPruningSafetyScenario{
 		{name: "exact stale fingerprint", listed: []upstream.RunnerScaleSet{exact}, deleteStatus: http.StatusNoContent,
 			wantDeleteAttempts: 1, wantOwnership: false},
