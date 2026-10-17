@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stateshifters/runnerfoundry/internal/core"
@@ -45,8 +46,7 @@ func TestReconciliationRetryUsesClaimSnapshot(t *testing.T) {
 		sourceOperationsResolverFake{operations: &bootstrapGeneratorFake{}},
 		provider,
 		provider,
-		"member",
-		testCurrentTime,
+		runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 
 	result, err := orchestrator.ReconcilePool(context.Background(), processing.Job.RunnerPool)

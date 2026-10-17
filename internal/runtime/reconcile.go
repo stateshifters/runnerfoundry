@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
-
-const unstartedProcessingLease = 5 * time.Minute
 
 // PoolReconciliation distinguishes newly reported source failures from
 // internal terminal finalization completed during a later reconciliation.
@@ -231,7 +228,7 @@ func (orchestrator *Orchestrator) recoverExpiredProcessing(
 	processing core.ProcessingJob,
 	instance *execution.RunnerInstance,
 ) (reconciliationChange, error) {
-	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(unstartedProcessingLease)) {
+	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(orchestrator.stopIfNotStartedWithin)) {
 		return reconciliationChange{}, nil
 	}
 	removedRunners, err := orchestrator.destroyExpiredRunner(ctx, instance)

@@ -231,10 +231,13 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
+	stopIfNotStartedWithin, err := runnerPoolConfig.StopIfNotStartedDuration()
+	if err != nil {
+		return fmt.Errorf("read Runner Pool start timeout: %w", err)
+	}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
 		dependencies.state.processing, dependencies.state.transitions, dependencies.state.provisioningFailures,
-		assembled.sourceOperations, provider, dependencies.inventory, dependencies.member,
-		dependencies.currentTime,
+		assembled.sourceOperations, provider, dependencies.inventory, runtimeengine.OrchestratorConfig{MemberID: dependencies.member, CurrentTime: dependencies.currentTime, StopIfNotStartedWithin: stopIfNotStartedWithin},
 	)
 	assembled.appendPoolConfiguration(runnerPoolConfig)
 	pool := newOrchestrationPool(orchestrator, provider, providerKind, runnerPoolConfig, assembled.stateBackend,

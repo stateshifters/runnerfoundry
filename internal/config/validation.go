@@ -184,6 +184,9 @@ func (runnerPool *RunnerPoolConfig) validate(seenNames map[string]bool) error {
 	if runnerPool.MaxRunners <= 0 {
 		return fmt.Errorf("runner pool %q max_runners must be positive", runnerPool.Name)
 	}
+	if _, err := runnerPool.StopIfNotStartedDuration(); err != nil {
+		return err
+	}
 	if err := runnerPool.validateProvider(); err != nil {
 		return fmt.Errorf("runner pool %q: %w", runnerPool.Name, err)
 	}
@@ -221,4 +224,16 @@ func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
 		return 0, fmt.Errorf("parse validated discovery interval: %w", err)
 	}
 	return discoveryInterval, nil
+}
+
+func (runnerPool RunnerPoolConfig) StopIfNotStartedDuration() (time.Duration, error) {
+	configured := runnerPool.StopIfNotStartedWithin
+	if configured == "" {
+		configured = "5m"
+	}
+	duration, err := time.ParseDuration(configured)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("runner pool %q stop_if_not_started_within must be a positive duration", runnerPool.Name)
+	}
+	return duration, nil
 }

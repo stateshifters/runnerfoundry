@@ -303,8 +303,7 @@ func assertSQLiteRecoveryOrdering(t *testing.T, reopened *sqlite.Store, state sq
 		resolver,
 		provider,
 		provider,
-		"recovery-leader",
-		func() time.Time { return recoveryTime },
+		runtimeengine.OrchestratorConfig{MemberID: "recovery-leader", CurrentTime: func() time.Time { return recoveryTime }, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 	recovery, err := orchestrator.RecoverForeignPool(ctx, state.runnerPool)
 	if err != nil || recovery.RemovedProcessing != 1 || recovery.RemainingProcessing != 0 {

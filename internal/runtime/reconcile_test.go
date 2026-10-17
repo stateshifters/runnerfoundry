@@ -31,7 +31,7 @@ func TestReconcilePoolRecoversOnlyExpiredClaimsWithEndpointProof(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, recovered, err := recoveryDecision(now, test.claimedAt, test.endpointID, test.accepted)
+			result, recovered, err := recoveryDecision(now, test.claimedAt, test.endpointID, test.accepted, 5*time.Minute)
 			if err != nil || recovered != test.wantRecover {
 				t.Fatalf("ReconcilePool() = (%#v, %v), recovered=%t", result, err, recovered)
 			}
@@ -44,6 +44,7 @@ func recoveryDecision(
 	claimedAt time.Time,
 	endpointID core.InventoryEndpointID,
 	accepted bool,
+	stopIfNotStartedWithin time.Duration,
 ) (runtimeengine.PoolReconciliation, bool, error) {
 	recovered := false
 	processing := core.ProcessingJob{Job: core.Job{ID: uuid.New(), RunnerPool: "linux"}, ClaimedAt: claimedAt,
@@ -58,8 +59,9 @@ func recoveryDecision(
 		},
 	}
 	provider := &providerFake{}
-	orchestrator := newTestOrchestrator(
-		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
+	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
+		store, store, store, sourceOperationsResolverFake{operations: &bootstrapGeneratorFake{}},
+		provider, provider, runtimeengine.OrchestratorConfig{MemberID: "leader", CurrentTime: func() time.Time { return now }, StopIfNotStartedWithin: stopIfNotStartedWithin},
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if err != nil {

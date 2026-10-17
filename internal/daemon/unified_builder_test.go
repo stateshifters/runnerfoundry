@@ -178,7 +178,7 @@ func newBuilderOrchestrator(
 		t.Fatalf("source operations resolver: %v", err)
 	}
 	return runtimeengine.NewOrchestratorWithSourceOperations(
-		store, store, store, resolver, provider, provider, daemonTestID(1), builderTime,
+		store, store, store, resolver, provider, provider, runtimeengine.OrchestratorConfig{MemberID: daemonTestID(1), CurrentTime: builderTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 }
 

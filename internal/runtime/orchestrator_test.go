@@ -20,7 +20,7 @@ func newTestOrchestrator(
 	currentTime func() time.Time,
 ) *runtimeengine.Orchestrator {
 	return runtimeengine.NewOrchestratorWithSourceOperations(
-		store, store, store, sourceOperationsResolverFake{operations: bootstrapper}, launcher, inventory, member, currentTime,
+		store, store, store, sourceOperationsResolverFake{operations: bootstrapper}, launcher, inventory, runtimeengine.OrchestratorConfig{MemberID: member, CurrentTime: currentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 }
 

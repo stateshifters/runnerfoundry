@@ -638,6 +638,7 @@ prune: false
 scale_sets:
   - name: linux
     runner_group: default
+    stop_if_not_started_within: 5m
     max_runners: 4
     docker:
       compose_file: /etc/runnerfoundry/compose.yaml
@@ -1261,6 +1262,32 @@ This is the amount of capacity contributed by this RunnerFoundry member.
 In a standalone deployment it is the member's full configured capacity for that pool.
 
 In a cluster, live members declaring the same pool contribute their capacities to the shared pool.
+
+#### `scale_sets[].stop_if_not_started_within`
+
+Optional.
+
+Default:
+
+```text
+5m
+```
+
+The value is a Go duration string that must be greater than zero. RunnerFoundry rejects malformed, zero or negative values
+when it validates startup or reload configuration.
+
+```yaml
+stop_if_not_started_within: 10m
+```
+
+This setting limits how long RunnerFoundry waits from claiming a job until a runner accepts it. Jobs already accepted by a
+runner are unaffected.
+
+When the limit expires, RunnerFoundry recovers the attempt only if it can identify the provider endpoint. It cleans up the
+runner attempt, then moves the same GitHub job to the back of its Runner Pool queue. The job remains in processing if cleanup
+fails, so RunnerFoundry can retry cleanup.
+
+Reload the configuration after changing the setting. A successful reload applies the new value.
 
 ### Docker provider configuration
 

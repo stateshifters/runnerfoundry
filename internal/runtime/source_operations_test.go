@@ -23,8 +23,7 @@ func TestProvisioningFailureRequeuesWhenSourceCannotReportIt(t *testing.T) {
 		sourceOperationsResolverFake{operations: source},
 		provider,
 		provider,
-		"member",
-		testCurrentTime,
+		runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 
 	result, err := orchestrator.Process(context.Background(), job.RunnerPool)
@@ -187,8 +186,7 @@ func TestUnknownSourceRetainsProcessingWithoutBootstrap(t *testing.T) {
 		sourceOperationsResolverFake{err: wantErr},
 		provider,
 		provider,
-		"member",
-		testCurrentTime,
+		runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 
 	result, err := orchestrator.Process(context.Background(), job.RunnerPool)
@@ -225,7 +223,7 @@ func assertReconciliationRetainsUnknownSource(t *testing.T, processing core.Proc
 	}}
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
+		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
 	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 || result.RemovedProcessing != 0 {
@@ -246,7 +244,7 @@ func TestMissingSourceOperationsRetainProcessing(t *testing.T) {
 			provider := &providerFake{}
 			store := provisioningFailureStore(job, &retried)
 			orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-				store, store, store, resolver, provider, provider, "member", testCurrentTime,
+				store, store, store, resolver, provider, provider, runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 			)
 			result, err := orchestrator.Process(context.Background(), job.RunnerPool)
 			if err == nil || result.Outcome != runtimeengine.ProcessClaimed || retried {
@@ -390,7 +388,7 @@ func TestReconciliationRetainsReservedFailureWhenSourceResolutionFails(t *testin
 	wantErr := errors.New("unknown source")
 	provider := &providerFake{}
 	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
-		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, "member", testCurrentTime,
+		store, store, store, sourceOperationsResolverFake{err: wantErr}, provider, provider, runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), processing.Job.RunnerPool)
 	if !errors.Is(err, wantErr) || result.RemainingProcessing != 1 || result.RemovedProcessing != 0 {
@@ -511,8 +509,7 @@ func newSourceOperationsOrchestrator(
 		sourceOperationsResolverFake{operations: source},
 		provider,
 		provider,
-		"member",
-		testCurrentTime,
+		runtimeengine.OrchestratorConfig{MemberID: "member", CurrentTime: testCurrentTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 }
 

@@ -82,11 +82,12 @@ type LogFileConfig struct {
 // RunnerPoolConfig defines one source-neutral Runner Pool. Exactly one of
 // Docker or Libvirt is required, and an empty RunnerGroup defaults to default.
 type RunnerPoolConfig struct {
-	Name        string         `yaml:"name"`
-	RunnerGroup string         `yaml:"runner_group"`
-	MaxRunners  int            `yaml:"max_runners"`
-	Docker      *DockerConfig  `yaml:"docker"`
-	Libvirt     *LibvirtConfig `yaml:"libvirt"`
+	Name                   string         `yaml:"name"`
+	RunnerGroup            string         `yaml:"runner_group"`
+	MaxRunners             int            `yaml:"max_runners"`
+	StopIfNotStartedWithin string         `yaml:"stop_if_not_started_within"`
+	Docker                 *DockerConfig  `yaml:"docker"`
+	Libvirt                *LibvirtConfig `yaml:"libvirt"`
 }
 
 // DockerConfig selects one service from a Docker Compose project.

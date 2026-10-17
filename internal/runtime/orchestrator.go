@@ -14,14 +14,21 @@ import (
 // Orchestrator owns member-local processing from queue pickup through provider
 // cleanup. Workflow outcomes remain between the provisioned runner and source.
 type Orchestrator struct {
-	store       state.ProcessingJobStore
-	transitions state.ProcessingTransitions
-	failures    state.ProvisioningFailureTransitions
-	sources     core.SourceOperationsResolver
-	launcher    execution.RunnerLauncher
-	inventory   execution.RunnerInventory
-	member      core.MemberID
-	currentTime func() time.Time
+	store                  state.ProcessingJobStore
+	transitions            state.ProcessingTransitions
+	failures               state.ProvisioningFailureTransitions
+	sources                core.SourceOperationsResolver
+	launcher               execution.RunnerLauncher
+	inventory              execution.RunnerInventory
+	member                 core.MemberID
+	currentTime            func() time.Time
+	stopIfNotStartedWithin time.Duration
+}
+
+type OrchestratorConfig struct {
+	MemberID               core.MemberID
+	CurrentTime            func() time.Time
+	StopIfNotStartedWithin time.Duration
 }
 
 type ProcessOutcome string
@@ -59,12 +66,12 @@ func NewOrchestratorWithSourceOperations(
 	sources core.SourceOperationsResolver,
 	launcher execution.RunnerLauncher,
 	inventory execution.RunnerInventory,
-	member core.MemberID,
-	currentTime func() time.Time,
+	configured OrchestratorConfig,
 ) *Orchestrator {
 	return &Orchestrator{
-		store: store, transitions: transitions, failures: failures, sources: sources, launcher: launcher, inventory: inventory, member: member,
-		currentTime: currentTime,
+		store: store, transitions: transitions, failures: failures, sources: sources, launcher: launcher, inventory: inventory,
+		member: configured.MemberID, currentTime: configured.CurrentTime,
+		stopIfNotStartedWithin: configured.StopIfNotStartedWithin,
 	}
 }
 
