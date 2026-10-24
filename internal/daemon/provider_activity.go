@@ -3,11 +3,13 @@ package daemon
 import (
 	"log/slog"
 
-	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
-func newProviderObserver(report func(error)) func(execution.ProviderActivity) {
-	return func(activity execution.ProviderActivity) {
+type providerActivityObserver func(runtimeservice.ProviderActivity, string)
+
+func newProviderObserver(report func(error)) providerActivityObserver {
+	return func(activity runtimeservice.ProviderActivity, composeService string) {
 		event := operationalEvent{
 			operation:      "provider_" + activity.Operation,
 			stage:          "provider",
@@ -17,7 +19,7 @@ func newProviderObserver(report func(error)) func(execution.ProviderActivity) {
 			runnerID:       activity.RunnerID,
 			endpoint:       string(activity.EndpointID),
 			provider:       string(activity.Provider),
-			composeService: activity.ComposeService,
+			composeService: composeService,
 			duration:       activity.Duration,
 			sourcePC:       activity.OriginPC,
 		}
@@ -28,5 +30,17 @@ func newProviderObserver(report func(error)) func(execution.ProviderActivity) {
 			return
 		}
 		reportProgress(report, slog.LevelDebug, event)
+	}
+}
+
+func observeProviderActivity(
+	observer providerActivityObserver,
+	composeService string,
+) func(runtimeservice.ProviderActivity) {
+	if observer == nil {
+		return nil
+	}
+	return func(activity runtimeservice.ProviderActivity) {
+		observer(activity, composeService)
 	}
 }

@@ -13,17 +13,17 @@ func TestPublishMemberStateProtocolFailures(t *testing.T) {
 	protocolErr := errors.New("protocol")
 	for _, testCase := range []struct {
 		name     string
-		executor Executor
+		executor executorStub
 	}{
-		{name: "begin", executor: Executor{begin: failingBegin(protocolErr)}},
-		{name: "member heartbeat", executor: Executor{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: successfulCompletion})}},
-		{name: "capacity withdrawal", executor: Executor{begin: transactionBeginning(transactionFailingExecute(2, protocolErr))}},
-		{name: "capacity publication", executor: Executor{begin: transactionBeginning(transactionFailingExecute(3, protocolErr))}},
-		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion})}},
-		{name: "rollback", executor: Executor{begin: transactionBeginning(Transaction{execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr)})}},
+		{name: "begin", executor: executorStub{begin: failingBegin(protocolErr)}},
+		{name: "member heartbeat", executor: executorStub{begin: transactionBeginning(transactionStub{execute: failingExecute(protocolErr), rollback: successfulCompletion})}},
+		{name: "capacity withdrawal", executor: executorStub{begin: transactionBeginning(transactionFailingExecute(2, protocolErr))}},
+		{name: "capacity publication", executor: executorStub{begin: transactionBeginning(transactionFailingExecute(3, protocolErr))}},
+		{name: "commit", executor: executorStub{begin: transactionBeginning(transactionStub{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion})}},
+		{name: "rollback", executor: executorStub{begin: transactionBeginning(transactionStub{execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr)})}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := NewStore(testCase.executor).PublishMemberState(context.Background(), testMemberID, fixedTime(),
+			if err := newStore(testCase.executor).PublishMemberState(context.Background(), testMemberID, fixedTime(),
 				[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); err == nil {
 				t.Fatal("publish succeeded")
 			}
@@ -34,23 +34,23 @@ func TestPublishMemberStateProtocolFailures(t *testing.T) {
 func TestWithdrawMemberCapacityProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	if err := NewStore(Executor{begin: failingBegin(protocolErr)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
+	if err := newStore(executorStub{begin: failingBegin(protocolErr)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
 		t.Fatal("expected withdrawal begin failure")
 	}
 	for _, testCase := range []struct {
 		name        string
-		transaction Transaction
+		transaction transactionStub
 	}{
 		{name: "withdrawal", transaction: transactionFailingExecute(1, protocolErr)},
-		{name: "commit", transaction: Transaction{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}},
+		{name: "commit", transaction: transactionStub{execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := NewStore(Executor{begin: transactionBeginning(testCase.transaction)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
+			if err := newStore(executorStub{begin: transactionBeginning(testCase.transaction)}).WithdrawMemberCapacity(context.Background(), testMemberID); err == nil {
 				t.Fatal("withdrawal succeeded")
 			}
 		})
 	}
-	if err := NewStore(Executor{begin: transactionBeginning(Transaction{execute: successfulExecute,
+	if err := newStore(executorStub{begin: transactionBeginning(transactionStub{execute: successfulExecute,
 		commit: successfulCompletion, rollback: successfulCompletion})}).WithdrawMemberCapacity(context.Background(), testMemberID); err != nil {
 		t.Fatalf("withdraw member capacity: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestWithdrawMemberCapacityProtocolFailures(t *testing.T) {
 
 func TestNonPositiveCapacityIsWithdrawn(t *testing.T) {
 	t.Parallel()
-	if err := NewStore(Executor{begin: transactionBeginning(Transaction{execute: successfulExecute,
+	if err := newStore(executorStub{begin: transactionBeginning(transactionStub{execute: successfulExecute,
 		commit: successfulCompletion, rollback: successfulCompletion})}).PublishMemberState(context.Background(), testMemberID,
 		fixedTime(), []core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 0}}); err != nil {
 		t.Fatalf("withdraw non-positive capacity: %v", err)
@@ -68,7 +68,7 @@ func TestNonPositiveCapacityIsWithdrawn(t *testing.T) {
 func TestCapacityScalarProtocolFailures(t *testing.T) {
 	t.Parallel()
 	protocolErr := errors.New("protocol")
-	brokenScalar := NewStore(Executor{queryRow: constantRow(Row{scan: func(...any) error { return protocolErr }})})
+	brokenScalar := newStore(executorStub{queryRow: constantRow(rowStub{scan: func(...any) error { return protocolErr }})})
 	if _, err := brokenScalar.CountLiveMembers(context.Background(), fixedTime()); err == nil {
 		t.Fatal("expected count error")
 	}

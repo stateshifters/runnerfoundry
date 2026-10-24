@@ -9,16 +9,15 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestQueuedJobProcessorStopBeforeStartIsIdempotent(t *testing.T) {
-	processor := newQueuedJobProcessor(queuedJobRequesterFake{request: func(
+	processor := newQueuedJobProcessorForPools(queuedJobRequesterFake{request: func(
 		context.Context,
 		core.RunnerPool,
 	) (runtimeengine.ProcessResult, error) {
 		return runtimeengine.ProcessResult{}, nil
-	}}, newQueuedJobEligibilityGate(), nil)
+	}}, newQueuedJobEligibilityGate(), nil, nil)
 	if err := processor.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() before start error = %v", err)
 	}
@@ -35,7 +34,7 @@ func TestQueuedJobProcessorStopDeadlineRemainsRetryable(t *testing.T) {
 		<-release
 		return runtimeengine.ProcessResult{}, nil
 	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
-	markQueuedJobPoolsEligible(processor.gate, "linux")
+	markQueuedJobPoolsEligible(t, processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -70,13 +69,13 @@ func TestUnifiedGenerationReportsQueuedJobProcessorStartFailure(t *testing.T) {
 	) (runtimeengine.ProcessResult, error) {
 		return runtimeengine.ProcessResult{}, nil
 	}}
-	processor := newQueuedJobProcessor(requester, newQueuedJobEligibilityGate(), nil)
+	processor := newQueuedJobProcessorForPools(requester, newQueuedJobEligibilityGate(), nil, nil)
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("pre-start processor: %v", err)
 	}
 	cycles := make(chan struct{}, 1)
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.processor = processor
 	mustPrepareGeneration(t, generation)
@@ -97,7 +96,7 @@ func TestUnifiedGenerationReportsQueuedJobProcessorStopFailure(t *testing.T) {
 		<-release
 		return runtimeengine.ProcessResult{}, nil
 	}}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"})
-	markQueuedJobPoolsEligible(processor.gate, "linux")
+	markQueuedJobPoolsEligible(t, processor.gate, "linux")
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -139,38 +138,3 @@ func (ctx *secondDoneCanceledContext) Done() <-chan struct{} {
 
 func (*secondDoneCanceledContext) Err() error    { return context.Canceled }
 func (*secondDoneCanceledContext) Value(any) any { return nil }
-
-func TestGitHubSourceRuntimeCoversStableAndRejectedLeadershipOpen(t *testing.T) {
-	wantErr := errors.New("snapshot failed")
-	manager := &githubManagerFake{snapshotErr: wantErr}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	if err := source.OpenLeader(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("OpenLeader() error = %v, want %v", err, wantErr)
-	}
-	manager.setSnapshotError(nil)
-	if err := source.OpenLeader(context.Background()); err != nil {
-		t.Fatalf("OpenLeader() error = %v", err)
-	}
-	if err := source.OpenLeader(context.Background()); err != nil {
-		t.Fatalf("stable OpenLeader() error = %v", err)
-	}
-	mustCloseGitHubSource(t, source)
-}
-
-func TestGitHubSourceRuntimeIgnoresDuplicateDiscoveryAndSessionScheduling(t *testing.T) {
-	record := githubsource.Registration{RepositoryURL: "repo", RunnerPool: "linux"}
-	manager := &githubManagerFake{adapters: []*githubsource.Adapter{{RunnerPool: "linux", Repository: "repo"}}}
-	source := newGitHubSourceRuntime(manager, &capacityAggregatorFake{}, "member", eventHandlerFake{},
-		githubsource.ManagerConfig{}, time.Minute, func() time.Time { return time.Time{} })
-	term := &githubLeadershipTerm{discoveryActive: true}
-	source.startDiscovery(context.Background(), nil)
-	source.startDiscovery(context.Background(), term)
-
-	source.desired[registrationKey(record)] = record
-	source.opening[registrationKey(record)] = record
-	source.scheduleRequiredRegistrationSessions(context.Background(), term)
-	if len(term.operations) != 0 {
-		t.Fatalf("duplicate schedule started %d operations", len(term.operations))
-	}
-}

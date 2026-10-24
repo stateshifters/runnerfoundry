@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "clean-code": {
+      "source": "meza/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/clean-code/skills/clean-code/SKILL.md",
+      "computedHash": "b7ee590c54df5ef72ad7375cad99c94ef2a093c8285575bfe3b86d1bdad5c102"
+    }
+  }
+}

@@ -7,82 +7,58 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	"net/http"
-	"runtime"
-	"sync"
-	"sync/atomic"
+	"reflect"
 	"testing"
+	"time"
 
 	upstream "github.com/actions/scaleset"
 )
 
-func TestTransportClientSerializesUpstreamSessionConstruction(t *testing.T) {
-	api := &sessionConstructionAPIFake{release: make(chan struct{})}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
-	sessionErrors := runConcurrentSessionConstruction(client, api.release)
-	for err := range sessionErrors {
+func TestTransportClientOpensSiblingSessionWhileAnotherOpenIsBlocked(t *testing.T) {
+	t.Parallel()
+	api := &sessionConstructionAPIFake{started: make(chan struct{}), release: make(chan struct{})}
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := client.OpenSession(t.Context(), Registration{ID: 29}, "member")
+		blocked <- err
+	}()
+	<-api.started
+	sibling := make(chan error, 1)
+	go func() {
+		_, err := client.OpenSession(t.Context(), Registration{ID: 30}, "member")
+		sibling <- err
+	}()
+	select {
+	case err := <-sibling:
 		if err != nil {
-			t.Fatalf("construct upstream session: %v", err)
+			t.Errorf("open sibling session: %v", err)
 		}
+	case <-time.After(time.Second):
+		t.Error("blocked session prevented sibling from opening")
 	}
-	if maximum := api.maximumActive.Load(); maximum != 1 {
-		t.Fatalf("concurrent upstream session constructions = %d, want 1", maximum)
-	}
-}
-
-func runConcurrentSessionConstruction(client *Client, release chan struct{}) <-chan error {
-	const callers = 32
-	start := make(chan struct{})
-	sessionErrors := make(chan error, callers)
-	var started sync.WaitGroup
-	var completed sync.WaitGroup
-	started.Add(callers)
-	completed.Add(callers)
-	for index := 0; index < callers; index++ {
-		go func() {
-			defer completed.Done()
-			<-start
-			started.Done()
-			_, err := client.openSession(context.Background(), 29, "member")
-			sessionErrors <- err
-		}()
-	}
-	close(start)
-	started.Wait()
-	yieldToSessionConstructors(callers)
-	close(release)
-	completed.Wait()
-	close(sessionErrors)
-	return sessionErrors
-}
-
-func yieldToSessionConstructors(callers int) {
-	for attempt := 0; attempt < callers; attempt++ {
-		runtime.Gosched()
+	close(api.release)
+	if err := <-blocked; err != nil {
+		t.Fatalf("open blocked session: %v", err)
 	}
 }
 
 type sessionConstructionAPIFake struct {
 	upstreamAPIFake
-	release       chan struct{}
-	active        atomic.Int64
-	maximumActive atomic.Int64
+	started chan struct{}
+	release chan struct{}
 }
 
 func (api *sessionConstructionAPIFake) MessageSessionClient(
-	context.Context,
-	int,
-	string,
-	...upstream.HTTPOption,
+	_ context.Context,
+	identifier int,
+	_ string,
+	_ ...upstream.HTTPOption,
 ) (*upstream.MessageSessionClient, error) {
-	active := api.active.Add(1)
-	for maximum := api.maximumActive.Load(); active > maximum; maximum = api.maximumActive.Load() {
-		if api.maximumActive.CompareAndSwap(maximum, active) {
-			break
-		}
+	if identifier == 29 {
+		close(api.started)
+		<-api.release
 	}
-	<-api.release
-	api.active.Add(-1)
 	return &upstream.MessageSessionClient{}, nil
 }
 
@@ -108,6 +84,20 @@ func TestEnsureRunnerPoolCreatesMissingScaleSetWithRequiredSettings(t *testing.T
 	}
 	if !created.RunnerSetting.DisableUpdate {
 		t.Fatal("runner update was not disabled")
+	}
+}
+
+func TestEnsureRunnerPoolCreatesMissingScaleSetWithRunnerAutoUpdatesEnabled(t *testing.T) {
+	t.Parallel()
+
+	api := &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}}
+	client := Client{registrations: api, autoUpdateRunners: true}
+
+	if _, err := client.EnsureRunnerPool(context.Background(), "linux", "default"); err != nil {
+		t.Fatalf("ensure runner pool: %v", err)
+	}
+	if api.createdScaleSet == nil || api.createdScaleSet.RunnerSetting.DisableUpdate {
+		t.Fatalf("created scale set = %#v", api.createdScaleSet)
 	}
 }
 
@@ -168,20 +158,42 @@ func TestEnsureRunnerPoolReportsBoundaryFailures(t *testing.T) {
 	}
 }
 
+func TestEnsureRunnerPoolReportsRunnerUpdateFailure(t *testing.T) {
+	t.Parallel()
+
+	expectedErr := errors.New("API unavailable")
+	api := &actionsAPIFake{
+		runnerGroup: &upstream.RunnerGroup{ID: 17},
+		runnerScaleSet: &upstream.RunnerScaleSet{
+			ID: 23, Name: "linux", RunnerGroupID: 17,
+		},
+		updateErr: expectedErr,
+	}
+	client := Client{registrations: api}
+
+	if _, err := client.EnsureRunnerPool(context.Background(), "linux", "default"); !errors.Is(err, expectedErr) {
+		t.Fatalf("update error = %v", err)
+	}
+}
+
 func TestNewClientValidatesRepositoryAndUsesConfiguredRepository(t *testing.T) {
-	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, http.DefaultTransport); err == nil {
+	if _, err := NewClient(Repository{URL: "://invalid"}, Credentials{}, nil, false); err == nil {
 		t.Fatal("NewClient accepted invalid repository URL")
 	}
 	client, err := NewClient(
 		Repository{InstallationID: 11, URL: "https://github.com/acme/widgets"},
 		deterministicCredentials(t),
 		nil,
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 	if client.repositoryURL != "https://github.com/acme/widgets" {
 		t.Fatalf("repository URL = %q", client.repositoryURL)
+	}
+	if !client.autoUpdateRunners {
+		t.Fatal("runner auto-update setting was not retained")
 	}
 }
 
@@ -195,7 +207,7 @@ func TestClientFromUpstreamUsesNativeScaleSetRegistry(t *testing.T) {
 			RunnerGroupID: 7, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
 		}},
 	}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
 	if _, err := client.PruneRunnerPools(context.Background(), 7, nil, []OwnedRunnerPool{{
 		ID: 11, Name: "obsolete", RunnerGroupID: 7,
 	}}); err != nil {
@@ -229,7 +241,7 @@ func TestClientFromUpstreamBuildsAndReportsMessageSessions(t *testing.T) {
 	t.Parallel()
 
 	api := &upstreamAPIFake{session: &upstream.MessageSessionClient{}}
-	client := clientFromUpstream("https://github.com/acme/widgets", api)
+	client := clientFromUpstream("https://github.com/acme/widgets", api, api, nil)
 	if _, err := client.OpenSession(context.Background(), Registration{ID: 17}, "owner"); err != nil {
 		t.Fatalf("open adapted session: %v", err)
 	}
@@ -245,8 +257,11 @@ func TestEnsureRunnerPoolReusesExistingScaleSet(t *testing.T) {
 	t.Parallel()
 
 	api := &actionsAPIFake{
-		runnerGroup:    &upstream.RunnerGroup{ID: 17},
-		runnerScaleSet: &upstream.RunnerScaleSet{ID: 23, Name: "linux", RunnerGroupID: 17},
+		runnerGroup: &upstream.RunnerGroup{ID: 17},
+		runnerScaleSet: &upstream.RunnerScaleSet{
+			ID: 23, Name: "linux", RunnerGroupID: 17,
+			RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+		},
 	}
 	client := Client{registrations: api}
 
@@ -260,6 +275,36 @@ func TestEnsureRunnerPoolReusesExistingScaleSet(t *testing.T) {
 	if api.createdScaleSet != nil {
 		t.Fatalf("unexpected create = %#v", api.createdScaleSet)
 	}
+	if api.updatedScaleSet != nil {
+		t.Fatalf("unexpected update = %#v", api.updatedScaleSet)
+	}
+}
+
+func TestEnsureRunnerPoolConvergesExistingRunnerUpdateSetting(t *testing.T) {
+	t.Parallel()
+
+	createdOn := time.Date(2026, time.October, 13, 9, 0, 0, 0, time.UTC)
+	existing := &upstream.RunnerScaleSet{
+		ID: 23, Name: "linux", RunnerGroupID: 17, RunnerGroupName: "default",
+		Labels:        []upstream.Label{{Name: "linux", Type: "System"}},
+		RunnerSetting: upstream.RunnerSetting{DisableUpdate: true}, CreatedOn: createdOn,
+		RunnerJitConfigURL: "https://example.test/jit",
+		Statistics:         &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	}
+	api := &actionsAPIFake{runnerGroup: &upstream.RunnerGroup{ID: 17}, runnerScaleSet: existing}
+	client := Client{registrations: api, autoUpdateRunners: true}
+
+	registration, err := client.EnsureRunnerPool(context.Background(), "linux", "default")
+	if err != nil {
+		t.Fatalf("ensure runner pool: %v", err)
+	}
+	if registration != (Registration{ID: 23, Name: "linux", RunnerGroupID: 17}) {
+		t.Fatalf("registration = %#v", registration)
+	}
+	expected := &upstream.RunnerScaleSet{RunnerSetting: upstream.RunnerSetting{DisableUpdate: false}}
+	if api.updatedScaleSetID != 23 || !reflect.DeepEqual(api.updatedScaleSet, expected) {
+		t.Fatalf("updated scale set = (%d, %#v), want (23, %#v)", api.updatedScaleSetID, api.updatedScaleSet, expected)
+	}
 }
 
 type actionsAPIFake struct {
@@ -270,6 +315,9 @@ type actionsAPIFake struct {
 	createdScaleSet   *upstream.RunnerScaleSet
 	createErr         error
 	emptyCreate       bool
+	updatedScaleSetID int
+	updatedScaleSet   *upstream.RunnerScaleSet
+	updateErr         error
 }
 
 type upstreamAPIFake struct {
@@ -318,4 +366,14 @@ func (api *actionsAPIFake) CreateRunnerScaleSet(
 	return &upstream.RunnerScaleSet{
 		ID: runnerScaleSet.RunnerGroupID + 12, Name: runnerScaleSet.Name, RunnerGroupID: runnerScaleSet.RunnerGroupID,
 	}, nil
+}
+
+func (api *actionsAPIFake) UpdateRunnerScaleSet(
+	_ context.Context,
+	runnerScaleSetID int,
+	runnerScaleSet *upstream.RunnerScaleSet,
+) (*upstream.RunnerScaleSet, error) {
+	api.updatedScaleSetID = runnerScaleSetID
+	api.updatedScaleSet = runnerScaleSet
+	return runnerScaleSet, api.updateErr
 }

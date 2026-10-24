@@ -4,26 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
-const unstartedProcessingLease = 5 * time.Minute
-
+// PoolReconciliation distinguishes newly reported source failures from
+// internal terminal finalization completed during a later reconciliation.
+// Daemon health tracking uses both lists to clear the corresponding degraded
+// operation only after its durable step succeeds.
 type PoolReconciliation struct {
-	RemovedProcessing   int
-	RemovedRunners      int
-	RemainingProcessing int
+	RemovedProcessing            int
+	RemovedRunners               int
+	RemainingProcessing          int
+	ReportedProvisioningFailures []core.Job
+	FinalizedTerminalJobs        []core.Job
 }
 
 type reconciliationPurpose uint8
 
 type reconciliationChange struct {
-	removedRunners     int
-	removedProcessing  int
-	noLongerProcessing int
+	removedRunners               int
+	removedProcessing            int
+	noLongerProcessing           int
+	reportedProvisioningFailures []core.Job
+	finalizedTerminalJobs        []core.Job
 }
 
 const (
@@ -54,21 +59,27 @@ func (orchestrator *Orchestrator) ReconcilePool(
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("list pool processing work for Runner Pool %q: %w", runnerPool, err)
 	}
+	stateOnly, providerDependent := partitionProvisioningFailures(ownedProcessing)
+	result, stateErr := orchestrator.reconcileOwnedProcessing(ctx, stateOnly, nil, preserveRunning)
 	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
-		return PoolReconciliation{}, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err)
+		result.RemainingProcessing += len(providerDependent)
+		return result, errors.Join(stateErr, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err))
 	}
 	poolInstances := instancesForPool(instances, runnerPool)
 	instancesByName := indexInstancesByName(poolInstances)
-	result, processingErr := orchestrator.reconcileOwnedProcessing(ctx, ownedProcessing, instancesByName, preserveRunning)
+	providerResult, processingErr := orchestrator.reconcileOwnedProcessing(
+		ctx, providerDependent, instancesByName, preserveRunning,
+	)
+	result = mergePoolReconciliation(result, providerResult)
 	removedOrphans, orphanErr := orchestrator.cleanupOrphanedRunners(ctx, poolInstances, poolProcessing)
 	result.RemovedRunners += removedOrphans
-	return result, errors.Join(processingErr, orphanErr)
+	return result, errors.Join(stateErr, processingErr, orphanErr)
 }
 
 // TerminatePool destroys member-owned resources for an operator-requested
 // shutdown or provider transition. Unstarted jobs return to the queue after
-// cleanup, while started jobs retain processing until the source terminalizes
+// cleanup, while source-accepted jobs retain processing until the source terminalizes
 // them. Cleanup failures always retain processing for a later retry.
 func (orchestrator *Orchestrator) TerminatePool(
 	ctx context.Context,
@@ -78,13 +89,17 @@ func (orchestrator *Orchestrator) TerminatePool(
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("list member processing work for Runner Pool %q: %w", runnerPool, err)
 	}
+	stateOnly, providerDependent := partitionProvisioningFailures(processing)
+	result, stateErr := orchestrator.reconcileOwnedProcessing(ctx, stateOnly, nil, terminateRunning)
 	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
-		return PoolReconciliation{}, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err)
+		result.RemainingProcessing += len(providerDependent)
+		return result, errors.Join(stateErr, fmt.Errorf("inspect Runner Pool %q: %w", runnerPool, err))
 	}
-	return orchestrator.reconcileOwnedProcessing(
-		ctx, processing, indexInstancesByName(instancesForPool(instances, runnerPool)), terminateRunning,
+	providerResult, providerErr := orchestrator.reconcileOwnedProcessing(
+		ctx, providerDependent, indexInstancesByName(instancesForPool(instances, runnerPool)), terminateRunning,
 	)
+	return mergePoolReconciliation(result, providerResult), errors.Join(stateErr, providerErr)
 }
 
 // RecoverForeignPool performs leader-authorized cleanup and recovery for
@@ -99,41 +114,17 @@ func (orchestrator *Orchestrator) RecoverForeignPool(
 	if err != nil {
 		return PoolReconciliation{}, fmt.Errorf("list foreign processing work for Runner Pool %q: %w", runnerPool, err)
 	}
+	stateOnly, providerDependent := partitionProvisioningFailures(processing)
+	result, stateErr := orchestrator.reconcileForeignProcessing(ctx, stateOnly, nil)
 	instances, err := orchestrator.inventory.Inspect(ctx)
 	if err != nil {
-		return PoolReconciliation{}, fmt.Errorf("inspect foreign Runner Pool %q: %w", runnerPool, err)
+		result.RemainingProcessing += countForeignProcessing(providerDependent, orchestrator.member)
+		return result, errors.Join(stateErr, fmt.Errorf("inspect foreign Runner Pool %q: %w", runnerPool, err))
 	}
-	return orchestrator.reconcileForeignProcessing(ctx, processing, instancesForPool(instances, runnerPool))
-}
-
-func (orchestrator *Orchestrator) reconcileForeignProcessing(
-	ctx context.Context,
-	processing []core.ProcessingJob,
-	instances []execution.RunnerInstance,
-) (PoolReconciliation, error) {
-	instancesByName := indexInstancesByName(instances)
-	result := PoolReconciliation{}
-	failures := make([]error, 0)
-	for _, job := range processing {
-		if job.MemberID == orchestrator.member {
-			continue
-		}
-		result.RemainingProcessing++
-		if !orchestrator.inventory.CanInspectEndpointForMember(job.InventoryEndpointID, job.MemberID) {
-			continue
-		}
-		instance, present := instancesByName[processingRunnerName(job)]
-		var instanceReference *execution.RunnerInstance
-		if present && (instance.EndpointID == "" || instance.EndpointID == job.InventoryEndpointID) {
-			instanceReference = &instance
-		}
-		change, err := orchestrator.reconcileProcessing(ctx, job, instanceReference, preserveRunning)
-		result.RemovedRunners += change.removedRunners
-		result.RemovedProcessing += change.removedProcessing
-		result.RemainingProcessing -= change.noLongerProcessing
-		failures = appendFailure(failures, err)
-	}
-	return result, errors.Join(failures...)
+	providerResult, providerErr := orchestrator.reconcileForeignProcessing(
+		ctx, providerDependent, instancesForPool(instances, runnerPool),
+	)
+	return mergePoolReconciliation(result, providerResult), errors.Join(stateErr, providerErr)
 }
 
 func indexInstancesByName(instances []execution.RunnerInstance) map[core.RunnerName]execution.RunnerInstance {
@@ -160,12 +151,20 @@ func (orchestrator *Orchestrator) reconcileOwnedProcessing(
 			instanceReference = &instance
 		}
 		change, err := orchestrator.reconcileProcessing(ctx, job, instanceReference, purpose)
-		result.RemovedRunners += change.removedRunners
-		result.RemovedProcessing += change.removedProcessing
-		result.RemainingProcessing -= change.noLongerProcessing
+		applyReconciliationChange(&result, change)
 		failures = appendFailure(failures, err)
 	}
 	return result, errors.Join(failures...)
+}
+
+func applyReconciliationChange(result *PoolReconciliation, change reconciliationChange) {
+	result.RemovedRunners += change.removedRunners
+	result.RemovedProcessing += change.removedProcessing
+	result.RemainingProcessing -= change.noLongerProcessing
+	result.ReportedProvisioningFailures = append(
+		result.ReportedProvisioningFailures, change.reportedProvisioningFailures...,
+	)
+	result.FinalizedTerminalJobs = append(result.FinalizedTerminalJobs, change.finalizedTerminalJobs...)
 }
 
 func (orchestrator *Orchestrator) cleanupOrphanedRunners(
@@ -198,18 +197,20 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 	instance *execution.RunnerInstance,
 	purpose reconciliationPurpose,
 ) (reconciliationChange, error) {
+	if processing.ProvisioningFailure != core.ProvisioningFailureOpen {
+		return orchestrator.reconcileProvisioningFailure(ctx, processing)
+	}
 	if processing.InventoryEndpointID != "" && !orchestrator.inventory.KnowsEndpoint(processing.InventoryEndpointID) {
 		return reconciliationChange{}, nil
 	}
 	if processing.SourceTerminal {
 		return orchestrator.cleanupTerminalProcessing(ctx, processing, instance)
 	}
-	if processing.InventoryEndpointID != "" && !processing.RunnerStarted {
+	if processing.InventoryEndpointID != "" && !processing.RunnerAccepted {
 		return orchestrator.recoverExpiredProcessing(ctx, processing, instance)
 	}
 	if instance == nil {
-		removed, gone, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
-		return reconciliationChange{removedProcessing: removed, noLongerProcessing: gone}, retryErr
+		return orchestrator.retryIfUnstarted(ctx, processing)
 	}
 	if purpose == preserveRunning && instance.State == execution.RunnerStateRunning {
 		return reconciliationChange{}, nil
@@ -217,8 +218,9 @@ func (orchestrator *Orchestrator) reconcileProcessing(
 	if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
 		return reconciliationChange{}, fmt.Errorf("destroy runner %q: %w", instance.ID, err)
 	}
-	removed, gone, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
-	return reconciliationChange{removedRunners: 1, removedProcessing: removed, noLongerProcessing: gone}, retryErr
+	change, retryErr := orchestrator.retryIfUnstarted(ctx, processing)
+	change.removedRunners = 1
+	return change, retryErr
 }
 
 func (orchestrator *Orchestrator) recoverExpiredProcessing(
@@ -226,30 +228,60 @@ func (orchestrator *Orchestrator) recoverExpiredProcessing(
 	processing core.ProcessingJob,
 	instance *execution.RunnerInstance,
 ) (reconciliationChange, error) {
-	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(unstartedProcessingLease)) {
+	if orchestrator.currentTime().Before(processing.ClaimedAt.Add(orchestrator.stopIfNotStartedWithin)) {
 		return reconciliationChange{}, nil
 	}
-	change := reconciliationChange{}
-	if instance != nil {
-		if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
-			return reconciliationChange{}, fmt.Errorf("destroy expired unstarted runner %q: %w", instance.ID, err)
-		}
-		change.removedRunners = 1
+	removedRunners, err := orchestrator.destroyExpiredRunner(ctx, instance)
+	if err != nil {
+		return reconciliationChange{}, err
 	}
-	if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
+	return orchestrator.recoverExpiredClaim(ctx, processing, removedRunners)
+}
+
+func (orchestrator *Orchestrator) destroyExpiredRunner(
+	ctx context.Context,
+	instance *execution.RunnerInstance,
+) (int, error) {
+	if instance == nil {
+		return 0, nil
+	}
+	if err := orchestrator.inventory.Destroy(ctx, *instance); err != nil {
+		return 0, fmt.Errorf("destroy expired unstarted runner %q: %w", instance.ID, err)
+	}
+	return 1, nil
+}
+
+func (orchestrator *Orchestrator) recoverExpiredClaim(
+	ctx context.Context,
+	processing core.ProcessingJob,
+	removedRunners int,
+) (reconciliationChange, error) {
+	change := reconciliationChange{removedRunners: removedRunners}
+	operations, err := orchestrator.sourceOperationsFor(processing.Job)
+	if err != nil {
 		return change, err
 	}
+	if cleanupErr := orchestrator.cleanupBootstrapWith(
+		ctx, processing, operations.RunnerBootstrapProvider,
+	); cleanupErr != nil {
+		return change, cleanupErr
+	}
 	processing.Job.EnqueuedAt = orchestrator.currentTime()
-	transition, err := orchestrator.store.RecoverUnstartedProcessing(ctx, processing)
+	resolution, err := orchestrator.finalizeProvisioningFailure(
+		ctx,
+		processing,
+		operations.RunnerBootstrapProvider,
+		func() (core.RetryResult, error) {
+			return orchestrator.transitions.RecoverUnstartedProcessing(ctx, processing)
+		},
+	)
 	if err != nil {
 		return change, fmt.Errorf("recover expired processing job %s: %w", processing.Job.ID, err)
 	}
-	if transition.Outcome == core.RetryRequeued {
-		change.removedProcessing = 1
-	}
-	if transition.Outcome == core.RetryRequeued || transition.Outcome == core.RetryMissing {
-		change.noLongerProcessing = 1
-	}
+	transition := provisioningFailureTransition(resolution, processing.Job)
+	change.removedProcessing = transition.removedProcessing
+	change.noLongerProcessing = transition.noLongerProcessing
+	change.reportedProvisioningFailures = transition.reportedProvisioningFailures
 	return change, nil
 }
 
@@ -265,12 +297,12 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 		}
 		change.removedRunners = 1
 	}
-	if !processing.RunnerStarted {
+	if !processing.RunnerAccepted {
 		if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
 			return change, err
 		}
 	}
-	transition, err := orchestrator.store.RemoveTerminal(ctx, processing.Job.ID)
+	transition, err := orchestrator.transitions.RemoveTerminal(ctx, processing.Job.ID)
 	if err != nil {
 		return change, fmt.Errorf("remove terminal processing job %s: %w", processing.Job.ID, err)
 	}
@@ -279,28 +311,59 @@ func (orchestrator *Orchestrator) cleanupTerminalProcessing(
 	}
 	if transition.Outcome == core.TerminalRemoved || transition.Outcome == core.TerminalMissing {
 		change.noLongerProcessing = 1
+		change.finalizedTerminalJobs = []core.Job{processing.Job}
 	}
 	return change, nil
 }
 
-func (orchestrator *Orchestrator) retryIfUnstarted(ctx context.Context, processing core.ProcessingJob) (removed, gone int, resultErr error) {
-	if processing.RunnerStarted {
-		return 0, 0, nil
+func (orchestrator *Orchestrator) retryIfUnstarted(
+	ctx context.Context,
+	processing core.ProcessingJob,
+) (reconciliationChange, error) {
+	if processing.RunnerAccepted {
+		return reconciliationChange{}, nil
 	}
-	if err := orchestrator.cleanupBootstrap(ctx, processing); err != nil {
-		return 0, 0, err
-	}
-	transition, err := orchestrator.store.RetryUnstarted(ctx, processing.Job.ID)
+	operations, err := orchestrator.sourceOperationsFor(processing.Job)
 	if err != nil {
-		return 0, 0, fmt.Errorf("retry unstarted processing job %s: %w", processing.Job.ID, err)
+		return reconciliationChange{}, err
 	}
-	if transition.Outcome == core.RetryRequeued {
-		return 1, 1, nil
+	if cleanupErr := orchestrator.cleanupBootstrapWith(
+		ctx, processing, operations.RunnerBootstrapProvider,
+	); cleanupErr != nil {
+		return reconciliationChange{}, cleanupErr
 	}
-	if transition.Outcome == core.RetryMissing {
-		return 0, 1, nil
+	resolution, err := orchestrator.finalizeProvisioningFailure(
+		ctx,
+		processing,
+		operations.RunnerBootstrapProvider,
+		func() (core.RetryResult, error) {
+			return orchestrator.transitions.RetryUnstarted(ctx, processing)
+		},
+	)
+	if err != nil {
+		return reconciliationChange{}, fmt.Errorf("retry unstarted processing job %s: %w", processing.Job.ID, err)
 	}
-	return 0, 0, nil
+	return provisioningFailureTransition(resolution, processing.Job), nil
+}
+
+func provisioningFailureTransition(
+	resolution provisioningFailureResolution,
+	job core.Job,
+) reconciliationChange {
+	if resolution.finalized {
+		change := reconciliationChange{removedProcessing: 1, noLongerProcessing: 1}
+		if resolution.reported {
+			change.reportedProvisioningFailures = []core.Job{job}
+		}
+		return change
+	}
+	if resolution.outcome == core.RetryRequeued {
+		return reconciliationChange{removedProcessing: 1, noLongerProcessing: 1}
+	}
+	if resolution.outcome == core.RetryMissing {
+		return reconciliationChange{noLongerProcessing: 1}
+	}
+	return reconciliationChange{}
 }
 
 func appendFailure(failures []error, err error) []error {
@@ -308,6 +371,30 @@ func appendFailure(failures []error, err error) []error {
 		return failures
 	}
 	return append(failures, err)
+}
+
+func partitionProvisioningFailures(
+	processing []core.ProcessingJob,
+) (stateOnly, providerDependent []core.ProcessingJob) {
+	for _, job := range processing {
+		if job.ProvisioningFailure != core.ProvisioningFailureOpen {
+			stateOnly = append(stateOnly, job)
+			continue
+		}
+		providerDependent = append(providerDependent, job)
+	}
+	return stateOnly, providerDependent
+}
+
+func mergePoolReconciliation(first, second PoolReconciliation) PoolReconciliation {
+	first.RemovedProcessing += second.RemovedProcessing
+	first.RemovedRunners += second.RemovedRunners
+	first.RemainingProcessing += second.RemainingProcessing
+	first.ReportedProvisioningFailures = append(
+		first.ReportedProvisioningFailures, second.ReportedProvisioningFailures...,
+	)
+	first.FinalizedTerminalJobs = append(first.FinalizedTerminalJobs, second.FinalizedTerminalJobs...)
+	return first
 }
 
 func instancesForPool(instances []execution.RunnerInstance, runnerPool core.RunnerPool) []execution.RunnerInstance {

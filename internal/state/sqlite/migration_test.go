@@ -2,14 +2,16 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestInitializeUpgradesSchema105WithoutDiscardingState(t *testing.T) {
+func TestInitializeUpgradesSchema108WithProvisioningFailureState(t *testing.T) {
 	t.Parallel()
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -17,28 +19,86 @@ func TestInitializeUpgradesSchema105WithoutDiscardingState(t *testing.T) {
 	}
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(
-		sqlmock.NewRows([]string{"user_version"}).AddRow(105))
+		sqlmock.NewRows([]string{"user_version"}).AddRow(108))
 	mock.ExpectBegin()
-	mock.ExpectExec("ALTER TABLE runnerfoundry_processing_jobs ADD COLUMN runner_name").
+	mock.ExpectExec("ALTER TABLE runnerfoundry_processing_jobs").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("UPDATE runnerfoundry_processing_jobs SET runner_name").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta(sqliteGitHubMemberRunnerPoolsSchema)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS runnerfoundry_provisioning_failures").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA user_version = 109")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
-	mock.ExpectClose()
 	if err = initialize(context.Background(), database); err != nil {
-		t.Fatalf("upgrade schema 105: %v", err)
-	}
-	if err = database.Close(); err != nil {
-		t.Fatalf("close database protocol fake: %v", err)
+		t.Fatalf("upgrade schema 108: %v", err)
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("schema upgrade protocol: %v", err)
 	}
 }
 
-func TestInitializeUpgradesSchema106WithGitHubDeclarations(t *testing.T) {
+func TestInitializeReportsExistingSchemaUpgradeFailures(t *testing.T) {
+	protocolErr := errors.New("protocol")
+	for _, version := range []int{106, 107} {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create database protocol fake: %v", err)
+		}
+		mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(
+			sqlmock.NewRows([]string{"user_version"}).AddRow(version))
+		mock.ExpectBegin().WillReturnError(protocolErr)
+		if err = initialize(context.Background(), database, testSchemaExtension{}); !errors.Is(err, protocolErr) {
+			t.Fatalf("initialize schema %d error = %v", version, err)
+		}
+		if err = mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("schema %d protocol: %v", version, err)
+		}
+	}
+}
+
+func TestSQLite108UpgradeReportsEveryProtocolFailure(t *testing.T) {
+	for failureStep := range 5 {
+		t.Run(fmt.Sprintf("step %d", failureStep), func(t *testing.T) {
+			assertSQLite108UpgradeFailure(t, failureStep)
+		})
+	}
+}
+
+func assertSQLite108UpgradeFailure(t *testing.T, failureStep int) {
+	t.Helper()
+	protocolErr := errors.New("protocol")
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create database protocol fake: %v", err)
+	}
+	if failureStep == 0 {
+		mock.ExpectBegin().WillReturnError(protocolErr)
+	} else {
+		mock.ExpectBegin()
+		expectSQLite108MigrationSteps(mock, failureStep, protocolErr)
+	}
+	if err = migrateSQLite108(context.Background(), database); !errors.Is(err, protocolErr) {
+		t.Fatalf("upgrade error = %v", err)
+	}
+	if err = mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("upgrade protocol: %v", err)
+	}
+}
+
+func expectSQLite108MigrationSteps(mock sqlmock.Sqlmock, failureStep int, protocolErr error) {
+	statements := []string{addSQLiteProvisioningFailureFenceSQL, sqliteProvisioningFailureSchema, sqliteSchemaVersionSQL}
+	for step, statement := range statements {
+		expectation := mock.ExpectExec(regexp.QuoteMeta(statement))
+		if step+1 == failureStep {
+			expectation.WillReturnError(protocolErr)
+			mock.ExpectRollback()
+			return
+		}
+		expectation.WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	mock.ExpectCommit().WillReturnError(protocolErr)
+}
+
+func TestInitializeRequiresExtensionForSchema106(t *testing.T) {
 	t.Parallel()
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -47,143 +107,184 @@ func TestInitializeUpgradesSchema106WithGitHubDeclarations(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("PRAGMA foreign_keys = ON")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta("PRAGMA user_version")).WillReturnRows(
 		sqlmock.NewRows([]string{"user_version"}).AddRow(106))
-	expectSQLite106Upgrade(mock, nil, nil, nil)
-	if err = initialize(context.Background(), database); err != nil {
-		t.Fatalf("upgrade schema 106: %v", err)
+	if err = initialize(context.Background(), database); err == nil {
+		t.Fatal("expected missing schema extension error")
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("schema upgrade protocol: %v", err)
 	}
 }
 
-func TestSQLite106UpgradeReportsBeginFailure(t *testing.T) {
-	t.Parallel()
-	assertSQLite106UpgradeFailure(t, func(mock sqlmock.Sqlmock, protocolErr error) {
-		mock.ExpectBegin().WillReturnError(protocolErr)
-	})
+func expectSQLite108Upgrade(mock sqlmock.Sqlmock) {
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(addSQLiteProvisioningFailureFenceSQL)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(sqliteProvisioningFailureSchema)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
 }
 
-func TestSQLite106UpgradeReportsDeclarationFailure(t *testing.T) {
-	t.Parallel()
-	assertSQLite106UpgradeFailure(t, func(mock sqlmock.Sqlmock, protocolErr error) {
-		expectSQLite106Upgrade(mock, protocolErr, nil, nil)
-	})
+type testSchemaExtension struct{}
+
+func (testSchemaExtension) SchemaStatements() []string { return nil }
+
+func (testSchemaExtension) Upgrade(context.Context, *sql.Tx, int) (int, bool, error) {
+	return 108, true, nil
 }
 
-func TestSQLite106UpgradeReportsVersionFailure(t *testing.T) {
-	t.Parallel()
-	assertSQLite106UpgradeFailure(t, func(mock sqlmock.Sqlmock, protocolErr error) {
-		expectSQLite106Upgrade(mock, nil, protocolErr, nil)
-	})
+func TestSQLiteSchemaCompositionIncludesExtensions(t *testing.T) {
+	base := len(sqliteSchemaStatements())
+	statements := sqliteSchemaStatements(schemaExtensionFake{statements: []string{"extension"}})
+	if len(statements) != base+1 || statements[len(statements)-1] != "extension" {
+		t.Fatalf("statements = %#v", statements)
+	}
 }
 
-func TestSQLite106UpgradeReportsCommitFailure(t *testing.T) {
-	t.Parallel()
-	assertSQLite106UpgradeFailure(t, func(mock sqlmock.Sqlmock, protocolErr error) {
-		expectSQLite106Upgrade(mock, nil, nil, protocolErr)
-	})
+func TestSQLiteExtensionUpgradeProtocol(t *testing.T) {
+	expectedErr := errors.New("protocol")
+	for _, testCase := range []extensionUpgradeCase{
+		{name: "unhandled", extension: schemaExtensionFake{}, wantHandled: false},
+		{name: "upgrade", extension: schemaExtensionFake{handled: true, err: expectedErr}, wantHandled: true, wantErr: expectedErr},
+		{name: "version", extension: schemaExtensionFake{handled: true, nextVersion: 108}, versionErr: expectedErr,
+			wantHandled: true, wantErr: expectedErr, versionUpdate: true},
+		{name: "commit", extension: schemaExtensionFake{handled: true, nextVersion: 108}, commitErr: expectedErr,
+			wantHandled: true, wantErr: expectedErr, versionUpdate: true},
+		{name: "success", extension: schemaExtensionFake{handled: true, nextVersion: 108},
+			wantHandled: true, versionUpdate: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runSQLiteExtensionUpgradeCase(t, testCase)
+		})
+	}
 }
 
-func assertSQLite106UpgradeFailure(t *testing.T, expect func(sqlmock.Sqlmock, error)) {
+type extensionUpgradeCase struct {
+	name          string
+	extension     SchemaExtension
+	versionErr    error
+	commitErr     error
+	wantHandled   bool
+	wantErr       error
+	versionUpdate bool
+}
+
+func runSQLiteExtensionUpgradeCase(t *testing.T, testCase extensionUpgradeCase) {
 	t.Helper()
-	protocolErr := errors.New("protocol")
 	database, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("create database protocol fake: %v", err)
+		t.Fatal(err)
 	}
-	expect(mock, protocolErr)
-	if err = migrateSQLite106(context.Background(), database); !errors.Is(err, protocolErr) {
-		t.Fatalf("upgrade error = %v", err)
+	mock.ExpectBegin()
+	expectExtensionVersionUpdate(mock, testCase)
+	expectExtensionCompletion(mock, testCase)
+	nextVersion, handled, err := upgradeSQLiteExtension(context.Background(), database, testCase.extension, 106)
+	if handled != testCase.wantHandled || !errors.Is(err, testCase.wantErr) ||
+		(testCase.wantHandled && testCase.wantErr == nil && nextVersion != 108) {
+		t.Fatalf("upgrade = (%d, %t, %v)", nextVersion, handled, err)
 	}
-	if err = mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("upgrade protocol: %v", err)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func expectSQLite106Upgrade(mock sqlmock.Sqlmock, declarationsErr, versionErr, commitErr error) {
-	mock.ExpectBegin()
-	declarations := mock.ExpectExec(regexp.QuoteMeta(sqliteGitHubMemberRunnerPoolsSchema))
-	if declarationsErr != nil {
-		declarations.WillReturnError(declarationsErr)
-		mock.ExpectRollback()
+func expectExtensionVersionUpdate(mock sqlmock.Sqlmock, testCase extensionUpgradeCase) {
+	if !testCase.versionUpdate {
 		return
 	}
-	declarations.WillReturnResult(sqlmock.NewResult(0, 0))
-	version := mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL))
-	if versionErr != nil {
-		version.WillReturnError(versionErr)
-		mock.ExpectRollback()
+	version := mock.ExpectExec(regexp.QuoteMeta("PRAGMA user_version = 108"))
+	if testCase.versionErr != nil {
+		version.WillReturnError(testCase.versionErr)
 		return
 	}
 	version.WillReturnResult(sqlmock.NewResult(0, 0))
-	commit := mock.ExpectCommit()
-	if commitErr != nil {
-		commit.WillReturnError(commitErr)
+}
+
+func expectExtensionCompletion(mock sqlmock.Sqlmock, testCase extensionUpgradeCase) {
+	if testCase.wantErr != nil && testCase.commitErr == nil || !testCase.wantHandled {
+		mock.ExpectRollback()
+		return
 	}
+	if testCase.commitErr != nil {
+		mock.ExpectCommit().WillReturnError(testCase.commitErr)
+		return
+	}
+	mock.ExpectCommit()
 }
 
-func TestSQLite105UpgradeReportsEveryTransactionFailure(t *testing.T) {
-	assertSQLite105UpgradeFailure(t, "begin")
-	assertSQLite105UpgradeFailure(t, "alter")
-	assertSQLite105UpgradeFailure(t, "backfill")
-	assertSQLite105UpgradeFailure(t, "declarations")
-	assertSQLite105UpgradeFailure(t, "version")
-	assertSQLite105UpgradeFailure(t, "commit")
-}
-
-func assertSQLite105UpgradeFailure(t *testing.T, stage string) {
-	t.Helper()
-	protocolErr := errors.New("protocol")
+func TestMigrateSQLiteSchemaReportsExtensionFailure(t *testing.T) {
+	expectedErr := errors.New("protocol")
 	database, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("create database protocol fake: %v", err)
+		t.Fatal(err)
 	}
-	expectSQLite105UpgradeFailure(mock, stage, protocolErr)
-	if err = migrateSQLite105(context.Background(), database); !errors.Is(err, protocolErr) {
-		t.Fatalf("%s error = %v", stage, err)
-	}
-	if err = mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("%s protocol: %v", stage, err)
-	}
-}
-
-func expectSQLite105UpgradeFailure(mock sqlmock.Sqlmock, stage string, protocolErr error) {
-	switch stage {
-	case "begin":
-		mock.ExpectBegin().WillReturnError(protocolErr)
-	case "alter":
-		mock.ExpectBegin()
-		mock.ExpectExec("ALTER TABLE runnerfoundry_processing_jobs ADD COLUMN runner_name").WillReturnError(protocolErr)
-		mock.ExpectRollback()
-	case "backfill":
-		expectSQLite105Alter(mock)
-		mock.ExpectExec("UPDATE runnerfoundry_processing_jobs SET runner_name").WillReturnError(protocolErr)
-		mock.ExpectRollback()
-	case "declarations":
-		expectSQLite105AlterAndBackfill(mock)
-		mock.ExpectExec(regexp.QuoteMeta(sqliteGitHubMemberRunnerPoolsSchema)).WillReturnError(protocolErr)
-		mock.ExpectRollback()
-	case "version":
-		expectSQLite105AlterAndBackfill(mock)
-		mock.ExpectExec(regexp.QuoteMeta(sqliteGitHubMemberRunnerPoolsSchema)).WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnError(protocolErr)
-		mock.ExpectRollback()
-	case "commit":
-		expectSQLite105AlterAndBackfill(mock)
-		mock.ExpectExec(regexp.QuoteMeta(sqliteGitHubMemberRunnerPoolsSchema)).WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(regexp.QuoteMeta(sqliteSchemaVersionSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectCommit().WillReturnError(protocolErr)
-	}
-}
-
-func expectSQLite105Alter(mock sqlmock.Sqlmock) {
 	mock.ExpectBegin()
-	mock.ExpectExec("ALTER TABLE runnerfoundry_processing_jobs ADD COLUMN runner_name").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+	if err := migrateSQLiteSchema(context.Background(), database, 106,
+		schemaExtensionFake{handled: true, err: expectedErr}); !errors.Is(err, expectedErr) {
+		t.Fatalf("error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func expectSQLite105AlterAndBackfill(mock sqlmock.Sqlmock) {
-	expectSQLite105Alter(mock)
-	mock.ExpectExec("UPDATE runnerfoundry_processing_jobs SET runner_name").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+func TestSQLiteExtensionRejectsInvalidVersionTransitions(t *testing.T) {
+	for _, nextVersion := range []int{106, 109} {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+		version, handled, upgradeErr := upgradeSQLiteExtension(context.Background(), database,
+			schemaExtensionFake{handled: true, nextVersion: nextVersion}, 106)
+		if upgradeErr == nil || !handled || version != 106 {
+			t.Fatalf("upgrade = (%d, %t, %v)", version, handled, upgradeErr)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMigrateSQLiteSchemaRejectsUnsupportedExtensionVersion(t *testing.T) {
+	database, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateSQLiteSchema(context.Background(), database, 109); err == nil {
+		t.Fatal("expected unsupported schema version error")
+	}
+}
+
+func TestMigrateSQLiteSchemaContinuesWithNeutralUpgrade(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta("PRAGMA user_version = 108")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	expectSQLite108Upgrade(mock)
+	if err := migrateSQLiteSchema(context.Background(), database, 106,
+		schemaExtensionFake{handled: true, nextVersion: 108}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type schemaExtensionFake struct {
+	statements  []string
+	nextVersion int
+	handled     bool
+	err         error
+}
+
+func (extension schemaExtensionFake) SchemaStatements() []string { return extension.statements }
+
+func (extension schemaExtensionFake) Upgrade(context.Context, *sql.Tx, int) (int, bool, error) {
+	return extension.nextVersion, extension.handled, extension.err
 }

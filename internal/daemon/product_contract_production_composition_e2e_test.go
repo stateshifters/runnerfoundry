@@ -15,6 +15,8 @@ import (
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
+	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 func TestProductContractProductionCompositionReachesDurableLifecycle(t *testing.T) {
@@ -67,7 +69,6 @@ func exerciseProductionCompositionLifecycle(
 	demandCapacity := productionCompositionCapacityCheckpoint(host)
 	host.queue("29", 101, time.Date(2020, time.August, 16, 10, 0, 0, 0, time.UTC))
 	host.queue("30", 102, time.Date(2020, time.August, 16, 10, 1, 0, 0, time.UTC))
-	tickers.awaitPublishedPolls(t, "docker-pool", "libvirt-pool")
 	tickers.complete(t, tickers.source)
 	awaitProductionCompositionValues(t, "production GitHub acknowledgements", host.acknowledged, 2)
 	tickers.complete(t, tickers.source)
@@ -87,31 +88,35 @@ func establishProductionCompositionSessions(
 	host *productionCompositionGitHub,
 ) {
 	t.Helper()
-	awaitProductionCompositionSignal(t, "initial production GitHub reconciliation", tickers.reconciled)
-	tickers.awaitPublishedDiscovery(t)
-	tickers.complete(t, tickers.source)
-	tickers.advanceClock(6 * time.Minute)
-	tickers.complete(t, tickers.membership)
-	tickers.complete(t, tickers.source)
-	awaitProductionCompositionSignal(t, "capacity-aware production GitHub reconciliation", tickers.reconciled)
-	tickers.awaitPublishedDiscovery(t)
-	tickers.complete(t, tickers.source)
-	awaitProductionCompositionValues(t, "production GitHub sessions", host.sessions, 2)
-	installProductionCompositionSessions(t, tickers)
+	routes := []string{"docker-pool", "libvirt-pool"}
+	activationCheckpoint := tickers.logs.sessionActivationCheckpoint()
+	registrationTargets := productionCompositionRouteTargets(routes, host.registrationObservation)
+	sessionTargets := productionCompositionRouteTargets(routes, host.sessionObservation)
+	awaitProductionCompositionRoutes(t, "production GitHub registrations",
+		registrationTargets, host.registrationObservation, func() {
+			tickers.advanceClock(6 * time.Minute)
+			tickers.complete(t, tickers.membership)
+			tickers.complete(t, tickers.source)
+		})
+	awaitProductionCompositionRoutes(t, "production GitHub sessions",
+		sessionTargets, host.sessionObservation,
+		func() { tickers.complete(t, tickers.source) })
+	awaitProductionCompositionSessionActivation(t, tickers, activationCheckpoint)
+	for _, runnerPool := range []core.RunnerPool{"docker-pool", "libvirt-pool"} {
+		tickers.pollCheckpoints[runnerPool], _ = host.pollObservation(string(runnerPool))
+	}
 }
 
-func installProductionCompositionSessions(t *testing.T, tickers productionCompositionTickers) {
-	t.Helper()
-	source := tickers.sourceRuntime
-	missingResults := len(source.desired) - len(source.sessions)
-	results := make([]githubRegistrationOpenResult, 0, missingResults)
-	for index := 0; index < missingResults; index++ {
-		results = append(results, e2eAwaitPublishedSessionOpenResult(t, source.term, index+1, missingResults))
+func productionCompositionRouteTargets(
+	routes []string,
+	observation func(string) (uint64, <-chan struct{}),
+) map[string]uint64 {
+	targets := make(map[string]uint64, len(routes))
+	for _, route := range routes {
+		sequence, _ := observation(route)
+		targets[route] = sequence + 1
 	}
-	for _, result := range results {
-		source.term.openResults <- result
-		tickers.complete(t, tickers.source)
-	}
+	return targets
 }
 
 type productionCompositionStarts struct {
@@ -167,7 +172,6 @@ func markProductionCompositionJobsStarted(
 	t.Helper()
 	host.queueStarted("29", 1101, 101, starts.dockerRunner)
 	host.queueStarted("30", 1102, 102, starts.libvirtRunner)
-	tickers.awaitPublishedPolls(t, "docker-pool", "libvirt-pool")
 	tickers.complete(t, tickers.source)
 	awaitProductionCompositionValues(t, "production started acknowledgements", host.acknowledged, 2)
 	tickers.complete(t, tickers.source)
@@ -186,7 +190,6 @@ func terminalizeProductionCompositionJobs(
 	t.Helper()
 	host.queueCompleted("29", 2101, 101, starts.dockerRunner)
 	host.queueCompleted("30", 2102, 102, starts.libvirtRunner)
-	tickers.awaitPublishedPolls(t, "docker-pool", "libvirt-pool")
 	tickers.complete(t, tickers.source)
 	awaitProductionCompositionValues(t, "production completion acknowledgements", host.acknowledged, 2)
 	tickers.complete(t, tickers.source)
@@ -229,17 +232,15 @@ type productionCompositionObservation struct {
 }
 
 type productionCompositionTickers struct {
-	membership              *e2eManualTicker
-	source                  *e2eManualTicker
-	execution               *e2eManualTicker
-	barriers                map[*e2eManualTicker]*e2eLaneBarrier
-	logs                    *productionCompositionLogDestination
-	reconciled              <-chan struct{}
-	notificationReady       <-chan struct{}
-	advanceClock            func(time.Duration)
-	awaitPublishedDiscovery func(*testing.T)
-	awaitPublishedPolls     func(*testing.T, ...core.RunnerPool)
-	sourceRuntime           *githubSourceRuntime
+	membership          *e2eManualTicker
+	source              *e2eManualTicker
+	execution           *e2eManualTicker
+	barriers            map[*e2eManualTicker]*e2eLaneBarrier
+	logs                *productionCompositionLogDestination
+	notificationReady   <-chan struct{}
+	advanceClock        func(time.Duration)
+	awaitPublishedPolls func(*testing.T, ...core.RunnerPool)
+	pollCheckpoints     map[core.RunnerPool]uint64
 }
 
 func openProductionComposition(
@@ -252,10 +253,14 @@ func openProductionComposition(
 	t.Helper()
 	tickers := productionCompositionTickers{
 		membership: newE2EManualTicker(), source: newE2EManualTicker(), execution: newE2EManualTicker(),
-		barriers: make(map[*e2eManualTicker]*e2eLaneBarrier),
+		barriers: make(map[*e2eManualTicker]*e2eLaneBarrier), pollCheckpoints: make(map[core.RunnerPool]uint64),
 	}
 	for _, ticker := range []*e2eManualTicker{tickers.membership, tickers.source, tickers.execution} {
 		tickers.barriers[ticker] = newE2ELaneBarrier()
+	}
+	tickers.awaitPublishedPolls = func(t *testing.T, runnerPools ...core.RunnerPool) {
+		t.Helper()
+		awaitProductionCompositionPollHarvest(t, tickers, host, runnerPools)
 	}
 	dependencies := productionCompositionDependencies(t, host, dockerCommands, libvirtCommands, &tickers)
 	if configured.State.Postgres != nil {
@@ -280,12 +285,23 @@ func productionCompositionDependencies(
 	t.Helper()
 	dependencies := newProductionDependencies()
 	dependencies.httpTransport = productionCompositionHTTPTransport(t, host)
-	dependencies.dockerCommands, dependencies.libvirtCommands = dockerCommands, libvirtCommands
+	dependencies.scaleSetTransportFactory = func() *http.Transport {
+		return productionCompositionHTTPTransport(t, host)
+	}
+	dependencies.newDockerLauncher = func(
+		configured dockerprovider.ComposeConfig,
+		memberID core.MemberID,
+	) execution.RunnerLauncher {
+		return dockerCommands.newLauncher(configured, memberID)
+	}
+	dependencies.newDockerInventory = func(memberID core.MemberID) execution.RunnerInventory {
+		return dockerCommands.newInventory(memberID)
+	}
+	dependencies.libvirtCommands = libvirtCommands
 	dependencies.readHostname = func() (string, error) { return "production-member", nil }
 	configureProductionCompositionClockAndLogging(&dependencies, tickers)
 	dependencies.readFile = productionCompositionFileReader(t)
 	configureProductionCompositionMaintenanceObservation(t, &dependencies, tickers)
-	captureProductionCompositionSource(&dependencies, tickers)
 	return dependencies
 }
 
@@ -297,10 +313,9 @@ func configureProductionCompositionClockAndLogging(
 	var clockAdvance atomic.Int64
 	dependencies.currentTime = func() time.Time { return baseTime.Add(time.Duration(clockAdvance.Load())) }
 	tickers.advanceClock = func(duration time.Duration) { clockAdvance.Add(int64(duration)) }
-	logDestination := &productionCompositionLogDestination{reconciled: make(chan struct{}, 4)}
+	logDestination := &productionCompositionLogDestination{sessionActivationChanged: make(chan struct{})}
 	dependencies.logDestinationFactory = logDestination
 	tickers.logs = logDestination
-	tickers.reconciled = logDestination.reconciled
 }
 
 func configureProductionCompositionMaintenanceObservation(
@@ -328,33 +343,6 @@ func configureProductionCompositionMaintenanceObservation(
 			return
 		}
 		barrier.complete()
-	}
-}
-
-func captureProductionCompositionSource(
-	dependencies *productionDependencies,
-	tickers *productionCompositionTickers,
-) {
-	buildGeneration := dependencies.buildGeneration
-	dependencies.buildGeneration = func(
-		ctx context.Context,
-		configured config.Config,
-		state *productionState,
-		gate *localLeadershipGate,
-		report func(error),
-		production productionDependencies,
-	) (*maintenanceGeneration, error) {
-		generation, err := buildGeneration(ctx, configured, state, gate, report, production)
-		if err != nil {
-			return nil, err
-		}
-		source, err := githubSourceFromMaintenance(generation)
-		if err != nil {
-			return nil, err
-		}
-		tickers.sourceRuntime = source
-		installProductionCompositionSourceBarriers(source, tickers)
-		return generation, nil
 	}
 }
 
@@ -422,69 +410,6 @@ func buildProductionCompositionGeneration(
 	return generation
 }
 
-func installProductionCompositionSourceBarriers(
-	source *githubSourceRuntime,
-	tickers *productionCompositionTickers,
-) {
-	tickers.awaitPublishedDiscovery = func(t *testing.T) {
-		t.Helper()
-		awaitProductionCompositionDiscovery(t, source)
-	}
-	tickers.awaitPublishedPolls = func(t *testing.T, runnerPools ...core.RunnerPool) {
-		t.Helper()
-		awaitProductionCompositionPolls(t, source, runnerPools)
-	}
-}
-
-func awaitProductionCompositionDiscovery(t *testing.T, source *githubSourceRuntime) {
-	t.Helper()
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-source.term.discoveryResult:
-		source.term.discoveryResult <- result
-	case <-timer.C:
-		t.Fatal("timed out waiting for published production discovery result")
-	}
-}
-
-func awaitProductionCompositionPolls(
-	t *testing.T,
-	source *githubSourceRuntime,
-	runnerPools []core.RunnerPool,
-) {
-	t.Helper()
-	for _, runnerPool := range runnerPools {
-		var attempt *githubPollAttempt
-		for _, adapter := range source.adapters {
-			if adapter.RunnerPool == runnerPool {
-				attempt = source.polls[adapter]
-				break
-			}
-		}
-		awaitProductionCompositionPollResult(t, runnerPool, attempt)
-	}
-}
-
-func awaitProductionCompositionPollResult(
-	t *testing.T,
-	runnerPool core.RunnerPool,
-	attempt *githubPollAttempt,
-) {
-	t.Helper()
-	if attempt == nil {
-		t.Fatalf("production GitHub poll for Runner Pool %q was not launched", runnerPool)
-	}
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-attempt.result:
-		attempt.result <- result
-	case <-timer.C:
-		t.Fatalf("timed out waiting for published production GitHub poll result for Runner Pool %q", runnerPool)
-	}
-}
-
 func (tickers productionCompositionTickers) complete(t *testing.T, ticker *e2eManualTicker) {
 	t.Helper()
 	barrier := tickers.barriers[ticker]
@@ -496,12 +421,129 @@ func (tickers productionCompositionTickers) complete(t *testing.T, ticker *e2eMa
 	barrier.waitAfter(t, "production-composition maintenance lane", before)
 }
 
+func awaitProductionCompositionRoutes(
+	t *testing.T,
+	description string,
+	targets map[string]uint64,
+	observation func(string) (uint64, <-chan struct{}),
+	cycle func(),
+) {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		pending := make([]string, 0, len(targets))
+		for route, target := range targets {
+			sequence, _ := observation(route)
+			if sequence < target {
+				pending = append(pending, route)
+			}
+		}
+		if len(pending) == 0 {
+			return
+		}
+		cycle()
+		select {
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s; pending routes %v", description, pending)
+		default:
+		}
+	}
+}
+
+func awaitProductionCompositionSessionActivation(
+	t *testing.T,
+	tickers productionCompositionTickers,
+	checkpoint uint64,
+) {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		completed, _ := tickers.logs.sessionActivationAfter(checkpoint)
+		if completed {
+			return
+		}
+		tickers.complete(t, tickers.source)
+		select {
+		case <-timer.C:
+			t.Fatal("timed out waiting for production GitHub session activation")
+		default:
+		}
+	}
+}
+
+func awaitProductionCompositionPollHarvest(
+	t *testing.T,
+	tickers productionCompositionTickers,
+	host *productionCompositionGitHub,
+	runnerPools []core.RunnerPool,
+) {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	targets, completed := productionCompositionPollTargets(tickers, host, runnerPools)
+	for {
+		pending := pendingProductionCompositionPolls(tickers, host, runnerPools, targets, completed)
+		if len(pending) == 0 {
+			tickers.complete(t, tickers.source)
+			return
+		}
+		tickers.complete(t, tickers.source)
+		select {
+		case <-timer.C:
+			t.Fatalf("timed out waiting for production GitHub poll harvest; pending Runner Pools %v", pending)
+		default:
+		}
+	}
+}
+
+func productionCompositionPollTargets(
+	tickers productionCompositionTickers,
+	host *productionCompositionGitHub,
+	runnerPools []core.RunnerPool,
+) (map[core.RunnerPool]uint64, map[core.RunnerPool]bool) {
+	targets := make(map[core.RunnerPool]uint64, len(runnerPools))
+	completed := make(map[core.RunnerPool]bool, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		if host.omitsInitialStatistics(string(runnerPool)) {
+			completed[runnerPool] = true
+			continue
+		}
+		targets[runnerPool] = tickers.pollCheckpoints[runnerPool] + 2
+	}
+	return targets, completed
+}
+
+func pendingProductionCompositionPolls(
+	tickers productionCompositionTickers,
+	host *productionCompositionGitHub,
+	runnerPools []core.RunnerPool,
+	targets map[core.RunnerPool]uint64,
+	completed map[core.RunnerPool]bool,
+) []core.RunnerPool {
+	pending := make([]core.RunnerPool, 0, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		if completed[runnerPool] {
+			continue
+		}
+		sequence, _ := host.pollObservation(string(runnerPool))
+		if sequence < targets[runnerPool] {
+			pending = append(pending, runnerPool)
+			continue
+		}
+		completed[runnerPool] = true
+		tickers.pollCheckpoints[runnerPool] = sequence
+	}
+	return pending
+}
+
 func loadProductionCompositionConfig(t *testing.T) config.Config {
 	t.Helper()
 	document := `github:
-  app:
-    app_id: 12345
-    private_key_file: github.pem
+  apps:
+    - app_id: 12345
+      private_key_file: github.pem
   discovery_interval: 5m
 state:
   path: ":memory:"
@@ -530,7 +572,7 @@ func assertProductionCompositionProcessing(
 	runnerPool core.RunnerPool,
 ) core.ProcessingJob {
 	t.Helper()
-	records, err := runtime.state.store.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
+	records, err := runtime.state.store.processing.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
 	if err != nil || len(records) != 1 || records[0].Job.RunnerPool != runnerPool || records[0].InventoryEndpointID == "" {
 		t.Fatalf("production processing for %q = (%s, %v)", runnerPool, describeProcessing(records), err)
 	}
@@ -545,9 +587,9 @@ func assertProductionCompositionObservation(
 ) {
 	t.Helper()
 	processing := assertProductionCompositionProcessing(t, runtime, runnerPool)
-	if processing.RunnerStarted != want.runnerStarted || processing.SourceTerminal != want.sourceTerminal {
+	if processing.RunnerAccepted != want.runnerStarted || processing.SourceTerminal != want.sourceTerminal {
 		t.Fatalf("production processing observation for %q = started:%t terminal:%t, want started:%t terminal:%t",
-			runnerPool, processing.RunnerStarted, processing.SourceTerminal, want.runnerStarted, want.sourceTerminal)
+			runnerPool, processing.RunnerAccepted, processing.SourceTerminal, want.runnerStarted, want.sourceTerminal)
 	}
 }
 
@@ -557,7 +599,7 @@ func assertNoProductionCompositionProcessing(
 	runnerPool core.RunnerPool,
 ) {
 	t.Helper()
-	records, err := runtime.state.store.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
+	records, err := runtime.state.store.processing.ProcessingByMember(context.Background(), runtime.state.member, runnerPool)
 	if err != nil || len(records) != 0 {
 		t.Fatalf("production processing after cleanup for %q = (%s, %v)", runnerPool, describeProcessing(records), err)
 	}
@@ -642,12 +684,24 @@ func pendingProductionCompositionCapacities(
 	defer host.mutex.Unlock()
 	pending := make(map[string]productionCompositionCapacity, 2)
 	for _, runnerPool := range []string{"docker-pool", "libvirt-pool"} {
-		observation, exists := host.capacities[runnerPool]
-		if !exists || observation.maximum != maximum || after != nil && observation.tick <= after[runnerPool] {
-			pending[runnerPool] = observation
+		if !productionCompositionCapacityObserved(host.capacityHistory[runnerPool], maximum, after[runnerPool]) {
+			pending[runnerPool] = host.capacities[runnerPool]
 		}
 	}
 	return pending, host.capacityChanged
+}
+
+func productionCompositionCapacityObserved(
+	history []productionCompositionCapacity,
+	maximum string,
+	after uint64,
+) bool {
+	for _, observation := range history {
+		if observation.tick > after && observation.maximum == maximum {
+			return true
+		}
+	}
+	return false
 }
 
 func productionCompositionCapacityCheckpoint(host *productionCompositionGitHub) map[string]uint64 {

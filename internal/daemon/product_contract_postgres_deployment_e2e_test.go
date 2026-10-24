@@ -52,10 +52,10 @@ func completeAcceptedPostgresProcessingAfterReconnect(
 	t.Helper()
 	second := newE2EHarness(t, state, "e2e-reconnect-member", false)
 	second.establishSourceSession()
-	processing, err := second.runtime.state.store.ProcessingByMember(
+	processing, err := second.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted {
 		t.Fatalf("accepted processing after PostgreSQL reconnect = %s, error = %v", describeProcessing(processing), err)
 	}
 	second.deliver(&upstream.RunnerScaleSetMessage{
@@ -64,7 +64,7 @@ func completeAcceptedPostgresProcessingAfterReconnect(
 			JobMessageBase: upstream.JobMessageBase{RunnerRequestID: 601}}},
 	})
 	second.completeMaintenanceCycle(second.execution)
-	processing, err = second.runtime.state.store.ProcessingByMember(
+	processing, err = second.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 0 {
@@ -78,7 +78,6 @@ func TestProductContractPostgresNotificationWakesDurableQueue(t *testing.T) {
 	}
 	harness := newPostgresE2EHarness(t)
 	harness.establishSourceSession()
-	harness.await("PostgreSQL queue listener readiness", harness.notificationReady)
 	harness.deliver(&upstream.RunnerScaleSetMessage{
 		Statistics: e2eMessageStatistics(1),
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{

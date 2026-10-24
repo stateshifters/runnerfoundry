@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type Session struct {
 	key               SessionKey
 	sessionID         uuid.UUID
 	initialStatistics *upstream.RunnerScaleSetStatistic
+	httpClient        *http.Client
 }
 
 // OpenSession creates the message session used to poll one registered Runner Pool.
@@ -34,16 +36,22 @@ func (client *Client) OpenSession(
 	if client == nil || client.openSession == nil {
 		return nil, errors.New("GitHub session APIs are required")
 	}
-	messageAPI, err := client.openSession(ctx, int(registration.ID), owner)
+	httpClient, err := newHTTPClient(client.transportFactory)
 	if err != nil {
+		return nil, err
+	}
+	messageAPI, err := client.openSession(ctx, int(registration.ID), owner, upstream.WithRetryableHTTPClint(httpClient))
+	if err != nil {
+		httpClient.HTTPClient.CloseIdleConnections()
 		return nil, fmt.Errorf("open message session for runner scale set %d: %w", registration.ID, err)
 	}
-	sessionID, initialStatistics := initialSessionDetails(messageAPI)
+	initialSession := messageAPI.Session()
 	return &Session{
 		messageAPI:        messageAPI,
 		key:               SessionKey{Repository: client.repositoryURL, RunnerPool: registration.Name},
-		sessionID:         sessionID,
-		initialStatistics: copyStatistics(initialStatistics),
+		sessionID:         initialSession.SessionID,
+		initialStatistics: copyStatistics(initialSession.Statistics),
+		httpClient:        httpClient.HTTPClient,
 	}, nil
 }
 
@@ -57,41 +65,6 @@ func (session *Session) InitialStatistics() *upstream.RunnerScaleSetStatistic {
 	return copyStatistics(session.initialStatistics)
 }
 
-type upstreamMessageSession struct {
-	getMessage        func(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error)
-	deleteMessage     func(context.Context, int) error
-	acquireJobs       func(context.Context, []int64) ([]int64, error)
-	closeSession      func(context.Context) error
-	sessionID         uuid.UUID
-	initialStatistics *upstream.RunnerScaleSetStatistic
-}
-
-func adaptUpstreamMessageSession(client *upstream.MessageSessionClient) upstreamMessageSession {
-	initialSession := client.Session()
-	return upstreamMessageSession{
-		getMessage:        client.GetMessage,
-		deleteMessage:     client.DeleteMessage,
-		acquireJobs:       client.AcquireJobs,
-		closeSession:      client.Close,
-		sessionID:         initialSession.SessionID,
-		initialStatistics: copyStatistics(initialSession.Statistics),
-	}
-}
-
-func (session upstreamMessageSession) initialSessionDetails() (uuid.UUID, *upstream.RunnerScaleSetStatistic) {
-	return session.sessionID, copyStatistics(session.initialStatistics)
-}
-
-func initialSessionDetails(messageAPI messageSessionAPI) (uuid.UUID, *upstream.RunnerScaleSetStatistic) {
-	details, available := messageAPI.(interface {
-		initialSessionDetails() (uuid.UUID, *upstream.RunnerScaleSetStatistic)
-	})
-	if !available {
-		return uuid.Nil, nil
-	}
-	return details.initialSessionDetails()
-}
-
 func copyStatistics(statistics *upstream.RunnerScaleSetStatistic) *upstream.RunnerScaleSetStatistic {
 	if statistics == nil {
 		return nil
@@ -100,49 +73,15 @@ func copyStatistics(statistics *upstream.RunnerScaleSetStatistic) *upstream.Runn
 	return &copied
 }
 
-func (session upstreamMessageSession) GetMessage(
-	ctx context.Context,
-	lastMessageID int,
-	maxCapacity int,
-) (*upstream.RunnerScaleSetMessage, error) {
-	message, err := session.getMessage(ctx, lastMessageID, maxCapacity)
-	if err == nil && message == nil {
-		return nil, ErrNoMessage
-	}
-	if err != nil {
-		return nil, fmt.Errorf("receive upstream scale-set message: %w", err)
-	}
-	return message, nil
-}
-
-func (session upstreamMessageSession) DeleteMessage(ctx context.Context, messageID int) error {
-	if err := session.deleteMessage(ctx, messageID); err != nil {
-		return fmt.Errorf("delete upstream scale-set message: %w", err)
-	}
-	return nil
-}
-
-func (session upstreamMessageSession) AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error) {
-	acquiredIDs, err := session.acquireJobs(ctx, requestIDs)
-	if err != nil {
-		return nil, fmt.Errorf("acquire upstream jobs: %w", err)
-	}
-	return acquiredIDs, nil
-}
-
-func (session upstreamMessageSession) Close(ctx context.Context) error {
-	if err := session.closeSession(ctx); err != nil {
-		return fmt.Errorf("close upstream message session: %w", err)
-	}
-	return nil
-}
-
 func (session *Session) GetMessage(
 	ctx context.Context,
 	lastMessageID int,
 	maxCapacity int,
 ) (*upstream.RunnerScaleSetMessage, error) {
 	message, err := session.messageAPI.GetMessage(ctx, lastMessageID, maxCapacity)
+	if err == nil && message == nil {
+		return nil, ErrNoMessage
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get GitHub scale-set message: %w", err)
 	}
@@ -157,6 +96,9 @@ func (session *Session) DeleteMessage(ctx context.Context, messageID int) error 
 }
 
 func (session *Session) Close(ctx context.Context) error {
+	if session.httpClient != nil {
+		defer session.httpClient.CloseIdleConnections()
+	}
 	if err := session.messageAPI.Close(ctx); err != nil {
 		return fmt.Errorf("close GitHub scale-set message session: %w", err)
 	}
@@ -191,6 +133,10 @@ func (client *Client) GenerateBootstrap(
 	if client == nil || client.jit == nil {
 		return nil, errors.New("GitHub JIT API is required")
 	}
+	if err := client.lockRepository(ctx); err != nil {
+		return nil, err
+	}
+	defer client.unlockRepository()
 	jitConfig, err := client.jit.GenerateJitRunnerConfig(ctx, &upstream.RunnerScaleSetJitRunnerSetting{
 		Name: runnerName,
 	}, int(registration.ID))
@@ -209,6 +155,10 @@ func (client *Client) CleanupRunner(ctx context.Context, runnerName string) erro
 	if client == nil || client.jit == nil {
 		return errors.New("GitHub JIT API is required")
 	}
+	if err := client.lockRepository(ctx); err != nil {
+		return err
+	}
+	defer client.unlockRepository()
 	runner, err := client.jit.GetRunnerByName(ctx, runnerName)
 	if err != nil {
 		return fmt.Errorf("find JIT runner %q: %w", runnerName, err)

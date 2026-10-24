@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	"github.com/stateshifters/runnerfoundry/internal/execution"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
@@ -133,7 +133,7 @@ type sqliteDurabilityState struct {
 func persistSQLiteDurabilityState(t *testing.T, databasePath string) sqliteDurabilityState {
 	t.Helper()
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, databasePath)
+	store, err := sqlite.Open(ctx, databasePath, githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("open SQLite store: %v", err)
 	}
@@ -141,7 +141,7 @@ func persistSQLiteDurabilityState(t *testing.T, databasePath string) sqliteDurab
 	publishSQLiteDurabilityMember(t, store, state)
 	state.claimed = persistSQLiteProcessing(t, store, state)
 	state.queued = persistSQLiteQueuedDemand(t, store, state)
-	persistSQLiteRegistration(t, store, state.registration)
+	persistSQLiteRegistration(t, githubsqlite.NewStore(store.AdapterExtension(), store), state.registration)
 	if err = store.Close(); err != nil {
 		t.Fatalf("close SQLite store before restart: %v", err)
 	}
@@ -166,7 +166,7 @@ func newSQLiteDurabilityState() sqliteDurabilityState {
 		EnqueuedAt: state.publishedAt,
 	}
 	state.registration = githubsource.Registration{
-		RepositoryURL: "https://github.com/example/repository", RunnerPool: state.runnerPool,
+		GitHubAppID: 1, RepositoryURL: "https://github.com/example/repository", RunnerPool: state.runnerPool,
 		InstallationID: 11, RunnerGroupID: 22, ScaleSetID: 33,
 	}
 	return state
@@ -190,6 +190,7 @@ func persistSQLiteProcessing(t *testing.T, store *sqlite.Store, state sqliteDura
 		t.Fatalf("queue processing candidate = %+v, error = %v", queuedProcessing, err)
 	}
 	claim := core.ProcessingClaim{
+		AttemptID:           core.NewAttemptID(),
 		MemberID:            state.memberID,
 		ClaimedAt:           state.publishedAt.Add(-time.Minute),
 		InventoryEndpointID: "e2e:provider",
@@ -210,7 +211,7 @@ func persistSQLiteQueuedDemand(t *testing.T, store *sqlite.Store, state sqliteDu
 	return queued.Job
 }
 
-func persistSQLiteRegistration(t *testing.T, store *sqlite.Store, registration githubsource.Registration) {
+func persistSQLiteRegistration(t *testing.T, store *githubsqlite.Store, registration githubsource.Registration) {
 	t.Helper()
 	if err := store.UpsertRegistration(context.Background(), registration); err != nil {
 		t.Fatalf("persist GitHub registration: %v", err)
@@ -219,7 +220,7 @@ func persistSQLiteRegistration(t *testing.T, store *sqlite.Store, registration g
 
 func reopenSQLiteDurabilityStore(t *testing.T, databasePath string) *sqlite.Store {
 	t.Helper()
-	reopened, err := sqlite.Open(context.Background(), databasePath)
+	reopened, err := sqlite.Open(context.Background(), databasePath, githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("reopen SQLite store: %v", err)
 	}
@@ -277,11 +278,12 @@ func assertSQLiteDurableProcessing(t *testing.T, reopened *sqlite.Store, state s
 
 func assertSQLiteDurableRegistrations(t *testing.T, reopened *sqlite.Store, state sqliteDurabilityState) {
 	t.Helper()
-	registrations, err := reopened.Registrations(context.Background())
+	store := githubsqlite.NewStore(reopened.AdapterExtension(), reopened)
+	registrations, err := store.Registrations(context.Background())
 	if err != nil || len(registrations) != 1 || registrations[0] != state.registration {
 		t.Fatalf("durable active registration after restart = %+v, error = %v", registrations, err)
 	}
-	ownedRegistrations, err := reopened.OwnedRegistrations(context.Background())
+	ownedRegistrations, err := store.OwnedRegistrations(context.Background())
 	if err != nil || len(ownedRegistrations) != 1 || ownedRegistrations[0] != state.registration {
 		t.Fatalf("durable registration ownership after restart = %+v, error = %v", ownedRegistrations, err)
 	}
@@ -292,13 +294,16 @@ func assertSQLiteRecoveryOrdering(t *testing.T, reopened *sqlite.Store, state sq
 	ctx := context.Background()
 	recoveryTime := state.publishedAt.Add(10 * time.Minute)
 	provider := newE2EProvider()
-	orchestrator := runtimeengine.NewOrchestrator(
-		reopened,
-		durabilityBootstrapGenerator{},
+	bootstrap := durabilityBootstrapGenerator{}
+	resolver := &sourceOperationsResolver{byAdapter: map[core.SourceAdapter]core.SourceOperations{
+		state.claimed.Job.Source.Adapter: {RunnerBootstrapProvider: bootstrap},
+	}}
+	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
+		reopened, reopened, reopened,
+		resolver,
 		provider,
 		provider,
-		"recovery-leader",
-		func() time.Time { return recoveryTime },
+		runtimeengine.OrchestratorConfig{MemberID: "recovery-leader", CurrentTime: func() time.Time { return recoveryTime }, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 	recovery, err := orchestrator.RecoverForeignPool(ctx, state.runnerPool)
 	if err != nil || recovery.RemovedProcessing != 1 || recovery.RemainingProcessing != 0 {
@@ -319,7 +324,8 @@ func claimRecoveredJob(
 ) {
 	t.Helper()
 	claimed, err := store.ClaimOldest(context.Background(), state.runnerPool, core.ProcessingClaim{
-		MemberID: state.memberID, ClaimedAt: claimedAt, InventoryEndpointID: provider.EndpointID(),
+		AttemptID: core.NewAttemptID(),
+		MemberID:  state.memberID, ClaimedAt: claimedAt, InventoryEndpointID: provider.EndpointID(),
 	})
 	if err != nil || claimed.Outcome != core.ClaimClaimed || claimed.Processing.Job.ID != want {
 		t.Fatalf("%s claim after restart recovery = %+v, error = %v", position, claimed, err)
@@ -332,7 +338,7 @@ func assertDurableProcessingClaim(t *testing.T, actual, expected core.Processing
 		actual.Job.RunnerPool != expected.Job.RunnerPool || actual.RunnerName != expected.RunnerName ||
 		actual.MemberID != expected.MemberID || !actual.ClaimedAt.Equal(expected.ClaimedAt) ||
 		actual.InventoryEndpointID != expected.InventoryEndpointID ||
-		actual.RunnerStarted != expected.RunnerStarted || actual.SourceTerminal != expected.SourceTerminal {
+		actual.RunnerAccepted != expected.RunnerAccepted || actual.SourceTerminal != expected.SourceTerminal {
 		t.Fatalf("durable processing claim = %+v, want contract fields from %+v", actual, expected)
 	}
 }
@@ -343,8 +349,8 @@ func (durabilityBootstrapGenerator) GenerateBootstrap(
 	context.Context,
 	core.Job,
 	core.RunnerName,
-) (execution.Bootstrap, error) {
-	return execution.NewBootstrap(nil), nil
+) (core.Bootstrap, error) {
+	return core.NewBootstrap(nil), nil
 }
 
 func (durabilityBootstrapGenerator) CleanupBootstrap(context.Context, core.Job, core.RunnerName) error {

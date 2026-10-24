@@ -180,9 +180,9 @@ func TestAdapterReportsCancelledDurableHandlingWithoutOperationalFailure(t *test
 func TestAdapterReportsCancelledLifecyclePersistenceWithoutOperationalFailure(t *testing.T) {
 	for _, message := range []*upstream.RunnerScaleSetMessage{
 		{MessageID: 19, Statistics: &upstream.RunnerScaleSetStatistic{},
-			JobStartedMessages: []*upstream.JobStarted{{RunnerName: "legacy-runner"}}},
+			JobStartedMessages: []*upstream.JobStarted{{RunnerName: "external-runner"}}},
 		{MessageID: 20, Statistics: &upstream.RunnerScaleSetStatistic{},
-			JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-runner"}}},
+			JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "external-runner"}}},
 	} {
 		assertCanceledLifecyclePersistence(t, message)
 	}
@@ -269,11 +269,11 @@ func (client *cancellationMessageClient) DeleteMessage(ctx context.Context, _ in
 
 type cancelingLifecycleEventHandler struct{ cancel context.CancelFunc }
 
-func (*cancelingLifecycleEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+func (*cancelingLifecycleEventHandler) IngestDemand(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, nil
 }
 
-func (handler *cancelingLifecycleEventHandler) RunnerStarted(
+func (handler *cancelingLifecycleEventHandler) ObserveRunnerAcceptance(
 	ctx context.Context,
 	_ core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -281,7 +281,7 @@ func (handler *cancelingLifecycleEventHandler) RunnerStarted(
 	return core.ObservationResult{}, fmt.Errorf("runner start canceled: %w", ctx.Err())
 }
 
-func (handler *cancelingLifecycleEventHandler) Terminalize(
+func (handler *cancelingLifecycleEventHandler) ObserveTerminal(
 	ctx context.Context,
 	_ core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -296,6 +296,13 @@ func (*cancelingLifecycleEventHandler) ReconcileAssignedDemand(
 	return githubsource.AssignedDemandResult{}, nil
 }
 
+func (*cancelingLifecycleEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
+}
+
 type cancellationEventHandler struct {
 	requests           int
 	handling           chan struct{}
@@ -303,7 +310,7 @@ type cancellationEventHandler struct {
 	returnContextError bool
 }
 
-func (handler *cancellationEventHandler) Request(ctx context.Context, _ core.JobRequest) (core.EnqueueResult, error) {
+func (handler *cancellationEventHandler) IngestDemand(ctx context.Context, _ core.JobRequest) (core.EnqueueResult, error) {
 	if handler.handling != nil {
 		close(handler.handling)
 	}
@@ -317,14 +324,14 @@ func (handler *cancellationEventHandler) Request(ctx context.Context, _ core.Job
 	return core.EnqueueResult{Outcome: core.QueueQueued}, nil
 }
 
-func (*cancellationEventHandler) RunnerStarted(
+func (*cancellationEventHandler) ObserveRunnerAcceptance(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 }
 
-func (*cancellationEventHandler) Terminalize(
+func (*cancellationEventHandler) ObserveTerminal(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -336,6 +343,13 @@ func (*cancellationEventHandler) ReconcileAssignedDemand(
 	githubsource.AssignedDemand,
 ) (githubsource.AssignedDemandResult, error) {
 	return githubsource.AssignedDemandResult{}, nil
+}
+
+func (*cancellationEventHandler) ObserveTerminalIfUnaccepted(
+	context.Context,
+	core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalProtected}, nil
 }
 
 func acquiredAvailableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMessage {

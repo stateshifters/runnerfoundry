@@ -6,17 +6,20 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 )
 
 func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := providerWithTemplate(commandRunner, `<domain type="kvm"><name>template</name></domain>`)
-	provider.Config.ConnectionURI = "qemu:///system"
+	provider.config.ConnectionURI = "qemu:///system"
 
-	err := provider.Start(context.Background(), StartRequest{
-		RunnerPoolName: "vm-set",
-		RunnerName:     "vm-set-1",
-		JITConfig:      "secret",
+	err := provider.Start(context.Background(), execution.StartRequest{
+		RunnerPool: "vm-set",
+		RunnerName: "vm-set-1",
+		Bootstrap:  core.NewBootstrap([]byte("secret")),
 	})
 	if err != nil {
 		t.Fatalf("expected start success, got %v", err)
@@ -31,7 +34,7 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 		t.Fatal("expected rendered domain XML on stdin")
 	}
 	if !containsAll(commandRunner.commands[0].Stdin, []string{"<name>vm-set-1</name>", "runnerfoundry:runner-pool", "vm-set", "runnerfoundry.jit=secret"}) {
-		t.Fatalf("expected rendered scaler metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
+		t.Fatalf("expected rendered runner metadata and SMBIOS JIT, got %s", commandRunner.commands[0].Stdin)
 	}
 	if containsAll(commandRunner.commands[0].Stdin, []string{"runnerfoundry.jit-env"}) {
 		t.Fatalf("jit config must not be stored in metadata: %s", commandRunner.commands[0].Stdin)
@@ -40,9 +43,9 @@ func TestStartCreatesTransientDomainFromRenderedStdin(t *testing.T) {
 
 func TestListRecognizesLegacyScaleSetMetadata(t *testing.T) {
 	instances, _ := listOwnedDomainFixture(t)
-	expected := []RunnerInstance{
-		{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning},
-		{ID: "vm-set-2", RunnerName: "vm-set-2", State: RunnerStateCompleted},
+	expected := []execution.RunnerInstance{
+		{ID: "vm-set-1", RunnerName: "vm-set-1", RunnerPool: "vm-set", State: execution.RunnerStateRunning},
+		{ID: "vm-set-2", RunnerName: "vm-set-2", RunnerPool: "vm-set", State: execution.RunnerStateCompleted},
 	}
 	if !reflect.DeepEqual(instances, expected) {
 		t.Fatalf("unexpected instances\nwant %#v\ngot  %#v", expected, instances)
@@ -55,20 +58,43 @@ func TestListRecognizesRunnerPoolMetadata(t *testing.T) {
 		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:runner-pool>linux</runnerfoundry:runner-pool><runnerfoundry:name>runner-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 		"running\n",
 	}}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	instances, err := provider.List(context.Background())
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	want := []RunnerInstance{{
-		ID:             "runner-1",
-		RunnerName:     "runner-1",
-		RunnerPoolName: "linux",
-		State:          RunnerStateRunning,
+	want := []execution.RunnerInstance{{
+		ID:         "runner-1",
+		RunnerName: "runner-1",
+		RunnerPool: "linux",
+		State:      execution.RunnerStateRunning,
 	}}
 	if !reflect.DeepEqual(instances, want) {
 		t.Fatalf("List() instances = %#v, want %#v", instances, want)
+	}
+}
+
+func TestInspectCombinesNamespacedAndRawLegacyOwnershipFields(t *testing.T) {
+	commandRunner := &recordingCommandRunner{outputs: []string{
+		"mixed-pool\nmixed-runner\nconflicting-pool\n",
+		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:name>namespaced-name</runnerfoundry:name></runnerfoundry:runner><runnerfoundry.scale-set>legacy-pool</runnerfoundry.scale-set></metadata></domain>`,
+		"running\n",
+		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:runner-pool>current-pool</runnerfoundry:runner-pool></runnerfoundry:runner><runnerfoundry.runner>legacy-name</runnerfoundry.runner></metadata></domain>`,
+		"running\n",
+		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>legacy-pool</runnerfoundry:scale-set></runnerfoundry:runner><runnerfoundry.runner-pool>current-pool</runnerfoundry.runner-pool></metadata></domain>`,
+		"running\n",
+	}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+
+	instances, err := provider.Inspect(context.Background())
+	want := []execution.RunnerInstance{
+		{ID: "mixed-pool", RunnerName: "namespaced-name", RunnerPool: "legacy-pool", State: execution.RunnerStateRunning},
+		{ID: "mixed-runner", RunnerName: "legacy-name", RunnerPool: "current-pool", State: execution.RunnerStateRunning},
+		{ID: "conflicting-pool", RunnerName: "conflicting-pool", RunnerPool: "current-pool", State: execution.RunnerStateRunning},
+	}
+	if err != nil || !reflect.DeepEqual(instances, want) {
+		t.Fatalf("mixed ownership inventory = (%#v, %v), want %#v", instances, err, want)
 	}
 }
 
@@ -87,7 +113,7 @@ func TestListInspectsOnlyOwnedDomainStates(t *testing.T) {
 	}
 }
 
-func listOwnedDomainFixture(t *testing.T) ([]RunnerInstance, []Command) {
+func listOwnedDomainFixture(t *testing.T) ([]execution.RunnerInstance, []Command) {
 	t.Helper()
 	runner := &recordingCommandRunner{
 		outputs: []string{
@@ -96,14 +122,14 @@ func listOwnedDomainFixture(t *testing.T) ([]RunnerInstance, []Command) {
 			"running\n",
 			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>vm-set</runnerfoundry:scale-set><runnerfoundry:name>vm-set-2</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 			"shut off\n",
-			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>other</runnerfoundry:scale-set><runnerfoundry:name>other</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
+			`<domain><metadata><example>unowned</example></metadata></domain>`,
 		},
 	}
 	provider := Provider{
-		CommandRunner: runner,
-		Config:        Config{ConnectionURI: "qemu:///system"},
+		commandRunner: runner,
+		config:        Config{ConnectionURI: "qemu:///system"},
 	}
-	instances, err := provider.List(context.Background(), "vm-set")
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
 	}
@@ -118,13 +144,13 @@ func TestListClassifiesUnknownDomainState(t *testing.T) {
 			"paused\n",
 		},
 	}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	instances, err := provider.List(context.Background(), "vm-set")
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
 	}
-	if len(instances) != 1 || instances[0].State != RunnerStateUnknown {
+	if len(instances) != 1 || instances[0].State != execution.RunnerStateUnknown {
 		t.Fatalf("expected unknown state, got %#v", instances)
 	}
 }
@@ -137,9 +163,9 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 			"running\n",
 		},
 	}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	instances, err := provider.List(context.Background(), "vm-set")
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
 	}
@@ -157,53 +183,28 @@ func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
 			"running\n",
 		},
 	}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	instances, err := provider.List(context.Background())
+	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	want := []RunnerInstance{{
-		ID:             "owned",
-		RunnerName:     "owned",
-		RunnerPoolName: "vm-set",
-		State:          RunnerStateRunning,
+	want := []execution.RunnerInstance{{
+		ID:         "owned",
+		RunnerName: "owned",
+		RunnerPool: "vm-set",
+		State:      execution.RunnerStateRunning,
 	}}
 	if !reflect.DeepEqual(instances, want) {
 		t.Fatalf("List() instances = %#v, want %#v", instances, want)
 	}
 }
 
-func TestListFiltersRequestedPoolBeforeReadingDomainState(t *testing.T) {
-	commandRunner := &recordingCommandRunner{
-		outputs: []string{
-			"other-runner\n",
-			`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>other</runnerfoundry:scale-set><runnerfoundry:name>other-runner</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
-		},
-	}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
-
-	instances, err := provider.List(context.Background(), "vm-set")
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if len(instances) != 0 {
-		t.Fatalf("List() instances = %#v, want none", instances)
-	}
-	wantCommands := []Command{
-		{Args: []string{"-c", "qemu:///system", "list", "--all", "--name"}},
-		{Args: []string{"-c", "qemu:///system", "dumpxml", "other-runner"}},
-	}
-	if !reflect.DeepEqual(commandRunner.commands, wantCommands) {
-		t.Fatalf("commands = %#v, want %#v", commandRunner.commands, wantCommands)
-	}
-}
-
 func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateRunning}); err != nil {
+	if err := provider.Destroy(context.Background(), execution.RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: execution.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
 	expected := []string{"-c", "qemu:///system", "destroy", "vm-set-1"}
@@ -214,9 +215,9 @@ func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testin
 
 func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
+	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
 
-	if err := provider.Destroy(context.Background(), RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: RunnerStateCompleted}); err != nil {
+	if err := provider.Destroy(context.Background(), execution.RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: execution.RunnerStateCompleted}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
 	if len(commandRunner.commands) != 0 {
@@ -228,8 +229,8 @@ func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	for _, state := range []string{"paused", "pmsuspended"} {
 		t.Run(state, func(t *testing.T) {
 			commandRunner := &recordingCommandRunner{}
-			provider := Provider{CommandRunner: commandRunner, Config: Config{ConnectionURI: "qemu:///system"}}
-			if err := provider.Destroy(context.Background(), RunnerInstance{
+			provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+			if err := provider.Destroy(context.Background(), execution.RunnerInstance{
 				ID: "vm-set-1", RunnerName: "vm-set-1", State: libvirtState(state),
 			}); err != nil {
 				t.Fatal(err)
@@ -242,8 +243,8 @@ func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 }
 
 func TestDestroyUnknownReportsCommandFailure(t *testing.T) {
-	provider := Provider{CommandRunner: failingCommandRunner{}}
-	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateUnknown}); err == nil {
+	provider := Provider{commandRunner: failingCommandRunner{}}
+	if err := provider.Destroy(context.Background(), execution.RunnerInstance{State: execution.RunnerStateUnknown}); err == nil {
 		t.Fatal("expected unknown destroy failure")
 	}
 }
@@ -251,7 +252,7 @@ func TestDestroyUnknownReportsCommandFailure(t *testing.T) {
 func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
 	provider := providerWithTemplate(commandRunner, `<domain type="kvm"><name>template</name></domain>`)
-	provider.Config.ConnectionURI = "qemu:///system"
+	provider.config.ConnectionURI = "qemu:///system"
 
 	if err := provider.Validate(context.Background()); err != nil {
 		t.Fatalf("expected validation success, got %v", err)
@@ -262,56 +263,47 @@ func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 	}
 }
 
-func TestStartReportsMissingTemplate(t *testing.T) {
-	provider := Provider{
-		CommandRunner: &recordingCommandRunner{},
-		readTemplate:  func(string) ([]byte, error) { return nil, errors.New("missing") },
-	}
-	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+func TestStartRequiresTemplate(t *testing.T) {
+	provider := Provider{commandRunner: &recordingCommandRunner{}}
+	if err := provider.Start(context.Background(), execution.StartRequest{}); err == nil {
 		t.Fatal("expected missing template error")
 	}
 }
 
-func TestStartRequiresTemplateReader(t *testing.T) {
-	provider := Provider{CommandRunner: &recordingCommandRunner{}}
-	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
-		t.Fatal("expected missing template reader error")
-	}
-}
-
-func TestNewProviderRetainsConfigurationAndInitializesTemplateReader(t *testing.T) {
+func TestNewProviderOwnsConfigurationAndTemplate(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"})
-	if provider.CommandRunner != commandRunner || provider.readTemplate == nil || provider.Config.DomainXMLTemplate != "domain.xml" {
+	provider := NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"}, []byte("<domain/>"), "member-a")
+	if provider.commandRunner != commandRunner || string(provider.domainTemplate) != "<domain/>" ||
+		provider.config.DomainXMLTemplate != "domain.xml" || provider.memberID != "member-a" {
 		t.Fatalf("production provider = %#v", provider)
 	}
 }
 
 func TestStartRejectsInvalidTemplate(t *testing.T) {
 	provider := providerWithTemplate(&recordingCommandRunner{}, `<domain><name>broken</domain>`)
-	if err := provider.Start(context.Background(), StartRequest{}); err == nil {
+	if err := provider.Start(context.Background(), execution.StartRequest{}); err == nil {
 		t.Fatal("expected invalid template error")
 	}
 }
 
 func TestStartReportsCreateCommandFailure(t *testing.T) {
 	provider := providerWithTemplate(failingCommandRunner{}, `<domain type="kvm"><name>template</name></domain>`)
-	if err := provider.Start(context.Background(), StartRequest{RunnerName: "runner"}); err == nil {
+	if err := provider.Start(context.Background(), execution.StartRequest{RunnerName: "runner"}); err == nil {
 		t.Fatal("expected create error")
 	}
 }
 
 func TestListReportsCommandFailure(t *testing.T) {
-	provider := Provider{CommandRunner: failingCommandRunner{}}
-	if _, err := provider.List(context.Background(), "set"); err == nil {
+	provider := Provider{commandRunner: failingCommandRunner{}}
+	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected list command error")
 	}
 }
 
 func TestListReportsDomainInspectionFailure(t *testing.T) {
 	commandRunner := &recordingCommandRunner{outputs: []string{"runner\n"}, failOnCall: 2}
-	provider := Provider{CommandRunner: commandRunner}
-	if _, err := provider.List(context.Background(), "set"); err == nil {
+	provider := Provider{commandRunner: commandRunner}
+	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected domain inspection error")
 	}
 }
@@ -321,15 +313,15 @@ func TestListReportsDomainStateFailure(t *testing.T) {
 		outputs:    []string{"runner\n", `<domain><metadata><runnerfoundry.scale-set>set</runnerfoundry.scale-set></metadata></domain>`},
 		failOnCall: 3,
 	}
-	provider := Provider{CommandRunner: commandRunner}
-	if _, err := provider.List(context.Background(), "set"); err == nil {
+	provider := Provider{commandRunner: commandRunner}
+	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected domain state error")
 	}
 }
 
 func TestDestroyReportsCommandFailure(t *testing.T) {
-	provider := Provider{CommandRunner: failingCommandRunner{}}
-	if err := provider.Destroy(context.Background(), RunnerInstance{State: RunnerStateRunning}); err == nil {
+	provider := Provider{commandRunner: failingCommandRunner{}}
+	if err := provider.Destroy(context.Background(), execution.RunnerInstance{State: execution.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy command error")
 	}
 }
@@ -348,25 +340,20 @@ func TestValidateReportsConnectionFailure(t *testing.T) {
 	}
 }
 
-func TestMetadataValueHandlesMissingTags(t *testing.T) {
-	if metadataValue("<domain></domain>", "missing") != "" {
+func TestLegacyMetadataValueHandlesMissingTags(t *testing.T) {
+	if legacyMetadataValue("<domain></domain>", "missing") != "" {
 		t.Fatal("expected missing metadata to be empty")
 	}
-	if metadataValue("<domain><missing>value</domain>", "missing") != "" {
+	if legacyMetadataValue("<domain><missing>value</domain>", "missing") != "" {
 		t.Fatal("expected missing closing tag to be empty")
 	}
 }
 
 func providerWithTemplate(commandRunner CommandRunner, contents string) Provider {
 	return Provider{
-		CommandRunner: commandRunner,
-		Config:        Config{DomainXMLTemplate: "domain.xml"},
-		readTemplate: func(path string) ([]byte, error) {
-			if path != "domain.xml" {
-				return nil, errors.New("unexpected template path")
-			}
-			return []byte(contents), nil
-		},
+		commandRunner:  commandRunner,
+		config:         Config{DomainXMLTemplate: "domain.xml"},
+		domainTemplate: []byte(contents),
 	}
 }
 

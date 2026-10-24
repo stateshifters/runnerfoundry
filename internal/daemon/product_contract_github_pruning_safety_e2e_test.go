@@ -38,7 +38,9 @@ func TestProductContractGitHubPruningDeletesOnlyExactSafeStaleOwnershipPostgres(
 
 func exerciseGitHubPruningSafetyMatrix(t *testing.T, stateFactory githubPruningStateFactory) {
 	t.Helper()
-	exact := upstream.RunnerScaleSet{ID: 29, Name: "linux", RunnerGroupID: 11}
+	exact := upstream.RunnerScaleSet{
+		ID: 29, Name: "linux", RunnerGroupID: 11, RunnerSetting: upstream.RunnerSetting{DisableUpdate: true},
+	}
 	scenarios := []githubPruningSafetyScenario{
 		{name: "exact stale fingerprint", listed: []upstream.RunnerScaleSet{exact}, deleteStatus: http.StatusNoContent,
 			wantDeleteAttempts: 1, wantOwnership: false},
@@ -142,7 +144,7 @@ func openGitHubPruningSafetyStore(
 		}
 	})
 	return &githubPruningSafetyState{
-		registrations: state.store, publishMemberState: state.store.PublishMemberState,
+		registrations: state.registrationStore, publishMemberState: state.store.members.PublishMemberState,
 	}
 }
 
@@ -162,13 +164,15 @@ func newProductionTransportPruningManager(
 		_ context.Context,
 		repository githubtransport.Repository,
 	) (githubsource.ManagerClient, error) {
-		client, clientErr := githubtransport.NewClient(repository, credentials, httpTransport)
+		client, clientErr := githubtransport.NewClient(repository, credentials, func() *http.Transport {
+			return githubPruningHTTPTransport(t, host)
+		}, false)
 		if clientErr != nil {
 			return githubsource.ManagerClient{}, fmt.Errorf("build production GitHub client: %w", clientErr)
 		}
 		return githubsource.NewTransportManagerClient(client), nil
 	}
-	manager, err := githubsource.NewManager(discoverer, factory, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(discoverer, factory, e2eAppRegistrations(t, store), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build production transport manager: %v", err)
 	}
@@ -219,7 +223,7 @@ func TestGitHubPruningHTTPTransportFailsClosed(t *testing.T) {
 
 func githubPruningRegistration() githubsource.Registration {
 	return githubsource.Registration{
-		RepositoryURL: "https://github.com/acme/widgets", RunnerPool: "linux",
+		GitHubAppID: 1, RepositoryURL: "https://github.com/acme/widgets", RunnerPool: "linux",
 		InstallationID: 71, RunnerGroupID: 11, ScaleSetID: 29,
 	}
 }

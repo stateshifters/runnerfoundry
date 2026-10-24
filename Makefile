@@ -13,22 +13,26 @@ E2E_POSTGRES_ROOT ?= $(abspath $(BUILD_DIR)/e2e/postgres)
 E2E_POSTGRES_VERSION ?=
 E2E_BACKEND ?= all
 E2E_PACKAGES := ./internal/daemon
+E2E_TOOL = $(abspath $(BUILD_DIR)/e2e/e2e-tool$(E2E_TOOL_EXTENSION))
 
 ifeq ($(OS),Windows_NT)
 OSFAMILY := Windows
+E2E_TOOL_EXTENSION := .exe
+E2E_TOOL_INVOKE = & "$(E2E_TOOL)"
 override SHELL := pwsh.exe
 .SHELLFLAGS := -NoLogo -NoProfile -Command
 MKDIR := New-Item -ItemType Directory -Force -Path
 REMOVE_DIR := Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -Path
 else
 OSFAMILY := Unix
+E2E_TOOL_INVOKE = "$(E2E_TOOL)"
 override SHELL := bash
 .SHELLFLAGS := -c
 MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race prepare-e2e test-e2e build notices sbom sbom-license source-info package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race e2e-tool prepare-e2e test-e2e build notices sbom sbom-license source-info package-deb prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -41,7 +45,7 @@ endif
 lint lint-config lint-fix: export GOTOOLCHAIN := $(GOLANGCI_LINT_TOOLCHAIN)
 
 lint: lint-no-nolint lint-config
-	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run
+	@go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --build-tags=e2e
 ifeq ($(OSFAMILY),Windows)
 	@$$violations = go tool github.com/boyter/scc/v3 --by-file --include-ext go --no-gen --format csv . | ConvertFrom-Csv | Where-Object { [int]$$_.Complexity -gt 100 }; if ($$violations) { $$violations | ForEach-Object { Write-Host "$$($$_.Provider) complexity=$$($$_.Complexity)" }; exit 1 }
 else
@@ -63,9 +67,11 @@ lint-fix:
 
 vet:
 	go vet ./...
+	go -C tools/e2e vet ./...
 
 test:
 	go test ./... -count=1 -timeout=60s
+	go -C tools/e2e test ./... -count=1 -timeout=60s
 
 coverage:
 	go test ./... '-coverprofile=coverage.out' -count=1 -timeout=60s
@@ -78,19 +84,19 @@ endif
 race:
 	go test -race ./... -count=1 -timeout=60s
 
-prepare-e2e:
+e2e-tool:
 ifeq ($(OSFAMILY),Windows)
-	@$$env:E2E_POSTGRES_ROOT = '$(E2E_POSTGRES_ROOT)'; $$env:E2E_POSTGRES_VERSION = '$(E2E_POSTGRES_VERSION)'; & ./scripts/prepare-e2e-postgres.ps1; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }
+	@$(MKDIR) "$(BUILD_DIR)/e2e" | Out-Null
 else
-	@E2E_POSTGRES_ROOT='$(E2E_POSTGRES_ROOT)' E2E_POSTGRES_VERSION='$(E2E_POSTGRES_VERSION)' bash ./scripts/prepare-e2e-postgres.sh
+	@$(MKDIR) "$(BUILD_DIR)/e2e"
 endif
+	@go -C tools/e2e build -o "$(E2E_TOOL)" .
 
-test-e2e:
-ifeq ($(OSFAMILY),Windows)
-	@$$env:E2E_POSTGRES_ROOT = '$(E2E_POSTGRES_ROOT)'; $$env:E2E_POSTGRES_VERSION = '$(E2E_POSTGRES_VERSION)'; $$env:E2E_BACKEND = '$(E2E_BACKEND)'; $$env:E2E_PACKAGES = '$(E2E_PACKAGES)'; & ./scripts/test-e2e.ps1; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }
-else
-	@E2E_POSTGRES_ROOT='$(E2E_POSTGRES_ROOT)' E2E_POSTGRES_VERSION='$(E2E_POSTGRES_VERSION)' E2E_BACKEND='$(E2E_BACKEND)' E2E_PACKAGES='$(E2E_PACKAGES)' bash ./scripts/test-e2e.sh
-endif
+prepare-e2e: e2e-tool
+	@$(E2E_TOOL_INVOKE) prepare --repository-root "$(CURDIR)" --postgres-root "$(E2E_POSTGRES_ROOT)" --postgres-version "$(E2E_POSTGRES_VERSION)"
+
+test-e2e: e2e-tool
+	@$(E2E_TOOL_INVOKE) test --repository-root "$(CURDIR)" --postgres-root "$(E2E_POSTGRES_ROOT)" --postgres-version "$(E2E_POSTGRES_VERSION)" --backend "$(E2E_BACKEND)" --packages "$(E2E_PACKAGES)"
 
 build: export GOOS := linux
 build: export GOARCH := amd64

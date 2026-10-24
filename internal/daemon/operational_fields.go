@@ -92,6 +92,9 @@ func coreIdentityAttributes(event operationalEvent) []slog.Attr {
 
 func githubIdentityAttributes(event operationalEvent) []slog.Attr {
 	attributes := make([]slog.Attr, 0, 8)
+	if event.githubAppID > 0 {
+		attributes = append(attributes, slog.Int64("github_app_id", int64(event.githubAppID)))
+	}
 	if event.installationID != 0 {
 		attributes = append(attributes, slog.Int64("installation_id", event.installationID))
 	}

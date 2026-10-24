@@ -99,7 +99,7 @@ func assertPoolStart(
 	if started.RunnerPool != runnerPool || started.EndpointID != wantEndpoint {
 		t.Fatalf("provider start = %+v, want pool %q endpoint %q", started, runnerPool, wantEndpoint)
 	}
-	records, err := harness.runtime.state.store.ProcessingByMember(
+	records, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, runnerPool,
 	)
 	if err != nil {

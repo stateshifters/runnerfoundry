@@ -16,6 +16,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
@@ -24,20 +25,22 @@ func (application *e2eApplication) buildProviderSet(
 	_ config.Config,
 	_ core.MemberID,
 	_ productionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 	providers := application.nextProviderBuild()
 	if err := validateE2EApplicationProviders(ctx, providers); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, err
+		return nil, runtimeservice.AggregateRunnerInventory{}, err
 	}
-	inventory := execution.NewAggregateRunnerInventory(providers.linux, providers.windows)
-	return map[core.RunnerPool]execution.ExecutionProvider{
-		"linux": providers.linux, "windows": providers.windows,
+	inventory := runtimeservice.NewAggregateRunnerInventory(providers.linuxInventory, providers.windowsInventory)
+	return map[core.RunnerPool]execution.RunnerLauncher{
+		"linux": providers.linuxLauncher, "windows": providers.windowsLauncher,
 	}, inventory, nil
 }
 
 type e2eApplicationProviderBuild struct {
-	linux   execution.ExecutionProvider
-	windows execution.ExecutionProvider
+	linuxLauncher    execution.RunnerLauncher
+	windowsLauncher  execution.RunnerLauncher
+	linuxInventory   execution.RunnerInventory
+	windowsInventory execution.RunnerInventory
 }
 
 func (application *e2eApplication) nextProviderBuild() e2eApplicationProviderBuild {
@@ -52,33 +55,36 @@ func (application *e2eApplication) nextProviderBuild() e2eApplicationProviderBui
 	buildNumber := application.providerBuilds
 	validationErr := application.replacementProviderValidationErr
 	application.providerBuilds++
-	linuxBoundary := execution.ExecutionProvider(provider)
+	linuxLauncher := execution.RunnerLauncher(provider)
 	if buildNumber > 0 && validationErr != nil {
-		linuxBoundary = e2eApplicationValidationFailureProvider{
-			ExecutionProvider: linuxBoundary,
-			err:               validationErr,
+		linuxLauncher = e2eApplicationValidationFailureLauncher{
+			RunnerLauncher: linuxLauncher,
+			err:            validationErr,
 		}
 	}
-	return e2eApplicationProviderBuild{linux: linuxBoundary, windows: windows}
+	return e2eApplicationProviderBuild{
+		linuxLauncher: linuxLauncher, windowsLauncher: windows,
+		linuxInventory: provider, windowsInventory: windows,
+	}
 }
 
 func validateE2EApplicationProviders(ctx context.Context, providers e2eApplicationProviderBuild) error {
-	if err := providers.linux.Validate(ctx); err != nil {
+	if err := providers.linuxLauncher.Validate(ctx); err != nil {
 		return fmt.Errorf("validate scripted Linux provider: %w", err)
 	}
-	if err := providers.windows.Validate(ctx); err != nil {
+	if err := providers.windowsLauncher.Validate(ctx); err != nil {
 		return fmt.Errorf("validate scripted Windows provider: %w", err)
 	}
 	return nil
 }
 
-type e2eApplicationValidationFailureProvider struct {
-	execution.ExecutionProvider
+type e2eApplicationValidationFailureLauncher struct {
+	execution.RunnerLauncher
 	err error
 }
 
-func (provider e2eApplicationValidationFailureProvider) Validate(ctx context.Context) error {
-	if err := provider.ExecutionProvider.Validate(ctx); err != nil {
+func (provider e2eApplicationValidationFailureLauncher) Validate(ctx context.Context) error {
+	if err := provider.RunnerLauncher.Validate(ctx); err != nil {
 		return fmt.Errorf("validate delegated application provider: %w", err)
 	}
 	return provider.err
@@ -90,8 +96,8 @@ func (application *e2eApplication) assertTimedOutLeaveShutdownState(
 	windows execution.StartRequest,
 ) {
 	t.Helper()
-	linuxProcessing, linuxErr := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
-	windowsProcessing, windowsErr := application.runtime.state.store.ProcessingByPool(context.Background(), "windows")
+	linuxProcessing, linuxErr := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
+	windowsProcessing, windowsErr := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "windows")
 	application.assertLeaveShutdownState(
 		t, linux, windows, linuxProcessing, windowsProcessing, linuxErr, windowsErr,
 	)
@@ -103,7 +109,7 @@ func (application *e2eApplication) assertCapacityAtCutoff(
 	want int,
 ) {
 	t.Helper()
-	capacity, err := application.runtime.state.store.AvailableRunnerPoolCapacity(
+	capacity, err := application.runtime.state.store.capacity.AvailableRunnerPoolCapacity(
 		context.Background(), "linux", activeSince,
 	)
 	if err != nil || capacity != want {
@@ -119,8 +125,8 @@ func (application *e2eApplication) assertLeaveShutdownRestartReconciliation(
 ) {
 	t.Helper()
 	replacement, running := application.startLeaveShutdownReplacement(t)
-	linuxProcessing, linuxErr := replacement.runtime.state.store.ProcessingByPool(context.Background(), "linux")
-	windowsProcessing, windowsErr := replacement.runtime.state.store.ProcessingByPool(context.Background(), "windows")
+	linuxProcessing, linuxErr := replacement.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
+	windowsProcessing, windowsErr := replacement.runtime.state.store.processing.ProcessingByPool(context.Background(), "windows")
 	assertRestartReconciliationProcessing(t, "linux", linuxProcessing, linuxErr,
 		e2eExpectedRestartProcessing{jobID: linux.JobID})
 	assertRestartReconciliationProcessing(t, "windows", windowsProcessing, windowsErr,
@@ -165,7 +171,7 @@ func assertRestartReconciliationProcessing(
 	if err != nil || len(processing) != 1 {
 		t.Fatalf("restart reconciliation %s processing = %+v, error = %v", runnerPool, processing, err)
 	}
-	if processing[0].Job.ID != want.jobID || processing[0].RunnerStarted != want.runnerStarted {
+	if processing[0].Job.ID != want.jobID || processing[0].RunnerAccepted != want.runnerStarted {
 		t.Fatalf("restart reconciliation %s processing = %+v, want job %s started=%t",
 			runnerPool, processing[0], want.jobID, want.runnerStarted)
 	}

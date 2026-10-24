@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 func recoverProcessingClaim(
@@ -14,22 +15,18 @@ func recoverProcessingClaim(
 	transaction Transaction,
 	processing core.ProcessingJob,
 ) (core.RetryOutcome, error) {
-	_, err := scanQueuedJob(transaction.QueryRow(ctx, recoverProcessingSQL, processing.Job.ID,
-		processing.ClaimedAt, processing.InventoryEndpointID, processing.Job.EnqueuedAt))
+	_, err := readQueuedJob(ctx, transaction, recoverProcessingSQL, processing.Job.ID,
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.Job.EnqueuedAt, processing.RunnerName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return classifyRecoveryFailure(ctx, transaction, processing)
 	}
 	if err != nil {
 		return "", fmt.Errorf("requeue expired processing: %w", err)
 	}
-	removal, err := transaction.Execute(ctx, deleteRecoveredProcessingSQL, processing.Job.ID,
-		processing.ClaimedAt, processing.InventoryEndpointID)
+	removed, err := transaction.Execute(ctx, deleteRecoveredProcessingSQL, processing.Job.ID,
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.RunnerName)
 	if err != nil {
 		return "", fmt.Errorf("remove recovered processing: %w", err)
-	}
-	removed, err := removal.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("read recovered processing removal count: %w", err)
 	}
 	if removed != 1 {
 		return "", fmt.Errorf("remove recovered processing ownership: expected one row, got %d", removed)
@@ -38,18 +35,15 @@ func recoverProcessingClaim(
 }
 
 func classifyRecoveryFailure(ctx context.Context, transaction Transaction, expected core.ProcessingJob) (core.RetryOutcome, error) {
-	actual, err := scanClaimedProcessingJob(transaction.QueryRow(ctx, processingByClaimIDSQL, expected.Job.ID))
+	actual, err := readClaimedProcessingJob(ctx, transaction, processingByClaimIDSQL, expected.Job.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.RetryMissing, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("classify processing recovery: %w", err)
 	}
-	if actual.SourceTerminal {
-		return core.RetrySourceTerminal, nil
-	}
-	if actual.RunnerStarted {
-		return core.RetryRunnerStarted, nil
+	if outcome := state.ClassifyProcessingRetry(actual, expected); outcome != "" {
+		return outcome, nil
 	}
 	return core.RetryClaimChanged, nil
 }

@@ -51,6 +51,9 @@ func TestPruneRunnerPoolsUsesStoredGroupIDAndReportsRemovedOwnership(t *testing.
 	if err != nil {
 		t.Fatalf("prune runner pools: %v", err)
 	}
+	if registry.requestedGroup != 17 {
+		t.Fatalf("requested runner group = %d, want stored group 17", registry.requestedGroup)
+	}
 	if len(result.Removed) != 2 || result.Removed[0] != owned[0] || result.Removed[1] != owned[1] {
 		t.Fatalf("removed ownership = %#v, want first two records", result.Removed)
 	}
@@ -60,13 +63,15 @@ func TestPruneRunnerPoolsUsesStoredGroupIDAndReportsRemovedOwnership(t *testing.
 }
 
 type registryAPIFake struct {
-	scaleSets  []upstream.RunnerScaleSet
-	deletedIDs []int
-	listErr    error
-	deleteErr  error
+	scaleSets      []upstream.RunnerScaleSet
+	requestedGroup int
+	deletedIDs     []int
+	listErr        error
+	deleteErr      error
 }
 
-func (registry *registryAPIFake) ListRunnerScaleSets(context.Context, int) ([]upstream.RunnerScaleSet, error) {
+func (registry *registryAPIFake) ListRunnerScaleSets(_ context.Context, group int) ([]upstream.RunnerScaleSet, error) {
+	registry.requestedGroup = group
 	return registry.scaleSets, registry.listErr
 }
 
