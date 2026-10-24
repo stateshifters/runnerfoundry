@@ -71,6 +71,11 @@ symbols, assert incidental file layout or implementation structure, or otherwise
 Checks that confirm an edit was completed are work verification, not software tests. Run searches, diff inspection, linters, and
 other appropriate commands as one-time verification evidence without adding them to the test suite.
 
+Choose work verification by deliverable. Documentation changes use content, link, and documentation-specific checks.
+Configuration changes use parser, schema, or tool-native static validation. Mechanical edits and removals use targeted searches,
+diff inspection, and applicable static checks. Analysis and plans use evidence reconciliation and internal-consistency review.
+Documentation, configuration, mechanical edits, removals, analysis, and plans MUST NOT use TDD or production software tests.
+
 - Write the test first.
   - If the behavior is user-facing, the test MUST be a snapshot test that captures the rendered user-visible output.
 - Verify the new test fails (prove the gap).
@@ -79,6 +84,18 @@ other appropriate commands as one-time verification evidence without adding them
 For a behavior change, completion means the tests prove the production behavior. A valid failing test fails because production
 code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
 documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
+
+#### Coverage follows purpose
+
+V1 code MUST maintain 100% Go statement coverage using hermetic tests, as reported by `make coverage`. Always call this result
+"statement coverage". It records only whether each instrumented statement was executed at least once.
+
+Every maintained production path MUST serve a concrete product behavior, domain invariant, boundary guarantee, or failure
+policy, and that purpose MUST be protected by an automated test through a stable interface.
+
+Coverage-only tests are invalid. Uncovered code without a defensible purpose is a design problem, not a test gap. Passing the
+statement-coverage gate does not establish test adequacy or meaningful assertions; those remain separate acceptance conditions.
+Do not describe a change as fully or comprehensively tested solely because the statement-coverage gate reports 100%.
 
 #### E2E tests
 
@@ -132,6 +149,8 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 ## Verification
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
+Any inspection or application of migrations through an installed RunnerFoundry executable described there is an operator procedure,
+not contributor or CI verification.
 
 ### Test isolation
 
@@ -142,7 +161,9 @@ files in test-owned temporary directories. Production Go files MUST NOT use buil
 
 ### Available verification gates
 
-V1 code MUST maintain 100% Go test coverage using hermetic tests.
+RunnerFoundry behavior is proved by automated tests that exercise production code through the stable seams defined above. Contributor and CI verification MUST NOT execute a built RunnerFoundry executable, RunnerFoundry installed from a distribution package, a RunnerFoundry container, or a deployed RunnerFoundry instance to prove application behavior, startup, embedded build metadata, or toolchain output. The compiler, linker, packager, and deployment system are not RunnerFoundry software-test subjects.
+
+Building or packaging may produce a requested artifact, but executing that artifact is not a verification gate. The gates listed below are exhaustive unless the product and contribution contracts are explicitly changed. This restriction does not prevent operators from running RunnerFoundry for its intended purpose.
 
 ```sh
 make lint

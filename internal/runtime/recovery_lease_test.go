@@ -30,13 +30,13 @@ func newExpiredRecoveryOrchestrator(
 		return core.RetryResult{Outcome: core.RetryRequeued}, recoverErr
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
-		return []execution.RunnerInstance{{ID: "runner", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()),
+		return []execution.RunnerInstance{{ID: "runner", RunnerName: testRunnerName(jobID),
 			RunnerPool: "linux", EndpointID: "test:endpoint"}}, nil
 	}, destroy: func(context.Context, execution.RunnerInstance) error {
 		appendRecoveryEvent(events, "destroy")
 		return destroyErr
 	}}
-	return runtimeengine.NewOrchestrator(
+	return newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "leader", func() time.Time { return now },
 	)
 }

@@ -7,21 +7,52 @@ const sourceByJobIDSQL = `SELECT source_name, source_reference
 	FROM public.runnerfoundry_processing_jobs WHERE job_id = $1`
 const insertTombstoneSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
 	VALUES($1, $2) ON CONFLICT(source_name, source_reference) DO NOTHING`
-const markProcessingStartedSQL = `UPDATE public.runnerfoundry_processing_jobs SET runner_started = true
-	WHERE source_name = $1 AND source_reference = $2 AND NOT runner_started
+const processingAttemptExistsSQL = `SELECT EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
+	WHERE source_name = $1 AND source_reference = $2 AND runner_name = $3)`
+const insertConditionalTombstoneSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
+	SELECT $1, $2 WHERE EXISTS (
+		SELECT 1 FROM public.runnerfoundry_queued_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+		UNION ALL
+		SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+			AND NOT runner_started AND NOT provisioning_failure_reserved)
+	ON CONFLICT(source_name, source_reference) DO NOTHING`
+const deleteConditionalQueuedJobSQL = `DELETE FROM public.runnerfoundry_queued_jobs
+	WHERE job_id = $1 AND source_name = $2 AND source_reference = $3`
+const classifyConditionalTerminalSQL = `SELECT CASE
+	WHEN EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
+		WHERE source_name = $1 AND source_reference = $2) THEN 'already_applied'
+	WHEN EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE job_id = $3 AND source_name = $1 AND source_reference = $2
+		AND (runner_started OR provisioning_failure_reserved)) THEN 'protected'
+	ELSE 'missing' END`
+const sourceTombstonedSQL = `SELECT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
+	WHERE source_name = $1 AND source_reference = $2)`
+const markProcessingAcceptedSQL = `UPDATE public.runnerfoundry_processing_jobs SET runner_started = true
+	WHERE source_name = $1 AND source_reference = $2 AND NOT runner_started AND NOT provisioning_failure_reserved
 	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
 		WHERE source_name = $1 AND source_reference = $2)`
-const tombstoneDelayedStartSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
+const markProcessingAttemptAcceptedSQL = `UPDATE public.runnerfoundry_processing_jobs SET runner_started = true
+	WHERE source_name = $1 AND source_reference = $2 AND runner_name = $3 AND NOT runner_started
+	AND NOT provisioning_failure_reserved
+	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones
+		WHERE source_name = $1 AND source_reference = $2)`
+const tombstoneDelayedAcceptanceSQL = `INSERT INTO public.runnerfoundry_source_tombstones(source_name, source_reference)
 	SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM public.runnerfoundry_queued_jobs
 		WHERE source_name = $1 AND source_reference = $2)
 	ON CONFLICT(source_name, source_reference) DO NOTHING`
-const runnerStartAlreadyAppliedSQL = `SELECT
+const runnerAcceptanceAlreadyAppliedSQL = `SELECT
 	EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones WHERE source_name = $1 AND source_reference = $2)
 	OR EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
-		WHERE source_name = $1 AND source_reference = $2 AND runner_started)`
+		WHERE source_name = $1 AND source_reference = $2
+		AND (runner_started OR provisioning_failure_reserved))`
+const attemptAcceptanceAlreadyAppliedSQL = `SELECT
+	EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones WHERE source_name = $1 AND source_reference = $2)
+	OR EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs
+		WHERE source_name = $1 AND source_reference = $2 AND runner_name = $3
+		AND (runner_started OR provisioning_failure_reserved))`
 
-const processingByIDSQL = `SELECT ` + processingJobColumns + `
-	FROM public.runnerfoundry_processing_jobs WHERE job_id = $1`
 const processingByClaimIDSQL = `SELECT ` + claimedProcessingJobColumns + `
 	FROM public.runnerfoundry_processing_jobs WHERE job_id = $1`
 const processingByPoolSQL = `SELECT ` + claimedProcessingJobColumns + `
@@ -31,7 +62,8 @@ const recoverProcessingSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	SELECT job_id, source_name, source_reference, runner_pool, $4
 	FROM public.runnerfoundry_processing_jobs processing
 	WHERE processing.job_id = $1 AND processing.claimed_at = $2
-	AND processing.inventory_endpoint_id = $3 AND NOT processing.runner_started
+	AND processing.inventory_endpoint_id = $3 AND processing.runner_name = $5 AND NOT processing.runner_started
+	AND NOT processing.provisioning_failure_reserved
 	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = processing.source_name
 		AND tombstones.source_reference = processing.source_reference)
@@ -39,7 +71,8 @@ const recoverProcessingSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	RETURNING ` + queuedJobColumns
 const deleteRecoveredProcessingSQL = `DELETE FROM public.runnerfoundry_processing_jobs processing
 	WHERE processing.job_id = $1 AND processing.claimed_at = $2
-	AND processing.inventory_endpoint_id = $3 AND NOT processing.runner_started
+	AND processing.inventory_endpoint_id = $3 AND processing.runner_name = $4 AND NOT processing.runner_started
+	AND NOT processing.provisioning_failure_reserved
 	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = processing.source_name
 		AND tombstones.source_reference = processing.source_reference)`
@@ -47,16 +80,19 @@ const retryProcessingSQL = `INSERT INTO public.runnerfoundry_queued_jobs
 	(job_id, source_name, source_reference, runner_pool)
 	SELECT job_id, source_name, source_reference, runner_pool
 	FROM public.runnerfoundry_processing_jobs processing
-	WHERE processing.job_id = $1 AND NOT processing.runner_started
+	WHERE processing.job_id = $1 AND processing.claimed_at = $2 AND processing.inventory_endpoint_id = $3
+	AND processing.runner_name = $4 AND NOT processing.runner_started AND NOT processing.provisioning_failure_reserved
 	AND NOT EXISTS (SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = processing.source_name
 		AND tombstones.source_reference = processing.source_reference)
 	RETURNING ` + queuedJobColumns
 const deleteRetriedProcessingSQL = `DELETE FROM public.runnerfoundry_processing_jobs
-	WHERE job_id = $1 AND NOT runner_started`
+	WHERE job_id = $1 AND claimed_at = $2 AND inventory_endpoint_id = $3 AND runner_name = $4
+	AND NOT runner_started AND NOT provisioning_failure_reserved`
 const deleteTerminalProcessingSQL = `DELETE FROM public.runnerfoundry_processing_jobs
 	WHERE job_id = $1 AND EXISTS (
 		SELECT 1 FROM public.runnerfoundry_source_tombstones tombstones
 		WHERE tombstones.source_name = runnerfoundry_processing_jobs.source_name
-		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference)`
+		AND tombstones.source_reference = runnerfoundry_processing_jobs.source_reference)
+	AND NOT provisioning_failure_reserved`
 const processingExistsSQL = `SELECT EXISTS (SELECT 1 FROM public.runnerfoundry_processing_jobs WHERE job_id = $1)`

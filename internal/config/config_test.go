@@ -9,9 +9,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestLoadAcceptsGitHubAppSettings(t *testing.T) {
+func TestLoadAcceptsOrderedGitHubAppSettings(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
-	if loadedConfig.GitHub.App.AppID != 12345 || loadedConfig.Log.Level != "debug" {
+	if len(loadedConfig.GitHub.Apps) != 1 || loadedConfig.GitHub.Apps[0].AppID != 12345 || loadedConfig.Log.Level != "debug" {
 		t.Fatalf("loaded config = %#v", loadedConfig)
 	}
 }
@@ -30,7 +30,7 @@ func TestLoadAppliesGitHubDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadedGitHubConfigurationResolvesAppCredentials(t *testing.T) {
+func TestLoadedGitHubConfigurationResolvesOrderedAppCredentials(t *testing.T) {
 	loadedConfig := loadValidConfig(t)
 	credentials, err := loadedConfig.GitHub.AppCredentials(func(path string) ([]byte, error) {
 		if path != "app.pem" {
@@ -41,8 +41,24 @@ func TestLoadedGitHubConfigurationResolvesAppCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve app credentials: %v", err)
 	}
-	if credentials.AppID != 12345 || credentials.PrivateKey != "private-key" {
+	if len(credentials) != 1 || credentials[0].AppID != 12345 || credentials[0].PrivateKey != "private-key" {
 		t.Fatalf("app credentials = %#v", credentials)
+	}
+}
+
+func TestAppCredentialsRejectAllAppsWhenAnyKeyCannotBePrepared(t *testing.T) {
+	configured := GitHubConfig{Apps: []GitHubAppConfig{
+		{AppID: 11, PrivateKeyFile: "first.pem"},
+		{AppID: 22, PrivateKeyFile: "second.pem"},
+	}}
+	credentials, err := configured.AppCredentials(func(path string) ([]byte, error) {
+		if path == "second.pem" {
+			return nil, errors.New("unavailable")
+		}
+		return []byte("first-key"), nil
+	})
+	if err == nil || credentials != nil {
+		t.Fatalf("partial credentials = %#v, %v", credentials, err)
 	}
 }
 
@@ -101,6 +117,32 @@ func TestLoadPostgreSQLStateRejectsInvalidPostgreSQLConfiguration(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			if _, err := LoadPostgreSQLState(strings.NewReader(configText)); err == nil {
 				t.Fatal("expected invalid PostgreSQL configuration to fail")
+			}
+		})
+	}
+}
+
+func TestLoadPostgreSQLStateRejectsWhitespaceDSNConflicts(t *testing.T) {
+	tests := map[string]struct {
+		configText    string
+		expectedError string
+	}{
+		"primary DSN with structured settings": {
+			configText: "state:\n  postgres:\n    role: runnerfoundry\n    dsn: '   '\n    host: database.internal\n",
+			expectedError: "validate PostgreSQL migration config: " +
+				"state.postgres.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"direct DSN with structured settings": {
+			configText: "state:\n  postgres:\n    role: runnerfoundry\n    direct:\n      dsn: '   '\n      host: database.internal\n",
+			expectedError: "validate PostgreSQL migration config: " +
+				"state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
+		},
+	}
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadPostgreSQLState(strings.NewReader(testCase.configText))
+			if err == nil || err.Error() != testCase.expectedError {
+				t.Fatalf("LoadPostgreSQLState() error = %v, want %q", err, testCase.expectedError)
 			}
 		})
 	}
@@ -190,6 +232,34 @@ func TestLoadRejectsAmbiguousPostgreSQLClusterState(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsWhitespaceDSNConflicts(t *testing.T) {
+	privateKeyPath := writePrivateKey(t, "private-key")
+	tests := map[string]struct {
+		state         string
+		expectedError string
+	}{
+		"primary DSN with structured settings": {
+			state: "  postgres:\n    role: runnerfoundry\n    dsn: '   '\n    host: database.internal\n",
+			expectedError: "validate PostgreSQL state: " +
+				"state.postgres.dsn cannot be combined with structured PostgreSQL settings",
+		},
+		"direct DSN with structured settings": {
+			state: "  postgres:\n    role: runnerfoundry\n    direct:\n      dsn: '   '\n      host: database.internal\n",
+			expectedError: "validate PostgreSQL state: " +
+				"state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings",
+		},
+	}
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			configText := strings.Replace(validConfig(privateKeyPath), "state:\n  path: state.db\n", "state:\n"+testCase.state, 1)
+			_, err := Load(strings.NewReader(configText))
+			if err == nil || err.Error() != testCase.expectedError {
+				t.Fatalf("Load() error = %v, want %q", err, testCase.expectedError)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsLegacyPostgreSQLCredentialKeys(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	for _, legacyKey := range []string{"dsn_env", "dsn_file"} {
@@ -220,11 +290,12 @@ func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{
 		"bad yaml":               "github: [",
-		"legacy token env":       strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token_env: TOKEN\n  app:\n", 1),
-		"legacy token file":      strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token_file: token\n  app:\n", 1),
-		"legacy plaintext token": strings.Replace(validConfig(privateKeyPath), "  app:\n", "  token: secret\n  app:\n", 1),
+		"legacy token env":       strings.Replace(validConfig(privateKeyPath), "  apps:\n", "  token_env: TOKEN\n  apps:\n", 1),
+		"legacy token file":      strings.Replace(validConfig(privateKeyPath), "  apps:\n", "  token_file: token\n  apps:\n", 1),
+		"legacy plaintext token": strings.Replace(validConfig(privateKeyPath), "  apps:\n", "  token: secret\n  apps:\n", 1),
 		"plaintext private key":  strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath, "    private_key: secret", 1),
 		"unknown field":          "unknown: true\n",
+		"former singular app":    strings.Replace(validConfig(privateKeyPath), "  apps:\n    - app_id:", "  app:\n    app_id:", 1),
 	}
 	assertLoadRejectsConfigurations(t, tests)
 }
@@ -232,8 +303,10 @@ func TestLoadRejectsInvalidGitHubAppConfiguration(t *testing.T) {
 func TestLoadRejectsInvalidGitHubAppAndLoggingValues(t *testing.T) {
 	privateKeyPath := writePrivateKey(t, "private-key")
 	tests := map[string]string{
-		"missing app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345\n", "", 1),
-		"invalid app ID":             strings.Replace(validConfig(privateKeyPath), "    app_id: 12345", "    app_id: -1", 1),
+		"missing apps":               strings.Replace(validConfig(privateKeyPath), "  apps:\n    - app_id: 12345\n      private_key_file: "+privateKeyPath+"\n", "", 1),
+		"missing app ID":             strings.Replace(validConfig(privateKeyPath), "    - app_id: 12345\n      private_key_file:", "    - private_key_file:", 1),
+		"invalid app ID":             strings.Replace(validConfig(privateKeyPath), "    - app_id: 12345", "    - app_id: -1", 1),
+		"duplicate app ID":           strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath, "    private_key_file: "+privateKeyPath+"\n    - app_id: 12345\n      private_key_file: second.pem", 1),
 		"missing private key file":   strings.Replace(validConfig(privateKeyPath), "    private_key_file: "+privateKeyPath+"\n", "", 1),
 		"invalid discovery interval": strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: soon\n", 1),
 		"short discovery interval":   strings.Replace(validConfig(privateKeyPath), "github:\n", "github:\n  discovery_interval: 59s\n", 1),
@@ -283,12 +356,35 @@ func assertLoadRejectsConfigurations(t *testing.T, configurations map[string]str
 }
 
 func TestAppCredentialsRejectUnreadableOrEmptyPrivateKey(t *testing.T) {
-	githubConfig := GitHubConfig{App: GitHubAppConfig{AppID: 12345, PrivateKeyFile: "app.pem"}}
+	githubConfig := GitHubConfig{Apps: []GitHubAppConfig{{AppID: 12345, PrivateKeyFile: "app.pem"}}}
 	if _, err := githubConfig.AppCredentials(func(string) ([]byte, error) { return []byte("\n"), nil }); err == nil {
 		t.Fatal("expected empty private key error")
 	}
 	if _, err := githubConfig.AppCredentials(func(string) ([]byte, error) { return nil, errors.New("unavailable") }); err == nil {
 		t.Fatal("expected unreadable private key error")
+	}
+}
+
+func TestGitHubAppListValidationOwnsEveryEntryInvariant(t *testing.T) {
+	tests := []struct {
+		name string
+		apps []GitHubAppConfig
+		ok   bool
+	}{
+		{name: "valid", apps: []GitHubAppConfig{{AppID: 1, PrivateKeyFile: "app.pem"}}, ok: true},
+		{name: "empty"},
+		{name: "non-positive", apps: []GitHubAppConfig{{PrivateKeyFile: "app.pem"}}},
+		{name: "duplicate", apps: []GitHubAppConfig{{AppID: 1, PrivateKeyFile: "a.pem"}, {AppID: 1, PrivateKeyFile: "b.pem"}}},
+		{name: "inline key", apps: []GitHubAppConfig{{AppID: 1, PrivateKey: "secret", PrivateKeyFile: "app.pem"}}},
+		{name: "missing path", apps: []GitHubAppConfig{{AppID: 1}}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := validateGitHubApps(testCase.apps)
+			if (err == nil) != testCase.ok {
+				t.Fatalf("validateGitHubApps() error = %v, valid = %t", err, testCase.ok)
+			}
+		})
 	}
 }
 
@@ -325,9 +421,9 @@ func writePrivateKey(t *testing.T, _ string) string {
 func validConfig(privateKeyPath string) string {
 	return `
 github:
-  app:
-    app_id: 12345
-    private_key_file: ` + privateKeyPath + `
+  apps:
+    - app_id: 12345
+      private_key_file: ` + privateKeyPath + `
 log:
   format: json
   level: debug
@@ -339,7 +435,7 @@ scale_sets:
 }
 
 func baseConfig(privateKeyPath string, runnerPools string) string {
-	return "github:\n  app:\n    app_id: 12345\n    private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + runnerPools
+	return "github:\n  apps:\n    - app_id: 12345\n      private_key_file: " + privateKeyPath + "\nstate:\n  path: state.db\nscale_sets:\n" + runnerPools
 }
 
 func validScaleSet(name string) string {

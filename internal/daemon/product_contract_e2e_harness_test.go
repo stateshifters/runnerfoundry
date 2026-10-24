@@ -18,6 +18,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
@@ -34,9 +35,15 @@ type e2eHarness struct {
 	host                      *e2eGitHost
 	provider                  *e2eProvider
 	windowsProvider           *e2eProvider
-	providerBoundary          execution.ExecutionProvider
-	windowsProviderBoundary   execution.ExecutionProvider
+	providerBoundary          execution.RunnerLauncher
+	windowsProviderBoundary   execution.RunnerLauncher
+	providerInventory         execution.RunnerInventory
+	windowsProviderInventory  execution.RunnerInventory
 	sourceRuntime             *githubSourceRuntime
+	sourceActivities          *e2eSupervisorActivityRecorder
+	registrationTargets       map[string]uint64
+	sessionTargets            map[string]uint64
+	pollTargets               map[string]uint64
 	membership                *e2eManualTicker
 	source                    *e2eManualTicker
 	execution                 *e2eManualTicker
@@ -48,6 +55,102 @@ type e2eHarness struct {
 	notificationReady         chan struct{}
 	notificationReadyOnce     sync.Once
 	laneCompleted             map[*e2eManualTicker]*e2eLaneBarrier
+}
+
+type githubSessionHandler interface {
+	core.SourceEventHandler
+	githubsource.AssignedDemandHandler
+}
+
+type githubSourceRuntime struct {
+	capacityProvider core.CapacitySnapshotProvider
+}
+
+func (runtime *githubSourceRuntime) AvailableRunnerPoolCapacity(
+	ctx context.Context,
+	runnerPool core.RunnerPool,
+	_ time.Time,
+) (int, error) {
+	snapshot, err := runtime.capacityProvider.CapacitySnapshot(ctx, runnerPool)
+	if err != nil {
+		return 0, fmt.Errorf("read available Runner Pool capacity: %w", err)
+	}
+	return snapshot.Available, nil
+}
+
+type e2eSupervisorActivityRecorder struct {
+	mutex        sync.Mutex
+	activities   []e2eRecordedSupervisorActivity
+	nextSequence uint64
+	changed      chan struct{}
+}
+
+type e2eRecordedSupervisorActivity struct {
+	sequence uint64
+	activity githubsource.ManagerActivity
+}
+
+func newE2ESupervisorActivityRecorder() *e2eSupervisorActivityRecorder {
+	return &e2eSupervisorActivityRecorder{changed: make(chan struct{})}
+}
+
+func (recorder *e2eSupervisorActivityRecorder) observe(
+	observer githubsource.ManagerObserver,
+) githubsource.ManagerObserver {
+	report := observer.Report
+	observer.Report = func(activity githubsource.ManagerActivity) {
+		if report != nil {
+			report(activity)
+		}
+		recorder.record(activity)
+	}
+	return observer
+}
+
+func (recorder *e2eSupervisorActivityRecorder) record(activity githubsource.ManagerActivity) {
+	recorder.mutex.Lock()
+	recorder.nextSequence++
+	recorder.activities = append(recorder.activities, e2eRecordedSupervisorActivity{
+		sequence: recorder.nextSequence,
+		activity: activity,
+	})
+	close(recorder.changed)
+	recorder.changed = make(chan struct{})
+	recorder.mutex.Unlock()
+}
+
+func (recorder *e2eSupervisorActivityRecorder) checkpoint() uint64 {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return recorder.nextSequence
+}
+
+func (recorder *e2eSupervisorActivityRecorder) awaitAfter(
+	t *testing.T,
+	description string,
+	checkpoint uint64,
+	matches func(githubsource.ManagerActivity) bool,
+) githubsource.ManagerActivity {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		recorder.mutex.Lock()
+		for _, recorded := range recorder.activities {
+			if recorded.sequence > checkpoint && matches(recorded.activity) {
+				recorder.mutex.Unlock()
+				return recorded.activity
+			}
+		}
+		changed := recorder.changed
+		recorder.mutex.Unlock()
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", description)
+			return githubsource.ManagerActivity{}
+		}
+	}
 }
 
 func newSQLiteE2EHarness(t *testing.T) *e2eHarness {
@@ -89,7 +192,24 @@ func newE2EHarnessWithProviderEndpoints(
 ) *e2eHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	harness := &e2eHarness{
+	harness := newE2EHarnessFixture(t, cancel, memberName, disableQueueNotifications, linuxEndpoint, windowsEndpoint)
+	harness.initializeObservationTargets()
+	harness.configured = e2eConfiguration(state)
+	harness.openAndActivate(ctx)
+	t.Cleanup(harness.close)
+	return harness
+}
+
+func newE2EHarnessFixture(
+	t *testing.T,
+	cancel context.CancelFunc,
+	memberName string,
+	disableQueueNotifications bool,
+	linuxEndpoint execution.InventoryEndpointID,
+	windowsEndpoint execution.InventoryEndpointID,
+) *e2eHarness {
+	t.Helper()
+	return &e2eHarness{
 		t: t, cancel: cancel, host: newE2EGitHost(),
 		provider:        newE2EProviderForEndpoint(linuxEndpoint),
 		windowsProvider: newE2EProviderForEndpoint(windowsEndpoint),
@@ -98,14 +218,19 @@ func newE2EHarnessWithProviderEndpoints(
 		disableQueueNotifications: disableQueueNotifications,
 		notificationReady:         make(chan struct{}),
 		laneCompleted:             make(map[*e2eManualTicker]*e2eLaneBarrier),
+		sourceRuntime:             &githubSourceRuntime{},
+		sourceActivities:          newE2ESupervisorActivityRecorder(),
 	}
+}
+
+func (harness *e2eHarness) initializeObservationTargets() {
+	runnerPools := []string{"linux", "windows"}
+	harness.registrationTargets = e2eRouteTargets(runnerPools, harness.host.registrationObservation)
+	harness.sessionTargets = e2eRouteTargets(runnerPools, harness.host.sessionObservation)
+	harness.pollTargets = e2eSessionPollTargets(runnerPools, harness.host)
 	for _, ticker := range []*e2eManualTicker{harness.membership, harness.source, harness.execution} {
 		harness.laneCompleted[ticker] = newE2ELaneBarrier()
 	}
-	harness.configured = e2eConfiguration(state)
-	harness.openAndActivate(ctx)
-	t.Cleanup(harness.close)
-	return harness
 }
 
 func (harness *e2eHarness) openAndActivate(ctx context.Context) {
@@ -137,6 +262,7 @@ func (harness *e2eHarness) openAndActivate(ctx context.Context) {
 func (harness *e2eHarness) dependencies() productionDependencies {
 	dependencies := newProductionDependencies()
 	dependencies.logDestinationFactory = e2eLogFactory{}
+	dependencies.readFile = func(string) ([]byte, error) { return []byte("e2e-private-key"), nil }
 	dependencies.readHostname = harness.readHostname
 	dependencies.currentTime = harness.now
 	dependencies.newDiscoverer = newE2EDiscoverer
@@ -145,6 +271,11 @@ func (harness *e2eHarness) dependencies() productionDependencies {
 	dependencies.maintenanceLaneCompleted = harness.observeMaintenanceLaneCompletion
 	dependencies.newManager = harness.newManager
 	dependencies.buildProviderSet = harness.buildProviderSet
+	harness.captureMaintenanceGeneration(&dependencies)
+	return dependencies
+}
+
+func (harness *e2eHarness) captureMaintenanceGeneration(dependencies *productionDependencies) {
 	buildGeneration := dependencies.buildGeneration
 	dependencies.buildGeneration = func(
 		ctx context.Context,
@@ -154,18 +285,19 @@ func (harness *e2eHarness) dependencies() productionDependencies {
 		report func(error),
 		production productionDependencies,
 	) (*maintenanceGeneration, error) {
-		generation, err := buildGeneration(ctx, configured, state, gate, report, production)
-		if err != nil {
-			return nil, err
+		if harness.sourceRuntime.capacityProvider == nil {
+			harness.sourceRuntime.capacityProvider = runtimeengine.NewCapacitySnapshotService(
+				state.store.capacity, production.currentTime, runtimeMemberTTL,
+			)
+			state.store.capacity = harness.sourceRuntime
 		}
-		harness.sourceRuntime, err = githubSourceFromMaintenance(generation)
+		generation, err := buildGeneration(ctx, configured, state, gate, report, production)
 		if err != nil {
 			return nil, err
 		}
 		harness.maintenanceGeneration = generation
 		return generation, nil
 	}
-	return dependencies
 }
 
 func (harness *e2eHarness) markLinuxProcessorIneligible() {
@@ -191,22 +323,6 @@ func (harness *e2eHarness) observeMaintenanceLaneCompletion(_ string, observed c
 		return
 	}
 	barrier.complete()
-}
-
-func githubSourceFromMaintenance(generation *maintenanceGeneration) (*githubSourceRuntime, error) {
-	gated, validGatedEngine := generation.engine.(*gatedCycleEngine)
-	if !validGatedEngine {
-		return nil, fmt.Errorf("maintenance engine has type %T, want *gatedCycleEngine", generation.engine)
-	}
-	unified, validUnifiedEngine := gated.engine.(*UnifiedEngine)
-	if !validUnifiedEngine {
-		return nil, fmt.Errorf("gated engine has type %T, want *UnifiedEngine", gated.engine)
-	}
-	source, validGitHubSource := unified.source.(*githubSourceRuntime)
-	if !validGitHubSource {
-		return nil, fmt.Errorf("unified source has type %T, want *githubSourceRuntime", unified.source)
-	}
-	return source, nil
 }
 
 func (harness *e2eHarness) readHostname() (string, error) { return harness.memberName, nil }
@@ -244,6 +360,7 @@ func (harness *e2eHarness) newManager(
 	observer githubsource.ManagerObserver,
 ) (*githubsource.Manager, error) {
 	observer = e2eObserveHostManagerActivities(harness.host, observer)
+	observer = harness.sourceActivities.observe(observer)
 	manager, err := githubsource.NewManager(harness.host, harness.host.Client, registrations, observer)
 	if err != nil {
 		return nil, fmt.Errorf("build scripted GitHub manager: %w", err)
@@ -256,17 +373,23 @@ func (harness *e2eHarness) buildProviderSet(
 	_ config.Config,
 	_ core.MemberID,
 	_ productionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	harness.providerBoundary = execution.WithOperationDeadlines(harness.provider, "e2e")
-	harness.windowsProviderBoundary = execution.WithOperationDeadlines(harness.windowsProvider, "e2e-windows")
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeengine.AggregateRunnerInventory, error) {
+	harness.providerBoundary = runtimeengine.WithLauncherOperationDeadlines(
+		harness.provider, "e2e",
+	)
+	harness.windowsProviderBoundary = runtimeengine.WithLauncherOperationDeadlines(
+		harness.windowsProvider, "e2e-windows",
+	)
+	harness.providerInventory = runtimeengine.WithInventoryOperationDeadlines(harness.provider, "e2e")
+	harness.windowsProviderInventory = runtimeengine.WithInventoryOperationDeadlines(harness.windowsProvider, "e2e-windows")
 	if err := harness.providerBoundary.Validate(ctx); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Linux provider: %w", err)
+		return nil, runtimeengine.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Linux provider: %w", err)
 	}
 	if err := harness.windowsProviderBoundary.Validate(ctx); err != nil {
-		return nil, execution.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Windows provider: %w", err)
+		return nil, runtimeengine.AggregateRunnerInventory{}, fmt.Errorf("validate scripted Windows provider: %w", err)
 	}
-	inventory := execution.NewAggregateRunnerInventory(harness.providerBoundary, harness.windowsProviderBoundary)
-	return map[core.RunnerPool]execution.ExecutionProvider{
+	inventory := runtimeengine.NewAggregateRunnerInventory(harness.providerInventory, harness.windowsProviderInventory)
+	return map[core.RunnerPool]execution.RunnerLauncher{
 		"linux": harness.providerBoundary, "windows": harness.windowsProviderBoundary,
 	}, inventory, nil
 }
@@ -299,7 +422,7 @@ func e2eConfiguration(state config.StateConfig) config.Config {
 	return config.Config{
 		State: state,
 		GitHub: config.GitHubConfig{
-			App: config.GitHubAppConfig{AppID: 1, PrivateKey: "e2e-private-key"}, DiscoveryInterval: "1ms",
+			Apps: []config.GitHubAppConfig{{AppID: 1, PrivateKeyFile: "e2e-private-key.pem"}}, DiscoveryInterval: "1ms",
 		},
 		RunnerPools: []config.RunnerPoolConfig{
 			{
@@ -314,6 +437,18 @@ func e2eConfiguration(state config.StateConfig) config.Config {
 	}
 }
 
+func e2eAppRegistrations(
+	t *testing.T,
+	store githubsource.RegistrationRepository,
+) *githubsource.AppScopedRegistrationRepository {
+	t.Helper()
+	scoped, err := githubsource.ScopeRegistrationRepository(store, 1)
+	if err != nil {
+		t.Fatalf("scope E2E GitHub registrations: %v", err)
+	}
+	return scoped
+}
+
 func e2eBackendEnabled(backend string) bool {
 	return selectedE2EBackend.enables(backend)
 }
@@ -322,43 +457,118 @@ func (harness *e2eHarness) establishSourceSession() {
 	harness.t.Helper()
 	harness.await("initial provider inventory", harness.provider.refreshed)
 	harness.completeMaintenanceCycle(harness.membership)
-	harness.reconcileSourceAfterMembership()
-	for _, runnerPool := range []string{"linux", "windows"} {
-		harness.await("GitHub Runner Pool registration for "+runnerPool, harness.host.registrationOK[runnerPool])
-	}
-	for _, runnerPool := range []string{"linux", "windows"} {
-		harness.await("GitHub message session for "+runnerPool, harness.host.sessionOK[runnerPool])
-	}
-	harness.installPublishedSessionOpenResults()
-	for _, runnerPool := range []string{"linux", "windows"} {
-		harness.await("GitHub message poll for "+runnerPool, harness.host.sessions[runnerPool].pollRequested)
+	harness.reconcileSourceAfterMembership(harness.registrationTargets)
+	e2eAwaitRouteTargetsWhileCycling(harness.t, "GitHub message sessions", harness.sessionTargets,
+		harness.host.sessionObservation, func() { harness.completeMaintenanceCycle(harness.source) })
+	e2eAwaitSessionPollTargetsWhileCycling(harness.t, "GitHub message polls", harness.pollTargets,
+		harness.host, func() { harness.completeMaintenanceCycle(harness.source) })
+	if harness.configured.State.Postgres != nil && !harness.disableQueueNotifications {
+		harness.await("PostgreSQL queue listener readiness", harness.notificationReady)
 	}
 }
 
-func (harness *e2eHarness) reconcileSourceAfterMembership() {
+func (harness *e2eHarness) reconcileSourceAfterMembership(registrationTargets map[string]uint64) {
 	harness.t.Helper()
 	discoveryInterval, err := harness.configured.GitHub.DiscoveryDuration()
 	if err != nil {
 		harness.t.Fatalf("read E2E GitHub discovery interval: %v", err)
 	}
-	harness.runSourceAtNextDiscovery(discoveryInterval)
-	if len(harness.sourceRuntime.desired) != 0 {
-		return
+	e2eAwaitRouteTargetsWhileCycling(harness.t, "post-membership source reconciliation",
+		registrationTargets, harness.host.registrationObservation,
+		func() { harness.runSourceAtNextDiscovery(discoveryInterval) })
+}
+
+func e2eRouteTargets(
+	runnerPools []string,
+	observation func(string) (uint64, <-chan struct{}),
+) map[string]uint64 {
+	targets := make(map[string]uint64, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		sequence, _ := observation(runnerPool)
+		targets[runnerPool] = sequence + 1
 	}
-	if !harness.sourceRuntime.term.discoveryActive {
-		harness.runSourceAtNextDiscovery(discoveryInterval)
+	return targets
+}
+
+func e2eSessionPollTargets(runnerPools []string, host *e2eGitHost) map[string]uint64 {
+	targets := make(map[string]uint64, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		sequence, _ := host.sessions[runnerPool].pollObservation()
+		targets[runnerPool] = sequence + 1
 	}
-	harness.awaitPublishedSourceDiscovery("initial source reconciliation")
-	harness.completeMaintenanceCycle(harness.source)
-	if len(harness.sourceRuntime.desired) != 0 {
-		return
+	return targets
+}
+
+func e2eAwaitRouteTargetsWhileCycling(
+	t *testing.T,
+	description string,
+	targets map[string]uint64,
+	observation func(string) (uint64, <-chan struct{}),
+	cycle func(),
+) {
+	t.Helper()
+	e2eAwaitTargetsWhileCycling(t, description, targets, func(runnerPool string) uint64 {
+		sequence, _ := observation(runnerPool)
+		return sequence
+	}, cycle)
+}
+
+func e2eAwaitSessionPollTargetsWhileCycling(
+	t *testing.T,
+	description string,
+	targets map[string]uint64,
+	host *e2eGitHost,
+	cycle func(),
+) {
+	t.Helper()
+	e2eAwaitTargetsWhileCycling(t, description, targets, func(runnerPool string) uint64 {
+		sequence, _ := host.sessions[runnerPool].pollObservation()
+		return sequence
+	}, cycle)
+}
+
+func e2eAwaitTargetsWhileCycling(
+	t *testing.T,
+	description string,
+	targets map[string]uint64,
+	sequence func(string) uint64,
+	cycle func(),
+) {
+	t.Helper()
+	completed := make(map[string]bool, len(targets))
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		pending := e2ePendingTargets(targets, completed, sequence)
+		if len(pending) == 0 {
+			return
+		}
+		cycle()
+		select {
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s; pending Runner Pools %v", description, pending)
+		default:
+		}
 	}
-	harness.runSourceAtNextDiscovery(discoveryInterval)
-	harness.awaitPublishedSourceDiscovery("post-membership source recovery")
-	harness.completeMaintenanceCycle(harness.source)
-	if len(harness.sourceRuntime.desired) == 0 {
-		harness.t.Fatal("post-membership source reconciliation produced no desired registrations")
+}
+
+func e2ePendingTargets(
+	targets map[string]uint64,
+	completed map[string]bool,
+	sequence func(string) uint64,
+) []string {
+	pending := make([]string, 0, len(targets))
+	for runnerPool, target := range targets {
+		if completed[runnerPool] {
+			continue
+		}
+		if sequence(runnerPool) >= target {
+			completed[runnerPool] = true
+			continue
+		}
+		pending = append(pending, runnerPool)
 	}
+	return pending
 }
 
 func (harness *e2eHarness) runSourceAtNextDiscovery(discoveryInterval time.Duration) {
@@ -366,54 +576,6 @@ func (harness *e2eHarness) runSourceAtNextDiscovery(discoveryInterval time.Durat
 	harness.advanceClock(discoveryInterval)
 	harness.completeMaintenanceCycle(harness.membership)
 	harness.completeMaintenanceCycle(harness.source)
-}
-
-func (harness *e2eHarness) awaitPublishedSourceDiscovery(description string) {
-	harness.t.Helper()
-	if harness.sourceRuntime == nil || harness.sourceRuntime.term == nil {
-		harness.t.Fatal("production source leadership is not active")
-	}
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-harness.sourceRuntime.term.discoveryResult:
-		harness.sourceRuntime.term.discoveryResult <- result
-	case <-timer.C:
-		harness.t.Fatalf("timed out waiting for %s publication", description)
-	}
-}
-
-func (harness *e2eHarness) installPublishedSessionOpenResults() {
-	harness.t.Helper()
-	term := harness.sourceRuntime.term
-	missingResults := len(harness.sourceRuntime.desired) - len(harness.sourceRuntime.sessions)
-	results := make([]githubRegistrationOpenResult, 0, missingResults)
-	for index := 0; index < missingResults; index++ {
-		results = append(results,
-			e2eAwaitPublishedSessionOpenResult(harness.t, term, index+1, missingResults))
-	}
-	for _, result := range results {
-		term.openResults <- result
-		harness.completeMaintenanceCycle(harness.source)
-	}
-}
-
-func e2eAwaitPublishedSessionOpenResult(
-	t *testing.T,
-	term *githubLeadershipTerm,
-	resultNumber int,
-	totalResults int,
-) githubRegistrationOpenResult {
-	t.Helper()
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-term.openResults:
-		return result
-	case <-timer.C:
-		t.Fatalf("timed out waiting for GitHub session-open result %d of %d", resultNumber, totalResults)
-		return githubRegistrationOpenResult{}
-	}
 }
 
 func (harness *e2eHarness) completeMaintenanceCycle(ticker *e2eManualTicker) {
@@ -480,7 +642,6 @@ func (harness *e2eHarness) deliverTo(runnerPool string, message *upstream.Runner
 	messageID := session.assignMessageID(message)
 	session.messages <- message
 	harness.awaitMessageAcknowledgement(session, messageID)
-	harness.completeMaintenanceCycle(harness.source)
 }
 
 func (harness *e2eHarness) awaitMessageAcknowledgement(session *e2eGitHubSession, messageID int) {
@@ -493,6 +654,35 @@ func (harness *e2eHarness) awaitMessageAcknowledgement(session *e2eGitHubSession
 		harness.t.Fatalf("timed out waiting for GitHub message %d acknowledgement", messageID)
 	}
 	harness.await("GitHub message poll completion", session.pollCompletion(messageID))
+	pollSequence, _ := session.pollObservation()
+	e2eAwaitSessionPollWhileCycling(harness.t, "GitHub message poll harvest", session,
+		pollSequence+1, func() { harness.completeMaintenanceCycle(harness.source) })
+}
+
+func e2eAwaitSessionPollWhileCycling(
+	t *testing.T,
+	description string,
+	session interface {
+		pollObservation() (uint64, <-chan struct{})
+	},
+	target uint64,
+	cycle func(),
+) {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		sequence, _ := session.pollObservation()
+		if sequence >= target {
+			return
+		}
+		cycle()
+		select {
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s", description)
+		default:
+		}
+	}
 }
 
 func (harness *e2eHarness) await(description string, signal <-chan struct{}) {
@@ -618,7 +808,7 @@ func assertExactDemandState(
 	if err != nil {
 		t.Fatalf("encode GitHub demand scope: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), core.JobRequest{
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), core.JobRequest{
 		Source: core.SourceReference{Adapter: githubsource.AdapterName, ID: sourceID}, Scope: scope,
 		RunnerPool: runnerPool, EnqueuedAt: harness.currentTime,
 	})

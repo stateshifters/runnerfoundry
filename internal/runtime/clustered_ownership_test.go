@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
-	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 func TestOccupiedSlotsCountsOnlyMemberOwnedProcessing(t *testing.T) {
@@ -27,10 +26,10 @@ func TestOccupiedSlotsCountsOnlyMemberOwnedProcessing(t *testing.T) {
 	}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{
-			ID: "foreign", RunnerName: core.RunnerName("runnerfoundry-" + foreignJob.Job.ID.String()), RunnerPool: "linux",
+			ID: "foreign", RunnerName: testRunnerName(foreignJob.Job.ID), RunnerPool: "linux",
 		}}, nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime,
 	)
 	occupied, err := orchestrator.OccupiedSlots(context.Background(), "linux")
@@ -52,10 +51,10 @@ func TestOrdinaryReconciliationCannotMutateForeignProcessing(t *testing.T) {
 	}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{{
-			ID: "foreign", RunnerName: core.RunnerName("runnerfoundry-" + foreignJob.Job.ID.String()), RunnerPool: "linux",
+			ID: "foreign", RunnerName: testRunnerName(foreignJob.Job.ID), RunnerPool: "linux",
 		}}, nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(
+	orchestrator := newTestOrchestrator(
 		store, &bootstrapGeneratorFake{}, provider, provider, "member-b", testCurrentTime,
 	)
 	result, err := orchestrator.ReconcilePool(context.Background(), "linux")
@@ -74,10 +73,10 @@ func TestTerminatePoolDoesNotSweepUnownedRunners(t *testing.T) {
 	provider := &providerFake{
 		inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 			return []execution.RunnerInstance{
-				{ID: "orphan", RunnerName: core.RunnerName("runnerfoundry-" + orphanID.String())},
+				{ID: "orphan", RunnerName: testRunnerName(orphanID)},
 				{ID: "external", RunnerName: "external"},
-				{ID: "malformed", RunnerName: "runnerfoundry-not-a-uuid"},
-				{ID: "zero", RunnerName: "runnerfoundry-00000000-0000-0000-0000-000000000000"},
+				{ID: "unowned-one", RunnerName: "external-runner-one"},
+				{ID: "unowned-two", RunnerName: "external-runner-two"},
 			}, nil
 		},
 		destroy: func(_ context.Context, instance execution.RunnerInstance) error {
@@ -85,7 +84,7 @@ func TestTerminatePoolDoesNotSweepUnownedRunners(t *testing.T) {
 			return nil
 		},
 	}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	result, err := orchestrator.TerminatePool(context.Background(), "linux")
 	assertReconciliation(t, result, err, 0, 0)
 	assertNotRecorded(t, "orphan destroyed", destroyed, "orphan")
@@ -101,11 +100,11 @@ func TestOccupiedSlotsCountsOnlyDurableMemberProcessing(t *testing.T) {
 	}}
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return []execution.RunnerInstance{
-			{ID: "same", RunnerName: core.RunnerName("runnerfoundry-" + jobID.String())},
+			{ID: "same", RunnerName: testRunnerName(jobID)},
 			{ID: "unnamed"},
 		}, nil
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	occupied, err := orchestrator.OccupiedSlots(context.Background(), "linux")
 	if err != nil || occupied != 1 {
 		t.Fatalf("OccupiedSlots() = (%d, %v)", occupied, err)
@@ -118,7 +117,7 @@ func TestOccupiedSlotsAndReconcileReportInventoryFailures(t *testing.T) {
 		return nil, wantErr
 	}}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	if _, err := orchestrator.OccupiedSlots(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("OccupiedSlots() error = %v", err)
 	}
@@ -133,7 +132,7 @@ func TestOccupiedSlotsDoesNotDependOnProviderInventory(t *testing.T) {
 	provider := &providerFake{inspect: func(context.Context) ([]execution.RunnerInstance, error) {
 		return nil, wantErr
 	}}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	if _, err := orchestrator.OccupiedSlots(context.Background(), "linux"); err != nil {
 		t.Fatalf("OccupiedSlots() should not inspect provider inventory: %v", err)
 	}
@@ -151,7 +150,7 @@ func TestReconcilePoolReportsPoolWideOwnershipFailure(t *testing.T) {
 		},
 	}
 	provider := &providerFake{}
-	orchestrator := runtimeengine.NewOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
+	orchestrator := newTestOrchestrator(store, &bootstrapGeneratorFake{}, provider, provider, "member", testCurrentTime)
 	if _, err := orchestrator.ReconcilePool(context.Background(), "linux"); !errors.Is(err, wantErr) {
 		t.Fatalf("ReconcilePool() error = %v", err)
 	}

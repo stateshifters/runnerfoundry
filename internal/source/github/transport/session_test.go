@@ -3,11 +3,46 @@ package transport
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
 )
+
+func TestSessionPreservesBoundaryErrorClassificationsAndClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+	for _, expected := range []error{nil, upstream.UnauthorizedError, upstream.NotFoundError, upstream.ConflictError, errors.New("rate limited"), errors.New("server unavailable")} {
+		exerciseSessionBoundaryError(t, expected)
+	}
+}
+
+func exerciseSessionBoundaryError(t *testing.T, expected error) {
+	t.Helper()
+	boundary := &idleConnectionBoundary{}
+	session := &Session{messageAPI: &messageSessionAPIFake{messageErr: expected, deleteErr: expected, acquireErr: expected, closeErr: expected}, httpClient: &http.Client{Transport: boundary}}
+	_, acquireErr := session.AcquireRequests(t.Context(), []int64{42})
+	for _, actual := range []error{acquireErr, session.DeleteMessage(t.Context(), 7), session.Close(t.Context())} {
+		if !errors.Is(actual, expected) {
+			t.Fatalf("session error = %v, want %v", actual, expected)
+		}
+	}
+	if boundary.closed != 1 {
+		t.Fatalf("idle cleanup calls = %d, want 1 after close attempt", boundary.closed)
+	}
+	if expected != nil {
+		if _, err := session.GetMessage(t.Context(), 0, 1); !errors.Is(err, expected) {
+			t.Fatalf("poll error = %v, want %v", err, expected)
+		}
+	}
+}
+
+type idleConnectionBoundary struct{ closed int }
+
+func (boundary *idleConnectionBoundary) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+func (boundary *idleConnectionBoundary) CloseIdleConnections() { boundary.closed++ }
 
 func TestSessionAcquireRequestsReturnsAcquiredSubset(t *testing.T) {
 	t.Parallel()
@@ -50,7 +85,7 @@ func TestOpenSessionExposesRepositoryAndRunnerPoolRoutingKey(t *testing.T) {
 
 	client := &Client{
 		repositoryURL: "https://github.com/acme/widgets",
-		openSession: func(context.Context, int, string) (messageSessionAPI, error) {
+		openSession: func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error) {
 			return &messageSessionAPIFake{}, nil
 		},
 	}
@@ -69,8 +104,8 @@ func TestOpenSessionCopiesInitialStatisticsAndSessionIdentity(t *testing.T) {
 	sessionID := uuid.MustParse("1d2da680-4390-4c6f-9f04-2f12c518ac34")
 	upstreamStatistics := &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 3}
 	client := &Client{
-		openSession: func(context.Context, int, string) (messageSessionAPI, error) {
-			return upstreamMessageSession{sessionID: sessionID, initialStatistics: upstreamStatistics}, nil
+		openSession: func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error) {
+			return &messageSessionAPIFake{metadata: upstream.RunnerScaleSetSession{SessionID: sessionID, Statistics: upstreamStatistics}}, nil
 		},
 	}
 	session, err := client.OpenSession(context.Background(), Registration{ID: 17}, "member-1")
@@ -89,7 +124,7 @@ func TestOpenSessionCopiesInitialStatisticsAndSessionIdentity(t *testing.T) {
 	}
 }
 
-func TestSessionPreservesErrNoMessageFromMessageBoundary(t *testing.T) {
+func TestSessionNormalizesNilMessageSuccess(t *testing.T) {
 	t.Parallel()
 
 	session := &Session{messageAPI: &messageSessionAPIFake{}}
@@ -99,79 +134,8 @@ func TestSessionPreservesErrNoMessageFromMessageBoundary(t *testing.T) {
 	}
 }
 
-func TestUpstreamMessageSessionNormalizesAndWrapsBoundaryResults(t *testing.T) {
-	t.Parallel()
-
-	message := &upstream.RunnerScaleSetMessage{MessageID: 7}
-	adapter := upstreamMessageSession{
-		getMessage: func(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
-			return message, nil
-		},
-		deleteMessage: func(context.Context, int) error { return nil },
-		acquireJobs:   func(context.Context, []int64) ([]int64, error) { return []int64{42}, nil },
-		closeSession:  func(context.Context) error { return nil },
-	}
-	if got, err := adapter.GetMessage(context.Background(), 0, 1); err != nil || got != message {
-		t.Fatalf("GetMessage = (%#v, %v)", got, err)
-	}
-	if err := adapter.DeleteMessage(context.Background(), 7); err != nil {
-		t.Fatalf("DeleteMessage: %v", err)
-	}
-	if acquired, err := adapter.AcquireJobs(context.Background(), []int64{42}); err != nil || len(acquired) != 1 {
-		t.Fatalf("AcquireJobs = (%#v, %v)", acquired, err)
-	}
-	if err := adapter.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
-
-func TestUpstreamMessageSessionNormalizesNoMessage(t *testing.T) {
-	t.Parallel()
-
-	adapter := upstreamMessageSession{getMessage: (messageResult{}).get}
-	if _, err := adapter.GetMessage(context.Background(), 0, 1); !errors.Is(err, ErrNoMessage) {
-		t.Fatalf("empty GetMessage error = %v", err)
-	}
-}
-
-func TestUpstreamMessageSessionWrapsFailures(t *testing.T) {
-	t.Parallel()
-
-	expectedErr := errors.New("upstream failed")
-	adapter := upstreamMessageSession{
-		getMessage:    (messageResult{err: expectedErr}).get,
-		deleteMessage: func(context.Context, int) error { return expectedErr },
-		acquireJobs:   func(context.Context, []int64) ([]int64, error) { return nil, expectedErr },
-		closeSession:  func(context.Context) error { return expectedErr },
-	}
-	if _, err := adapter.GetMessage(context.Background(), 0, 1); !errors.Is(err, expectedErr) {
-		t.Fatalf("GetMessage error = %v", err)
-	}
-	if err := adapter.DeleteMessage(context.Background(), 7); !errors.Is(err, expectedErr) {
-		t.Fatalf("DeleteMessage error = %v", err)
-	}
-	if _, err := adapter.AcquireJobs(context.Background(), []int64{42}); !errors.Is(err, expectedErr) {
-		t.Fatalf("AcquireJobs error = %v", err)
-	}
-	if err := adapter.Close(context.Background()); !errors.Is(err, expectedErr) {
-		t.Fatalf("Close error = %v", err)
-	}
-}
-
-type messageResult struct {
-	message *upstream.RunnerScaleSetMessage
-	err     error
-}
-
-func (result messageResult) get(
-	context.Context,
-	int,
-	int,
-) (*upstream.RunnerScaleSetMessage, error) {
-	return result.message, result.err
-}
-
 type messageSessionAPIFake struct {
+	metadata     upstream.RunnerScaleSetSession
 	requestedIDs []int64
 	acquiredIDs  []int64
 	message      *upstream.RunnerScaleSetMessage
@@ -181,10 +145,9 @@ type messageSessionAPIFake struct {
 	closeErr     error
 }
 
+func (api *messageSessionAPIFake) Session() upstream.RunnerScaleSetSession { return api.metadata }
+
 func (api *messageSessionAPIFake) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
-	if api.message == nil && api.messageErr == nil {
-		return nil, ErrNoMessage
-	}
 	return api.message, api.messageErr
 }
 
@@ -337,9 +300,9 @@ func TestOpenSessionReportsConfigurationAndBoundaryFailures(t *testing.T) {
 	expectedErr := errors.New("open failed")
 	for _, testCase := range []struct {
 		name        string
-		openSession func(context.Context, int, string) (messageSessionAPI, error)
+		openSession func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error)
 	}{
-		{name: "open failure", openSession: func(context.Context, int, string) (messageSessionAPI, error) {
+		{name: "open failure", openSession: func(context.Context, int, string, ...upstream.HTTPOption) (messageSessionAPI, error) {
 			return nil, expectedErr
 		}},
 	} {

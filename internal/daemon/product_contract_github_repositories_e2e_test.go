@@ -14,8 +14,10 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
-	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
+	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 func TestProductContractGitHubRepositoriesReconcileAndPollIndependently(t *testing.T) {
@@ -32,19 +34,19 @@ func TestProductContractGitHubRepositoriesReconcileAndPollIndependently(t *testi
 }
 
 type multiRepositoryFixture struct {
-	store     *sqlite.Store
+	store     *sqlitestate.Store
 	host      *multiRepositoryGitHost
 	discovery *paginatedRepositoryDiscovery
 	manager   *githubsource.Manager
 	config    githubsource.RunnerPoolConfig
-	handler   githubsource.EventHandler
+	handler   githubSessionHandler
 	records   []githubsource.Registration
 }
 
 func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 	t.Helper()
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, ":memory:")
+	store, err := sqlitestate.Open(ctx, ":memory:", githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("open multi-repository SQLite state: %v", err)
 	}
@@ -57,10 +59,11 @@ func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 		t.Fatalf("publish multi-repository member: %v", err)
 	}
 
+	githubStore := githubsqlite.NewStore(store.AdapterExtension(), store)
 	fixture := &multiRepositoryFixture{store: store, host: newMultiRepositoryGitHost(6)}
 	fixture.discovery = newPaginatedRepositoryDiscovery(fixture.host.repositories)
 	manager, err := githubsource.NewManager(
-		transport.Discoverer{API: fixture.discovery}, fixture.host.Client, store,
+		transport.Discoverer{API: fixture.discovery}, fixture.host.Client, e2eAppRegistrations(t, githubStore),
 		githubsource.ManagerObserver{CurrentTime: time.Now},
 	)
 	if err != nil {
@@ -68,7 +71,7 @@ func newMultiRepositoryFixture(t *testing.T) *multiRepositoryFixture {
 	}
 	fixture.manager = manager
 	fixture.config = githubsource.RunnerPoolConfig{RunnerPool: "linux", RunnerGroup: "default"}
-	fixture.handler = newGitHubDemandHandler(runtime.NewQueueHandler(store), store, nil, "sqlite")
+	fixture.handler = newGitHubDemandHandler(runtime.NewQueueHandler(store), githubpersistence.NewAssignedDemandStore(store), nil, "sqlite")
 	return fixture
 }
 
@@ -93,8 +96,8 @@ func (fixture *multiRepositoryFixture) reconcile(ctx context.Context, t *testing
 func (fixture *multiRepositoryFixture) assertRouteLocalConflict(ctx context.Context, t *testing.T) {
 	t.Helper()
 	fixture.host.conflictNextOpen(fixture.records[0].RepositoryURL)
-	session, err := fixture.manager.OpenRegistrationSession(
-		ctx, fixture.records[0], fixture.config, "owner", fixture.handler,
+	session, err := fixture.manager.OpenSourceRegistrationSession(
+		ctx, fixture.records[0], fixture.config, "owner", fixture.handler, fixture.handler,
 	)
 	if session != nil || !errors.Is(err, upstream.ConflictError) {
 		t.Fatalf("route-local 409 restoration = (%v, %v), want retained conflict", session, err)
@@ -151,10 +154,10 @@ func openMultiRepositorySession(
 	manager *githubsource.Manager,
 	record githubsource.Registration,
 	configured githubsource.RunnerPoolConfig,
-	handler githubsource.EventHandler,
+	handler githubSessionHandler,
 ) *githubsource.RegistrationSession {
 	t.Helper()
-	session, err := manager.OpenRegistrationSession(ctx, record, configured, "owner", handler)
+	session, err := manager.OpenSourceRegistrationSession(ctx, record, configured, "owner", handler, handler)
 	if err != nil {
 		t.Fatalf("open multi-repository session for %q: %v", record.RepositoryURL, err)
 	}
@@ -164,7 +167,7 @@ func openMultiRepositorySession(
 func exerciseSharedRepositoryCapacityAndFIFO(
 	ctx context.Context,
 	t *testing.T,
-	store *sqlite.Store,
+	store *sqlitestate.Store,
 	host *multiRepositoryGitHost,
 	first *githubsource.RegistrationSession,
 	second *githubsource.RegistrationSession,
@@ -191,12 +194,13 @@ func exerciseSharedRepositoryCapacityAndFIFO(
 func claimMultiRepositoryJob(
 	ctx context.Context,
 	t *testing.T,
-	store *sqlite.Store,
+	store *sqlitestate.Store,
 	claimedAt time.Time,
 ) core.ProcessingJob {
 	t.Helper()
 	result, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{
-		MemberID: "multi-repository-member", ClaimedAt: claimedAt, InventoryEndpointID: "multi-repository-endpoint",
+		AttemptID: core.NewAttemptID(),
+		MemberID:  "multi-repository-member", ClaimedAt: claimedAt, InventoryEndpointID: "multi-repository-endpoint",
 	})
 	if err != nil || result.Outcome != core.ClaimClaimed {
 		t.Fatalf("claim multi-repository job = %+v, error = %v", result, err)

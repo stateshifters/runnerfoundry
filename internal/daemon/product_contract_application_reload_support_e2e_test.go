@@ -67,8 +67,7 @@ func e2eCompleteReloadHandoff(t *testing.T, handoff e2eReloadHandoff) {
 		t, "replacement source runtime", handoff.application.builtSources,
 	)
 	e2eEstablishReloadSource(t, handoff.application, replacementSource,
-		handoff.application.replacementProvider, handoff.application.replacementWindows,
-		handoff.application.replacementHost)
+		handoff.application.replacementProvider, handoff.application.replacementWindows)
 	handoff.application.replacementProvider.setInspectionError(nil)
 	handoff.application.tickers.cycle(t, "execution")
 	replacementStart := e2eAwaitReloadProviderStart(t, handoff.application)
@@ -80,52 +79,39 @@ func e2eCompleteReloadHandoff(t *testing.T, handoff e2eReloadHandoff) {
 func e2eEstablishReloadSource(
 	t *testing.T,
 	application *e2eApplication,
-	source *githubSourceRuntime,
+	source e2eGitHubSourceRuntimeResult,
 	linuxProvider *e2eProvider,
 	windowsProvider *e2eProvider,
-	host *e2eGitHost,
 ) {
 	t.Helper()
 	awaitSignal(t, "application Linux inventory", linuxProvider.refreshed)
 	awaitSignal(t, "application Windows inventory", windowsProvider.refreshed)
 	application.tickers.cycle(t, "membership")
 	e2eReconcileApplicationSourceAfterMembership(t, application, source)
-	for _, runnerPool := range []string{"linux", "windows"} {
-		awaitSignal(t, "application registration for "+runnerPool, host.registrationOK[runnerPool])
-	}
-	for _, runnerPool := range []string{"linux", "windows"} {
-		awaitSignal(t, "application session for "+runnerPool, host.sessionOK[runnerPool])
-	}
 	e2eInstallPublishedApplicationSessions(t, application, source)
-	for _, runnerPool := range []string{"linux", "windows"} {
-		awaitSignal(t, "application poll for "+runnerPool, host.sessions[runnerPool].pollRequested)
-	}
+	application.mutex.Lock()
+	application.activeSource = source
+	application.mutex.Unlock()
 }
 
 func e2eReconcileApplicationSourceAfterMembership(
 	t *testing.T,
 	application *e2eApplication,
-	source *githubSourceRuntime,
+	source e2eGitHubSourceRuntimeResult,
 ) {
 	t.Helper()
-	e2eRunApplicationSourceAtNextDiscovery(t, application, source.discoveryInterval)
-	if len(source.desired) != 0 {
-		return
+	if source.host == nil {
+		t.Fatal("application GitHub source observation has no host")
 	}
-	if !source.term.discoveryActive {
-		e2eRunApplicationSourceAtNextDiscovery(t, application, source.discoveryInterval)
+	discoveryInterval, err := application.configured.GitHub.DiscoveryDuration()
+	if err != nil {
+		t.Fatalf("read application GitHub discovery interval: %v", err)
 	}
-	e2eAwaitPublishedApplicationDiscovery(t, source, "initial source reconciliation")
-	application.tickers.cycle(t, "source")
-	if len(source.desired) != 0 {
-		return
-	}
-	e2eRunApplicationSourceAtNextDiscovery(t, application, source.discoveryInterval)
-	e2eAwaitPublishedApplicationDiscovery(t, source, "post-membership source recovery")
-	application.tickers.cycle(t, "source")
-	if len(source.desired) == 0 {
-		t.Fatal("post-membership application source reconciliation produced no desired registrations")
-	}
+	e2eAwaitRouteTargetsWhileCycling(t,
+		fmt.Sprintf("generation %d post-membership application source reconciliation", source.generation),
+		source.registrationTargets, source.registrations.observation,
+		func() { e2eRunApplicationSourceAtNextDiscovery(t, application, discoveryInterval) },
+	)
 }
 
 func e2eRunApplicationSourceAtNextDiscovery(
@@ -139,43 +125,31 @@ func e2eRunApplicationSourceAtNextDiscovery(
 	application.tickers.cycle(t, "source")
 }
 
-func e2eAwaitPublishedApplicationDiscovery(t *testing.T, source *githubSourceRuntime, description string) {
-	t.Helper()
-	if source.term == nil {
-		t.Fatal("application source leadership term is not active")
-	}
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-source.term.discoveryResult:
-		source.term.discoveryResult <- result
-	case <-timer.C:
-		t.Fatalf("timed out waiting for %s publication", description)
-	}
-}
-
 func e2eInstallPublishedApplicationSessions(
 	t *testing.T,
 	application *e2eApplication,
-	source *githubSourceRuntime,
+	source e2eGitHubSourceRuntimeResult,
 ) {
 	t.Helper()
-	missingResults := len(source.desired) - len(source.sessions)
-	results := make([]githubRegistrationOpenResult, 0, missingResults)
-	for index := 0; index < missingResults; index++ {
-		results = append(results, e2eAwaitPublishedSessionOpenResult(t, source.term, index+1, missingResults))
-	}
-	for _, result := range results {
-		source.term.openResults <- result
-		application.tickers.cycle(t, "source")
-	}
+	e2eAwaitRouteTargetsWhileCycling(t,
+		fmt.Sprintf("generation %d application GitHub sessions", source.generation),
+		source.sessionTargets, source.sessions.observation,
+		func() { application.tickers.cycle(t, "source") })
+	e2eAwaitTargetsWhileCycling(t,
+		fmt.Sprintf("generation %d application GitHub polls", source.generation),
+		source.pollTargets,
+		func(runnerPool string) uint64 {
+			sequence, _ := source.pollSessions[runnerPool].pollObservation()
+			return sequence
+		},
+		func() { application.tickers.cycle(t, "source") })
 }
 
 func e2eAwaitGitHubSourceRuntime(
 	t *testing.T,
 	description string,
 	sources <-chan e2eGitHubSourceRuntimeResult,
-) *githubSourceRuntime {
+) e2eGitHubSourceRuntimeResult {
 	t.Helper()
 	timer := time.NewTimer(e2eWaitLimit)
 	defer timer.Stop()
@@ -184,10 +158,10 @@ func e2eAwaitGitHubSourceRuntime(
 		if result.err != nil {
 			t.Fatalf("load %s: %v", description, result.err)
 		}
-		return result.source
+		return result
 	case <-timer.C:
 		t.Fatalf("timed out waiting for %s", description)
-		return nil
+		return e2eGitHubSourceRuntimeResult{}
 	}
 }
 
@@ -199,7 +173,7 @@ func e2eAwaitReloadProviderStart(t *testing.T, application *e2eApplication) exec
 	case started := <-application.replacementProvider.starts:
 		return started
 	case <-timer.C:
-		processing, processingErr := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+		processing, processingErr := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 		application.runtime.reporter.mutex.Lock()
 		failures := fmt.Sprintf("%+v", application.runtime.reporter.failures)
 		status := application.runtime.reporter.lastStatus
@@ -300,7 +274,7 @@ func e2eObserveIndependentRunnerLifecycle(t *testing.T, lifecycle e2eInFlightRun
 		t, "in-flight replacement source", lifecycle.application.builtSources,
 	)
 	e2eEstablishReloadSource(t, lifecycle.application, replacementSource,
-		lifecycle.application.provider, lifecycle.application.windows, lifecycle.application.host)
+		lifecycle.application.provider, lifecycle.application.windows)
 	lifecycle.application.deliver(t, "linux", e2eRunnerStartedMessage(1401, lifecycle.attempt))
 	e2eAssertApplicationStartedProcessing(t, lifecycle.application, lifecycle.attempt.JobID)
 	e2eAssertSingleProviderAttempt(t, lifecycle.application, "independent runner acceptance")
@@ -339,7 +313,7 @@ func e2eAssertSingleProviderAttempt(t *testing.T, application *e2eApplication, p
 
 func e2eAssertIndependentRunnerCleanup(t *testing.T, lifecycle e2eInFlightRunnerLifecycle) {
 	t.Helper()
-	processing, err := lifecycle.application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := lifecycle.application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	destroys := lifecycle.application.provider.destroyCount()
 	attempts := lifecycle.application.provider.attemptCount()
 	if err != nil || len(processing) != 0 || destroys != 1 || attempts != 1 {

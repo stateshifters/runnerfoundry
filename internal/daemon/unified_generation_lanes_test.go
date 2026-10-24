@@ -77,16 +77,79 @@ func awaitMaintenanceLaneEvent(t *testing.T, events <-chan operationalEvent) ope
 	}
 }
 
-func TestIndependentMaintenanceLanesStartWhileMembershipIsBlocked(t *testing.T) {
+func TestIndependentMaintenanceLanesWaitForMembershipBeforeStarting(t *testing.T) {
 	fixture := newBlockedMembershipGeneration()
 
 	assertNoTestError(t, fixture.generation.Prepare(context.Background()), "prepare generation")
 	assertNoTestError(t, fixture.generation.Activate(context.Background()), "activate generation")
 	awaitTestSignal(t, fixture.membershipStarted, "membership lane start")
+	assertMaintenanceNotStarted(t, fixture.sourceStarted, "source")
+	assertMaintenanceNotStarted(t, fixture.executionStarted, "execution")
+	close(fixture.releaseMembership)
 	awaitTestSignal(t, fixture.sourceStarted, "source lane start")
 	awaitTestSignal(t, fixture.executionStarted, "execution lane start")
-	close(fixture.releaseMembership)
 	assertNoTestError(t, fixture.generation.Close(context.Background()), "close generation")
+}
+
+func TestIndependentMaintenanceLanesWaitForSuccessfulMembership(t *testing.T) {
+	membershipErr := errors.New("membership failed")
+	runtime := &startupOrderingMaintenanceRuntimeFake{
+		membershipStarted: make(chan struct{}, 2),
+		membershipResults: make(chan error, 2),
+		sourceStarted:     make(chan struct{}, 1),
+		executionStarted:  make(chan struct{}, 1),
+	}
+	membershipTicker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
+	tickers := newManualMaintenanceLaneTickers()
+	tickers.membership = membershipTicker
+	generation := newIndependentMaintenanceGeneration(
+		&maintenanceEngineFake{}, runtime, tickers, nil, nil, nil,
+	)
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
+
+	waitForMaintenance(t, runtime.membershipStarted)
+	runtime.membershipResults <- membershipErr
+	assertMaintenanceNotStarted(t, runtime.sourceStarted, "source")
+	assertMaintenanceNotStarted(t, runtime.executionStarted, "execution")
+
+	membershipTicker.ticks <- time.Time{}
+	waitForMaintenance(t, runtime.membershipStarted)
+	assertMaintenanceNotStarted(t, runtime.sourceStarted, "source")
+	assertMaintenanceNotStarted(t, runtime.executionStarted, "execution")
+	runtime.membershipResults <- nil
+	waitForMaintenance(t, runtime.sourceStarted)
+	waitForMaintenance(t, runtime.executionStarted)
+
+	mustCloseGeneration(t, generation)
+}
+
+func TestIndependentMaintenanceLanesCancelWhileWaitingForMembership(t *testing.T) {
+	runtime := &startupOrderingMaintenanceRuntimeFake{
+		membershipStarted: make(chan struct{}, 1),
+		membershipResults: make(chan error),
+		sourceStarted:     make(chan struct{}, 1),
+		executionStarted:  make(chan struct{}, 1),
+	}
+	generation := newIndependentMaintenanceGeneration(
+		&maintenanceEngineFake{}, runtime, newManualMaintenanceLaneTickers(), nil, nil, nil,
+	)
+	mustPrepareGeneration(t, generation)
+	mustActivateGeneration(t, generation)
+	waitForMaintenance(t, runtime.membershipStarted)
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- generation.Close(context.Background()) }()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("close generation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dependent lanes waiting for membership blocked generation close")
+	}
+	assertMaintenanceNotStarted(t, runtime.sourceStarted, "source")
+	assertMaintenanceNotStarted(t, runtime.executionStarted, "execution")
 }
 
 func TestMaintenanceLaneCancellationDoesNotReportFailure(t *testing.T) {
@@ -175,6 +238,42 @@ type maintenanceLaneEngineFake struct {
 	membership func(context.Context) error
 	source     func(context.Context) error
 	execution  func(context.Context) error
+}
+
+type startupOrderingMaintenanceRuntimeFake struct {
+	membershipStarted chan struct{}
+	membershipResults chan error
+	sourceStarted     chan struct{}
+	executionStarted  chan struct{}
+}
+
+func (runtime *startupOrderingMaintenanceRuntimeFake) MaintainMembership(ctx context.Context) error {
+	runtime.membershipStarted <- struct{}{}
+	select {
+	case err := <-runtime.membershipResults:
+		return err
+	case <-ctx.Done():
+		return errors.Join(errors.New("wait for membership result"), ctx.Err())
+	}
+}
+
+func (runtime *startupOrderingMaintenanceRuntimeFake) MaintainSource(context.Context) error {
+	runtime.sourceStarted <- struct{}{}
+	return nil
+}
+
+func (runtime *startupOrderingMaintenanceRuntimeFake) MaintainExecution(context.Context) error {
+	runtime.executionStarted <- struct{}{}
+	return nil
+}
+
+func assertMaintenanceNotStarted(t *testing.T, started <-chan struct{}, lane string) {
+	t.Helper()
+	select {
+	case <-started:
+		t.Fatalf("%s maintenance started before membership succeeded", lane)
+	default:
+	}
 }
 
 func (*maintenanceLaneEngineFake) Activate() error                  { return nil }

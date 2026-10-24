@@ -80,10 +80,10 @@ func recoverPartialResourceAndRetry(t *testing.T, harness *e2eHarness, jobID cor
 
 func assertRetainedUnstartedProcessing(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
-	records, err := harness.runtime.state.store.ProcessingByMember(
+	records, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
-	if err != nil || len(records) != 1 || records[0].Job.ID != wantJobID || records[0].RunnerStarted {
+	if err != nil || len(records) != 1 || records[0].Job.ID != wantJobID || records[0].RunnerAccepted {
 		t.Fatalf("retained unstarted processing = %+v, error = %v, want job %s", records, err, wantJobID)
 	}
 }
@@ -126,7 +126,7 @@ func failCleanupAndAssertRetained(t *testing.T, harness *e2eHarness, started exe
 	harness.await("repeated failed-cleanup inventory inspection", harness.provider.inspected)
 	awaitRunnerInstance(t, "repeated failed cleanup attempt", harness.provider.destroyAttempts)
 
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 1 || !processing[0].SourceTerminal {
@@ -142,7 +142,7 @@ func recoverCleanupAndAssertRemoved(t *testing.T, harness *e2eHarness) {
 	harness.await("recovered-cleanup inventory inspection", harness.provider.inspected)
 	harness.completeMaintenanceCycle(harness.execution)
 	harness.await("post-recovery execution cycle", harness.provider.inspected)
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 0 {

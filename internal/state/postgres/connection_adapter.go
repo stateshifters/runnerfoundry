@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -9,103 +10,116 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type executeProtocol func(context.Context, string, ...any) (Result, error)
-type queryProtocol func(context.Context, string, ...any) (Rows, error)
-type queryRowProtocol func(context.Context, string, ...any) Row
+type Connection struct{ executor executor }
 
-// Connection is the state store's PostgreSQL protocol. Construct one with
-// NewPGXConnection and pass it to NewConnectionStore during application startup.
-type Connection struct {
-	begin    func(context.Context) (Transaction, error)
-	queryRow func(context.Context, string, ...any) Row
-}
+func NewConnectionStore(connection *Connection) *Store { return newStore(connection.executor) }
 
-// NewConnectionStore builds a state store from an adapted PostgreSQL connection.
-// The returned store is safe to use with the concurrency guarantees of the
-// underlying pool and does not own or close that pool.
-func NewConnectionStore(connection Connection) *Store {
-	return NewStore(Executor(connection))
-}
-
-// NewPGXConnection adapts a pgx pool to the state store's narrow database
-// protocol. The caller retains ownership of the pool and must close it after
-// all store operations have stopped.
-func NewPGXConnection(pool *pgxpool.Pool) Connection {
+func NewPGXConnection(pool *pgxpool.Pool) *Connection {
 	return connectionFromPGXFunctions(pool.Begin, pool.QueryRow)
 }
 
-func connectionFromPGXFunctions(begin func(context.Context) (pgx.Tx, error),
-	queryRow func(context.Context, string, ...any) pgx.Row) Connection {
-	return Connection{
-		begin: func(ctx context.Context) (Transaction, error) {
-			transaction, err := begin(ctx)
-			if err != nil {
-				return Transaction{}, fmt.Errorf("begin PostgreSQL transaction: %w", err)
+func connectionFromPGXFunctions(
+	begin func(context.Context) (pgx.Tx, error),
+	queryRow func(context.Context, string, ...any) pgx.Row,
+) *Connection {
+	return &Connection{executor: pgxExecutor{begin: begin, queryRow: queryRow}}
+}
+
+type pgxExecutor struct {
+	begin    func(context.Context) (pgx.Tx, error)
+	queryRow func(context.Context, string, ...any) pgx.Row
+}
+
+func (executor pgxExecutor) WithinTransaction(
+	ctx context.Context,
+	operation func(Transaction) error,
+) (resultErr error) {
+	transaction, err := executor.begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin PostgreSQL transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if err := transaction.Rollback(context.WithoutCancel(ctx)); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback PostgreSQL transaction: %w", err))
 			}
-			return adaptPGXTransaction(transaction), nil
-		},
-		queryRow: func(ctx context.Context, statement string, arguments ...any) Row {
-			return Row{scan: queryRow(ctx, statement, arguments...).Scan}
-		},
-	}
-}
-
-func adaptPGXTransaction(transaction pgx.Tx) Transaction {
-	return newPGXTransaction(transaction.Exec, transaction.Query, transaction.QueryRow,
-		transaction.Commit, transaction.Rollback)
-}
-
-func newPGXTransaction(
-	execute func(context.Context, string, ...any) (pgconn.CommandTag, error),
-	query func(context.Context, string, ...any) (pgx.Rows, error),
-	queryRow func(context.Context, string, ...any) pgx.Row,
-	commit func(context.Context) error,
-	rollback func(context.Context) error,
-) Transaction {
-	return Transaction{
-		execute: pgxExecutor(execute), query: pgxQuery(query), queryRow: pgxQueryRow(queryRow),
-		commit: pgxCompletion("commit", commit), rollback: pgxCompletion("rollback", rollback),
-	}
-}
-
-func pgxExecutor(
-	execute func(context.Context, string, ...any) (pgconn.CommandTag, error),
-) executeProtocol {
-	return func(ctx context.Context, statement string, arguments ...any) (Result, error) {
-		commandTag, err := execute(ctx, statement, arguments...)
-		if err != nil {
-			return Result{}, fmt.Errorf("execute PostgreSQL statement: %w", err)
 		}
-		return Result{rowsAffected: func() (int64, error) { return commandTag.RowsAffected(), nil }}, nil
+	}()
+	if err := operation(adaptPGXTransaction(transaction)); err != nil {
+		return err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit PostgreSQL transaction: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func (executor pgxExecutor) ReadRow(
+	ctx context.Context,
+	statement string,
+	read func(Scanner) error,
+	arguments ...any,
+) error {
+	if err := read(executor.queryRow(ctx, statement, arguments...)); err != nil {
+		return fmt.Errorf("read PostgreSQL row: %w", err)
+	}
+	return nil
+}
+
+type pgxTransaction struct {
+	execute  func(context.Context, string, ...any) (pgconn.CommandTag, error)
+	query    func(context.Context, string, ...any) (pgx.Rows, error)
+	queryRow func(context.Context, string, ...any) pgx.Row
+}
+
+func adaptPGXTransaction(transaction pgx.Tx) pgxTransaction {
+	return pgxTransaction{
+		execute:  transaction.Exec,
+		query:    transaction.Query,
+		queryRow: transaction.QueryRow,
 	}
 }
 
-func pgxQuery(
-	query func(context.Context, string, ...any) (pgx.Rows, error),
-) queryProtocol {
-	return func(ctx context.Context, statement string, arguments ...any) (Rows, error) {
-		rows, err := query(ctx, statement, arguments...)
-		if err != nil {
-			return Rows{}, fmt.Errorf("query PostgreSQL rows: %w", err)
+func (adapter pgxTransaction) Execute(ctx context.Context, statement string, arguments ...any) (int64, error) {
+	result, err := adapter.execute(ctx, statement, arguments...)
+	if err != nil {
+		return 0, fmt.Errorf("execute PostgreSQL statement: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
+func (adapter pgxTransaction) ReadRow(
+	ctx context.Context,
+	statement string,
+	read func(Scanner) error,
+	arguments ...any,
+) error {
+	if err := read(adapter.queryRow(ctx, statement, arguments...)); err != nil {
+		return fmt.Errorf("read PostgreSQL transaction row: %w", err)
+	}
+	return nil
+}
+
+func (adapter pgxTransaction) VisitRows(
+	ctx context.Context,
+	statement string,
+	visit func(Scanner) error,
+	arguments ...any,
+) error {
+	rows, err := adapter.query(ctx, statement, arguments...)
+	if err != nil {
+		return fmt.Errorf("query PostgreSQL rows: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := visit(rows); err != nil {
+			return err
 		}
-		return Rows{close: func() error { rows.Close(); return nil }, err: rows.Err,
-			next: rows.Next, scan: rows.Scan}, nil
 	}
-}
-
-func pgxQueryRow(
-	queryRow func(context.Context, string, ...any) pgx.Row,
-) queryRowProtocol {
-	return func(ctx context.Context, statement string, arguments ...any) Row {
-		return Row{scan: queryRow(ctx, statement, arguments...).Scan}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate PostgreSQL rows: %w", err)
 	}
-}
-
-func pgxCompletion(operation string, complete func(context.Context) error) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if err := complete(ctx); err != nil {
-			return fmt.Errorf("%s PostgreSQL transaction: %w", operation, err)
-		}
-		return nil
-	}
+	return nil
 }

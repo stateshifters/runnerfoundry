@@ -10,6 +10,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/cluster"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	githubtransport "github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
@@ -22,22 +23,24 @@ type migrationRepresentativeState struct {
 func populateCurrentPostgresState(
 	ctx context.Context,
 	t *testing.T,
-	clusterStore *cluster.Store,
+	connections *cluster.Connections,
 ) migrationRepresentativeState {
 	t.Helper()
-	pool, err := clusterStore.OpenPool(ctx)
+	pool, err := connections.OpenPool(ctx)
 	if err != nil {
 		t.Fatalf("open current PostgreSQL pool: %v", err)
 	}
 	defer pool.Close()
-	store := postgresstate.NewConnectionStore(postgresstate.NewPGXConnection(pool))
+	connection := postgresstate.NewPGXConnection(pool)
+	store := postgresstate.NewConnectionStore(connection)
+	githubStore := githubpostgres.NewStore(connection.AdapterExtension(), store)
 	heartbeat := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	if err = store.PublishMemberState(ctx, "upgrade-member", heartbeat,
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 3}}); err != nil {
 		t.Fatalf("populate current PostgreSQL member state: %v", err)
 	}
 	processingJobID := populateMigrationDemand(ctx, t, store, heartbeat)
-	registration := populateMigrationGitHubState(ctx, t, store, heartbeat)
+	registration := populateMigrationGitHubState(ctx, t, githubStore, heartbeat)
 	return migrationRepresentativeState{processingJobID: processingJobID, registration: registration}
 }
 
@@ -92,7 +95,8 @@ func claimAndAcceptMigrationDemand(
 ) {
 	t.Helper()
 	claimed, err := store.ClaimOldest(ctx, "linux", core.ProcessingClaim{
-		MemberID: "upgrade-member", ClaimedAt: heartbeat.Add(-30 * time.Minute),
+		AttemptID: core.NewAttemptID(),
+		MemberID:  "upgrade-member", ClaimedAt: heartbeat.Add(-30 * time.Minute),
 		InventoryEndpointID: "e2e:provider",
 	})
 	if err != nil {
@@ -101,7 +105,7 @@ func claimAndAcceptMigrationDemand(
 	if claimed.Outcome != core.ClaimClaimed || claimed.Processing.Job.ID != processingJobID {
 		t.Fatalf("populate current PostgreSQL processing claim = %+v, error = %v", claimed, err)
 	}
-	started, err := store.MarkRunnerStarted(ctx, core.JobIdentity{JobID: processingJobID})
+	started, err := store.ObserveRunnerAcceptance(ctx, core.JobIdentity{JobID: processingJobID})
 	if err != nil {
 		t.Fatalf("populate current PostgreSQL accepted processing: %v", err)
 	}
@@ -150,12 +154,12 @@ func queueRepresentativeMigrationDemand(
 func populateMigrationGitHubState(
 	ctx context.Context,
 	t *testing.T,
-	store *postgresstate.Store,
+	store *githubpostgres.Store,
 	heartbeat time.Time,
 ) githubsource.Registration {
 	t.Helper()
 	registration := githubsource.Registration{
-		RepositoryURL: "https://github.example/upgrade", RunnerPool: "linux",
+		GitHubAppID: 7, RepositoryURL: "https://github.example/upgrade", RunnerPool: "linux",
 		InstallationID: githubtransport.InstallationID(1), RunnerGroupID: githubtransport.RunnerGroupID(2),
 		ScaleSetID: githubtransport.ScaleSetID(3),
 	}

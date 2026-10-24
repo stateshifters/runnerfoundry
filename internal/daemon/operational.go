@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 type operationalHealth string
@@ -43,6 +44,7 @@ type operationalEvent struct {
 	sourceRequestID    int64
 	sourceRequestIDSet bool
 	installationID     int64
+	githubAppID        githubsource.AppID
 	runnerGroupID      int64
 	scaleSetID         int64
 	messageID          int64
@@ -90,13 +92,6 @@ type progressEventEnvelope struct {
 	event operationalEvent
 }
 
-type maintenanceCycleResult struct{ cause error }
-
-func (result maintenanceCycleResult) Error() string {
-	return "maintenance cycle contained reported failures"
-}
-func (result maintenanceCycleResult) Unwrap() error { return result.cause }
-
 type reportedOperationalError struct{ cause error }
 
 func (reported reportedOperationalError) Error() string { return reported.cause.Error() }
@@ -115,7 +110,11 @@ func operationalErrorWasReported(err error) bool {
 		return everyOperationalErrorWasReported(joined.Unwrap())
 	}
 	var reported reportedOperationalError
-	return errors.As(err, &reported)
+	if errors.As(err, &reported) {
+		return true
+	}
+	var external interface{ OperationallyReported() bool }
+	return errors.As(err, &external) && external.OperationallyReported()
 }
 
 func everyOperationalErrorWasReported(errs []error) bool {
@@ -193,10 +192,6 @@ func newProductionRuntimeReporter(
 }
 
 func (reporter *productionRuntimeReporter) reportMaintenance(err error) {
-	var cycleResult maintenanceCycleResult
-	if errors.As(err, &cycleResult) {
-		return
-	}
 	var progress progressEventEnvelope
 	if errors.As(err, &progress) {
 		reporter.ReportProgress(progress.level, progress.event)
@@ -283,6 +278,9 @@ func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event
 		if failure.event.operation != event.operation {
 			continue
 		}
+		if event.githubAppID > 0 && failure.event.githubAppID != event.githubAppID {
+			continue
+		}
 		delete(reporter.failures, key)
 		recovery := failure.event
 		recovery.err = nil
@@ -294,8 +292,14 @@ func (reporter *productionRuntimeReporter) recoverOperation(now time.Time, event
 }
 
 func operationalFailureKey(event operationalEvent) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s", event.component, event.operation, event.stage,
-		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation)
+	jobID := ""
+	if event.operation == "provisioning_failure" ||
+		(event.operation == "job_processing" && event.stage == provisioningFailureFinalizationStage) {
+		jobID = event.jobID.String()
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d|%s", event.component, event.operation, event.stage,
+		event.repository, event.runnerPool, event.provider, event.endpoint, event.stateBackend, event.stateOperation,
+		event.githubAppID, jobID)
 }
 
 func (reporter *productionRuntimeReporter) logEvent(level slog.Level, event operationalEvent, extra []slog.Attr) {

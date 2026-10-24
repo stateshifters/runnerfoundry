@@ -1,12 +1,81 @@
 package libvirtxml
 
 import (
+	"encoding/xml"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	upstream "libvirt.org/go/libvirtxml"
 )
+
+type renderedDomain struct {
+	Name     string `xml:"name"`
+	Metadata struct {
+		Runner struct {
+			PoolName string `xml:"urn:runnerfoundry runner-pool"`
+			Name     string `xml:"urn:runnerfoundry name"`
+		} `xml:"urn:runnerfoundry runner"`
+	} `xml:"metadata"`
+	SysInfo struct {
+		OEMStrings []string `xml:"oemStrings>entry"`
+	} `xml:"sysinfo"`
+}
+
+func TestDomainTemplatePreservesIdentityText(t *testing.T) {
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name></domain>`)
+	request := RenderRequest{
+		RunnerPoolName: "pool\r\n\t<&>\"'日本語",
+		RunnerName:     "runner\r\n\t<&>\"'é",
+	}
+	renderedXML, err := template.Render(request)
+	if err != nil {
+		t.Fatalf("expected render success, got %v", err)
+	}
+	domain := decodeRenderedDomain(t, renderedXML)
+	if domain.Metadata.Runner.PoolName != request.RunnerPoolName {
+		t.Errorf("runner pool = %q, want %q", domain.Metadata.Runner.PoolName, request.RunnerPoolName)
+	}
+	if domain.Metadata.Runner.Name != request.RunnerName {
+		t.Errorf("runner name = %q, want %q", domain.Metadata.Runner.Name, request.RunnerName)
+	}
+}
+
+func TestDomainTemplateIsolatesRenderedRequests(t *testing.T) {
+	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><sysinfo type="smbios"><oemStrings><entry>existing=value</entry><entry>runnerfoundry.jit=old</entry></oemStrings></sysinfo></domain>`)
+	requests := []RenderRequest{
+		{RunnerPoolName: "first-pool", RunnerName: "first-runner", JITConfig: "first<&\""},
+		{RunnerPoolName: "second-pool", RunnerName: "second-runner", JITConfig: "second\r\n日本語"},
+	}
+	rendered := make([]string, len(requests))
+	for index, request := range requests {
+		var err error
+		rendered[index], err = template.Render(request)
+		if err != nil {
+			t.Fatalf("render %q: %v", request.RunnerName, err)
+		}
+	}
+	for index, request := range requests {
+		domain := decodeRenderedDomain(t, rendered[index])
+		if domain.Name != request.RunnerName || domain.Metadata.Runner.Name != request.RunnerName || domain.Metadata.Runner.PoolName != request.RunnerPoolName {
+			t.Errorf("render %q has domain name %q and ownership %+v", request.RunnerName, domain.Name, domain.Metadata.Runner)
+		}
+		expectedOEMStrings := []string{"existing=value", "runnerfoundry.jit=" + request.JITConfig}
+		if !slices.Equal(domain.SysInfo.OEMStrings, expectedOEMStrings) {
+			t.Errorf("render %q OEM strings = %q, want %q", request.RunnerName, domain.SysInfo.OEMStrings, expectedOEMStrings)
+		}
+	}
+}
+
+func decodeRenderedDomain(t *testing.T, renderedXML string) renderedDomain {
+	t.Helper()
+	var domain renderedDomain
+	if err := xml.Unmarshal([]byte(renderedXML), &domain); err != nil {
+		t.Fatalf("decode rendered domain: %v", err)
+	}
+	return domain
+}
 
 func TestDomainTemplateInjectsUniqueNameAndMetadata(t *testing.T) {
 	template := NewDomainTemplate(`<domain type="kvm"><name>template</name><devices></devices></domain>`)
@@ -53,7 +122,7 @@ func TestDomainTemplateReplacesExistingMetadata(t *testing.T) {
 		t.Fatalf("expected render success, got %v", err)
 	}
 	if !strings.Contains(renderedXML, "runnerfoundry:runner-pool") {
-		t.Fatalf("expected scaler metadata: %s", renderedXML)
+		t.Fatalf("expected runner metadata: %s", renderedXML)
 	}
 	if strings.Contains(renderedXML, "<old>value</old>") {
 		t.Fatalf("expected old metadata replaced: %s", renderedXML)
@@ -76,7 +145,7 @@ func TestDomainTemplateMergesExistingSMBIOSOEMStrings(t *testing.T) {
 		}
 	}
 	if strings.Contains(renderedXML, "runnerfoundry.jit=old") {
-		t.Fatalf("expected old scaler JIT OEM string replaced:\n%s", renderedXML)
+		t.Fatalf("expected old runner JIT OEM string replaced:\n%s", renderedXML)
 	}
 }
 
@@ -120,7 +189,11 @@ func TestDomainTemplateSurfacesMarshalFailures(t *testing.T) {
 	template := domainTemplateWithMarshaler(`<domain type="kvm"><name>template</name></domain>`, func(*upstream.Domain) (string, error) {
 		return "", wantErr
 	})
-	if _, err := template.Render(RenderRequest{RunnerName: "runner"}); err == nil {
+	_, err := template.Render(RenderRequest{RunnerName: "runner"})
+	if err == nil {
 		t.Fatal("expected marshal failure")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected render error to retain marshal failure, got %v", err)
 	}
 }

@@ -11,33 +11,39 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubsupervisor "github.com/stateshifters/runnerfoundry/internal/source/github/supervisor"
 	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
-type unifiedStore interface {
-	core.JobQueueStore
-	core.ProcessingJobStore
-	runtimeengine.MembershipStore
-	githubsource.RegistrationRepository
-	statecontract.RunnerPoolCapacityStore
+type runtimeStatePorts struct {
+	jobs                 statecontract.JobQueueStore
+	processing           statecontract.ProcessingJobStore
+	transitions          statecontract.ProcessingTransitions
+	provisioningFailures statecontract.ProvisioningFailureTransitions
+	members              statecontract.MemberRegistry
+	capacity             statecontract.RunnerPoolCapacityStore
 }
 
 type unifiedBuilderDependencies struct {
-	store              unifiedStore
+	state              runtimeStatePorts
 	demandStore        githubsource.AssignedDemandRepository
-	manager            *githubsource.Manager
+	manager            githubManagerComposition
 	member             core.MemberID
-	providers          map[core.RunnerPool]execution.ExecutionProvider
+	providers          map[core.RunnerPool]execution.RunnerLauncher
 	inventory          execution.RunnerInventory
 	leadership         leadershipRuntime
 	currentTime        func() time.Time
 	memberTTL          time.Duration
-	ticker             cycleTicker
-	tickers            *maintenanceLaneTickers
+	tickers            maintenanceLaneTickers
 	report             func(error)
 	closers            []runtimeCloser
 	processGate        *localLeadershipGate
 	queueNotifications *queueNotificationPool
+}
+
+type githubManagerComposition interface {
+	githubsupervisor.Manager
+	Source() *githubsource.Source
 }
 
 func buildUnifiedGeneration(
@@ -74,27 +80,16 @@ func buildValidatedUnifiedGeneration(
 		assembled, dependencies, discoveryInterval, jobGate, wakeJobs, enqueueWake, stateBackendName(configured.State),
 	)
 	processor = newQueuedJobProcessorForPools(engine, jobGate, dependencies.report, configuredRunnerPoolNames(assembled.pools))
-	processEngine := newGatedCycleEngine(engine, dependencies.processGate.NewLeadership())
-	generation := newConfiguredMaintenanceGeneration(processEngine, dependencies, assembled.finalizers)
+	processEngine := newGatedMaintenanceEngine(engine, dependencies.processGate.NewLeadership())
+	generation := newIndependentMaintenanceGeneration(
+		processEngine, processEngine, dependencies.tickers, dependencies.report,
+		configuredClosers(dependencies), assembled.finalizers,
+	)
 	generation.processor = processor
 	if notifications := configuredQueueNotifications(dependencies, wakeJobs); notifications != nil {
 		generation.notifications = notifications
 	}
 	return generation, nil
-}
-
-func newConfiguredMaintenanceGeneration(
-	engine *gatedCycleEngine,
-	dependencies unifiedBuilderDependencies,
-	finalizers []runtimeFinalizer,
-) *maintenanceGeneration {
-	closers := configuredClosers(dependencies)
-	if dependencies.tickers != nil {
-		return newIndependentMaintenanceGeneration(
-			engine, engine, *dependencies.tickers, dependencies.report, closers, finalizers,
-		)
-	}
-	return newMaintenanceGeneration(engine, dependencies.ticker, dependencies.report, closers, finalizers)
 }
 
 func configuredRunnerPoolNames(pools []RunnerPoolRuntime) []core.RunnerPool {
@@ -141,16 +136,19 @@ func buildConfiguredEngine(
 	enqueueWake func(core.RunnerPool),
 	stateBackend string,
 ) *UnifiedEngine {
-	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.store, enqueueWake, stateBackend)
+	queue := runtimeengine.NewQueueHandlerWithWakeAndBackend(dependencies.state.jobs, enqueueWake, stateBackend)
 	handler := newGitHubDemandHandler(queue, dependencies.demandStore, enqueueWake, stateBackend)
-	source := newGitHubSourceRuntime(
-		dependencies.manager, dependencies.store, string(dependencies.member),
+	capacity := runtimeengine.NewCapacitySnapshotService(
+		dependencies.state.capacity, dependencies.currentTime, dependencies.memberTTL,
+	)
+	source := githubsupervisor.New(
+		dependencies.manager, capacity, string(dependencies.member),
 		handler,
 		assembled.managerConfig, discoveryInterval, dependencies.currentTime,
+		newGitHubManagerObserver(dependencies.report, dependencies.currentTime),
 	)
-	source.report = dependencies.report
 	membership := runtimeengine.NewMembershipService(
-		dependencies.store, dependencies.member, assembled.localCapacity, dependencies.currentTime,
+		dependencies.state.members, dependencies.member, assembled.localCapacity, dependencies.currentTime,
 	)
 	return NewUnifiedEngine(UnifiedEngineConfig{
 		CurrentTime: dependencies.currentTime, MemberTTL: dependencies.memberTTL,
@@ -183,23 +181,31 @@ func configuredClosers(dependencies unifiedBuilderDependencies) []runtimeCloser 
 }
 
 type assembledRuntime struct {
-	managerConfig githubsource.ManagerConfig
-	stateBackend  string
-	localCapacity []core.RunnerPoolCapacity
-	pools         []RunnerPoolRuntime
-	finalizers    []runtimeFinalizer
+	managerConfig    githubsource.ManagerConfig
+	stateBackend     string
+	localCapacity    []core.RunnerPoolCapacity
+	pools            []RunnerPoolRuntime
+	finalizers       []runtimeFinalizer
+	sourceOperations core.SourceOperationsResolver
 }
 
 func assembleConfiguredRuntime(
 	configured config.Config,
 	dependencies unifiedBuilderDependencies,
 ) (assembledRuntime, error) {
+	sourceOperations, err := newSourceOperationsResolver([]sourceOperationsRegistration{{
+		adapter: githubsource.AdapterName, operations: dependencies.manager.Source(),
+	}})
+	if err != nil {
+		return assembledRuntime{}, fmt.Errorf("register source operations: %w", err)
+	}
 	assembled := assembledRuntime{
-		managerConfig: githubsource.ManagerConfig{Prune: configured.Prune},
-		stateBackend:  stateBackendName(configured.State),
-		localCapacity: make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
-		pools:         make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
-		finalizers:    make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
+		managerConfig:    githubsource.ManagerConfig{Prune: configured.Prune},
+		stateBackend:     stateBackendName(configured.State),
+		localCapacity:    make([]core.RunnerPoolCapacity, 0, len(configured.RunnerPools)),
+		pools:            make([]RunnerPoolRuntime, 0, len(configured.RunnerPools)),
+		finalizers:       make([]runtimeFinalizer, 0, len(configured.RunnerPools)),
+		sourceOperations: sourceOperations,
 	}
 	for _, runnerPoolConfig := range configured.RunnerPools {
 		if err := assembled.appendRunnerPool(runnerPoolConfig, dependencies); err != nil {
@@ -225,9 +231,13 @@ func (assembled *assembledRuntime) appendRunnerPool(
 	if provider == nil {
 		return fmt.Errorf("execution provider for Runner Pool %q is required", runnerPool)
 	}
-	orchestrator := runtimeengine.NewOrchestrator(
-		dependencies.store, dependencies.manager.Source(), provider, dependencies.inventory, dependencies.member,
-		dependencies.currentTime,
+	stopIfNotStartedWithin, err := runnerPoolConfig.StopIfNotStartedDuration()
+	if err != nil {
+		return fmt.Errorf("read Runner Pool start timeout: %w", err)
+	}
+	orchestrator := runtimeengine.NewOrchestratorWithSourceOperations(
+		dependencies.state.processing, dependencies.state.transitions, dependencies.state.provisioningFailures,
+		assembled.sourceOperations, provider, dependencies.inventory, runtimeengine.OrchestratorConfig{MemberID: dependencies.member, CurrentTime: dependencies.currentTime, StopIfNotStartedWithin: stopIfNotStartedWithin},
 	)
 	assembled.appendPoolConfiguration(runnerPoolConfig)
 	pool := newOrchestrationPool(orchestrator, provider, providerKind, runnerPoolConfig, assembled.stateBackend,
@@ -256,7 +266,7 @@ func (assembled *assembledRuntime) appendPoolConfiguration(configured config.Run
 
 func newOrchestrationPool(
 	orchestrator *runtimeengine.Orchestrator,
-	provider execution.ExecutionProvider,
+	provider execution.RunnerLauncher,
 	providerKind config.ProviderKind,
 	configured config.RunnerPoolConfig,
 	stateBackend string,
@@ -271,9 +281,10 @@ func newOrchestrationPool(
 }
 
 func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error {
-	if dependencies.store == nil || dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
+	if !hasCompleteRuntimeState(dependencies.state) ||
+		dependencies.demandStore == nil || dependencies.manager == nil || dependencies.member == "" ||
 		dependencies.leadership == nil || dependencies.currentTime == nil ||
-		(dependencies.ticker == nil && dependencies.tickers == nil) ||
+		!hasCompleteMaintenanceLaneTickers(dependencies.tickers) ||
 		dependencies.processGate == nil || dependencies.inventory == nil {
 		return errors.New("state, GitHub manager, member, leadership, clock, ticker, and process gate are required")
 	}
@@ -281,6 +292,15 @@ func validateUnifiedDependencies(dependencies unifiedBuilderDependencies) error 
 		return errors.New("member TTL must be positive")
 	}
 	return nil
+}
+
+func hasCompleteMaintenanceLaneTickers(tickers maintenanceLaneTickers) bool {
+	return tickers.membership != nil && tickers.source != nil && tickers.execution != nil
+}
+
+func hasCompleteRuntimeState(ports runtimeStatePorts) bool {
+	return ports.jobs != nil && ports.processing != nil && ports.transitions != nil &&
+		ports.provisioningFailures != nil && ports.members != nil && ports.capacity != nil
 }
 
 type orchestrationPool struct {
@@ -292,6 +312,11 @@ type orchestrationPool struct {
 	stateBackend string
 	report       func(error)
 }
+
+const (
+	provisioningFailureReportingStage    = "report"
+	provisioningFailureFinalizationStage = "finalize_provisioning_failure"
+)
 
 func (pool orchestrationPool) RequestWork(
 	ctx context.Context,
@@ -364,29 +389,129 @@ func reportProcessEvents(
 		reportOperational(report, started)
 	}
 	if result.Outcome == runtimeengine.ProcessRetry {
+		reportRetryOutcome(report, base, result, err)
+	}
+	reportProvisioningFailureOutcome(report, base, result, err)
+}
+
+func reportRetryOutcome(
+	report func(error),
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	event := retryOperationalEvent(base, result, err)
+	var diagnostic interface{ OperationalDiagnostic() string }
+	if errors.As(err, &diagnostic) {
+		event.diagnostic = diagnostic.OperationalDiagnostic()
+	}
+	reportOperational(report, event)
+}
+
+func retryOperationalEvent(
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) operationalEvent {
+	event := base
+	event.outcome = string(result.RetryOutcome)
+	event.err = err
+	if result.RetryOutcome == core.RetryFailureReportingPending {
+		event.operation = "provisioning_failure"
+		event.stage = provisioningFailureReportingStage
+		return event
+	}
+	if result.RetryOutcome == core.RetryFailureFinalizationPending {
+		event.operation = "job_processing"
+		event.stage = provisioningFailureFinalizationStage
+		return event
+	}
+	event.operation = "runner_retry"
+	event.stage = result.FailedStage
+	return event
+}
+
+func reportProvisioningFailureOutcome(
+	report func(error),
+	base operationalEvent,
+	result runtimeengine.ProcessResult,
+	err error,
+) {
+	if result.Outcome == runtimeengine.ProcessClaimed && err != nil {
 		event := base
-		event.operation = "runner_retry"
+		event.operation = "job_processing"
 		event.stage = result.FailedStage
-		event.outcome = string(result.RetryOutcome)
+		event.outcome = "failed"
 		event.err = err
-		var diagnostic interface{ OperationalDiagnostic() string }
-		if errors.As(err, &diagnostic) {
-			event.diagnostic = diagnostic.OperationalDiagnostic()
-		}
+		reportOperational(report, event)
+	}
+	if result.Outcome == runtimeengine.ProcessProvisioningFailureReported ||
+		result.RetryOutcome == core.RetryFailureFinalizationPending {
+		event := base
+		event.operation = "provisioning_failure"
+		event.stage = provisioningFailureReportingStage
+		event.outcome = "reported"
 		reportOperational(report, event)
 	}
 }
 
 func (pool orchestrationPool) Reconcile(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	result, err := pool.orchestrator.ReconcilePool(ctx, runnerPool)
+	reportReconciliationOutcome(pool.report, runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
 		return fmt.Errorf("reconcile pool work: %w", err)
 	}
 	return nil
 }
 
+func reportReconciliationOutcome(
+	report func(error),
+	runnerPool core.RunnerPool,
+	provider string,
+	endpoint string,
+	result runtimeengine.PoolReconciliation,
+) {
+	for _, job := range result.ReportedProvisioningFailures {
+		event := operationalEvent{
+			operation:  "provisioning_failure",
+			stage:      provisioningFailureReportingStage,
+			outcome:    "reported",
+			runnerPool: runnerPool,
+			jobID:      job.ID,
+			provider:   provider,
+			endpoint:   endpoint,
+			count:      1,
+		}
+		reportOperational(report, addGitHubJobContext(report, event, job))
+		reportProvisioningFailureFinalizationRecovery(report, runnerPool, provider, endpoint, job)
+	}
+	for _, job := range result.FinalizedTerminalJobs {
+		reportProvisioningFailureFinalizationRecovery(report, runnerPool, provider, endpoint, job)
+	}
+}
+
+func reportProvisioningFailureFinalizationRecovery(
+	report func(error),
+	runnerPool core.RunnerPool,
+	provider string,
+	endpoint string,
+	job core.Job,
+) {
+	event := operationalEvent{
+		operation:  "job_processing",
+		stage:      provisioningFailureFinalizationStage,
+		outcome:    "recovered",
+		runnerPool: runnerPool,
+		jobID:      job.ID,
+		provider:   provider,
+		endpoint:   endpoint,
+	}
+	reportOperational(report, addGitHubJobContext(report, event, job))
+}
+
 func (pool orchestrationPool) RecoverForeign(ctx context.Context, runnerPool core.RunnerPool) error {
-	_, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
+	result, err := pool.orchestrator.RecoverForeignPool(ctx, runnerPool)
+	reportReconciliationOutcome(pool.report, runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
 		return fmt.Errorf("recover foreign pool work: %w", err)
 	}
@@ -397,8 +522,9 @@ func (pool orchestrationPool) RunnerPool() core.RunnerPool { return pool.runnerP
 
 func (pool orchestrationPool) Terminate(ctx context.Context) (int, error) {
 	result, err := pool.orchestrator.TerminatePool(ctx, pool.runnerPool)
+	reportReconciliationOutcome(pool.report, pool.runnerPool, pool.provider, pool.endpoint, result)
 	if err != nil {
-		return result.RemainingProcessing, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
+		return 0, fmt.Errorf("clean up Runner Pool %q: %w", pool.runnerPool, err)
 	}
 	return result.RemainingProcessing, nil
 }

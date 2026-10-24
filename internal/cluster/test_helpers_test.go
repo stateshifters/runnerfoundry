@@ -7,13 +7,22 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
-func storeWithConnection(connection *fakeDatabaseConnection) *Store {
-	store := NewStore(postgresconfig.Settings{})
-	store.directConnector = func(context.Context) (leaderConnection, error) { return connection, nil }
-	return store
+type fakeSessionOpener struct {
+	connection *fakeDatabaseConnection
+	session    *databaseSession
+	err        error
+}
+
+func (opener fakeSessionOpener) openSession(ctx context.Context) (*databaseSession, error) {
+	if opener.session != nil {
+		return opener.session, opener.err
+	}
+	if opener.connection == nil {
+		return nil, opener.err
+	}
+	return opener.connection.session(), opener.err
 }
 
 type fakeDatabaseExecution struct {
@@ -32,6 +41,8 @@ type fakeDatabaseConnection struct {
 	closeHasDeadline bool
 	pingErr          error
 	closed           bool
+	executor         *migrationExecutor
+	executorErr      error
 }
 
 func (connection *fakeDatabaseConnection) Close(ctx context.Context) error {
@@ -71,6 +82,20 @@ func (connection *fakeDatabaseConnection) QueryRow(
 		statement: statement, arguments: append([]any(nil), arguments...),
 	})
 	return databaseRow{scanner: nextScriptedRow(&connection.rowResults)}
+}
+
+func (connection *fakeDatabaseConnection) newMigrationExecutor(
+	context.Context,
+	*Catalog,
+) (*migrationExecutor, error) {
+	return connection.executor, connection.executorErr
+}
+
+func (connection *fakeDatabaseConnection) session() *databaseSession {
+	return &databaseSession{
+		close: connection.Close, exec: connection.Exec, isClosed: connection.IsClosed,
+		ping: connection.Ping, queryRow: connection.QueryRow, newExecutor: connection.newMigrationExecutor,
+	}
 }
 
 type fakeRow struct {

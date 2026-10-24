@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 
@@ -13,8 +14,8 @@ func primaryConnectionConfigWithResolver(
 	settings postgresconfig.Settings,
 	resolver connectionSettingResolver,
 ) (*pgx.ConnConfig, error) {
-	if settings.Role == "" {
-		return nil, errors.New("PostgreSQL role is required")
+	if err := postgresconfig.Validate(settings); err != nil {
+		return nil, fmt.Errorf("validate PostgreSQL connection settings: %w", err)
 	}
 	if _, err := resolver.resolve(settings.Role); err != nil {
 		return nil, err
@@ -31,6 +32,9 @@ func directConnectionConfigWithResolver(
 	settings postgresconfig.Settings,
 	resolver connectionSettingResolver,
 ) (*pgx.ConnConfig, error) {
+	if err := postgresconfig.Validate(settings); err != nil {
+		return nil, fmt.Errorf("validate PostgreSQL connection settings: %w", err)
+	}
 	if settings.Direct == nil {
 		return primaryConnectionConfigWithResolver(settings, resolver)
 	}
@@ -40,9 +44,6 @@ func directConnectionConfigWithResolver(
 		Role: settings.Role,
 	}
 	if settings.DSN != "" {
-		if direct.DSN == "" && hasStructuredConnectionValues(direct) {
-			return nil, errors.New("direct PostgreSQL DSN is required when overriding a primary DSN")
-		}
 		if direct.DSN == "" {
 			return primaryConnectionConfigWithResolver(settings, resolver)
 		}
@@ -63,9 +64,6 @@ func connectionConfigWithoutRole(
 	settings postgresconfig.Settings,
 	resolver connectionSettingResolver,
 ) (*pgx.ConnConfig, error) {
-	if settings.DSN != "" && hasStructuredConnectionValues(settings) {
-		return nil, errors.New("PostgreSQL DSN cannot be combined with structured settings")
-	}
 	if settings.DSN != "" {
 		return dsnConnectionConfig(settings.DSN, resolver)
 	}
@@ -102,10 +100,6 @@ func structuredConnectionConfig(
 		connectionString = "postgresql://?" + values.Encode()
 	}
 	return parseConnectionConfig(connectionString, resolver)
-}
-
-func hasStructuredConnectionValues(settings postgresconfig.Settings) bool {
-	return settings.Host != "" || settings.Port != "" || settings.Name != "" || settings.User != "" || settings.Password != ""
 }
 
 func inheritConnectionSetting(value string, inherited string) string {

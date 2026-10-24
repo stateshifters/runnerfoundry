@@ -6,23 +6,18 @@ import (
 	"time"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 )
 
-type MembershipStore interface {
-	PublishMemberState(ctx context.Context, memberID core.MemberID, heartbeatAt time.Time, capacities []core.RunnerPoolCapacity) error
-	CountLiveMembers(ctx context.Context, cutoff time.Time) (int, error)
-	WithdrawMemberCapacity(ctx context.Context, memberID core.MemberID) error
-}
-
 type MembershipService struct {
-	store         MembershipStore
+	store         state.MemberRegistry
 	member        core.MemberID
 	localCapacity []core.RunnerPoolCapacity
 	currentTime   func() time.Time
 }
 
 func NewMembershipService(
-	store MembershipStore,
+	store state.MemberRegistry,
 	member core.MemberID,
 	localCapacity []core.RunnerPoolCapacity,
 	currentTime func() time.Time,

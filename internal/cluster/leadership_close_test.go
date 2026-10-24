@@ -9,7 +9,7 @@ import (
 
 func TestLeaderLeaseCloseHonorsCallerCancellation(t *testing.T) {
 	connection := &fakeDatabaseConnection{}
-	lease := &LeaderLease{connection: connection}
+	lease := &LeaderLease{session: connection.session()}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -23,7 +23,7 @@ func TestLeaderLeaseCloseHonorsCallerCancellation(t *testing.T) {
 
 func TestLeaderLeaseClosePropagatesCallerDeadline(t *testing.T) {
 	connection := &fakeDatabaseConnection{}
-	lease := &LeaderLease{connection: connection}
+	lease := &LeaderLease{session: connection.session()}
 	wantDeadline := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	ctx := deadlineContext{deadline: wantDeadline}
 

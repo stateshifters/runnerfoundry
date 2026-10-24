@@ -6,20 +6,26 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 type executionDependencies struct {
-	dockerCommands   dockerprovider.CommandRunner
-	libvirtCommands  libvirtprovider.CommandRunner
-	readTemplate     func(string) ([]byte, error)
-	memberHostname   string
-	providerObserver func(execution.ProviderActivity)
+	newDockerLauncher  func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory func(core.MemberID) execution.RunnerInventory
+	libvirtCommands    libvirtprovider.CommandRunner
+	readTemplate       func(string) ([]byte, error)
+	memberID           core.MemberID
+	providerObserver   providerActivityObserver
 }
 
-type configuredExecutionProvider struct{ execution.ExecutionProvider }
+type configuredExecutionProvider struct {
+	Launcher  execution.RunnerLauncher
+	Inventory execution.RunnerInventory
+}
 
 func buildExecutionProvider(
 	ctx context.Context,
@@ -30,7 +36,7 @@ func buildExecutionProvider(
 	if err != nil {
 		return configuredExecutionProvider{}, err
 	}
-	if err = provider.Validate(ctx); err != nil {
+	if err = provider.Launcher.Validate(ctx); err != nil {
 		return configuredExecutionProvider{}, fmt.Errorf("validate execution provider for Runner Pool %q: %w", configured.Name, err)
 	}
 	return provider, nil
@@ -45,7 +51,7 @@ func configuredProvider(
 		return configuredExecutionProvider{}, fmt.Errorf("runner pool %q: %w", configured.Name, err)
 	}
 	if kind == config.ProviderKindDocker {
-		return configuredDockerProvider(configured, dependencies), nil
+		return configuredDockerProvider(configured, dependencies)
 	}
 	return configuredLibvirtProvider(configured, dependencies)
 }
@@ -53,18 +59,33 @@ func configuredProvider(
 func configuredDockerProvider(
 	configured config.RunnerPoolConfig,
 	dependencies executionDependencies,
-) configuredExecutionProvider {
-	provider := execution.NewDockerComposeProvider(
-		dependencies.dockerCommands,
+) (configuredExecutionProvider, error) {
+	if dependencies.newDockerLauncher == nil {
+		return configuredExecutionProvider{}, errors.New("docker launcher factory is required")
+	}
+	launcher := dependencies.newDockerLauncher(
 		dockerprovider.ComposeConfig{
 			ComposeFile: configured.Docker.ComposeFile,
 			Service:     configured.Docker.Service,
-		}, execution.HostIdentity(dependencies.memberHostname),
+		}, dependencies.memberID,
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlinesAndMetadata(
-		provider, execution.ProviderMetadata{Name: execution.ProviderName(config.ProviderKindDocker),
-			ComposeService: configured.Docker.Service}, dependencies.providerObserver,
-	)}
+	return configuredExecutionProvider{
+		Launcher: runtimeservice.WithLauncherOperationDeadlines(
+			launcher, runtimeservice.ProviderName(config.ProviderKindDocker),
+			observeProviderActivity(dependencies.providerObserver, configured.Docker.Service),
+		),
+	}, nil
+}
+
+func configuredDockerInventory(dependencies executionDependencies) (runtimeservice.InventoryOperationDeadlineProvider, error) {
+	if dependencies.newDockerInventory == nil {
+		return runtimeservice.InventoryOperationDeadlineProvider{}, errors.New("docker inventory factory is required")
+	}
+	inventory := dependencies.newDockerInventory(dependencies.memberID)
+	return runtimeservice.WithInventoryOperationDeadlines(
+		inventory, runtimeservice.ProviderName(config.ProviderKindDocker),
+		observeProviderActivity(dependencies.providerObserver, ""),
+	), nil
 }
 
 func configuredLibvirtProvider(
@@ -78,16 +99,18 @@ func configuredLibvirtProvider(
 	if err != nil {
 		return configuredExecutionProvider{}, fmt.Errorf("read libvirt domain template: %w", err)
 	}
-	provider := execution.NewLibvirtProvider(
+	provider := libvirtprovider.NewProvider(
 		dependencies.libvirtCommands,
 		libvirtprovider.Config{
 			ConnectionURI:     configured.Libvirt.ConnectionURI,
 			DomainXMLTemplate: configured.Libvirt.DomainXMLTemplate,
 		},
 		template,
-		execution.HostIdentity(dependencies.memberHostname),
+		dependencies.memberID,
 	)
-	return configuredExecutionProvider{ExecutionProvider: execution.WithOperationDeadlines(
-		provider, execution.ProviderName(config.ProviderKindLibvirt), dependencies.providerObserver,
-	)}, nil
+	wrapped := runtimeservice.WithOperationDeadlines(
+		provider, runtimeservice.ProviderName(config.ProviderKindLibvirt),
+		observeProviderActivity(dependencies.providerObserver, ""),
+	)
+	return configuredExecutionProvider{Launcher: wrapped, Inventory: wrapped}, nil
 }

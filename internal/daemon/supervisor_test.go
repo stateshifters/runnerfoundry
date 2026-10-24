@@ -15,7 +15,7 @@ func TestSupervisorReportsReadyBeforeFirstMaintenanceCycleCompletes(t *testing.T
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	runtimeGeneration, cycles, releaseCycle := newBlockedMaintenanceGeneration(t)
+	runtimeGeneration, cycles, releaseMaintenance := newBlockedMaintenanceGeneration(t)
 	ready := make(chan struct{}, 1)
 	notifier := &fakeSupervisorNotifier{readySignal: ready}
 	supervisorResult := make(chan error, 1)
@@ -31,9 +31,9 @@ func TestSupervisorReportsReadyBeforeFirstMaintenanceCycleCompletes(t *testing.T
 		)
 	}()
 
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	waitForSupervisorSignal(t, ready, "systemd readiness")
-	releaseCycle()
+	releaseMaintenance()
 	cancel()
 	if err := <-supervisorResult; err != nil {
 		t.Fatalf("supervise runtime: %v", err)
@@ -43,7 +43,7 @@ func TestSupervisorReportsReadyBeforeFirstMaintenanceCycleCompletes(t *testing.T
 func TestSupervisorReportsReloadReadyBeforeReplacementMaintenanceCompletes(t *testing.T) {
 	t.Parallel()
 
-	replacement, cycles, releaseCycle := newBlockedMaintenanceGeneration(t)
+	replacement, cycles, releaseMaintenance := newBlockedMaintenanceGeneration(t)
 	handoff := &generationHandoff{
 		policy: LeaveActiveRunners,
 		active: &managedGeneration{generation: &fakeGeneration{}},
@@ -61,9 +61,9 @@ func TestSupervisorReportsReloadReadyBeforeReplacementMaintenanceCompletes(t *te
 		)
 	}()
 
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	waitForSupervisorSignal(t, ready, "replacement readiness")
-	releaseCycle()
+	releaseMaintenance()
 	if err := <-reloadResult; err != nil {
 		t.Fatalf("reload runtime: %v", err)
 	}

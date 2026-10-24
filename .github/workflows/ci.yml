@@ -20,12 +20,12 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-#    env:
-#      GOCACHE: /cache/go-build
-#      GOMODCACHE: /cache/go-mod
-#      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/embedded-postgres
-#      npm_config_cache: /cache/npm
+    runs-on: meza-ubuntu-slim
+    env:
+      GOCACHE: /cache/go-build
+      GOMODCACHE: /cache/go-mod
+      RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
+      npm_config_cache: /cache/npm
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,6 +33,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
+          cache: false
 
       - name: Lint
         run: make lint

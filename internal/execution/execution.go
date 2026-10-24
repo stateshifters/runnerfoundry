@@ -11,10 +11,6 @@ import (
 // endpoint that accepted a claim.
 type InventoryEndpointID = core.InventoryEndpointID
 
-// HostIdentity is the stable member-local host name used when deriving provider
-// endpoint identities across reloads.
-type HostIdentity string
-
 // RunnerLauncher validates and starts ephemeral runner environments.
 type RunnerLauncher interface {
 	EndpointID() InventoryEndpointID
@@ -57,17 +53,6 @@ type ExecutionProvider interface {
 	RunnerInventory
 }
 
-// Bootstrap is source-owned runner initialization data. Execution providers
-// transport it without interpreting it.
-type Bootstrap struct {
-	content []byte
-}
-
-// NewBootstrap takes a defensive copy of source-owned bootstrap data.
-func NewBootstrap(content []byte) Bootstrap {
-	return Bootstrap{content: append([]byte(nil), content...)}
-}
-
 // StartRequest binds a runner to exactly one configured Runner Pool and
 // inventory endpoint. Bootstrap remains opaque to the execution provider.
 type StartRequest struct {
@@ -75,12 +60,8 @@ type StartRequest struct {
 	RunnerPool core.RunnerPool
 	EndpointID InventoryEndpointID
 	RunnerName core.RunnerName
-	Bootstrap  Bootstrap
+	Bootstrap  core.Bootstrap
 }
-
-// ProviderName identifies the configured execution implementation in operator
-// diagnostics without relying on reflection or endpoint parsing.
-type ProviderName string
 
 // RunnerState is the provider-neutral lifecycle observation used by recovery.
 type RunnerState string
@@ -91,17 +72,13 @@ const (
 	RunnerStateUnknown   RunnerState = "unknown"
 )
 
-// RunnerInstance is one provider observation. Aggregate inventories attach a
-// transient origin so Destroy can route it back to the observing endpoint.
-type RunnerInstance struct {
-	ID         string
-	RunnerName core.RunnerName
-	RunnerPool core.RunnerPool
-	EndpointID InventoryEndpointID
-	State      RunnerState
-	origin     *runnerInventoryOrigin
-}
+type InventoryObservation [1]byte
 
-type runnerInventoryOrigin struct {
-	inventory RunnerInventory
+type RunnerInstance struct {
+	ID                   string
+	RunnerName           core.RunnerName
+	RunnerPool           core.RunnerPool
+	EndpointID           InventoryEndpointID
+	State                RunnerState
+	InventoryObservation *InventoryObservation
 }

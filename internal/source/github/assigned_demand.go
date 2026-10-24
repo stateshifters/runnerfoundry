@@ -21,11 +21,13 @@ type AssignedDemand struct {
 // AssignedDemandResult describes the ordinary durable jobs covering one
 // assigned-demand observation after its transaction commits.
 type AssignedDemandResult struct {
-	ActiveJobs     int
-	QueuedJobs     int
-	ProcessingJobs int
-	JobsAdded      int
-	JobsRemoved    int
+	ActiveJobs        int
+	QueuedJobs        int
+	ProcessingJobs    int
+	JobsAdded         int
+	JobsRemoved       int
+	SurplusQueued     []core.JobIdentity
+	SurplusProcessing []core.JobIdentity
 }
 
 // AssignedDemandRepository atomically translates GitHub's aggregate demand

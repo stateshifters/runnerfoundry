@@ -37,8 +37,8 @@ func TestProductionRuntimeReusesMemberIdentityAcrossReload(t *testing.T) {
 		_ func(error),
 	) (*maintenanceGeneration, error) {
 		members = append(members, state.member)
-		return newMaintenanceGeneration(
-			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+		return newTestMaintenanceGeneration(
+			&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
 			nil,
 		), nil
 	}
@@ -64,7 +64,7 @@ func TestProductionRuntimeCloseWithdrawsMember(t *testing.T) {
 		t.Fatalf("create memory logger: %v", err)
 	}
 	runtime := &productionRuntime{logging: logging, state: &productionState{
-		store: store, member: daemonTestID(7),
+		store: runtimeStatePorts{members: store}, member: daemonTestID(7),
 	}}
 
 	if err := runtime.Close(context.Background()); !errors.Is(err, wantErr) {
@@ -86,8 +86,8 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 		func(error),
 	) (*maintenanceGeneration, error) {
 		builds++
-		return newMaintenanceGeneration(
-			&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
+		return newTestMaintenanceGeneration(
+			&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, func(error) {}, nil,
 			nil,
 		), nil
 	}
@@ -96,7 +96,7 @@ func newTestProductionRuntime(t *testing.T) (*productionRuntime, *int) {
 		t.Fatalf("create memory logger: %v", err)
 	}
 	return &productionRuntime{
-		logging: logging, state: &productionState{store: newBuilderStoreFake(), member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
+		logging: logging, state: &productionState{store: builderStatePorts(newBuilderStoreFake()), member: daemonTestID(1)}, processGate: &localLeadershipGate{}, report: func(error) {}, firstBuild: true,
 		build: buildGeneration, reporter: &productionRuntimeReporter{},
 	}, &builds
 }
@@ -237,7 +237,7 @@ func TestLeaveShutdownReturnsSuccessfullyWhenRuntimeCleanupExceedsBudget(t *test
 		release:          releaseCleanup,
 	}
 	runtime, _ := newTestProductionRuntime(t)
-	runtime.state.store = store
+	runtime.state.store.members = store
 	dependencies, _ := testRunBoundaries(t, runtime)
 	expired := make(chan time.Time, 1)
 	timerCreated := make(chan time.Duration, 1)
@@ -326,7 +326,7 @@ func TestTerminateShutdownDoesNotUseLeaveBudget(t *testing.T) {
 		release:          releaseCleanup,
 	}
 	runtime, _ := newTestProductionRuntime(t)
-	runtime.state.store = store
+	runtime.state.store.members = store
 	dependencies, _ := testRunBoundaries(t, runtime)
 	dependencies.supervise = successfulSupervisor
 	dependencies.newShutdownTimer = func(time.Duration) shutdownTimer {

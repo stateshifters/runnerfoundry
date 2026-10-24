@@ -140,9 +140,9 @@ Replace `/etc/runnerfoundry/config.yaml` with:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
 
 state:
   path: /var/lib/runnerfoundry/state.db
@@ -211,9 +211,9 @@ A complete standalone configuration can be as small as:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
 
 state:
   path: /var/lib/runnerfoundry/state.db
@@ -279,9 +279,9 @@ Then use PostgreSQL instead of `state.path`:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
 
 state:
   postgres:
@@ -355,9 +355,9 @@ Each host must therefore have a stable, unique hostname.
 
 Do not run two RunnerFoundry daemons using the same hostname against the same cluster.
 
-### 3. Use the same GitHub App
+### 3. Use the same ordered GitHub App list
 
-Every cluster member uses the same GitHub App and the same PostgreSQL database.
+Every cluster member uses the same ordered GitHub App list and the same PostgreSQL database. App order must match on every member so repository precedence is consistent.
 
 Install the private key on each member:
 
@@ -411,9 +411,9 @@ Host `runner01` might provide Docker capacity:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
 
 state:
   postgres:
@@ -436,9 +436,9 @@ Host `runner02` might provide Windows capacity:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
 
 state:
   postgres:
@@ -526,7 +526,7 @@ RunnerFoundry validates that the configured Compose service exists before activa
 
 When a job needs a runner, RunnerFoundry starts a detached one-job container and supplies the GitHub JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`.
 
-The container uses Docker's `--rm` lifecycle. RunnerFoundry also tracks it so failed or interrupted provisioning can be cleaned up.
+The container uses Docker's `--rm` lifecycle and normally removes itself after the runner exits. RunnerFoundry still issues `docker rm --force` during cleanup. A failed or interrupted runner might not terminate by itself. Cleanup succeeds when Docker reports that removal of that exact container is already in progress. Docker then owns completing the removal, and RunnerFoundry does not retry it. Other removal failures require RunnerFoundry to confirm that the container is absent.
 
 The image, tools, command, volumes, networks and security policy remain yours to define.
 
@@ -591,21 +591,22 @@ The keys documented in this section are the complete valid YAML configuration su
 
 ### Top-level settings
 
-| Setting      | Type    | Default          | Requirements                 |
-| ------------ | ------- | ---------------- | ---------------------------- |
-| `github`     | mapping | none             | Required                     |
-| `log`        | mapping | defaults applied | Optional                     |
-| `state`      | mapping | none             | Required                     |
-| `prune`      | boolean | `false`          | `true` or `false`            |
-| `scale_sets` | list    | none             | Required, at least one entry |
+| Setting             | Type    | Default          | Requirements                 |
+| ------------------- | ------- | ---------------- | ---------------------------- |
+| `autoUpdateRunners` | boolean | `false`          | `true` or `false`            |
+| `github`            | mapping | none             | Required                     |
+| `log`               | mapping | defaults applied | Optional                     |
+| `state`             | mapping | none             | Required                     |
+| `prune`             | boolean | `false`          | `true` or `false`            |
+| `scale_sets`        | list    | none             | Required, at least one entry |
 
 A complete PostgreSQL-backed example showing all major configuration areas looks like:
 
 ```yaml
 github:
-  app:
-    app_id: 123456
-    private_key_file: /etc/runnerfoundry/github-app.pem
+  apps:
+    - app_id: 123456
+      private_key_file: /etc/runnerfoundry/github-app.pem
   discovery_interval: 5m
 
 log:
@@ -631,46 +632,80 @@ state:
       user: env://RUNNERFOUNDRY_POSTGRES_USER
       password: file:///run/secrets/runnerfoundry-postgres-password
 
+autoUpdateRunners: false
 prune: false
 
 scale_sets:
   - name: linux
     runner_group: default
+    stop_if_not_started_within: 5m
     max_runners: 4
     docker:
       compose_file: /etc/runnerfoundry/compose.yaml
       service: runner
 ```
 
+### Runner software updates
+
+#### `autoUpdateRunners`
+
+Optional boolean.
+
+Default:
+
+```yaml
+autoUpdateRunners: false
+```
+
+Set this to `true` to allow automatic GitHub Actions runner software updates:
+
+```yaml
+autoUpdateRunners: true
+```
+
+This setting controls the GitHub runner scale-set setting. Changing it does not restart or replace runner instances.
+
+When this is `false`, RunnerFoundry disables automatic runner software updates on every GitHub runner scale set it manages.
+
+You must then keep the GitHub Actions runner software current in every Docker or libvirt runner image. GitHub requires an update within 30 days of each new runner release and stops queueing jobs to outdated runners. A required critical security update can stop job queueing sooner. See [GitHub's runner software update requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#runner-software-updates-on-self-hosted-runners).
+
+This global setting applies to every configured GitHub App, repository and Runner Pool. It applies to Docker-backed and libvirt-backed pools.
+
+Reload the configuration or restart RunnerFoundry after changing the setting. RunnerFoundry applies it as each repository's Runner Pools are reconciled. It updates existing scale sets when their current setting differs and uses the setting when it creates new scale sets.
+
+If the GitHub API update fails, reconciliation for that repository fails and RunnerFoundry reports the error in its logs.
+
 ### GitHub configuration
 
-#### `github.app.app_id`
+#### `github.apps`
 
 ```yaml
 github:
-  app:
-    app_id: 123456
+  apps:
+    - app_id: 4273059
+      private_key_file: /run/secrets/meza-runner.pem
+    - app_id: 7654321
+      private_key_file: /run/secrets/stateshifters-runner.pem
 ```
 
 Required.
 
-Must be a positive integer containing the numeric GitHub App ID.
+Must contain at least one GitHub App. List order is repository precedence: when more than one App can see the same repository, the first successfully authoritative App owns every route for that repository. Lower-priority Apps continue serving repositories that do not overlap.
 
-#### `github.app.private_key_file`
+Every entry requires:
 
-```yaml
-github:
-  app:
-    private_key_file: /etc/runnerfoundry/github-app.pem
-```
+- `app_id`: a unique positive numeric GitHub App ID;
+- `private_key_file`: a readable path containing non-empty private-key material.
 
-Required.
+RunnerFoundry applies every configured Runner Pool and its `runner_group` to every App. Repository URLs remain the unique job namespace; App identity does not change queued job identity or FIFO behavior.
 
-A filesystem path to the GitHub App private key.
+RunnerFoundry prepares every key before accepting startup or reload. App discovery runs independently with a one-minute bound. Repository work receives a fresh one-minute bound after admission, so time spent waiting for shared capacity does not consume another App's opportunity to reconcile. One App's later authentication, discovery, session, or rate-limit failure degrades overall health while trustworthy routes from other Apps continue operating.
 
-The file must be readable by RunnerFoundry and contain non-empty private-key material.
+Repository reconciliation shares a four-repository limit across all Apps and reserves admission between configured Apps so one App cannot consume every slot. Session creation retains its global limit of 16, partitions admission between configured Apps so one App cannot consume every slot, and cancels an individual open attempt after one minute.
 
-Inline private keys are not supported.
+Removing an App closes its sessions and removes its active bootstrap and polling routes. RunnerFoundry retains that App's scale-set ownership evidence and does not delete its remote scale sets. Re-add the App to resume management, or uninstall it in GitHub when those scale sets are no longer required.
+
+Duplicate or non-positive App IDs, missing key paths, inline private keys, and the former singular `github.app` form are rejected.
 
 #### `github.discovery_interval`
 
@@ -699,7 +734,7 @@ Examples:
 1h30m
 ```
 
-RunnerFoundry uses this interval when rediscovering repositories available through the configured GitHub App.
+RunnerFoundry uses this interval when rediscovering repositories independently through each configured GitHub App.
 
 #### Unsupported GitHub authentication settings
 
@@ -713,11 +748,15 @@ github:
   token_env: ...
   token_file: ...
 
-  app:
-    private_key: ...
+  app: # former singular form is not supported
+    app_id: ...
+
+  apps:
+    - app_id: 123456
+      private_key: ...
 ```
 
-Use `github.app.app_id` together with `github.app.private_key_file`.
+Use `github.apps` with `app_id` and `private_key_file` for every entry.
 
 ### Logging configuration
 
@@ -1224,6 +1263,32 @@ In a standalone deployment it is the member's full configured capacity for that 
 
 In a cluster, live members declaring the same pool contribute their capacities to the shared pool.
 
+#### `scale_sets[].stop_if_not_started_within`
+
+Optional.
+
+Default:
+
+```text
+5m
+```
+
+The value is a Go duration string that must be greater than zero. RunnerFoundry rejects malformed, zero or negative values
+when it validates startup or reload configuration.
+
+```yaml
+stop_if_not_started_within: 10m
+```
+
+This setting limits how long RunnerFoundry waits from claiming a job until a runner accepts it. Jobs already accepted by a
+runner are unaffected.
+
+When the limit expires, RunnerFoundry recovers the attempt only if it can identify the provider endpoint. It cleans up the
+runner attempt, then moves the same GitHub job to the back of its Runner Pool queue. The job remains in processing if cleanup
+fails, so RunnerFoundry can retry cleanup.
+
+Reload the configuration after changing the setting. A successful reload applies the new value.
+
 ### Docker provider configuration
 
 The Docker provider has exactly two settings:
@@ -1417,6 +1482,8 @@ For a controlled cluster upgrade:
 
 Starting a new member before the explicit `migrate up` will apply those same forward migrations automatically.
 
+Migration 006 introduces App-scoped GitHub adapter state. Use the stopped-cluster procedure above. The migration preserves queued and processing jobs, tombstones, membership, capacity, and Runner Pool declarations, but intentionally clears active GitHub registrations and scale-set ownership that lack an App ID. Expect a brief route-recreation period after restart. The migration keeps the prior adapter rows only for rollback to schema 005.
+
 A rollback to a known schema version is available through:
 
 ```sh
@@ -1432,7 +1499,7 @@ RunnerFoundry is currently pre-1.0. Read the release notes before upgrading.
 
 PostgreSQL deployments use the migration system described above.
 
-For SQLite, reuse the existing database unless the release notes explicitly say that a particular schema change requires recreation.
+SQLite schema 108 performs the same adapter-state replacement automatically while preserving core job, tombstone, membership, capacity, and Runner Pool declaration data. Reuse the existing database and expect GitHub routes to reappear after discovery.
 
 Recreating the SQLite database discards RunnerFoundry's durable state. Back it up before doing so.
 
@@ -1583,12 +1650,6 @@ The resulting executable is:
 
 ```text
 build/linux/amd64/runnerfoundry
-```
-
-Check it with:
-
-```sh
-./build/linux/amd64/runnerfoundry --version
 ```
 
 Build the Debian package and release metadata with:

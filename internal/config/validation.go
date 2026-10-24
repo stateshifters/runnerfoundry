@@ -112,17 +112,38 @@ func (stateConfig StateConfig) validate() error {
 
 func (githubConfig *GitHubConfig) validate() error {
 	if githubConfig.TokenEnv != "" || githubConfig.TokenFile != "" || githubConfig.Token != "" {
-		return errors.New("PAT authentication is not supported; configure github.app")
+		return errors.New("PAT authentication is not supported; configure github.apps")
 	}
-	if githubConfig.App.AppID <= 0 {
-		return errors.New("github.app.app_id must be positive")
+	if err := validateGitHubApps(githubConfig.Apps); err != nil {
+		return err
 	}
-	if githubConfig.App.PrivateKey != "" {
-		return errors.New("github.app.private_key is not allowed; use private_key_file")
+	return githubConfig.validateDiscoveryInterval()
+}
+
+func validateGitHubApps(apps []GitHubAppConfig) error {
+	if len(apps) == 0 {
+		return errors.New("github.apps must contain at least one App")
 	}
-	if githubConfig.App.PrivateKeyFile == "" {
-		return errors.New("github.app.private_key_file is required")
+	seenAppIDs := make(map[int64]struct{}, len(apps))
+	for index, app := range apps {
+		if app.AppID <= 0 {
+			return fmt.Errorf("github.apps[%d].app_id must be positive", index)
+		}
+		if _, duplicate := seenAppIDs[app.AppID]; duplicate {
+			return fmt.Errorf("github.apps[%d].app_id %d is duplicated", index, app.AppID)
+		}
+		seenAppIDs[app.AppID] = struct{}{}
+		if app.PrivateKey != "" {
+			return fmt.Errorf("github.apps[%d].private_key is not allowed; use private_key_file", index)
+		}
+		if app.PrivateKeyFile == "" {
+			return fmt.Errorf("github.apps[%d].private_key_file is required", index)
+		}
 	}
+	return nil
+}
+
+func (githubConfig *GitHubConfig) validateDiscoveryInterval() error {
 	if githubConfig.DiscoveryInterval == "" {
 		githubConfig.DiscoveryInterval = defaultDiscoveryInterval
 	}
@@ -163,6 +184,9 @@ func (runnerPool *RunnerPoolConfig) validate(seenNames map[string]bool) error {
 	if runnerPool.MaxRunners <= 0 {
 		return fmt.Errorf("runner pool %q max_runners must be positive", runnerPool.Name)
 	}
+	if _, err := runnerPool.StopIfNotStartedDuration(); err != nil {
+		return err
+	}
 	if err := runnerPool.validateProvider(); err != nil {
 		return fmt.Errorf("runner pool %q: %w", runnerPool.Name, err)
 	}
@@ -200,4 +224,16 @@ func (githubConfig GitHubConfig) DiscoveryDuration() (time.Duration, error) {
 		return 0, fmt.Errorf("parse validated discovery interval: %w", err)
 	}
 	return discoveryInterval, nil
+}
+
+func (runnerPool RunnerPoolConfig) StopIfNotStartedDuration() (time.Duration, error) {
+	configured := runnerPool.StopIfNotStartedWithin
+	if configured == "" {
+		configured = "5m"
+	}
+	duration, err := time.ParseDuration(configured)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("runner pool %q stop_if_not_started_within must be a positive duration", runnerPool.Name)
+	}
+	return duration, nil
 }

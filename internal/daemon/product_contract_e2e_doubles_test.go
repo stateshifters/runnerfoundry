@@ -55,6 +55,9 @@ type e2eGitHost struct {
 	discoveredRepositories []int
 	clientCalls            int
 	ensureCalls            map[string]int
+	registrationSequences  map[string]uint64
+	sessionSequences       map[string]uint64
+	observationChanged     chan struct{}
 	openGates              map[string]*e2eSessionOpenGate
 	discoveryGates         []*e2eDiscoveryGate
 	cleanupGates           []*e2eCleanupGate
@@ -83,7 +86,9 @@ func newE2EGitHost() *e2eGitHost {
 		sessionOns: map[string]*sync.Once{"linux": {}, "windows": {}},
 		cleanups:   make(chan string, 8), sessionOpened: make(chan string, 16),
 		sessionOpens: make(map[string]int), openGates: make(map[string]*e2eSessionOpenGate),
-		ensureCalls: make(map[string]int),
+		ensureCalls:           make(map[string]int),
+		registrationSequences: make(map[string]uint64), sessionSequences: make(map[string]uint64),
+		observationChanged: make(chan struct{}),
 	}).withDefaultRepository()
 }
 
@@ -218,18 +223,11 @@ func (host *e2eGitHost) ensureRunnerPool(
 	if !exists || runnerGroup != "default" {
 		return transport.Registration{}, errors.New("unexpected GitHub Runner Pool registration")
 	}
+	host.mutex.Lock()
+	host.recordRouteObservation(host.registrationSequences, runnerPool)
+	host.mutex.Unlock()
 	host.registrationOns[runnerPool].Do(func() { close(host.registrationOK[runnerPool]) })
 	return registration, nil
-}
-
-func (host *e2eGitHost) callSummary() (repositories []int, clientCalls int, ensures map[string]int) {
-	host.mutex.Lock()
-	defer host.mutex.Unlock()
-	ensures = make(map[string]int, len(host.ensureCalls))
-	for runnerPool, calls := range host.ensureCalls {
-		ensures[runnerPool] = calls
-	}
-	return append([]int(nil), host.discoveredRepositories...), host.clientCalls, ensures
 }
 
 func (host *e2eGitHost) resolveRunnerGroup(context.Context, string) (transport.RunnerGroupID, error) {
@@ -249,7 +247,6 @@ func (host *e2eGitHost) openSession(
 	host.mutex.Lock()
 	gate := host.openGates[runnerPool]
 	delete(host.openGates, runnerPool)
-	host.sessionOpens[runnerPool]++
 	host.mutex.Unlock()
 	if gate != nil {
 		close(gate.started)
@@ -260,9 +257,36 @@ func (host *e2eGitHost) openSession(
 		case <-gate.release:
 		}
 	}
+	host.mutex.Lock()
+	host.sessionOpens[runnerPool]++
+	host.recordRouteObservation(host.sessionSequences, runnerPool)
+	host.mutex.Unlock()
 	host.sessionOns[runnerPool].Do(func() { close(host.sessionOK[runnerPool]) })
 	host.sessionOpened <- runnerPool
 	return host.sessions[runnerPool], nil
+}
+
+func (host *e2eGitHost) recordRouteObservation(observations map[string]uint64, runnerPool string) {
+	observations[runnerPool]++
+	close(host.observationChanged)
+	host.observationChanged = make(chan struct{})
+}
+
+func (host *e2eGitHost) routeObservation(
+	observations map[string]uint64,
+	runnerPool string,
+) (uint64, <-chan struct{}) {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	return observations[runnerPool], host.observationChanged
+}
+
+func (host *e2eGitHost) registrationObservation(runnerPool string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.registrationSequences, runnerPool)
+}
+
+func (host *e2eGitHost) sessionObservation(runnerPool string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.sessionSequences, runnerPool)
 }
 
 func (host *e2eGitHost) sessionOpenCount(runnerPool string) int {
@@ -359,6 +383,8 @@ type e2eGitHubSession struct {
 	ackEffects     map[int]chan struct{}
 	pollEffects    map[int]chan struct{}
 	pendingPollAck int
+	pollStarts     uint64
+	pollChanged    chan struct{}
 	nextMessageID  int
 	closed         chan struct{}
 	closeStarted   chan struct{}
@@ -370,6 +396,60 @@ type e2eGitHubSession struct {
 	mutex          sync.Mutex
 	closeStartOnce sync.Once
 	closeOnce      sync.Once
+}
+
+type e2eObservedGitHubSession struct {
+	*e2eGitHubSession
+	mutex       sync.Mutex
+	pollStarts  uint64
+	pollChanged chan struct{}
+}
+
+func newE2EObservedGitHubSession(session *e2eGitHubSession) *e2eObservedGitHubSession {
+	return &e2eObservedGitHubSession{e2eGitHubSession: session, pollChanged: make(chan struct{})}
+}
+
+func (session *e2eObservedGitHubSession) GetMessage(
+	ctx context.Context,
+	lastMessageID int,
+	maxCapacity int,
+) (*upstream.RunnerScaleSetMessage, error) {
+	session.mutex.Lock()
+	session.pollStarts++
+	close(session.pollChanged)
+	session.pollChanged = make(chan struct{})
+	session.mutex.Unlock()
+	return session.e2eGitHubSession.GetMessage(ctx, lastMessageID, maxCapacity)
+}
+
+func (session *e2eObservedGitHubSession) pollObservation() (uint64, <-chan struct{}) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	return session.pollStarts, session.pollChanged
+}
+
+type e2eRouteRecorder struct {
+	mutex   sync.Mutex
+	routes  map[string]uint64
+	changed chan struct{}
+}
+
+func newE2ERouteRecorder() *e2eRouteRecorder {
+	return &e2eRouteRecorder{routes: make(map[string]uint64), changed: make(chan struct{})}
+}
+
+func (recorder *e2eRouteRecorder) record(route string) {
+	recorder.mutex.Lock()
+	recorder.routes[route]++
+	close(recorder.changed)
+	recorder.changed = make(chan struct{})
+	recorder.mutex.Unlock()
+}
+
+func (recorder *e2eRouteRecorder) observation(route string) (uint64, <-chan struct{}) {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return recorder.routes[route], recorder.changed
 }
 
 type e2eAcquisitionScript struct {
@@ -452,6 +532,7 @@ func newE2EGitHubSession() *e2eGitHubSession {
 		pollEffects:    make(map[int]chan struct{}),
 		acquisitions:   make(chan []int64, 16),
 		capacityChange: make(chan struct{}),
+		pollChanged:    make(chan struct{}),
 		closed:         make(chan struct{}), closeStarted: make(chan struct{}),
 	}
 }
@@ -470,6 +551,11 @@ func (session *e2eGitHubSession) GetMessage(
 	_ int,
 	maxCapacity int,
 ) (*upstream.RunnerScaleSetMessage, error) {
+	session.mutex.Lock()
+	session.pollStarts++
+	close(session.pollChanged)
+	session.pollChanged = make(chan struct{})
+	session.mutex.Unlock()
 	session.recordCapacity(maxCapacity)
 	select {
 	case session.pollRequested <- struct{}{}:
@@ -483,6 +569,12 @@ func (session *e2eGitHubSession) GetMessage(
 	case <-ctx.Done():
 		return nil, fmt.Errorf("wait for scripted GitHub message: %w", ctx.Err())
 	}
+}
+
+func (session *e2eGitHubSession) pollObservation() (uint64, <-chan struct{}) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	return session.pollStarts, session.pollChanged
 }
 
 func (session *e2eGitHubSession) recordCapacity(capacity int) {

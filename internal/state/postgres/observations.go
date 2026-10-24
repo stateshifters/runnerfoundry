@@ -13,61 +13,151 @@ import (
 func (store *Store) Terminalize(
 	ctx context.Context,
 	identity core.JobIdentity,
-) (_ core.ObservationResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) (core.ObservationResult, error) {
+	return store.applyObservation(ctx, identity, "terminalize job", terminalizeResolvedSource)
+}
+
+func (store *Store) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	outcome := core.ConditionalTerminalMissing
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		outcome, err = applyConditionalTerminal(ctx, transaction, identity)
+		return err
+	})
 	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("begin terminalize job: %w", err)
+		return core.ConditionalTerminalResult{}, fmt.Errorf("conditionally terminalize job: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
+	return core.ConditionalTerminalResult{Outcome: outcome}, nil
+}
+
+func applyConditionalTerminal(
+	ctx context.Context,
+	transaction Transaction,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalOutcome, error) {
 	source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
 	if err != nil || !matched {
-		return commitObservation(ctx, transaction, &open, core.ObservationUnmatched, err)
+		return core.ConditionalTerminalMissing, err
+	}
+	inserted, err := executeAffected(ctx, transaction, insertConditionalTombstoneSQL,
+		source.Adapter, source.ID, identity.JobID)
+	if err != nil {
+		return "", fmt.Errorf("tombstone unaccepted job: %w", err)
+	}
+	if _, err = transaction.Execute(ctx, deleteConditionalQueuedJobSQL,
+		identity.JobID, source.Adapter, source.ID); err != nil {
+		return "", fmt.Errorf("remove conditionally terminal queued job: %w", err)
+	}
+	if inserted > 0 {
+		return core.ConditionalTerminalApplied, nil
+	}
+	var classified string
+	if err = transaction.ReadRow(ctx, classifyConditionalTerminalSQL, func(row Scanner) error {
+		return row.Scan(&classified)
+	}, source.Adapter, source.ID, identity.JobID); err != nil {
+		return "", fmt.Errorf("classify conditional terminal observation: %w", err)
+	}
+	return core.ConditionalTerminalOutcome(classified), nil
+}
+
+type postgresObservationOperation func(
+	context.Context,
+	Transaction,
+	core.SourceReference,
+	core.JobIdentity,
+) (core.ObservationOutcome, error)
+
+func (store *Store) applyObservation(
+	ctx context.Context,
+	identity core.JobIdentity,
+	begin string,
+	operation postgresObservationOperation,
+) (core.ObservationResult, error) {
+	outcome := core.ObservationUnmatched
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
+		if err != nil || !matched {
+			return err
+		}
+		outcome, err = operation(ctx, transaction, source, identity)
+		return err
+	})
+	if err != nil {
+		return core.ObservationResult{}, fmt.Errorf("%s: %w", begin, err)
+	}
+	return core.ObservationResult{Outcome: outcome}, nil
+}
+
+func terminalizeResolvedSource(
+	ctx context.Context,
+	transaction Transaction,
+	source core.SourceReference,
+	identity core.JobIdentity,
+) (core.ObservationOutcome, error) {
+	if identity.AttemptID.IsValid() {
+		matched, outcome, matchErr := classifyProcessingAttempt(ctx, transaction, source, identity)
+		if matchErr != nil || !matched {
+			return outcome, matchErr
+		}
 	}
 	inserted, err := executeAffected(ctx, transaction, insertTombstoneSQL, source.Adapter, source.ID)
 	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("tombstone terminal job: %w", err)
+		return "", fmt.Errorf("tombstone terminal job: %w", err)
 	}
 	if _, err = transaction.Execute(ctx, deleteQueuedJobBySourceSQL, source.Adapter, source.ID); err != nil {
-		return core.ObservationResult{}, fmt.Errorf("remove terminal queued job: %w", err)
+		return "", fmt.Errorf("remove terminal queued job: %w", err)
 	}
 	outcome := core.ObservationAlreadyApplied
 	if inserted > 0 {
 		outcome = core.ObservationApplied
 	}
-	return commitObservation(ctx, transaction, &open, outcome, nil)
+	return outcome, nil
 }
 
-func (store *Store) MarkRunnerStarted(
+func (store *Store) ObserveRunnerAcceptance(
 	ctx context.Context,
 	identity core.JobIdentity,
-) (_ core.ObservationResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+) (core.ObservationResult, error) {
+	return store.applyObservation(ctx, identity, "mark runner accepted", applyRunnerAcceptanceInTransaction)
+}
+
+func applyRunnerAcceptanceInTransaction(
+	ctx context.Context,
+	transaction Transaction,
+	source core.SourceReference,
+	identity core.JobIdentity,
+) (core.ObservationOutcome, error) {
+	statement, arguments := runnerAcceptanceUpdate(identity, source)
+	accepted, err := executeAffected(ctx, transaction, statement, arguments...)
 	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("begin mark runner started: %w", err)
+		return "", fmt.Errorf("mark processing runner accepted: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	source, matched, err := resolveAndSerializeObservation(ctx, transaction, identity)
-	if err != nil || !matched {
-		return commitObservation(ctx, transaction, &open, core.ObservationUnmatched, err)
+	if identity.AttemptID.IsValid() {
+		return classifyRunnerAcceptance(ctx, transaction, source, identity, accepted)
 	}
-	started, err := executeAffected(ctx, transaction, markProcessingStartedSQL, source.Adapter, source.ID)
+	delayed, err := executeAffected(ctx, transaction, tombstoneDelayedAcceptanceSQL, source.Adapter, source.ID)
 	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("mark processing runner started: %w", err)
-	}
-	delayed, err := executeAffected(ctx, transaction, tombstoneDelayedStartSQL, source.Adapter, source.ID)
-	if err != nil {
-		return core.ObservationResult{}, fmt.Errorf("tombstone delayed runner start: %w", err)
+		return "", fmt.Errorf("tombstone delayed runner acceptance: %w", err)
 	}
 	if _, err = transaction.Execute(ctx, deleteQueuedJobBySourceSQL, source.Adapter, source.ID); err != nil {
-		return core.ObservationResult{}, fmt.Errorf("remove delayed-start queued job: %w", err)
+		return "", fmt.Errorf("remove delayed-acceptance queued job: %w", err)
 	}
-	outcome, err := classifyRunnerStart(ctx, transaction, source, started+delayed)
-	if err != nil {
-		return core.ObservationResult{}, err
+	return classifyRunnerAcceptance(ctx, transaction, source, identity, accepted+delayed)
+}
+
+func runnerAcceptanceUpdate(
+	identity core.JobIdentity,
+	source core.SourceReference,
+) (string, []any) {
+	arguments := []any{source.Adapter, source.ID}
+	if identity.AttemptID.IsValid() {
+		return markProcessingAttemptAcceptedSQL,
+			append(arguments, core.AttemptRunnerName(identity.JobID, identity.AttemptID))
 	}
-	return commitObservation(ctx, transaction, &open, outcome, nil)
+	return markProcessingAcceptedSQL, arguments
 }
 
 func resolveAndSerializeObservation(
@@ -89,8 +179,23 @@ func resolveAndSerializeObservation(
 	if identity.JobID == uuid.Nil {
 		return source, true, nil
 	}
+	return resolveSerializedObservation(ctx, transaction, identity, source)
+}
+
+func resolveSerializedObservation(
+	ctx context.Context,
+	transaction Transaction,
+	identity core.JobIdentity,
+	source core.SourceReference,
+) (core.SourceReference, bool, error) {
 	lockedSource, found, err := lookupSourceByJobID(ctx, transaction, identity.JobID)
-	if err != nil || !found {
+	if err != nil {
+		return core.SourceReference{}, false, err
+	}
+	if !found && identity.AttemptID.IsValid() && identity.Source.IsValid() {
+		return source, true, nil
+	}
+	if !found {
 		return core.SourceReference{}, found, err
 	}
 	if lockedSource != source {
@@ -108,7 +213,13 @@ func resolveObservationSource(
 		return identity.Source, true, nil
 	}
 	resolved, found, err := lookupSourceByJobID(ctx, transaction, identity.JobID)
-	if err != nil || !found {
+	if err != nil {
+		return core.SourceReference{}, false, err
+	}
+	if !found && identity.AttemptID.IsValid() && identity.Source.IsValid() {
+		return identity.Source, true, nil
+	}
+	if !found {
 		return core.SourceReference{}, found, err
 	}
 	if identity.Source != (core.SourceReference{}) && identity.Source != resolved {
@@ -124,7 +235,9 @@ func lookupSourceByJobID(
 ) (core.SourceReference, bool, error) {
 	var adapter string
 	var identifier string
-	err := transaction.QueryRow(ctx, sourceByJobIDSQL, jobID).Scan(&adapter, &identifier)
+	err := transaction.ReadRow(ctx, sourceByJobIDSQL, func(row Scanner) error {
+		return row.Scan(&adapter, &identifier)
+	}, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.SourceReference{}, false, nil
 	}
@@ -141,23 +254,59 @@ func validateJobIdentity(identity core.JobIdentity) error {
 	return nil
 }
 
-func classifyRunnerStart(
+func classifyRunnerAcceptance(
 	ctx context.Context,
 	transaction Transaction,
 	source core.SourceReference,
+	identity core.JobIdentity,
 	affected int64,
 ) (core.ObservationOutcome, error) {
 	if affected > 0 {
 		return core.ObservationApplied, nil
 	}
-	var terminal bool
-	if err := transaction.QueryRow(ctx, runnerStartAlreadyAppliedSQL, source.Adapter, source.ID).Scan(&terminal); err != nil {
-		return "", fmt.Errorf("classify runner start observation: %w", err)
+	statement := runnerAcceptanceAlreadyAppliedSQL
+	arguments := []any{source.Adapter, source.ID}
+	if identity.AttemptID.IsValid() {
+		statement = attemptAcceptanceAlreadyAppliedSQL
+		arguments = append(arguments, core.AttemptRunnerName(identity.JobID, identity.AttemptID))
 	}
-	if terminal {
+	var accepted bool
+	if err := transaction.ReadRow(ctx, statement, func(row Scanner) error {
+		return row.Scan(&accepted)
+	}, arguments...); err != nil {
+		return "", fmt.Errorf("classify runner acceptance observation: %w", err)
+	}
+	if accepted {
 		return core.ObservationAlreadyApplied, nil
 	}
 	return core.ObservationUnmatched, nil
+}
+
+func classifyProcessingAttempt(
+	ctx context.Context,
+	transaction Transaction,
+	source core.SourceReference,
+	identity core.JobIdentity,
+) (bool, core.ObservationOutcome, error) {
+	var matched bool
+	if err := transaction.ReadRow(ctx, processingAttemptExistsSQL, func(row Scanner) error {
+		return row.Scan(&matched)
+	}, source.Adapter, source.ID, core.AttemptRunnerName(identity.JobID, identity.AttemptID)); err != nil {
+		return false, "", fmt.Errorf("match lifecycle processing attempt: %w", err)
+	}
+	if matched {
+		return true, "", nil
+	}
+	var tombstoned bool
+	if err := transaction.ReadRow(ctx, sourceTombstonedSQL, func(row Scanner) error {
+		return row.Scan(&tombstoned)
+	}, source.Adapter, source.ID); err != nil {
+		return false, "", fmt.Errorf("classify lifecycle processing attempt: %w", err)
+	}
+	if tombstoned {
+		return false, core.ObservationAlreadyApplied, nil
+	}
+	return false, core.ObservationUnmatched, nil
 }
 
 func executeAffected(
@@ -166,26 +315,9 @@ func executeAffected(
 	statement string,
 	arguments ...any,
 ) (int64, error) {
-	result, err := transaction.Execute(ctx, statement, arguments...)
+	affected, err := transaction.Execute(ctx, statement, arguments...)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("execute observation statement: %w", err)
 	}
-	return result.RowsAffected()
-}
-
-func commitObservation(
-	ctx context.Context,
-	transaction Transaction,
-	open *bool,
-	outcome core.ObservationOutcome,
-	observationErr error,
-) (core.ObservationResult, error) {
-	if observationErr != nil {
-		return core.ObservationResult{}, observationErr
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return core.ObservationResult{}, fmt.Errorf("commit job observation: %w", err)
-	}
-	*open = false
-	return core.ObservationResult{Outcome: outcome}, nil
+	return affected, nil
 }

@@ -28,9 +28,7 @@ func TestQueuedJobProcessorStartsImmediatelyAndJoinsOnStop(t *testing.T) {
 		t.Fatalf("Start() requested work for ineligible Runner Pool %q", runnerPool)
 	default:
 	}
-	gate.Maintain(func(maintenance *queuedJobMaintenance) {
-		maintenance.MarkEligible("linux")
-	})
+	markQueuedJobPoolsEligible(t, gate, "linux")
 	processor.Wake("linux")
 	if runnerPool := <-requests; runnerPool != "linux" {
 		t.Fatalf("woken Runner Pool = %q, want linux", runnerPool)
@@ -92,7 +90,7 @@ func TestQueuedJobProcessorProcessesDifferentPoolsConcurrently(t *testing.T) {
 	linux.response <- queuedJobResponse{result: runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}}
 }
 
-func TestQueuedJobProcessorMaintenanceExcludesRequestsAndSelectsEligibility(t *testing.T) {
+func TestQueuedJobProcessorInventoryRefreshAndPoolMaintenanceSelectEligibility(t *testing.T) {
 	requests := make(chan core.RunnerPool, 2)
 	requester := queuedJobRequesterFake{request: func(
 		_ context.Context,
@@ -108,39 +106,21 @@ func TestQueuedJobProcessorMaintenanceExcludesRequestsAndSelectsEligibility(t *t
 	}
 	t.Cleanup(func() { stopQueuedJobProcessor(t, processor) })
 
-	maintenanceEntered, releaseMaintenance, maintenanceDone := startBlockedQueuedJobMaintenance(gate)
-	<-maintenanceEntered
-	wakeReturned := make(chan struct{})
-	go func() {
-		processor.Wake("linux")
-		processor.Wake("windows")
-		close(wakeReturned)
-	}()
-	waitForQueuedJobSignal(t, wakeReturned, "Wake() blocked behind maintenance")
-	assertNoRunnerPoolRequest(t, requests, "request overlapped maintenance")
-	close(releaseMaintenance)
-	<-maintenanceDone
+	markQueuedJobPoolsEligible(t, gate, "windows")
+	if err := gate.RefreshInventory(func() error { return nil }); err != nil {
+		t.Fatalf("refresh inventory: %v", err)
+	}
+	for _, runnerPool := range []core.RunnerPool{"linux", "windows"} {
+		_, requested, err := gate.requestIfEligible(context.Background(), runnerPool, requester)
+		if err != nil || requested {
+			t.Fatalf("post-refresh %s request = requested %t, error %v; want ineligible", runnerPool, requested, err)
+		}
+	}
+	markQueuedJobPoolsEligible(t, gate, "windows")
+	processor.Wake("windows")
 	if runnerPool := <-requests; runnerPool != "windows" {
 		t.Fatalf("eligible Runner Pool = %q, want windows", runnerPool)
 	}
-	assertNoRunnerPoolRequest(t, requests, "ineligible Runner Pool requested work")
-}
-
-func startBlockedQueuedJobMaintenance(
-	gate *queuedJobEligibilityGate,
-) (<-chan struct{}, chan<- struct{}, <-chan struct{}) {
-	maintenanceEntered := make(chan struct{})
-	releaseMaintenance := make(chan struct{})
-	maintenanceDone := make(chan struct{})
-	go func() {
-		gate.Maintain(func(maintenance *queuedJobMaintenance) {
-			close(maintenanceEntered)
-			<-releaseMaintenance
-			maintenance.MarkEligible("windows")
-		})
-		close(maintenanceDone)
-	}()
-	return maintenanceEntered, releaseMaintenance, maintenanceDone
 }
 
 func TestQueuedJobProcessorUsesCallerCancellationAndCanRestartAfterJoin(t *testing.T) {
@@ -154,8 +134,8 @@ func TestQueuedJobProcessorUsesCallerCancellationAndCanRestartAfterJoin(t *testi
 		return runtimeengine.ProcessResult{}, fmt.Errorf("wait for request cancellation: %w", ctx.Err())
 	}}
 	gate := newQueuedJobEligibilityGate()
-	markQueuedJobPoolsEligible(gate, "linux")
-	processor := newQueuedJobProcessor(requester, gate, nil)
+	markQueuedJobPoolsEligible(t, gate, "linux")
+	processor := newQueuedJobProcessorForPools(requester, gate, nil, []core.RunnerPool{"linux"})
 	runContext, cancel := context.WithCancel(context.Background())
 	if err := processor.Start(runContext); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -264,6 +244,15 @@ func TestQueuedJobProcessorImmediatelyRetriesDurablyRequeuedFailure(t *testing.T
 }
 
 func TestQueuedJobProcessorContinuesAfterStartingRunner(t *testing.T) {
+	assertQueuedJobProcessorContinuesAfter(t, runtimeengine.ProcessRunnerStarted)
+}
+
+func TestQueuedJobProcessorContinuesAfterReportingProvisioningFailure(t *testing.T) {
+	assertQueuedJobProcessorContinuesAfter(t, runtimeengine.ProcessProvisioningFailureReported)
+}
+
+func assertQueuedJobProcessorContinuesAfter(t *testing.T, outcome runtimeengine.ProcessOutcome) {
+	t.Helper()
 	requests := make(chan int, 2)
 	requestCount := 0
 	requester := queuedJobRequesterFake{request: func(
@@ -273,7 +262,7 @@ func TestQueuedJobProcessorContinuesAfterStartingRunner(t *testing.T) {
 		requestCount++
 		requests <- requestCount
 		if requestCount == 1 {
-			return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRunnerStarted}, nil
+			return runtimeengine.ProcessResult{Outcome: outcome}, nil
 		}
 		return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessNoWork}, nil
 	}}
@@ -322,8 +311,8 @@ func startQueuedJobTestProcessor(
 ) *queuedJobProcessor {
 	t.Helper()
 	gate := newQueuedJobEligibilityGate()
-	markQueuedJobPoolsEligible(gate, eligible...)
-	processor := newQueuedJobProcessor(requester, gate, report)
+	markQueuedJobPoolsEligible(t, gate, eligible...)
+	processor := newQueuedJobProcessorForPools(requester, gate, report, eligible)
 	if err := processor.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -331,12 +320,17 @@ func startQueuedJobTestProcessor(
 	return processor
 }
 
-func markQueuedJobPoolsEligible(gate *queuedJobEligibilityGate, runnerPools ...core.RunnerPool) {
-	gate.Maintain(func(maintenance *queuedJobMaintenance) {
-		for _, runnerPool := range runnerPools {
-			maintenance.MarkEligible(runnerPool)
+func markQueuedJobPoolsEligible(
+	t *testing.T,
+	gate *queuedJobEligibilityGate,
+	runnerPools ...core.RunnerPool,
+) {
+	t.Helper()
+	for _, runnerPool := range runnerPools {
+		if err := gate.MaintainPool(runnerPool, func() (bool, error) { return true, nil }); err != nil {
+			t.Fatalf("mark Runner Pool %q eligible: %v", runnerPool, err)
 		}
-	})
+	}
 }
 
 func nextQueuedJobRequest(
@@ -350,24 +344,6 @@ func nextQueuedJobRequest(
 		t.Fatalf("requested Runner Pool = %q, want %q", request.runnerPool, want)
 	}
 	return request
-}
-
-func assertNoRunnerPoolRequest(t *testing.T, requests <-chan core.RunnerPool, description string) {
-	t.Helper()
-	select {
-	case runnerPool := <-requests:
-		t.Fatalf("%s: %q", description, runnerPool)
-	default:
-	}
-}
-
-func waitForQueuedJobSignal(t *testing.T, signal <-chan struct{}, timeoutMessage string) {
-	t.Helper()
-	select {
-	case <-signal:
-	case <-time.After(time.Second):
-		t.Fatal(timeoutMessage)
-	}
 }
 
 func collectQueuedJobOperationalEvents(
