@@ -80,32 +80,35 @@ func TestPollRejectsStatisticsWithInvalidDemandContext(t *testing.T) {
 	}
 }
 
-func TestPollRequiresAssignedDemandCapabilityForStatistics(t *testing.T) {
+func TestPollUsesExplicitAssignedDemandHandlerForStatistics(t *testing.T) {
 	t.Parallel()
 
 	message := &upstream.RunnerScaleSetMessage{MessageID: 48, Statistics: &upstream.RunnerScaleSetStatistic{}}
-	adapter := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}},
-		lifecycleOnlyEventHandler{})
-	if result, err := adapter.Poll(context.Background(), 1); err == nil ||
-		result != (githubsource.PollResult{Received: true}) {
-		t.Fatalf("Poll() = (%#v, %v), want missing assigned-demand capability", result, err)
+	assignedDemand := &recordingEventHandler{}
+	adapter := newAdapter(&recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}, assignedDemand)
+	adapter.SourceEvents = lifecycleOnlyEventHandler{}
+	if result, err := adapter.Poll(context.Background(), 1); err != nil || !result.Acknowledged {
+		t.Fatalf("Poll() = (%#v, %v), want acknowledged statistics", result, err)
+	}
+	if len(assignedDemand.demands) != 1 {
+		t.Fatalf("assigned-demand observations = %d, want 1", len(assignedDemand.demands))
 	}
 }
 
 type lifecycleOnlyEventHandler struct{}
 
-func (lifecycleOnlyEventHandler) Request(context.Context, core.JobRequest) (core.EnqueueResult, error) {
+func (lifecycleOnlyEventHandler) IngestDemand(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{}, nil
 }
 
-func (lifecycleOnlyEventHandler) RunnerStarted(
+func (lifecycleOnlyEventHandler) ObserveRunnerAcceptance(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
 
-func (lifecycleOnlyEventHandler) Terminalize(
+func (lifecycleOnlyEventHandler) ObserveTerminal(
 	context.Context,
 	core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -181,9 +184,9 @@ func assertUnusableLifecycleReconciliation(
 	activities []githubsource.ManagerActivity,
 ) {
 	t.Helper()
-	if len(handler.started) != 0 || len(handler.completed) != 0 || len(handler.requests) != 0 {
-		t.Fatalf("unusable lifecycle entries mutated state: requests=%d started=%d completed=%d",
-			len(handler.requests), len(handler.started), len(handler.completed))
+	if len(handler.accepted) != 0 || len(handler.completed) != 0 || len(handler.requests) != 0 {
+		t.Fatalf("unusable lifecycle entries mutated state: requests=%d accepted=%d completed=%d",
+			len(handler.requests), len(handler.accepted), len(handler.completed))
 	}
 	if len(handler.demands) != 1 || handler.demands[0].DesiredJobs != 75 {
 		t.Fatalf("assigned demands = %#v, want desired 75", handler.demands)

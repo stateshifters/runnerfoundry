@@ -16,11 +16,55 @@ test("user can checkout with valid cart", async () => {
 
 Characteristics:
 
-- Tests behaviour users/callers care about
+- Tests behavior users/callers care about
 - Uses public API only
 - Survives internal refactors
 - Describes WHAT, not HOW
 - One logical assertion per test
+
+## Durable Test Names
+
+Suite names (`describe`) and test names (`test` or `it`) must describe stable, observable
+behavior in domain language. They must not contain Jira keys, ticket item numbers, pull request
+numbers, or other delivery metadata. Delivery traceability belongs in Jira, commits, branches, and
+pull requests, not in the executable specification.
+
+```typescript
+// BAD: Delivery metadata makes the suite name temporary.
+describe("restoreReviewItem (AS-228 item 18)", () => {});
+
+// GOOD: The suite names the behavior boundary.
+describe("restoreReviewItem", () => {});
+
+// BAD: The ticket identifies the work, not the behavior.
+it("AS-228 item 18 - preserves the stored status", () => {});
+
+// GOOD: The name remains meaningful after the ticket is closed.
+it("preserves status when restoring a deleted review note", () => {});
+```
+
+## Verification Is Not Always a Test
+
+Do not commit a test that searches the repository merely to prove that a requested string, variable,
+file, or identifier was removed. That test encodes a one-off change request rather than a durable
+behavior contract.
+
+```typescript
+// BAD: A mechanical cleanup disguised as an executable specification.
+test("variable X no longer appears anywhere", () => {
+  expect(searchRepository("X")).toEqual([]);
+});
+```
+
+Use a targeted command as completion evidence instead:
+
+```bash
+rg -n '\bX\b' . # expected result: no matches
+```
+
+Record the command and result in the verification evidence; do not add it to the test suite. If the
+absence is a permanent repository policy, use the repository's established lint or static-analysis
+mechanism, and only when that enduring policy is explicitly required.
 
 ## Bad Tests
 
@@ -40,7 +84,7 @@ Red flags:
 - Mocking internal collaborators
 - Testing private methods
 - Asserting on call counts/order
-- Test breaks when refactoring without behaviour change
+- Test breaks when refactoring without behavior change
 - Test name describes HOW not WHAT
 - Verifying through external means instead of interface
 
@@ -57,5 +101,21 @@ test("createUser makes user retrievable", async () => {
   const user = await createUser({ name: "Alice" });
   const retrieved = await getUser(user.id);
   expect(retrieved.name).toBe("Alice");
+});
+```
+
+**Tautological tests**: Expected value restates the implementation, so the test passes by construction.
+
+```typescript
+// BAD: Expected value is recomputed the way the code computes it
+test("calculateTotal sums line items", () => {
+  const items = [{ price: 10 }, { price: 5 }];
+  const expected = items.reduce((sum, i) => sum + i.price, 0);
+  expect(calculateTotal(items)).toBe(expected);
+});
+
+// GOOD: Expected value is an independent, known literal
+test("calculateTotal sums line items", () => {
+  expect(calculateTotal([{ price: 10 }, { price: 5 }])).toBe(15);
 });
 ```

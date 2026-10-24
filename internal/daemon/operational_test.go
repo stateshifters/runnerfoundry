@@ -73,6 +73,25 @@ func TestGitHubManagerObserverPublishesProgressAndFailureDetail(t *testing.T) {
 	})
 }
 
+func TestGitHubAppRecoveryDoesNotClearAnotherAppsFailure(t *testing.T) {
+	reporter := newDebugRuntimeReporter(t, &memoryLogDestination{})
+	first := newGitHubManagerObserverForApp(reporter.reportMaintenance, builderTime, 11)
+	second := newGitHubManagerObserverForApp(reporter.reportMaintenance, builderTime, 22)
+	failure := githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "reconciliation",
+		Outcome: "failed", Err: errors.New("unavailable")}
+	first.Report(failure)
+	second.Report(failure)
+	first.Report(githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "reconciliation", Outcome: "completed"})
+	if len(reporter.failures) != 1 {
+		t.Fatalf("remaining App failures = %#v", reporter.failures)
+	}
+	for _, remaining := range reporter.failures {
+		if remaining.event.githubAppID != 22 {
+			t.Fatalf("remaining failure belongs to App %d", remaining.event.githubAppID)
+		}
+	}
+}
+
 func TestGitHubAssignedDemandLoggingNamesChangeAndCarriesCounts(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
@@ -103,9 +122,9 @@ func TestGitHubAssignedDemandLoggingNamesChangeAndCarriesCounts(t *testing.T) {
 func TestGitHubLifecycleFailureLoggingText(t *testing.T) {
 	output := githubLifecycleFailureLog(t, "text")
 	assertLogFragments(t, output, []string{
-		"SQLite transaction failed while attempting to record terminal state for GitHub runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"SQLite transaction failed while attempting to record terminal state for GitHub runner runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"repository=https://github.com/example/project", "runner_pool=linux", "message_id=91",
-		"runner_name=runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"runner_name=runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"github_event_type=JobCompleted", "state_operation=terminalize_job",
 	})
 }
@@ -117,9 +136,9 @@ func TestGitHubLifecycleFailureLoggingJSON(t *testing.T) {
 	}
 	assertJSONFields(t, record, map[string]any{
 		"msg": "SQLite transaction failed while attempting to record terminal state for GitHub runner " +
-			"runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8 for https://github.com/example/project in Runner Pool linux",
+			"runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w for https://github.com/example/project in Runner Pool linux",
 		"repository": "https://github.com/example/project", "runner_pool": "linux", "message_id": float64(91),
-		"runner_name":       "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+		"runner_name":       "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 		"github_event_type": "JobCompleted", "state_operation": "terminalize_job",
 	})
 }
@@ -132,7 +151,7 @@ func githubLifecycleFailureLog(t *testing.T, format string) string {
 	observer.Report(githubsource.ManagerActivity{Visibility: githubsource.ActivityInfo,
 		Operation: "job_observation", Stage: "persist_terminal", Outcome: "failed",
 		Repository: "https://github.com/example/project", RunnerPool: "linux", MessageID: 91,
-		RunnerName: "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8", EventType: "JobCompleted",
+		RunnerName: "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w", EventType: "JobCompleted",
 		StateBackend: "sqlite", StateOperation: "terminalize_job", Err: errors.New("state operation failed"),
 	})
 	return strings.TrimSpace(destination.String())
@@ -235,9 +254,9 @@ func TestProviderObserverUsesDebugLoggingAfterProviderProtection(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
 	observer := newProviderObserver(reporter.reportMaintenance)
-	observer(execution.ProviderActivity{Operation: "start", Outcome: "started", RunnerPool: "linux", EndpointID: "docker:member-a"})
-	observer(execution.ProviderActivity{Operation: "start", Outcome: "failed", RunnerPool: "linux", EndpointID: "docker:member-a",
-		Provider: "docker", JobID: core.JobID{1}, Duration: time.Second, Err: errors.New("protected provider failure")})
+	observer(runtimeengine.ProviderActivity{Operation: "start", Outcome: "started", RunnerPool: "linux", EndpointID: "docker:member-a"}, "runner")
+	observer(runtimeengine.ProviderActivity{Operation: "start", Outcome: "failed", RunnerPool: "linux", EndpointID: "docker:member-a",
+		Provider: "docker", JobID: core.JobID{1}, Duration: time.Second, Err: errors.New("protected provider failure")}, "runner")
 	output := destination.String()
 	assertLogFragments(t, output, []string{
 		"level=ERROR msg=\"Docker Compose runner start failed for job 01000000-0000-0000-0000-000000000000 in Runner Pool linux\"",
@@ -281,9 +300,9 @@ func TestLoggingProtectsOnlyTheKnownCredentialBoundaries(t *testing.T) {
 func assertGitHubPrivateKeyRemainsAtBoundary(t *testing.T, reporter *productionRuntimeReporter, privateKey string) {
 	t.Helper()
 	var captured transport.Credentials
-	_, err := buildProductionGitHubManagerWithDependencies(config.Config{GitHub: config.GitHubConfig{App: config.GitHubAppConfig{
+	_, err := buildProductionGitHubManagerWithDependencies(config.Config{GitHub: config.GitHubConfig{Apps: []config.GitHubAppConfig{{
 		AppID: 1, PrivateKeyFile: "in-memory-key",
-	}}}, newBuilderStoreFake(), reporter.reportMaintenance, productionDependencies{
+	}}}}, newBuilderStoreFake(), reporter.reportMaintenance, productionDependencies{
 		readFile: func(string) ([]byte, error) { return []byte(privateKey), nil },
 		newDiscoverer: func(credentials transport.Credentials, _ http.RoundTripper) (transport.Discoverer, error) {
 			captured = credentials
@@ -297,13 +316,25 @@ func assertGitHubPrivateKeyRemainsAtBoundary(t *testing.T, reporter *productionR
 	}
 }
 
+func TestGitHubAppObserverAttachesCredentialIdentityWithoutSecrets(t *testing.T) {
+	var reported error
+	observer := newGitHubManagerObserverForApp(func(err error) { reported = err }, builderTime, 4273059)
+	observer.Report(githubsource.ManagerActivity{Operation: "source_reconciliation", Stage: "repository_overlap",
+		Outcome: "ignored", Repository: "https://github.com/stateshifters/runnerfoundry"})
+	var envelope operationalEventEnvelope
+	if !errors.As(reported, &envelope) || envelope.event.githubAppID != 4273059 || envelope.event.repository == "" {
+		t.Fatalf("App-scoped operational event = %#v", reported)
+	}
+}
+
 func assertJITRemainsAtProviderBoundary(t *testing.T, reporter *productionRuntimeReporter, jit string) {
 	t.Helper()
-	provider := execution.WithOperationDeadlines(
-		confidentialityProvider{}, "test", newProviderObserver(reporter.reportMaintenance),
+	provider := runtimeengine.WithOperationDeadlines(
+		confidentialityProvider{}, "test",
+		observeProviderActivity(newProviderObserver(reporter.reportMaintenance), ""),
 	)
 	if err := provider.Start(context.Background(), execution.StartRequest{RunnerPool: "linux", EndpointID: "test:endpoint",
-		Bootstrap: execution.NewBootstrap([]byte(jit))}); err != nil {
+		Bootstrap: core.NewBootstrap([]byte(jit))}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -340,7 +371,7 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 	reporter := newOperationalReporterFixture(t, "json", destination)
 	jobID := core.JobID{1}
 	reporter.Report(operationalEvent{operation: "runner_retry", outcome: "source_terminal",
-		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", runnerName: "runnerfoundry-job",
+		runnerPool: "linux", jobID: jobID, runnerID: "runner-1", runnerName: "external-runner",
 		githubEventType: "JobCompleted", installationID: 11, runnerGroupID: 12,
 		scaleSetID: 13, messageID: 14, count: 2, capacity: 3, provider: "docker", composeService: "runner",
 		stateBackend: "postgresql", stateOperation: "retry_unstarted"})
@@ -351,7 +382,7 @@ func TestOperationalReporterPublishesStructuredJSONIdentifiers(t *testing.T) {
 	}
 	want := map[string]any{"operation": "runner_retry", "member": "member-a", "outcome": "source_terminal",
 		"runner_pool": "linux", "job_id": jobID.String(), "runner_id": "runner-1",
-		"runner_name": "runnerfoundry-job", "github_event_type": "JobCompleted", "installation_id": float64(11),
+		"runner_name": "external-runner", "github_event_type": "JobCompleted", "installation_id": float64(11),
 		"runner_group_id": float64(12), "scale_set_id": float64(13), "message_id": float64(14),
 		"count": float64(2), "capacity": float64(3), "provider": "docker", "compose_service": "runner",
 		"state_backend": "postgresql", "state_operation": "retry_unstarted"}
@@ -398,7 +429,7 @@ func TestOperationalReporterRecoversEverySubjectForAnOperation(t *testing.T) {
 
 func TestOperationalErrorWrappersDescribeAndPreserveTheirCause(t *testing.T) {
 	cause := errors.New("reported")
-	if (maintenanceCycleResult{}).Error() == "" || (reportedOperationalError{cause: cause}).Error() == "" {
+	if (reportedOperationalError{cause: cause}).Error() == "" {
 		t.Fatal("error wrappers did not describe their purpose")
 	}
 	if !errors.Is(reportedOperationalError{cause: cause}, cause) {
@@ -534,14 +565,13 @@ func emitDebugProvenance(report func(error)) {
 	})
 }
 
-func TestMaintenancePhaseReportsItsOwningFailureWithoutGenericDuplicate(t *testing.T) {
+func TestMaintenancePhaseReportsItsOwningFailure(t *testing.T) {
 	destination := &memoryLogDestination{}
 	reporter := newDebugRuntimeReporter(t, destination)
 	engine := &UnifiedEngine{report: reporter.reportMaintenance, currentTime: builderTime}
 	wantErr := errors.New("inventory endpoint unavailable")
 
 	engine.phaseCompleted("refresh_inventory", "inventory", "linux", builderTime(), wantErr)
-	(&maintenanceGeneration{report: reporter.reportMaintenance}).reportCycle(wantErr)
 
 	output := destination.String()
 	assertLogFragments(t, output, []string{
@@ -549,9 +579,6 @@ func TestMaintenancePhaseReportsItsOwningFailureWithoutGenericDuplicate(t *testi
 		"component=runner_inventory operation=refresh_inventory", "stage=inventory outcome=failed",
 		"runner_pool=linux", "error_category=operation",
 	})
-	if strings.Contains(output, "Maintenance cycle failed unexpectedly") {
-		t.Fatalf("owning failure was duplicated as generic maintenance: %q", output)
-	}
 }
 
 func TestMaintenancePhaseDoesNotRepeatAnOwningBoundaryFailure(t *testing.T) {

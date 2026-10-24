@@ -20,11 +20,12 @@ const (
 // Config is the validated daemon configuration. RunnerPools is decoded from
 // the external scale_sets key for configuration compatibility.
 type Config struct {
-	GitHub      GitHubConfig       `yaml:"github"`
-	Log         LogConfig          `yaml:"log"`
-	State       StateConfig        `yaml:"state"`
-	Prune       bool               `yaml:"prune"`
-	RunnerPools []RunnerPoolConfig `yaml:"scale_sets"`
+	AutoUpdateRunners bool               `yaml:"autoUpdateRunners"`
+	GitHub            GitHubConfig       `yaml:"github"`
+	Log               LogConfig          `yaml:"log"`
+	State             StateConfig        `yaml:"state"`
+	Prune             bool               `yaml:"prune"`
+	RunnerPools       []RunnerPoolConfig `yaml:"scale_sets"`
 }
 
 // StateConfig selects exactly one state backend: Path for SQLite or Postgres
@@ -34,14 +35,14 @@ type StateConfig struct {
 	Postgres *postgresconfig.Settings `yaml:"postgres"`
 }
 
-// GitHubConfig configures GitHub App discovery. PAT fields are retained only
+// GitHubConfig configures ordered GitHub App discovery. PAT fields are retained only
 // so validation can reject obsolete configuration with a useful error.
 type GitHubConfig struct {
-	App               GitHubAppConfig `yaml:"app"`
-	DiscoveryInterval string          `yaml:"discovery_interval"`
-	TokenEnv          string          `yaml:"token_env"`
-	TokenFile         string          `yaml:"token_file"`
-	Token             string          `yaml:"token"`
+	Apps              []GitHubAppConfig `yaml:"apps"`
+	DiscoveryInterval string            `yaml:"discovery_interval"`
+	TokenEnv          string            `yaml:"token_env"`
+	TokenFile         string            `yaml:"token_file"`
+	Token             string            `yaml:"token"`
 }
 
 // GitHubAppConfig identifies an installation-authenticated GitHub App. Runtime
@@ -81,11 +82,12 @@ type LogFileConfig struct {
 // RunnerPoolConfig defines one source-neutral Runner Pool. Exactly one of
 // Docker or Libvirt is required, and an empty RunnerGroup defaults to default.
 type RunnerPoolConfig struct {
-	Name        string         `yaml:"name"`
-	RunnerGroup string         `yaml:"runner_group"`
-	MaxRunners  int            `yaml:"max_runners"`
-	Docker      *DockerConfig  `yaml:"docker"`
-	Libvirt     *LibvirtConfig `yaml:"libvirt"`
+	Name                   string         `yaml:"name"`
+	RunnerGroup            string         `yaml:"runner_group"`
+	MaxRunners             int            `yaml:"max_runners"`
+	StopIfNotStartedWithin string         `yaml:"stop_if_not_started_within"`
+	Docker                 *DockerConfig  `yaml:"docker"`
+	Libvirt                *LibvirtConfig `yaml:"libvirt"`
 }
 
 // DockerConfig selects one service from a Docker Compose project.
@@ -103,7 +105,7 @@ type LibvirtConfig struct {
 // Load decodes and validates one daemon configuration document.
 //
 // The returned Config has defaults applied for logging, discovery, and runner
-// groups. GitHub App secrets are checked when AppCredentials reads the key so
+// groups. GitHub App secrets are checked when AppCredentials reads every key so
 // reload can validate a replacement before stopping active Runner Pools.
 func Load(reader io.Reader) (Config, error) {
 	var loadedConfig Config
@@ -163,19 +165,21 @@ func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// AppCredentials resolves the configured private key through readFile. It
-// trims surrounding whitespace and rejects unreadable or empty key material.
-func (githubConfig GitHubConfig) AppCredentials(readFile ReadFile) (GitHubAppCredentials, error) {
-	privateKey := strings.TrimSpace(githubConfig.App.PrivateKey)
-	if privateKey == "" {
-		privateKeyBytes, err := readFile(githubConfig.App.PrivateKeyFile)
+// AppCredentials resolves every configured private key in precedence order.
+// It returns no credentials unless every file can be read and contains
+// non-empty key material, allowing startup and reload to reject changes atomically.
+func (githubConfig GitHubConfig) AppCredentials(readFile ReadFile) ([]GitHubAppCredentials, error) {
+	credentials := make([]GitHubAppCredentials, 0, len(githubConfig.Apps))
+	for index, app := range githubConfig.Apps {
+		privateKeyBytes, err := readFile(app.PrivateKeyFile)
 		if err != nil {
-			return GitHubAppCredentials{}, fmt.Errorf("read github.app.private_key_file: %w", err)
+			return nil, fmt.Errorf("read github.apps[%d].private_key_file: %w", index, err)
 		}
-		privateKey = strings.TrimSpace(string(privateKeyBytes))
+		privateKey := strings.TrimSpace(string(privateKeyBytes))
+		if privateKey == "" {
+			return nil, fmt.Errorf("github.apps[%d].private_key_file is empty", index)
+		}
+		credentials = append(credentials, GitHubAppCredentials{AppID: app.AppID, PrivateKey: privateKey})
 	}
-	if privateKey == "" {
-		return GitHubAppCredentials{}, errors.New("github.app.private_key_file is empty")
-	}
-	return GitHubAppCredentials{AppID: githubConfig.App.AppID, PrivateKey: privateKey}, nil
+	return credentials, nil
 }

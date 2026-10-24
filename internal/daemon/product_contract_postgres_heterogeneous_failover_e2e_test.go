@@ -13,6 +13,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 )
 
@@ -123,7 +124,7 @@ func e2ePostgresCommittedRegistrations(
 ) githubsource.RegistrationSnapshot {
 	t.Helper()
 	var snapshot githubsource.RegistrationSnapshot
-	e2ePostgresWithStateStore(t, settings, func(store *postgresstate.Store) {
+	e2ePostgresWithStores(t, settings, func(_ *postgresstate.Store, store *githubpostgres.Store) {
 		active, err := store.Registrations(context.Background())
 		if err != nil {
 			t.Fatalf("load active PostgreSQL registrations: %v", err)

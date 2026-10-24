@@ -66,10 +66,10 @@ func TestPoolWorkerPreservesOutcomesWhileReportingFailures(t *testing.T) {
 			coordinator: &workCoordinatorFake{
 				occupied: func(context.Context, core.RunnerPool) (int, error) { return 0, nil },
 				process: func(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error) {
-					return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerStarted}, wantErr
+					return runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerAccepted}, wantErr
 				},
 			},
-			want: runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerStarted},
+			want: runtimeengine.ProcessResult{Outcome: runtimeengine.ProcessRetry, RetryOutcome: core.RetryRunnerAccepted},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

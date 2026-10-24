@@ -87,10 +87,13 @@ func exerciseFailedGitHubAcquisitionRedelivery(t *testing.T, harness *e2eHarness
 	session.scriptAcquisition(nil, wantErr)
 	message := githubAvailableRequests(harness.currentTime, 1, 821, 822)
 	messageID := session.assignMessageID(message)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	assertAcquisitionRequest(t, session, 821, 822)
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("failed acquisition poll error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("failed acquisition poll error = %v, want %v", pollErr, wantErr)
 	}
 	assertNoInteger(t, "failed acquisition acknowledgement", session.ackAttempts)
 	assertNoAcquiredProcessing(t, harness, 1, "failed acquisition")
@@ -138,7 +141,7 @@ func assertAcquisitionRequest(t *testing.T, session *e2eGitHubSession, want ...i
 
 func assertNoAcquiredProcessing(t *testing.T, harness *e2eHarness, wantAttempts int, phase string) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByPool(context.Background(), core.RunnerPool("linux"))
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), core.RunnerPool("linux"))
 	if err != nil || len(processing) != 0 {
 		t.Fatalf("%s processing = %+v, error = %v, want empty", phase, processing, err)
 	}

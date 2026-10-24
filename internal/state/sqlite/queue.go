@@ -9,40 +9,34 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-func (store *Store) Queue(ctx context.Context, request core.JobRequest) (_ core.EnqueueResult, resultErr error) {
-	transaction, err := store.executor.Begin(ctx)
+func (store *Store) Queue(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+	if err := request.Validate(); err != nil {
+		return core.EnqueueResult{}, fmt.Errorf("validate queued demand: %w", err)
+	}
+	var result core.EnqueueResult
+	err := store.executor.WithinTransaction(ctx, func(transaction Transaction) error {
+		var err error
+		result, err = enqueueInTransaction(ctx, transaction, request)
+		return err
+	})
 	if err != nil {
-		return core.EnqueueResult{}, fmt.Errorf("begin enqueue job: %w", err)
+		return core.EnqueueResult{}, fmt.Errorf("enqueue job: %w", err)
 	}
-	open := true
-	defer rollback(ctx, transaction, &open, &resultErr)
-	result, err := queueInTransaction(ctx, transaction, request)
-	if err != nil {
-		return core.EnqueueResult{}, err
-	}
-	if err = transaction.Commit(ctx); err != nil {
-		return core.EnqueueResult{}, fmt.Errorf("commit enqueue job: %w", err)
-	}
-	open = false
 	return result, nil
 }
 
-func queueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.EnqueueResult, error) {
-	result, err := transaction.Execute(ctx, insertQueuedJobSQL,
+func enqueueInTransaction(ctx context.Context, transaction Transaction, request core.JobRequest) (core.EnqueueResult, error) {
+	rowsAffected, err := transaction.Execute(ctx, insertQueuedJobSQL,
 		request.Source.Adapter, request.Source.ID, string(request.RunnerPool), request.EnqueuedAt.UnixNano(),
 		request.Source.Adapter, request.Source.ID, request.Source.Adapter, request.Source.ID)
 	if err != nil {
 		return core.EnqueueResult{}, fmt.Errorf("insert queued job: %w", err)
 	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return core.EnqueueResult{}, fmt.Errorf("read inserted job count: %w", err)
-	}
-	job, err := scanJob(transaction.QueryRow(ctx, queuedJobBySourceSQL, request.Source.Adapter, request.Source.ID))
+	job, err := readJob(ctx, transaction, queuedJobBySourceSQL, request.Source.Adapter, request.Source.ID)
 	if errors.Is(err, sql.ErrNoRows) && rowsAffected == 0 {
 		var rawOutcome string
-		err = transaction.QueryRow(ctx, classifyQueueSourceSQL, request.Source.Adapter, request.Source.ID,
-			request.Source.Adapter, request.Source.ID).Scan(&rawOutcome)
+		err = transaction.ReadRow(ctx, classifyQueueSourceSQL, func(row Scanner) error { return row.Scan(&rawOutcome) }, request.Source.Adapter, request.Source.ID,
+			request.Source.Adapter, request.Source.ID)
 		if err != nil {
 			return core.EnqueueResult{}, fmt.Errorf("classify existing source request: %w", err)
 		}

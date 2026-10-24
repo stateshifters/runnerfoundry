@@ -186,28 +186,38 @@ func TestSettingsBuildEveryDirectConnectionShape(t *testing.T) {
 	}
 }
 
-func TestSettingsRejectDirectDSNWithStructuredOverrides(t *testing.T) {
-	const directDSN = "postgres://direct-user@direct:6432/direct"
-	if _, err := directConnectionConfigWithResolver(Settings{
-		Host: "primary", Role: "runnerfoundry",
-		Direct: &Endpoint{DSN: directDSN, Host: "direct"},
-	}, testConnectionResolver(nil)); err == nil {
-		t.Fatal("expected direct DSN and structured settings conflict")
-	}
+func TestPrimaryConnectionBuilderRejectsStructurallyInvalidSettings(t *testing.T) {
+	assertConnectionBuilderError(t, primaryConnectionConfigWithResolver, Settings{Host: "database"},
+		"validate PostgreSQL connection settings: state.postgres.role is required")
+	assertConnectionBuilderError(t, primaryConnectionConfigWithResolver, Settings{
+		Role: "runnerfoundry", DSN: "postgres://pool/scaler", Host: "database",
+	}, "validate PostgreSQL connection settings: "+
+		"state.postgres.dsn cannot be combined with structured PostgreSQL settings")
 }
 
-func TestSettingsRejectMissingRoleAndOpaqueDSNPartialDirectOverride(t *testing.T) {
-	for name, settings := range map[string]Settings{
-		"missing role": {Host: "database"},
-		"opaque DSN partial direct override": {
-			DSN: "postgres://pool/scaler", Role: "runnerfoundry", Direct: &Endpoint{Host: "database"},
+func TestDirectConnectionBuilderRejectsStructurallyInvalidSettings(t *testing.T) {
+	assertConnectionBuilderError(t, directConnectionConfigWithResolver, Settings{
+		Role: "runnerfoundry", Host: "primary", Direct: &Endpoint{
+			DSN: "postgres://direct-user@direct:6432/direct", Host: "direct",
 		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := directConnectionConfigWithResolver(settings, testConnectionResolver(nil)); err == nil {
-				t.Fatal("expected direct connection settings error")
-			}
-		})
+	}, "validate PostgreSQL connection settings: "+
+		"state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings")
+	assertConnectionBuilderError(t, directConnectionConfigWithResolver, Settings{
+		Role: "runnerfoundry", DSN: "postgres://pool/scaler", Direct: &Endpoint{Host: "database"},
+	}, "validate PostgreSQL connection settings: "+
+		"state.postgres.direct.dsn is required when overriding a primary DSN")
+}
+
+func assertConnectionBuilderError(
+	t *testing.T,
+	build func(Settings, connectionSettingResolver) (*pgx.ConnConfig, error),
+	settings Settings,
+	expectedError string,
+) {
+	t.Helper()
+	_, err := build(settings, testConnectionResolver(nil))
+	if err == nil || err.Error() != expectedError {
+		t.Fatalf("connection builder error = %v, want %q", err, expectedError)
 	}
 }
 

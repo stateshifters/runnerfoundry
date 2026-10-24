@@ -25,7 +25,7 @@ func TestProductContractPostgresForeignRecoveryRetainsUnavailableExactEndpoint(t
 	second.advanceClock(5*time.Minute + time.Second)
 	second.completeMaintenanceCycle(second.execution)
 
-	processing, err := second.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := second.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != original.JobID ||
 		processing[0].MemberID != originalOwner ||
 		processing[0].InventoryEndpointID != original.EndpointID {

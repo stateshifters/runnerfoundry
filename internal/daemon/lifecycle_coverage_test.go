@@ -187,33 +187,33 @@ func TestUnifiedEngineStopsPoolWorkWhenInventoryRefreshFails(t *testing.T) {
 	engine := unifiedEngineFixture(&events)
 	engine.inventory = &runnerInventoryRefreshFake{err: wantErr}
 
-	err := engine.Cycle(context.Background())
+	err := engine.MaintainExecution(context.Background())
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("cycle error = %v, want %v", err, wantErr)
+		t.Fatalf("execution maintenance error = %v, want %v", err, wantErr)
 	}
 	if occurrences(events, "reconcile:linux") != 0 || occurrences(events, "request:linux") != 0 {
 		t.Fatalf("pool work continued after inventory failure: %#v", events)
 	}
 }
 
-func TestGatedCycleEngineReportsDeactivationFailure(t *testing.T) {
+func TestGatedMaintenanceEngineReportsDeactivationFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("gate close failed")
-	engine := newGatedCycleEngine(&lifecycleCycleEngineFake{}, &generationLeadershipFake{closeErr: wantErr})
+	engine := newGatedMaintenanceEngine(&lifecycleMaintenanceEngineFake{}, &generationLeadershipFake{closeErr: wantErr})
 	if err := engine.Deactivate(context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("deactivate gated engine = %v, want %v", err, wantErr)
 	}
 }
 
-func TestMaintenanceGenerationReportsFirstCycleAndDeactivationFailures(t *testing.T) {
+func TestMaintenanceGenerationReportsFirstMembershipMaintenanceAndDeactivationFailures(t *testing.T) {
 	t.Parallel()
 
-	cycleErr := errors.New("first cycle failed")
+	maintenanceErr := errors.New("first membership maintenance failed")
 	deactivateErr := errors.New("deactivate failed")
-	engine := &lifecycleCycleEngineFake{cycleErr: cycleErr, deactivateErr: deactivateErr}
+	engine := &lifecycleMaintenanceEngineFake{maintenanceErr: maintenanceErr, deactivateErr: deactivateErr}
 	reports := make(chan error, 1)
-	generation := newMaintenanceGeneration(
+	generation := newTestMaintenanceGeneration(
 		engine,
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		func(err error) {
@@ -231,31 +231,11 @@ func TestMaintenanceGenerationReportsFirstCycleAndDeactivationFailures(t *testin
 	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activation error = %v, want maintenance to run asynchronously", err)
 	}
-	if err := <-reports; !errors.Is(err, cycleErr) {
-		t.Fatalf("reported first-cycle error = %v, want %v", err, cycleErr)
+	if err := <-reports; !errors.Is(err, maintenanceErr) {
+		t.Fatalf("reported first-membership-maintenance error = %v, want %v", err, maintenanceErr)
 	}
 	if err := generation.Deactivate(context.Background()); !errors.Is(err, deactivateErr) {
 		t.Fatalf("deactivation error = %v, want %v", err, deactivateErr)
-	}
-}
-
-func TestMaintenanceGenerationForwardsEveryFailureAndRecovery(t *testing.T) {
-	t.Parallel()
-
-	wantErr := errors.New("cycle failed")
-	reports := make([]error, 0)
-	generation := newMaintenanceGeneration(
-		&lifecycleCycleEngineFake{},
-		&manualCycleTicker{ticks: make(chan time.Time)},
-		func(err error) { reports = append(reports, err) },
-		nil,
-		nil,
-	)
-	generation.reportCycle(wantErr)
-	generation.reportCycle(wantErr)
-	generation.reportCycle(nil)
-	if len(reports) != 3 || !errors.Is(reports[0], wantErr) || !errors.Is(reports[1], wantErr) || reports[2] != nil {
-		t.Fatalf("cycle reports = %#v, want every failure and recovery", reports)
 	}
 }
 
@@ -264,8 +244,8 @@ func TestMaintenanceGenerationRetriesOnlyFailedClosers(t *testing.T) {
 
 	failing := &failOnceRuntimeCloser{err: errors.New("close failed")}
 	successful := &failOnceRuntimeCloser{}
-	generation := newMaintenanceGeneration(
-		&lifecycleCycleEngineFake{},
+	generation := newTestMaintenanceGeneration(
+		&lifecycleMaintenanceEngineFake{},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		nil,
 		[]runtimeCloser{failing, successful},
@@ -366,22 +346,21 @@ func (*generationLeadershipFake) IsLeader(context.Context) (bool, error) { retur
 func (*generationLeadershipFake) Activate() error                        { return nil }
 func (fake *generationLeadershipFake) Close(context.Context) error       { return fake.closeErr }
 
-type lifecycleCycleEngineFake struct {
-	cycleErr      error
-	deactivateErr error
+type lifecycleMaintenanceEngineFake struct {
+	maintenanceErr error
+	deactivateErr  error
 }
 
-func (*lifecycleCycleEngineFake) Activate() error { return nil }
-func (fake *lifecycleCycleEngineFake) Deactivate(context.Context) error {
+func (*lifecycleMaintenanceEngineFake) Activate() error { return nil }
+func (fake *lifecycleMaintenanceEngineFake) Deactivate(context.Context) error {
 	return fake.deactivateErr
 }
-func (fake *lifecycleCycleEngineFake) Cycle(context.Context) error { return fake.cycleErr }
-func (*lifecycleCycleEngineFake) Close(context.Context) error      { return nil }
-func (fake *lifecycleCycleEngineFake) MaintainMembership(ctx context.Context) error {
-	return fake.Cycle(ctx)
+func (*lifecycleMaintenanceEngineFake) Close(context.Context) error { return nil }
+func (fake *lifecycleMaintenanceEngineFake) MaintainMembership(context.Context) error {
+	return fake.maintenanceErr
 }
-func (*lifecycleCycleEngineFake) MaintainSource(context.Context) error    { return nil }
-func (*lifecycleCycleEngineFake) MaintainExecution(context.Context) error { return nil }
+func (*lifecycleMaintenanceEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*lifecycleMaintenanceEngineFake) MaintainExecution(context.Context) error { return nil }
 
 type failOnceRuntimeCloser struct {
 	err   error

@@ -11,7 +11,7 @@ import (
 func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{}
-	result, err := NewStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{
+	result, err := newStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{
 		Source: core.SourceReference{Adapter: "github", ID: "request-1"},
 	})
 	if err != nil || result.Outcome != core.ObservationApplied || protocol.commitCalls != 1 || len(protocol.statements) != 3 ||
@@ -21,10 +21,10 @@ func TestTerminalizeSourceTombstonesAndDeletesQueued(t *testing.T) {
 	}
 }
 
-func TestMarkRunnerStartedUpdatesProcessingWithoutTombstoning(t *testing.T) {
+func TestObserveRunnerAcceptanceUpdatesProcessingWithoutTombstoning(t *testing.T) {
 	t.Parallel()
 	protocol := &recordedTransaction{}
-	result, err := NewStore(protocol.executor()).MarkRunnerStarted(context.Background(), core.JobIdentity{
+	result, err := newStore(protocol.executor()).ObserveRunnerAcceptance(context.Background(), core.JobIdentity{
 		Source: core.SourceReference{Adapter: "github", ID: "request-1"},
 	})
 	if err != nil || result.Outcome != core.ObservationApplied || protocol.commitCalls != 1 || len(protocol.statements) != 4 ||
@@ -38,11 +38,11 @@ func TestMarkRunnerStartedUpdatesProcessingWithoutTombstoning(t *testing.T) {
 func TestTerminalizeResolvesJobIdentityBeforeTombstoning(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
-	protocol := &recordedTransaction{rows: []Row{
+	protocol := &recordedTransaction{rows: []rowStub{
 		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
 		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
 	}}
-	result, err := NewStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
+	result, err := newStore(protocol.executor()).Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
 	if err != nil || result.Outcome != core.ObservationApplied || protocol.commitCalls != 1 || len(protocol.statements) != 5 {
 		t.Fatalf("terminalize job result=%#v statements=%#v commits=%d error=%v", result, protocol.statements, protocol.commitCalls, err)
 	}
@@ -56,16 +56,16 @@ func TestLifecycleObservationRejectsMismatchedSourceAndJobWithoutMutation(t *tes
 	resolved := core.SourceReference{Adapter: "github", ID: "request-1"}
 	provided := core.SourceReference{Adapter: "github", ID: "request-2"}
 	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
-		"started": func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: provided, JobID: testJobID1})
+		"accepted": func(store *Store) (core.ObservationResult, error) {
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: provided, JobID: testJobID1})
 		},
 		"terminal": func(store *Store) (core.ObservationResult, error) {
 			return store.Terminalize(context.Background(), core.JobIdentity{Source: provided, JobID: testJobID1})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			protocol := &recordedTransaction{rows: []Row{rowFromValues([]any{string(resolved.Adapter), string(resolved.ID)})}}
-			result, err := operation(NewStore(protocol.executor()))
+			protocol := &recordedTransaction{rows: []rowStub{rowFromValues([]any{string(resolved.Adapter), string(resolved.ID)})}}
+			result, err := operation(newStore(protocol.executor()))
 			if err == nil || result != (core.ObservationResult{}) || protocol.commitCalls != 0 || len(protocol.statements) != 1 {
 				t.Fatalf("%s result=%#v statements=%#v commits=%d error=%v", name, result, protocol.statements, protocol.commitCalls, err)
 			}
@@ -76,8 +76,8 @@ func TestLifecycleObservationRejectsMismatchedSourceAndJobWithoutMutation(t *tes
 func TestJobOnlyLifecycleObservationIsUnmatchedWhenDurableJobIsMissing(t *testing.T) {
 	t.Parallel()
 	for name, operation := range map[string]func(*Store) (core.ObservationResult, error){
-		"started": func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{JobID: testJobID1})
+		"accepted": func(store *Store) (core.ObservationResult, error) {
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{JobID: testJobID1})
 		},
 		"terminal": func(store *Store) (core.ObservationResult, error) {
 			return store.Terminalize(context.Background(), core.JobIdentity{JobID: testJobID1})
@@ -85,7 +85,7 @@ func TestJobOnlyLifecycleObservationIsUnmatchedWhenDurableJobIsMissing(t *testin
 	} {
 		t.Run(name, func(t *testing.T) {
 			protocol := &recordedTransaction{}
-			result, err := operation(NewStore(protocol.executor()))
+			result, err := operation(newStore(protocol.executor()))
 			if err != nil || result.Outcome != core.ObservationUnmatched || protocol.commitCalls != 1 || len(protocol.statements) != 1 {
 				t.Fatalf("%s result=%#v statements=%#v commits=%d error=%v", name, result, protocol.statements, protocol.commitCalls, err)
 			}
@@ -102,27 +102,27 @@ func TestTerminalizeClassifiesReplayAsAlreadyApplied(t *testing.T) {
 		})
 }
 
-func TestMarkRunnerStartedClassifiesReplayAsAlreadyApplied(t *testing.T) {
+func TestObserveRunnerAcceptanceClassifiesReplayAsAlreadyApplied(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
-	exerciseSourceObservationOutcome(t, []Row{rowFromValues([]any{true})}, 0, core.ObservationAlreadyApplied,
+	exerciseSourceObservationOutcome(t, []rowStub{rowFromValues([]any{true})}, 0, core.ObservationAlreadyApplied,
 		func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 		})
 }
 
-func TestMarkRunnerStartedClassifiesMissingSourceStateAsUnmatched(t *testing.T) {
+func TestObserveRunnerAcceptanceClassifiesMissingSourceStateAsUnmatched(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
-	exerciseSourceObservationOutcome(t, []Row{rowFromValues([]any{false})}, 0, core.ObservationUnmatched,
+	exerciseSourceObservationOutcome(t, []rowStub{rowFromValues([]any{false})}, 0, core.ObservationUnmatched,
 		func(store *Store) (core.ObservationResult, error) {
-			return store.MarkRunnerStarted(context.Background(), core.JobIdentity{Source: source})
+			return store.ObserveRunnerAcceptance(context.Background(), core.JobIdentity{Source: source})
 		})
 }
 
 func exerciseSourceObservationOutcome(
 	t *testing.T,
-	rows []Row,
+	rows []rowStub,
 	affected int64,
 	want core.ObservationOutcome,
 	operation func(*Store) (core.ObservationResult, error),
@@ -130,20 +130,20 @@ func exerciseSourceObservationOutcome(
 	t.Helper()
 	commits := 0
 	transaction := postgresOutcomeTransaction(rows, affected, &commits)
-	result, err := operation(NewStore(Executor{begin: transactionBeginning(transaction)}))
+	result, err := operation(newStore(executorStub{begin: transactionBeginning(transaction)}))
 	if err != nil || result.Outcome != want || commits != 1 {
 		t.Fatalf("result=%#v commits=%d error=%v", result, commits, err)
 	}
 }
 
-func TestMarkRunnerStartedAcceptsMatchingSourceAndJobIdentity(t *testing.T) {
+func TestObserveRunnerAcceptanceAcceptsMatchingSourceAndJobIdentity(t *testing.T) {
 	t.Parallel()
 	source := core.SourceReference{Adapter: "github", ID: "request-1"}
-	protocol := &recordedTransaction{rows: []Row{
+	protocol := &recordedTransaction{rows: []rowStub{
 		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
 		rowFromValues([]any{string(source.Adapter), string(source.ID)}),
 	}}
-	result, err := NewStore(protocol.executor()).MarkRunnerStarted(context.Background(), core.JobIdentity{
+	result, err := newStore(protocol.executor()).ObserveRunnerAcceptance(context.Background(), core.JobIdentity{
 		Source: source, JobID: testJobID1,
 	})
 	if err != nil || result.Outcome != core.ObservationApplied || protocol.commitCalls != 1 {
@@ -155,13 +155,16 @@ func TestRetryUnstartedProcessingMovesSameJobToDatabaseTimedQueueTail(t *testing
 	t.Parallel()
 	job := core.Job{ID: testJobID1, Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
 	queued := core.JobRequest{Source: job.Source, RunnerPool: job.RunnerPool, EnqueuedAt: fixedTime()}
-	protocol := &recordedTransaction{rows: []Row{
-		rowFromValues(processingJobValues(job, testMemberIDA)),
+	protocol := &recordedTransaction{rows: []rowStub{
+		rowFromValues(postgresProcessingOutcomeValues(job, false, false)),
 		rowFromValues(queuedJobValues(testJobID1, queued)),
 	}}
-	result, err := NewStore(protocol.executor()).RetryUnstarted(context.Background(), testJobID1)
+	result, err := newStore(protocol.executor()).RetryUnstarted(context.Background(), retryProcessingJob())
 	if err != nil || result.Outcome != core.RetryRequeued || protocol.commitCalls != 1 || len(protocol.statements) != 4 ||
-		len(protocol.arguments[2]) != 1 || !strings.Contains(protocol.statements[2], "RETURNING") ||
+		len(protocol.arguments[2]) != 4 || !strings.Contains(protocol.statements[2], "RETURNING") ||
+		!strings.Contains(protocol.statements[2], "claimed_at = $2") ||
+		!strings.Contains(protocol.statements[2], "inventory_endpoint_id = $3") ||
+		!strings.Contains(protocol.statements[2], "runner_name = $4") ||
 		strings.Contains(protocol.statements[2], "enqueued_at) VALUES") {
 		t.Fatalf("retry statements=%#v arguments=%#v commits=%d result=%#v error=%v",
 			protocol.statements, protocol.arguments, protocol.commitCalls, result, err)

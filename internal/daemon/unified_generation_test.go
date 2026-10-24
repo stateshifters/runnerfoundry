@@ -41,13 +41,13 @@ func mustCloseGeneration(t *testing.T, generation *maintenanceGeneration) {
 	}
 }
 
-func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
+func TestUnifiedGenerationMaintainsMembershipImmediatelyAndOnInjectedTicks(t *testing.T) {
 	t.Parallel()
 
 	cycles := make(chan struct{}, 2)
-	engine := &cycleEngineFake{cycles: cycles}
+	engine := &maintenanceEngineFake{cycles: cycles}
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	generation := newMaintenanceGeneration(engine, ticker, nil, nil, nil)
+	generation := newTestMaintenanceGeneration(engine, ticker, nil, nil, nil)
 
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("start generation: %v", err)
@@ -55,9 +55,9 @@ func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	ticker.ticks <- time.Time{}
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
@@ -69,14 +69,14 @@ func TestUnifiedGenerationCyclesImmediatelyAndOnInjectedTicks(t *testing.T) {
 func TestUnifiedGenerationActivatesBeforeFirstMaintenanceCycleCompletes(t *testing.T) {
 	t.Parallel()
 
-	generation, cycles, releaseCycle := newBlockedMaintenanceGeneration(t)
+	generation, cycles, releaseMaintenance := newBlockedMaintenanceGeneration(t)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
 
 	activationResult := make(chan error, 1)
 	go func() { activationResult <- generation.Activate(context.Background()) }()
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	select {
 	case err := <-activationResult:
 		if err != nil {
@@ -86,7 +86,7 @@ func TestUnifiedGenerationActivatesBeforeFirstMaintenanceCycleCompletes(t *testi
 		t.Fatal("activation waited for the first maintenance cycle")
 	}
 
-	releaseCycle()
+	releaseMaintenance()
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("close generation: %v", err)
 	}
@@ -105,13 +105,11 @@ func TestUnifiedGenerationStartsAndJoinsQueuedJobProcessorWithinActivation(t *te
 		return runtimeengine.ProcessResult{}, ctx.Err()
 	}}
 	gate := newQueuedJobEligibilityGate()
-	gate.Maintain(func(maintenance *queuedJobMaintenance) {
-		maintenance.MarkEligible("linux")
-	})
-	processor := newQueuedJobProcessor(requester, gate, nil)
+	markQueuedJobPoolsEligible(t, gate, "linux")
+	processor := newQueuedJobProcessorForPools(requester, gate, nil, []core.RunnerPool{"linux"})
 	processor.Wake("linux")
 	engine := &processorLifecycleEngineFake{processorStopped: requestStopped}
-	generation := newMaintenanceGeneration(
+	generation := newTestMaintenanceGeneration(
 		engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.processor = processor
@@ -127,14 +125,14 @@ func TestUnifiedGenerationStartsAndJoinsQueuedJobProcessorWithinActivation(t *te
 	mustCloseGeneration(t, generation)
 }
 
-func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.T) {
+func TestUnifiedGenerationSerializesImmediateAndScheduledLaneMaintenance(t *testing.T) {
 	t.Parallel()
 
 	cycles := make(chan struct{}, 2)
-	cycleResults := make(chan error, 2)
+	maintenanceResults := make(chan error, 2)
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
-	generation := newMaintenanceGeneration(
-		&controlledCycleEngineFake{cycles: cycles, results: cycleResults},
+	generation := newTestMaintenanceGeneration(
+		&controlledMaintenanceEngineFake{cycles: cycles, results: maintenanceResults},
 		ticker,
 		nil,
 		nil,
@@ -142,16 +140,16 @@ func TestUnifiedGenerationSerializesImmediateAndScheduledMaintenance(t *testing.
 	)
 	mustPrepareGeneration(t, generation)
 	mustActivateGeneration(t, generation)
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	ticker.ticks <- time.Time{}
 	select {
 	case <-cycles:
 		t.Fatal("scheduled maintenance overlapped the immediate cycle")
 	default:
 	}
-	cycleResults <- nil
-	waitForCycle(t, cycles)
-	cycleResults <- nil
+	maintenanceResults <- nil
+	waitForMaintenance(t, cycles)
+	maintenanceResults <- nil
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("close generation: %v", err)
 	}
@@ -161,8 +159,8 @@ func TestUnifiedGenerationOwnsQueueNotificationLifecycle(t *testing.T) {
 	started := make(chan struct{})
 	stopped := make(chan struct{})
 	notifications := &queueNotificationRuntimeFake{started: started, stopped: stopped}
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: make(chan struct{}, 1)},
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: make(chan struct{}, 1)},
 		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.notifications = notifications
@@ -172,6 +170,79 @@ func TestUnifiedGenerationOwnsQueueNotificationLifecycle(t *testing.T) {
 	mustDeactivateGeneration(t, generation)
 	<-stopped
 	mustCloseGeneration(t, generation)
+}
+
+func TestUnifiedGenerationRejectsQueueNotificationStartupFailureAndStopsProcessor(t *testing.T) {
+	wantErr := errors.New("notification startup failed")
+	notifications := &queueNotificationRuntimeFake{
+		started: make(chan struct{}), stopped: make(chan struct{}), startErr: wantErr,
+	}
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: make(chan struct{}, 1)},
+		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	processor := newQueuedJobProcessorForPools(
+		queuedJobRequesterFake{}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"},
+	)
+	generation.processor = processor
+	generation.notifications = notifications
+	mustPrepareGeneration(t, generation)
+	if err := generation.Activate(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("activation error = %v, want %v", err, wantErr)
+	}
+	assertQueuedJobProcessorCanRestart(t, processor)
+	mustCloseGeneration(t, generation)
+}
+
+func TestUnifiedGenerationCancelsBlockedQueueNotificationStartupAndStopsProcessor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	listener, connection := newCancelingQueueNotificationListener(cancel)
+	processor := newQueuedJobProcessorForPools(
+		queuedJobRequesterFake{}, newQueuedJobEligibilityGate(), nil, []core.RunnerPool{"linux"},
+	)
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: make(chan struct{}, 1)},
+		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	)
+	generation.processor = processor
+	generation.notifications = listener
+	mustPrepareGeneration(t, generation)
+
+	if err := generation.Activate(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("activation error = %v, want context cancellation", err)
+	}
+	if connection.discardCalls != 1 {
+		t.Fatalf("canceled notification startup discards = %d, want 1", connection.discardCalls)
+	}
+	assertQueuedJobProcessorCanRestart(t, processor)
+	mustCloseGeneration(t, generation)
+}
+
+func newCancelingQueueNotificationListener(
+	cancel context.CancelFunc,
+) (*postgreSQLQueueNotificationListener, *queueNotificationConnectionFake) {
+	connection := newQueueNotificationConnectionFake()
+	protocol := connection.protocol()
+	protocol.listen = func(ctx context.Context) error {
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
+		maxConnections: 2,
+		acquire: func(context.Context) (queueNotificationConnection, error) {
+			return protocol, nil
+		},
+	})
+	return listener, connection
+}
+
+func assertQueuedJobProcessorCanRestart(t *testing.T, processor *queuedJobProcessor) {
+	t.Helper()
+	if err := processor.Start(context.Background()); err != nil {
+		t.Fatalf("queued-job processor was not stopped after notification startup failure: %v", err)
+	}
+	assertNoTestError(t, processor.Stop(context.Background()), "stop restarted queued-job processor")
 }
 
 func TestUnifiedGenerationRunsMaintenanceWhileQueueNotificationPingIsBlocked(t *testing.T) {
@@ -189,8 +260,8 @@ func TestUnifiedGenerationRunsMaintenanceWhileQueueNotificationPingIsBlocked(t *
 	})
 	listener.keepaliveInterval = time.Millisecond
 	cycles := make(chan struct{}, 1)
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: cycles},
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: cycles},
 		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.notifications = listener
@@ -198,7 +269,7 @@ func TestUnifiedGenerationRunsMaintenanceWhileQueueNotificationPingIsBlocked(t *
 	mustPrepareGeneration(t, generation)
 	mustActivateGeneration(t, generation)
 	<-pingStarted
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	mustCloseGeneration(t, generation)
 }
 
@@ -207,8 +278,8 @@ func TestUnifiedGenerationReportsQueueNotificationStopFailure(t *testing.T) {
 	notifications := &queueNotificationRuntimeFake{
 		started: make(chan struct{}), stopped: make(chan struct{}), stopErr: wantErr,
 	}
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: make(chan struct{}, 1)},
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: make(chan struct{}, 1)},
 		&manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	generation.notifications = notifications
@@ -225,7 +296,7 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 	ticker := &manualCycleTicker{ticks: make(chan time.Time, 1)}
 	ticker.ticks <- time.Time{}
 	observedPendingTicks := make(chan int, 2)
-	generation := newMaintenanceGeneration(
+	generation := newTestMaintenanceGeneration(
 		&activationObservationEngine{ticker: ticker, observedPendingTicks: observedPendingTicks},
 		ticker,
 		nil,
@@ -249,8 +320,8 @@ func TestUnifiedGenerationDoesNotConsumeTicksBeforeActivation(t *testing.T) {
 func TestUnifiedGenerationCanStopWhileWaitingForActivation(t *testing.T) {
 	t.Parallel()
 
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil,
 	)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
@@ -264,8 +335,8 @@ func TestUnifiedGenerationReportsActivationBoundaryFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("activation failed")
-	engine := newGatedCycleEngine(&cycleEngineFake{}, leadershipFake{activateErr: wantErr, events: &[]string{}})
-	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
+	engine := newGatedMaintenanceEngine(&maintenanceEngineFake{}, leadershipFake{activateErr: wantErr, events: &[]string{}})
+	generation := newTestMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil, nil)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatalf("prepare generation: %v", err)
 	}
@@ -282,8 +353,8 @@ func TestUnifiedGenerationClosesOwnedResourcesInReverseOrder(t *testing.T) {
 
 	cycles := make(chan struct{}, 1)
 	events := make([]string, 0)
-	engine := &cycleEngineFake{cycles: cycles, closeEvents: &events}
-	generation := newMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, []runtimeCloser{
+	engine := &maintenanceEngineFake{cycles: cycles, closeEvents: &events}
+	generation := newTestMaintenanceGeneration(engine, &manualCycleTicker{ticks: make(chan time.Time)}, nil, []runtimeCloser{
 		closerFake{name: "state", events: &events}, closerFake{name: "provider", events: &events},
 	}, nil)
 
@@ -293,7 +364,7 @@ func TestUnifiedGenerationClosesOwnedResourcesInReverseOrder(t *testing.T) {
 	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatalf("activate generation: %v", err)
 	}
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	if err := generation.Close(context.Background()); err != nil {
 		t.Fatalf("stop generation: %v", err)
 	}
@@ -307,8 +378,8 @@ func TestUnifiedGenerationSelectsFinalizersByRunnerPool(t *testing.T) {
 
 	linux := &finalizerFake{runnerPool: "linux"}
 	windows := &finalizerFake{runnerPool: "windows"}
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{},
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		nil,
 		nil,
@@ -320,36 +391,36 @@ func TestUnifiedGenerationSelectsFinalizersByRunnerPool(t *testing.T) {
 	}
 }
 
-func TestGatedCycleEnginePreventsReloadGenerationOverlap(t *testing.T) {
+func TestGatedMaintenanceEnginePreventsReloadGenerationLaneOverlap(t *testing.T) {
 	t.Parallel()
 
 	gate := &localLeadershipGate{}
 	activeCycles := make(chan struct{}, 1)
 	replacementCycles := make(chan struct{}, 1)
-	active := newGatedCycleEngine(&cycleEngineFake{cycles: activeCycles}, gate.NewLeadership())
-	replacement := newGatedCycleEngine(&cycleEngineFake{cycles: replacementCycles}, gate.NewLeadership())
+	active := newGatedMaintenanceEngine(&maintenanceEngineFake{cycles: activeCycles}, gate.NewLeadership())
+	replacement := newGatedMaintenanceEngine(&maintenanceEngineFake{cycles: replacementCycles}, gate.NewLeadership())
 
 	assertNoTestError(t, active.Activate(), "activate initial generation")
-	assertNoTestError(t, active.Cycle(context.Background()), "cycle active generation")
+	assertNoTestError(t, active.MaintainMembership(context.Background()), "maintain active generation")
 	assertTestError(t, replacement.Activate(), "activate overlapping replacement")
-	waitForCycle(t, activeCycles)
-	assertTestError(t, replacement.Cycle(context.Background()), "cycle overlapping replacement")
+	waitForMaintenance(t, activeCycles)
+	assertTestError(t, replacement.MaintainMembership(context.Background()), "maintain overlapping replacement")
 	if len(replacementCycles) != 0 {
-		t.Fatal("replacement generation cycled before active generation closed")
+		t.Fatal("replacement generation ran maintenance before active generation closed")
 	}
 	assertNoTestError(t, active.Close(context.Background()), "close active generation")
 	assertNoTestError(t, replacement.Activate(), "activate replacement generation")
-	assertNoTestError(t, replacement.Cycle(context.Background()), "cycle replacement after handoff")
-	waitForCycle(t, replacementCycles)
+	assertNoTestError(t, replacement.MaintainMembership(context.Background()), "maintain replacement after handoff")
+	waitForMaintenance(t, replacementCycles)
 }
 
-func TestGatedCycleEngineRunsIndependentMaintenanceLanes(t *testing.T) {
+func TestGatedMaintenanceEngineRunsIndependentMaintenanceLanes(t *testing.T) {
 	cycles := make(chan struct{}, 1)
 	gate := &localLeadershipGate{}
-	engine := newGatedCycleEngine(&cycleEngineFake{cycles: cycles}, gate.NewLeadership())
+	engine := newGatedMaintenanceEngine(&maintenanceEngineFake{cycles: cycles}, gate.NewLeadership())
 	assertNoTestError(t, engine.Activate(), "activate gated engine")
 	assertNoTestError(t, engine.MaintainMembership(context.Background()), "maintain membership")
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	assertNoTestError(t, engine.MaintainSource(context.Background()), "maintain source")
 	assertNoTestError(t, engine.MaintainExecution(context.Background()), "maintain execution")
 	assertNoTestError(t, engine.Close(context.Background()), "close gated engine")
@@ -377,15 +448,15 @@ func TestUnifiedGenerationRejectsInvalidLifecycleCalls(t *testing.T) {
 	t.Parallel()
 
 	cycles := make(chan struct{}, 1)
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil,
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: cycles}, &manualCycleTicker{ticks: make(chan time.Time)}, nil, nil,
 		nil,
 	)
 	assertTestError(t, generation.Activate(context.Background()), "activate before start")
 	assertNoTestError(t, generation.Prepare(context.Background()), "prepare generation")
 	assertNoTestError(t, generation.Activate(context.Background()), "activate generation")
 	assertTestError(t, generation.Activate(context.Background()), "activate twice")
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	assertTestError(t, generation.Prepare(context.Background()), "prepare twice")
 	assertNoTestError(t, generation.Close(context.Background()), "close generation")
 	assertTestError(t, generation.Prepare(context.Background()), "prepare closed generation")
@@ -397,7 +468,7 @@ func TestUnifiedGenerationStopsBeforeStartAndGatedLeadershipErrors(t *testing.T)
 	t.Parallel()
 
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
-	generation := newMaintenanceGeneration(&cycleEngineFake{cycles: make(chan struct{})}, ticker, nil, nil, nil)
+	generation := newTestMaintenanceGeneration(&maintenanceEngineFake{cycles: make(chan struct{})}, ticker, nil, nil, nil)
 	if err := generation.Close(context.Background()); err != nil || !ticker.stopped {
 		t.Fatalf("stop before start = %v, ticker stopped=%t", err, ticker.stopped)
 	}
@@ -405,21 +476,21 @@ func TestUnifiedGenerationStopsBeforeStartAndGatedLeadershipErrors(t *testing.T)
 		t.Fatal("generation started after close-before-start")
 	}
 	wantErr := errors.New("leadership failed")
-	gated := newGatedCycleEngine(&cycleEngineFake{cycles: make(chan struct{}, 1)}, leadershipFake{err: wantErr, events: &[]string{}})
-	if err := gated.Cycle(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("gated cycle error = %v", err)
+	gated := newGatedMaintenanceEngine(&maintenanceEngineFake{cycles: make(chan struct{}, 1)}, leadershipFake{err: wantErr, events: &[]string{}})
+	if err := gated.MaintainMembership(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("gated maintenance error = %v", err)
 	}
-	gated = newGatedCycleEngine(&cycleEngineFake{}, leadershipFake{activateErr: wantErr, events: &[]string{}})
+	gated = newGatedMaintenanceEngine(&maintenanceEngineFake{}, leadershipFake{activateErr: wantErr, events: &[]string{}})
 	if err := gated.Activate(); !errors.Is(err, wantErr) {
 		t.Fatalf("gated activation error = %v", err)
 	}
-	gated = newGatedCycleEngine(&cycleEngineFake{cycles: make(chan struct{}, 1), cycleErr: wantErr},
+	gated = newGatedMaintenanceEngine(&maintenanceEngineFake{cycles: make(chan struct{}, 1), maintenanceErr: wantErr},
 		(&localLeadershipGate{}).NewLeadership())
 	if err := gated.Activate(); err != nil {
 		t.Fatalf("activate gated engine: %v", err)
 	}
-	if err := gated.Cycle(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("active cycle error = %v", err)
+	if err := gated.MaintainMembership(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("active maintenance error = %v", err)
 	}
 }
 
@@ -427,21 +498,21 @@ func TestUnifiedGenerationReportsCanceledWait(t *testing.T) {
 	t.Parallel()
 	block := make(chan struct{})
 	cycles := make(chan struct{}, 1)
-	cycleBlocks := make(chan (<-chan struct{}), 2)
-	cycleBlocks <- nil
-	cycleBlocks <- block
-	engine := &sequencedBlockingCycleEngineFake{cycles: cycles, blocks: cycleBlocks}
+	maintenanceBlocks := make(chan (<-chan struct{}), 2)
+	maintenanceBlocks <- nil
+	maintenanceBlocks <- block
+	engine := &sequencedBlockingMaintenanceEngineFake{cycles: cycles, blocks: maintenanceBlocks}
 	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
-	generation := newMaintenanceGeneration(engine, ticker, nil, nil, nil)
+	generation := newTestMaintenanceGeneration(engine, ticker, nil, nil, nil)
 	if err := generation.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := generation.Activate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	ticker.ticks <- time.Time{}
-	waitForCycle(t, cycles)
+	waitForMaintenance(t, cycles)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := generation.Close(canceled); !errors.Is(err, context.Canceled) {
@@ -454,7 +525,7 @@ func TestUnifiedGenerationReportsCloseFailures(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("close failed")
-	generation := newMaintenanceGeneration(&cycleEngineFake{closeErr: wantErr},
+	generation := newTestMaintenanceGeneration(&maintenanceEngineFake{closeErr: wantErr},
 		&manualCycleTicker{ticks: make(chan time.Time)}, nil,
 		[]runtimeCloser{closerErrorFake{events: &[]string{}, err: wantErr}}, nil)
 	if err := generation.Close(context.Background()); !errors.Is(err, wantErr) {
@@ -462,16 +533,16 @@ func TestUnifiedGenerationReportsCloseFailures(t *testing.T) {
 	}
 }
 
-type cycleEngineFake struct {
-	cycles      chan<- struct{}
-	cycleErr    error
-	closes      int
-	closeEvents *[]string
-	block       <-chan struct{}
-	closeErr    error
+type maintenanceEngineFake struct {
+	cycles         chan<- struct{}
+	maintenanceErr error
+	closes         int
+	closeEvents    *[]string
+	block          <-chan struct{}
+	closeErr       error
 }
 
-type controlledCycleEngineFake struct {
+type controlledMaintenanceEngineFake struct {
 	cycles  chan<- struct{}
 	results <-chan error
 }
@@ -481,22 +552,28 @@ type processorLifecycleEngineFake struct {
 }
 
 type queueNotificationRuntimeFake struct {
-	started chan<- struct{}
-	stopped chan<- struct{}
-	stopErr error
+	started  chan<- struct{}
+	stopped  chan<- struct{}
+	startErr error
+	stopErr  error
 }
 
-func (runtime *queueNotificationRuntimeFake) Start(context.Context) { close(runtime.started) }
+func (runtime *queueNotificationRuntimeFake) Start(context.Context, context.Context) error {
+	close(runtime.started)
+	return runtime.startErr
+}
 func (runtime *queueNotificationRuntimeFake) Stop(context.Context) error {
 	close(runtime.stopped)
 	return runtime.stopErr
 }
 
 func (*processorLifecycleEngineFake) Activate() error { return nil }
-func (*processorLifecycleEngineFake) Cycle(ctx context.Context) error {
+func (*processorLifecycleEngineFake) MaintainMembership(ctx context.Context) error {
 	<-ctx.Done()
 	return nil
 }
+func (*processorLifecycleEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*processorLifecycleEngineFake) MaintainExecution(context.Context) error { return nil }
 func (fake *processorLifecycleEngineFake) Deactivate(context.Context) error {
 	select {
 	case <-fake.processorStopped:
@@ -507,48 +584,52 @@ func (fake *processorLifecycleEngineFake) Deactivate(context.Context) error {
 }
 func (*processorLifecycleEngineFake) Close(context.Context) error { return nil }
 
-func (*controlledCycleEngineFake) Activate() error { return nil }
-func (*controlledCycleEngineFake) Deactivate(context.Context) error {
+func (*controlledMaintenanceEngineFake) Activate() error { return nil }
+func (*controlledMaintenanceEngineFake) Deactivate(context.Context) error {
 	return nil
 }
-func (fake *controlledCycleEngineFake) Cycle(ctx context.Context) error {
+func (fake *controlledMaintenanceEngineFake) MaintainMembership(ctx context.Context) error {
 	fake.cycles <- struct{}{}
 	select {
 	case err := <-fake.results:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("wait for controlled cycle result: %w", ctx.Err())
+		return fmt.Errorf("wait for controlled maintenance result: %w", ctx.Err())
 	}
 }
-func (*controlledCycleEngineFake) Close(context.Context) error { return nil }
+func (*controlledMaintenanceEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*controlledMaintenanceEngineFake) MaintainExecution(context.Context) error { return nil }
+func (*controlledMaintenanceEngineFake) Close(context.Context) error             { return nil }
 
-type sequencedBlockingCycleEngineFake struct {
+type sequencedBlockingMaintenanceEngineFake struct {
 	cycles chan<- struct{}
 	blocks <-chan (<-chan struct{})
 }
 
-func (*sequencedBlockingCycleEngineFake) Activate() error { return nil }
-func (*sequencedBlockingCycleEngineFake) Deactivate(context.Context) error {
+func (*sequencedBlockingMaintenanceEngineFake) Activate() error { return nil }
+func (*sequencedBlockingMaintenanceEngineFake) Deactivate(context.Context) error {
 	return nil
 }
-func (fake *sequencedBlockingCycleEngineFake) Cycle(context.Context) error {
+func (fake *sequencedBlockingMaintenanceEngineFake) MaintainMembership(context.Context) error {
 	fake.cycles <- struct{}{}
 	if block := <-fake.blocks; block != nil {
 		<-block
 	}
 	return nil
 }
-func (*sequencedBlockingCycleEngineFake) Close(context.Context) error { return nil }
+func (*sequencedBlockingMaintenanceEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*sequencedBlockingMaintenanceEngineFake) MaintainExecution(context.Context) error { return nil }
+func (*sequencedBlockingMaintenanceEngineFake) Close(context.Context) error             { return nil }
 
 func newBlockedMaintenanceGeneration(t *testing.T) (*maintenanceGeneration, <-chan struct{}, func()) {
 	t.Helper()
 	cycles := make(chan struct{}, 1)
-	releaseCycle := make(chan struct{})
+	releaseMaintenance := make(chan struct{})
 	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseCycle) }) }
+	release := func() { releaseOnce.Do(func() { close(releaseMaintenance) }) }
 	t.Cleanup(release)
-	generation := newMaintenanceGeneration(
-		&cycleEngineFake{cycles: cycles, block: releaseCycle},
+	generation := newTestMaintenanceGeneration(
+		&maintenanceEngineFake{cycles: cycles, block: releaseMaintenance},
 		&manualCycleTicker{ticks: make(chan time.Time)},
 		nil,
 		nil,
@@ -562,30 +643,31 @@ type activationObservationEngine struct {
 	observedPendingTicks chan<- int
 }
 
-func (engine *activationObservationEngine) Cycle(context.Context) error {
+func (engine *activationObservationEngine) MaintainMembership(context.Context) error {
 	engine.observedPendingTicks <- len(engine.ticker.ticks)
 	return nil
 }
+func (*activationObservationEngine) MaintainSource(context.Context) error    { return nil }
+func (*activationObservationEngine) MaintainExecution(context.Context) error { return nil }
 
 func (*activationObservationEngine) Activate() error                  { return nil }
 func (*activationObservationEngine) Deactivate(context.Context) error { return nil }
 
 func (*activationObservationEngine) Close(context.Context) error { return nil }
 
-func (fake *cycleEngineFake) Cycle(context.Context) error {
+func (fake *maintenanceEngineFake) MaintainMembership(context.Context) error {
 	fake.cycles <- struct{}{}
 	if fake.block != nil {
 		<-fake.block
 	}
-	return fake.cycleErr
+	return fake.maintenanceErr
 }
 
-func (fake *cycleEngineFake) MaintainMembership(ctx context.Context) error { return fake.Cycle(ctx) }
-func (*cycleEngineFake) MaintainSource(context.Context) error              { return nil }
-func (*cycleEngineFake) MaintainExecution(context.Context) error           { return nil }
-func (*cycleEngineFake) Activate() error                                   { return nil }
-func (*cycleEngineFake) Deactivate(context.Context) error                  { return nil }
-func (fake *cycleEngineFake) Close(context.Context) error {
+func (*maintenanceEngineFake) MaintainSource(context.Context) error    { return nil }
+func (*maintenanceEngineFake) MaintainExecution(context.Context) error { return nil }
+func (*maintenanceEngineFake) Activate() error                         { return nil }
+func (*maintenanceEngineFake) Deactivate(context.Context) error        { return nil }
+func (fake *maintenanceEngineFake) Close(context.Context) error {
 	fake.closes++
 	if fake.closeEvents != nil {
 		*fake.closeEvents = append(*fake.closeEvents, "engine")
@@ -600,6 +682,54 @@ type manualCycleTicker struct {
 
 func (ticker *manualCycleTicker) Ticks() <-chan time.Time { return ticker.ticks }
 func (ticker *manualCycleTicker) Stop()                   { ticker.stopped = true }
+
+type maintenanceTestEngine interface {
+	generationLifecycleEngine
+	MaintainMembership(ctx context.Context) error
+}
+
+type membershipOnlyTestRuntime struct {
+	engine maintenanceTestEngine
+}
+
+func (runtime membershipOnlyTestRuntime) MaintainMembership(ctx context.Context) error {
+	if err := runtime.engine.MaintainMembership(ctx); err != nil {
+		return fmt.Errorf("maintain membership: %w", err)
+	}
+	return nil
+}
+
+func (membershipOnlyTestRuntime) MaintainSource(ctx context.Context) error {
+	<-ctx.Done()
+	return fmt.Errorf("wait for source maintenance cancellation: %w", ctx.Err())
+}
+
+func (membershipOnlyTestRuntime) MaintainExecution(ctx context.Context) error {
+	<-ctx.Done()
+	return fmt.Errorf("wait for execution maintenance cancellation: %w", ctx.Err())
+}
+
+func newTestMaintenanceGeneration(
+	engine maintenanceTestEngine,
+	membershipTicker cycleTicker,
+	report func(error),
+	closers []runtimeCloser,
+	finalizers []runtimeFinalizer,
+) *maintenanceGeneration {
+	return newIndependentMaintenanceGeneration(engine, membershipOnlyTestRuntime{engine: engine}, maintenanceLaneTickers{
+		membership: membershipTicker,
+		source:     &manualCycleTicker{ticks: make(chan time.Time)},
+		execution:  &manualCycleTicker{ticks: make(chan time.Time)},
+	}, report, closers, finalizers)
+}
+
+func newManualMaintenanceLaneTickers() maintenanceLaneTickers {
+	return maintenanceLaneTickers{
+		membership: &manualCycleTicker{ticks: make(chan time.Time)},
+		source:     &manualCycleTicker{ticks: make(chan time.Time)},
+		execution:  &manualCycleTicker{ticks: make(chan time.Time)},
+	}
+}
 
 type closerFake struct {
 	name   string
@@ -634,7 +764,7 @@ func (closer closerFake) Close(context.Context) error {
 	return nil
 }
 
-func waitForCycle(t *testing.T, cycles <-chan struct{}) {
+func waitForMaintenance(t *testing.T, cycles <-chan struct{}) {
 	t.Helper()
 	<-cycles
 }

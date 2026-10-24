@@ -17,6 +17,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 	"gopkg.in/yaml.v3"
 )
@@ -133,11 +134,14 @@ type e2eApplication struct {
 	runtimeClosed                    chan struct{}
 	runtimeCloseOnce                 sync.Once
 	managerBuilds                    int
+	buildingSource                   e2eGitHubSourceRuntimeResult
+	activeSource                     e2eGitHubSourceRuntimeResult
 	providerBuilds                   int
 	generationDecorator              func(int, generation) generation
 	replacementProviderValidationErr error
 	useProductionProviders           bool
-	dockerCommands                   dockerprovider.CommandRunner
+	newDockerLauncher                func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory               func(core.MemberID) execution.RunnerInventory
 }
 
 func (application *e2eApplication) enableSource(policy ActiveRunnerPolicy) {
@@ -163,8 +167,7 @@ func newE2EApplicationWithState(
 	configured := e2eConfiguration(state)
 	configured.Log.Format = "json"
 	configured.Log.Level = "debug"
-	configured.GitHub.App.PrivateKey = ""
-	configured.GitHub.App.PrivateKeyFile = "e2e-private-key.pem"
+	configured.GitHub.Apps[0].PrivateKeyFile = "e2e-private-key.pem"
 	configured.GitHub.DiscoveryInterval = "1m"
 	application := &e2eApplication{
 		databasePath: configured.State.Path, memberName: memberName, host: newE2EGitHost(),
@@ -210,7 +213,8 @@ func (application *e2eApplication) productionDependencies() productionDependenci
 	production.maintenanceLaneCompleted = application.tickers.observeMaintenanceLaneCompletion
 	production.newManager = application.newManager
 	if application.useProductionProviders {
-		production.dockerCommands = application.dockerCommands
+		production.newDockerLauncher = application.newDockerLauncher
+		production.newDockerInventory = application.newDockerInventory
 	} else {
 		production.buildProviderSet = application.buildProviderSet
 	}
@@ -241,11 +245,24 @@ func (application *e2eApplication) observeGenerationBuild(production *production
 		dependencies productionDependencies,
 	) (*maintenanceGeneration, error) {
 		application.builtConfigs <- configured
+		application.mutex.Lock()
+		application.buildingSource = e2eGitHubSourceRuntimeResult{}
+		application.mutex.Unlock()
 		generation, err := buildGeneration(ctx, configured, state, gate, report, dependencies)
 		if err != nil {
+			application.mutex.Lock()
+			application.buildingSource = e2eGitHubSourceRuntimeResult{}
+			application.mutex.Unlock()
 			return nil, err
 		}
-		application.builtSources <- e2eGitHubSourceRuntime(generation)
+		application.mutex.Lock()
+		source := application.buildingSource
+		application.buildingSource = e2eGitHubSourceRuntimeResult{}
+		application.mutex.Unlock()
+		if source.host == nil {
+			source.err = errors.New("production generation did not build a GitHub source manager")
+		}
+		application.builtSources <- source
 		return generation, nil
 	}
 }
@@ -326,19 +343,68 @@ func (application *e2eApplication) newManager(
 	registrations githubsource.RegistrationRepository,
 	observer githubsource.ManagerObserver,
 ) (*githubsource.Manager, error) {
-	application.mutex.Lock()
-	host := application.host
-	if application.managerBuilds > 0 && application.replacementHost != nil {
-		host = application.replacementHost
-	}
-	application.managerBuilds++
-	application.mutex.Unlock()
+	host, source := application.beginManagerBuild()
 	observer = e2eObserveHostManagerActivities(host, observer)
-	manager, err := githubsource.NewManager(host, host.Client, registrations, observer)
+	manager, err := githubsource.NewManager(host, observedManagerClientFactory(host, source), registrations, observer)
 	if err != nil {
 		return nil, fmt.Errorf("create E2E GitHub manager: %w", err)
 	}
 	return manager, nil
+}
+
+func (application *e2eApplication) beginManagerBuild() (*e2eGitHost, e2eGitHubSourceRuntimeResult) {
+	application.mutex.Lock()
+	defer application.mutex.Unlock()
+	host := application.host
+	if application.managerBuilds > 0 && application.replacementHost != nil {
+		host = application.replacementHost
+	}
+	source := e2eGitHubSourceRuntime(application.managerBuilds, host)
+	application.buildingSource = source
+	application.managerBuilds++
+	return host, source
+}
+
+func observedManagerClientFactory(
+	host *e2eGitHost,
+	source e2eGitHubSourceRuntimeResult,
+) githubsource.ManagerClientFactoryFunc {
+	return func(ctx context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
+		client, err := host.Client(ctx, repository)
+		if err != nil {
+			return githubsource.ManagerClient{}, err
+		}
+		client.EnsureRunnerPool = observedEnsureRunnerPool(client.EnsureRunnerPool, source)
+		client.OpenSession = observedOpenSession(client.OpenSession, source)
+		return client, nil
+	}
+}
+
+func observedEnsureRunnerPool(
+	ensureRunnerPool func(context.Context, string, string) (transport.Registration, error),
+	source e2eGitHubSourceRuntimeResult,
+) func(context.Context, string, string) (transport.Registration, error) {
+	return func(ctx context.Context, runnerPool string, runnerGroup string) (transport.Registration, error) {
+		registration, err := ensureRunnerPool(ctx, runnerPool, runnerGroup)
+		if err == nil {
+			source.registrations.record(runnerPool)
+		}
+		return registration, err
+	}
+}
+
+func observedOpenSession(
+	openSession func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error),
+	source e2eGitHubSourceRuntimeResult,
+) func(context.Context, transport.Registration, string) (githubsource.ManagedSession, error) {
+	return func(ctx context.Context, registration transport.Registration, name string) (githubsource.ManagedSession, error) {
+		_, err := openSession(ctx, registration, name)
+		if err != nil {
+			return nil, err
+		}
+		source.sessions.record(registration.Name)
+		return source.pollSessions[registration.Name], nil
+	}
 }
 
 func (application *e2eApplication) rejectInvalidReload(t *testing.T) {
@@ -405,30 +471,10 @@ func (application *e2eApplication) establishSource(t *testing.T) {
 	awaitSignal(t, "application Windows inventory", application.windows.refreshed)
 	application.tickers.cycle(t, "membership")
 	e2eReconcileApplicationSourceAfterMembership(t, application, source)
-	for _, runnerPool := range []string{"linux", "windows"} {
-		application.awaitRegistration(t, runnerPool)
-	}
-	for _, runnerPool := range []string{"linux", "windows"} {
-		awaitSignal(t, "application session for "+runnerPool, application.host.sessionOK[runnerPool])
-	}
 	e2eInstallPublishedApplicationSessions(t, application, source)
-	for _, runnerPool := range []string{"linux", "windows"} {
-		awaitSignal(t, "application poll for "+runnerPool, application.host.sessions[runnerPool].pollRequested)
-	}
-}
-
-func (application *e2eApplication) awaitRegistration(t *testing.T, runnerPool string) {
-	t.Helper()
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case <-application.host.registrationOK[runnerPool]:
-		return
-	case <-timer.C:
-		repositories, clientCalls, ensures := application.host.callSummary()
-		t.Fatalf("timed out waiting for application registration for %s; discovered repository counts=%v clients=%d ensures=%v",
-			runnerPool, repositories, clientCalls, ensures)
-	}
+	application.mutex.Lock()
+	application.activeSource = source
+	application.mutex.Unlock()
 }
 
 func (application *e2eApplication) startShutdownPolicyJobs(
@@ -475,29 +521,68 @@ func (application *e2eApplication) deliverWithSourceTicker(
 	sourceTicker *e2eManualTicker,
 ) {
 	t.Helper()
-	session := application.host.sessions[runnerPool]
+	session := application.activeSession(t, runnerPool)
 	messageID := session.assignMessageID(message)
-	acknowledged := session.acknowledgement(messageID)
+	application.sendMessage(t, runnerPool, session, message, messageID)
+	application.awaitMessageAcknowledgement(t, runnerPool, session, messageID)
 	pollCompleted := session.pollCompletion(messageID)
+	awaitSignal(t, fmt.Sprintf("application %s message %d poll completion", runnerPool, messageID), pollCompleted)
+	pollSequence, _ := session.pollObservation()
+	e2eAwaitSessionPollWhileCycling(t, fmt.Sprintf("application %s message %d poll harvest", runnerPool, messageID),
+		session, pollSequence+1,
+		func() { application.tickers.cycleTicker(t, sourceTicker, "application source maintenance") })
+}
+
+func (application *e2eApplication) activeSession(t *testing.T, runnerPool string) *e2eObservedGitHubSession {
+	t.Helper()
+	application.mutex.Lock()
+	defer application.mutex.Unlock()
+	if application.activeSource.host != nil {
+		if session := application.activeSource.pollSessions[runnerPool]; session != nil {
+			return session
+		}
+	}
+	t.Fatalf("application has no active GitHub session for Runner Pool %q", runnerPool)
+	return nil
+}
+
+func (application *e2eApplication) sendMessage(
+	t *testing.T,
+	runnerPool string,
+	session *e2eObservedGitHubSession,
+	message *upstream.RunnerScaleSetMessage,
+	messageID int,
+) {
+	t.Helper()
 	deliveryTimer := time.NewTimer(e2eWaitLimit)
+	defer deliveryTimer.Stop()
 	select {
 	case session.messages <- message:
-		deliveryTimer.Stop()
 	case <-deliveryTimer.C:
 		t.Fatalf("timed out waiting for application %s poll to receive message %d", runnerPool, messageID)
 	}
+}
+
+func (application *e2eApplication) awaitMessageAcknowledgement(
+	t *testing.T,
+	runnerPool string,
+	session *e2eObservedGitHubSession,
+	messageID int,
+) {
+	t.Helper()
+	acknowledged := session.acknowledgement(messageID)
 	acknowledgementTimer := time.NewTimer(e2eWaitLimit)
 	defer acknowledgementTimer.Stop()
 	select {
 	case <-acknowledged:
 	case <-acknowledgementTimer.C:
-		processing, processingErr := application.runtime.state.store.ProcessingByPool(context.Background(), core.RunnerPool(runnerPool))
+		processing, processingErr := application.runtime.state.store.processing.ProcessingByPool(
+			context.Background(), core.RunnerPool(runnerPool),
+		)
 		t.Fatalf("timed out waiting for application %s message %d acknowledgement; queued_messages=%d ack_attempts=%d processing=%+v processing_error=%v logs=%+v",
 			runnerPool, messageID, len(session.messages), len(session.ackAttempts), processing, processingErr,
 			e2eApplicationMessageLogs(application.logs.records(t), runnerPool, messageID))
 	}
-	awaitSignal(t, fmt.Sprintf("application %s message %d poll completion", runnerPool, messageID), pollCompleted)
-	application.tickers.cycleTicker(t, sourceTicker, "application source maintenance")
 }
 
 func (application *e2eApplication) assertShutdownPolicyState(
@@ -537,7 +622,7 @@ func (application *e2eApplication) assertLeaveShutdownState(
 	t.Helper()
 	if application.provider.destroyCount() != 0 || application.windows.destroyCount() != 0 ||
 		len(linuxProcessing) != 1 || linuxProcessing[0].Job.ID != linux.JobID ||
-		len(windowsProcessing) != 1 || windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerStarted {
+		len(windowsProcessing) != 1 || windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerAccepted {
 		t.Fatalf("leave shutdown state: linux=%+v windows=%+v errors=(%v,%v) destroys=(%d,%d)",
 			linuxProcessing, windowsProcessing, linuxErr, windowsErr,
 			application.provider.destroyCount(), application.windows.destroyCount())
@@ -555,9 +640,9 @@ func (application *e2eApplication) assertTerminateShutdownState(
 ) {
 	t.Helper()
 	if linuxErr != nil || windowsErr != nil || len(linuxProcessing) != 1 ||
-		linuxProcessing[0].Job.ID != linux.JobID || linuxProcessing[0].RunnerStarted ||
+		linuxProcessing[0].Job.ID != linux.JobID || linuxProcessing[0].RunnerAccepted ||
 		len(windowsProcessing) != 1 ||
-		windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerStarted ||
+		windowsProcessing[0].Job.ID != windows.JobID || !windowsProcessing[0].RunnerAccepted ||
 		application.provider.destroyCount() != 0 || application.windows.destroyCount() != 1 {
 		t.Fatalf("terminate shutdown state: linux=%+v windows=%+v errors=(%v,%v) destroys=(%d,%d)",
 			linuxProcessing, windowsProcessing, linuxErr, windowsErr,

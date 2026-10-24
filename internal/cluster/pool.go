@@ -14,25 +14,23 @@ type roleConnection interface {
 	Exec(ctx context.Context, statement string, arguments ...any) (pgconn.CommandTag, error)
 }
 
-// OpenPool opens the primary PostgreSQL endpoint for concurrent runtime state
-// access. Every connection assumes the configured stable role before use.
-func (store *Store) OpenPool(ctx context.Context) (*pgxpool.Pool, error) {
-	role, err := resolvedConnectionRole(store.settings, store.connectionResolver)
+func (connections *Connections) OpenPool(ctx context.Context) (*pgxpool.Pool, error) {
+	role, err := resolvedConnectionRole(connections.settings, connections.resolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PostgreSQL role: %w", err)
 	}
-	connectionConfig, err := primaryConnectionConfigWithResolver(store.settings, store.connectionResolver)
+	connectionConfig, err := primaryConnectionConfigWithResolver(connections.settings, connections.resolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve primary PostgreSQL connection: %w", err)
 	}
-	poolConfig, err := store.parsePoolConfig(connectionConfig.ConnString())
+	poolConfig, err := connections.driver.parsePoolConfig(connectionConfig.ConnString())
 	if err != nil {
 		return nil, errors.New("prepare PostgreSQL pool")
 	}
 	poolConfig.AfterConnect = func(connectCtx context.Context, connection *pgx.Conn) error {
-		return store.assumePoolRole(connectCtx, connection, role)
+		return connections.driver.assumePoolRole(connectCtx, connection, role)
 	}
-	pool, err := store.connectPool(ctx, poolConfig)
+	pool, err := connections.driver.connectPool(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("open PostgreSQL pool: %w", newPostgreSQLConnectionError(err))
 	}

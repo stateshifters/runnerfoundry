@@ -86,7 +86,7 @@ func TestReconcileReturnsActiveWithPruneFailureWhenOwnershipReadFails(t *testing
 	}
 }
 
-func TestOpenRegistrationSessionForgetsOnlyTerminallyMissingRegistration(t *testing.T) {
+func TestOpenSourceRegistrationSessionForgetsOnlyTerminallyMissingRegistration(t *testing.T) {
 	t.Parallel()
 
 	record, sibling := registrationPair()
@@ -108,14 +108,14 @@ func TestOpenRegistrationSessionForgetsOnlyTerminallyMissingRegistration(t *test
 		}, nil
 	}, repository)
 
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
 		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
-		"member-1", &recordingEventHandler{})
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	assertRegistrationNotAdmitted(t, session, err)
 	assertExactRegistrationState(t, repository.records, repository.owned, sibling)
 }
 
-func TestOpenRegistrationSessionExposesAdmittedRouteAndAdapter(t *testing.T) {
+func TestOpenSourceRegistrationSessionExposesAdmittedRouteAndAdapter(t *testing.T) {
 	t.Parallel()
 
 	record := managerRecord("https://github.com/octo/repo", 11)
@@ -134,11 +134,11 @@ func TestOpenRegistrationSessionExposesAdmittedRouteAndAdapter(t *testing.T) {
 		}, nil
 	}, &registrationRepositoryFake{})
 
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
 		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
-		"member-1", &recordingEventHandler{})
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	if err != nil {
-		t.Fatalf("OpenRegistrationSession() error = %v", err)
+		t.Fatalf("OpenSourceRegistrationSession() error = %v", err)
 	}
 	if session == nil || session.Registration() != record || session.Adapter() == nil {
 		t.Fatalf("RegistrationSession = %#v, want admitted route and adapter", session)
@@ -148,7 +148,65 @@ func TestOpenRegistrationSessionExposesAdmittedRouteAndAdapter(t *testing.T) {
 	}
 }
 
-func TestOpenRegistrationSessionCopiesInitialObservationToAdapter(t *testing.T) {
+func TestOpenSourceRegistrationSessionPreservesSourceNeutralHandler(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 11)
+	manager := registrationSessionManager(t, record, &managerSessionFake{})
+	handler := &recordingEventHandler{}
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
+		"member-1", handler, handler)
+	if err != nil {
+		t.Fatalf("OpenSourceRegistrationSession() error = %v", err)
+	}
+	if session.Adapter().SourceEvents != handler {
+		t.Fatalf("source event handler = %T, want %T", session.Adapter().SourceEvents, handler)
+	}
+}
+
+func TestOpenSourceRegistrationSessionRejectsTypedNilSourceEventHandler(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 11)
+	manager := registrationSessionManager(t, record, &managerSessionFake{})
+	var handler *recordingEventHandler
+	if _, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
+		"member-1", handler, &recordingEventHandler{},
+	); err == nil {
+		t.Fatal("OpenSourceRegistrationSession() accepted a typed-nil source event handler")
+	}
+}
+
+func TestOpenSourceRegistrationSessionRequiresAssignedDemandHandler(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 11)
+	manager := registrationSessionManager(t, record, &managerSessionFake{})
+	if _, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
+		"member-1", lifecycleOnlyEventHandler{}, nil,
+	); err == nil {
+		t.Fatal("OpenSourceRegistrationSession() accepted a missing assigned-demand handler")
+	}
+}
+
+func TestOpenSourceRegistrationSessionRejectsTypedNilAssignedDemandHandler(t *testing.T) {
+	t.Parallel()
+
+	record := managerRecord("https://github.com/octo/repo", 11)
+	manager := registrationSessionManager(t, record, &managerSessionFake{})
+	var assignedDemand *recordingEventHandler
+	if _, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
+		"member-1", lifecycleOnlyEventHandler{}, assignedDemand,
+	); err == nil {
+		t.Fatal("OpenSourceRegistrationSession() accepted a typed-nil assigned-demand handler")
+	}
+}
+
+func TestOpenSourceRegistrationSessionCopiesInitialObservationToAdapter(t *testing.T) {
 	t.Parallel()
 
 	record := managerRecord("https://github.com/octo/repo", 11)
@@ -169,7 +227,7 @@ func TestOpenRegistrationSessionCopiesInitialObservationToAdapter(t *testing.T) 
 	}
 }
 
-func TestOpenRegistrationSessionRetainsMissingInitialStatisticsAsPending(t *testing.T) {
+func TestOpenSourceRegistrationSessionRetainsMissingInitialStatisticsAsPending(t *testing.T) {
 	t.Parallel()
 
 	record := managerRecord("https://github.com/octo/repo", 11)
@@ -196,7 +254,7 @@ func (session *sessionWithInitialStatistics) InitialStatistics() *upstream.Runne
 	return session.statistics
 }
 
-func TestOpenRegistrationSessionRestoresCommittedRecordWithoutLocalConfiguration(t *testing.T) {
+func TestOpenSourceRegistrationSessionRestoresCommittedRecordWithoutLocalConfiguration(t *testing.T) {
 	t.Parallel()
 
 	factoryCalls := 0
@@ -213,18 +271,18 @@ func TestOpenRegistrationSessionRestoresCommittedRecordWithoutLocalConfiguration
 	}, &registrationRepositoryFake{})
 	record := managerRecord("https://github.com/octo/repo", 11)
 
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
 		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool},
-		"member-1", &recordingEventHandler{})
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	if err != nil || session == nil {
-		t.Fatalf("OpenRegistrationSession() = (%v, %v), want restored session", session, err)
+		t.Fatalf("OpenSourceRegistrationSession() = (%v, %v), want restored session", session, err)
 	}
 	if factoryCalls != 1 {
 		t.Fatalf("GitHub factory calls = %d, want 1", factoryCalls)
 	}
 }
 
-func TestOpenRegistrationSessionRetiresOnlyActiveRouteOnRunnerGroupMismatch(t *testing.T) {
+func TestOpenSourceRegistrationSessionRetiresOnlyActiveRouteOnRunnerGroupMismatch(t *testing.T) {
 	t.Parallel()
 
 	record, sibling := registrationPair()
@@ -243,9 +301,9 @@ func TestOpenRegistrationSessionRetiresOnlyActiveRouteOnRunnerGroupMismatch(t *t
 		}}, nil
 	}, repository)
 
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
 		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
-		"member-1", &recordingEventHandler{})
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	assertRegistrationNotAdmitted(t, session, err)
 	if len(repository.records) != 1 || repository.records[0] != sibling {
 		t.Fatalf("active registrations = %#v, want sibling only", repository.records)
@@ -265,7 +323,7 @@ func registrationPair() (record githubsource.Registration, sibling githubsource.
 func assertRegistrationNotAdmitted(t *testing.T, session *githubsource.RegistrationSession, err error) {
 	t.Helper()
 	if !errors.Is(err, githubsource.ErrRegistrationNotAdmitted) || session != nil {
-		t.Fatalf("OpenRegistrationSession() = (%v, %v), want not-admitted sentinel", session, err)
+		t.Fatalf("OpenSourceRegistrationSession() = (%v, %v), want not-admitted sentinel", session, err)
 	}
 }
 
@@ -308,11 +366,11 @@ func openRegistrationSession(
 	record githubsource.Registration,
 ) *githubsource.RegistrationSession {
 	t.Helper()
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
 		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool, RunnerGroup: "default"},
-		"member-1", &recordingEventHandler{})
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	if err != nil {
-		t.Fatalf("OpenRegistrationSession() error = %v", err)
+		t.Fatalf("OpenSourceRegistrationSession() error = %v", err)
 	}
 	return session
 }

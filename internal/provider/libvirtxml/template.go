@@ -1,16 +1,18 @@
 package libvirtxml
 
 import (
+	"bytes"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
 	upstream "libvirt.org/go/libvirtxml"
 )
 
 const (
-	MetadataNamespace  = "urn:runnerfoundry"
-	JITOEMStringPrefix = contract.JITOEMStringPrefix
+	metadataNamespace  = "urn:runnerfoundry"
+	jitOEMStringPrefix = "runnerfoundry.jit="
 )
 
 // DomainTemplate is immutable source XML used to render one transient runner
@@ -40,14 +42,6 @@ type RenderRequest struct {
 	JITConfig      string
 }
 
-var xmlTextEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	`"`, "&#34;",
-	`'`, "&#39;",
-)
-
 // Render parses a fresh copy of the template, replaces RunnerFoundry-owned
 // metadata and JIT OEM data, and leaves the original template unchanged.
 func (template DomainTemplate) Render(request RenderRequest) (string, error) {
@@ -58,12 +52,13 @@ func (template DomainTemplate) Render(request RenderRequest) (string, error) {
 	domain.Name = request.RunnerName
 	ensureSMBIOSSystemInfo(&domain)
 	addJITOEMString(&domain, request.JITConfig)
+	metadataXML, metadataErr := runnerMetadata(request)
 	domain.Metadata = &upstream.DomainMetadata{
-		XML: scalerMetadata(request),
+		XML: metadataXML,
 	}
-	renderedXML, err := template.marshal(&domain)
-	if err != nil {
-		return "", fmt.Errorf("marshal domain xml: %w", err)
+	renderedXML, marshalErr := template.marshal(&domain)
+	if err := errors.Join(metadataErr, marshalErr); err != nil {
+		return "", fmt.Errorf("render domain xml: %w", err)
 	}
 	return renderedXML, nil
 }
@@ -86,7 +81,7 @@ func addJITOEMString(domain *upstream.Domain, jitConfig string) {
 	domain.SysInfo = append(domain.SysInfo, upstream.DomainSysInfo{
 		SMBIOS: &upstream.DomainSysInfoSMBIOS{
 			OEMStrings: &upstream.DomainSysInfoOEMStrings{
-				Entry: []string{JITOEMStringPrefix + jitConfig},
+				Entry: []string{jitOEMStringPrefix + jitConfig},
 			},
 		},
 	})
@@ -98,23 +93,27 @@ func addJITOEMStringToSMBIOS(smbios *upstream.DomainSysInfoSMBIOS, jitConfig str
 	}
 	oemStrings := make([]string, 0, len(smbios.OEMStrings.Entry)+1)
 	for _, oemString := range smbios.OEMStrings.Entry {
-		if strings.HasPrefix(oemString, JITOEMStringPrefix) {
+		if strings.HasPrefix(oemString, jitOEMStringPrefix) {
 			continue
 		}
 		oemStrings = append(oemStrings, oemString)
 	}
-	smbios.OEMStrings.Entry = append(oemStrings, JITOEMStringPrefix+jitConfig)
+	smbios.OEMStrings.Entry = append(oemStrings, jitOEMStringPrefix+jitConfig)
 }
 
-func scalerMetadata(request RenderRequest) string {
+func runnerMetadata(request RenderRequest) (string, error) {
+	escapedRunnerPoolName, runnerPoolErr := escapeXML(request.RunnerPoolName)
+	escapedRunnerName, runnerNameErr := escapeXML(request.RunnerName)
 	return fmt.Sprintf(
 		`<runnerfoundry:runner xmlns:runnerfoundry="%s"><runnerfoundry:runner-pool>%s</runnerfoundry:runner-pool><runnerfoundry:name>%s</runnerfoundry:name></runnerfoundry:runner>`,
-		MetadataNamespace,
-		escapeXML(request.RunnerPoolName),
-		escapeXML(request.RunnerName),
-	)
+		metadataNamespace,
+		escapedRunnerPoolName,
+		escapedRunnerName,
+	), errors.Join(runnerPoolErr, runnerNameErr)
 }
 
-func escapeXML(value string) string {
-	return xmlTextEscaper.Replace(value)
+func escapeXML(value string) (string, error) {
+	var escaped bytes.Buffer
+	err := xml.EscapeText(&escaped, []byte(value))
+	return escaped.String(), err
 }

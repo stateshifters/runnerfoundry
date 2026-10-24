@@ -40,7 +40,7 @@ func newProductionProcess() processRuntime {
 		stdout:       os.Stdout,
 		stderr:       os.Stderr,
 		runDaemon:    daemonApplication.Run,
-		runMigration: migrationCommandExecutor{newProductionMigrationDependencies()}.run,
+		runMigration: newProductionMigrationCommandExecutor().run,
 		lifecycle: processLifecycle{
 			notifyContext: signal.NotifyContext,
 			notifySignals: signal.Notify,

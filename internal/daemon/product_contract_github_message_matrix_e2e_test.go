@@ -117,12 +117,15 @@ func deliverWithAcknowledgementReplay(
 	messageID := session.assignMessageID(message)
 	wantErr := errors.New("scripted lifecycle acknowledgement failure")
 	session.failNextAcknowledgement(wantErr)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	if attempt := awaitInteger(t, "lifecycle acknowledgement failure", session.ackAttempts); attempt != messageID {
 		t.Fatalf("lifecycle acknowledgement attempt = %d, want %d", attempt, messageID)
 	}
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("lifecycle acknowledgement error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("lifecycle acknowledgement error = %v, want %v", pollErr, wantErr)
 	}
 	assertDurableEffect()
 	harness.completeMaintenanceCycle(harness.source)
@@ -171,7 +174,7 @@ func deliverIgnoredGitHubHistory(
 
 func messageMatrixProcessing(t *testing.T, harness *e2eHarness, wantJobID core.JobID) core.ProcessingJob {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID {
 		t.Fatalf("message-matrix processing = %+v, error = %v", processing, err)
 	}
@@ -181,7 +184,7 @@ func messageMatrixProcessing(t *testing.T, harness *e2eHarness, wantJobID core.J
 func assertMessageMatrixStarted(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
 	processing := messageMatrixProcessing(t, harness, wantJobID)
-	if !processing.RunnerStarted || processing.SourceTerminal {
+	if !processing.RunnerAccepted || processing.SourceTerminal {
 		t.Fatalf("message-matrix started processing = %+v", processing)
 	}
 }
@@ -189,7 +192,7 @@ func assertMessageMatrixStarted(t *testing.T, harness *e2eHarness, wantJobID cor
 func assertMessageMatrixTerminal(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
 	processing := messageMatrixProcessing(t, harness, wantJobID)
-	if !processing.RunnerStarted || !processing.SourceTerminal {
+	if !processing.RunnerAccepted || !processing.SourceTerminal {
 		t.Fatalf("message-matrix terminal processing = %+v", processing)
 	}
 }

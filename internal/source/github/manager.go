@@ -14,8 +14,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const repositoryConcurrency = 4
-
 type repositoryRegistrationResult struct {
 	repository string
 	records    []Registration
@@ -153,15 +151,17 @@ func wrapTransportPrune(
 // member-route lifecycle operations. Callers own scheduling, leadership, and
 // supervision; Manager starts no background work.
 type Manager struct {
-	discoverer    RepositoryDiscoverer
-	factory       ManagerClientFactoryFunc
-	registrations RegistrationRepository
-	observer      ManagerObserver
-	source        *Source
-	activityMu    sync.Mutex
-	clientsMu     sync.RWMutex
-	clients       map[transport.Repository]ManagerClient
-	clientLoads   singleflight.Group
+	discoverer         RepositoryDiscoverer
+	factory            ManagerClientFactoryFunc
+	registrations      RegistrationRepository
+	observer           ManagerObserver
+	source             *Source
+	activityMu         sync.Mutex
+	clientsMu          sync.RWMutex
+	clients            map[transport.Repository]ManagerClient
+	clientLoads        singleflight.Group
+	repositorySlots    chan struct{}
+	appRepositorySlots chan struct{}
 }
 
 type openedLeader struct {
@@ -181,7 +181,7 @@ func NewManager(
 	source := &Source{routes: make(map[routeKey]memberRoute)}
 	return &Manager{
 		discoverer: discoverer, factory: factory, registrations: registrations, observer: observer, source: source,
-		clients: make(map[transport.Repository]ManagerClient),
+		clients: make(map[transport.Repository]ManagerClient), repositorySlots: make(chan struct{}, repositoryConcurrency),
 	}, nil
 }
 
@@ -277,21 +277,34 @@ func (manager *Manager) reconcileConfigured(ctx context.Context, config ManagerC
 	if failureErr := discoveryFailures(result.InstallationFailures); failureErr != nil {
 		return nil, failureErr
 	}
-	active, err := manager.ensureRegistrations(ctx, result.Repositories, config)
+	return manager.reconcileDiscovered(ctx, previous, result.Repositories, config, 0)
+}
+
+func (manager *Manager) reconcileDiscovered(
+	ctx context.Context,
+	previous []Registration,
+	repositories []transport.Repository,
+	config ManagerConfig,
+	operationTimeout time.Duration,
+) ([]Registration, error) {
+	active, err := manager.ensureRegistrations(ctx, repositories, config, operationTimeout)
+	completionContext, cancelCompletion := repositoryOperationContext(ctx, operationTimeout)
+	defer cancelCompletion()
 	if err != nil {
-		return nil, err
+		committed, loadErr := manager.ActiveRegistrations(completionContext)
+		return committed, errors.Join(err, loadErr)
 	}
 	canonical, err := canonicalRegistrationSnapshot(RegistrationSnapshot{Active: active})
 	if err != nil {
 		return nil, err
 	}
 	active = canonical.Active
-	active = retainEstablishedRegistrations(previous, active, result.Repositories, config)
-	if err = manager.deleteInactiveRegistrations(ctx, previous, active); err != nil {
+	active = retainEstablishedRegistrations(previous, active, repositories, config)
+	if err = manager.deleteInactiveRegistrations(completionContext, previous, active); err != nil {
 		return nil, err
 	}
 	if config.Prune {
-		if err = manager.pruneReconciledRegistrations(ctx, result.Repositories, active); err != nil {
+		if err = manager.pruneReconciledRegistrations(completionContext, repositories, active); err != nil {
 			return active, err
 		}
 	}
@@ -398,15 +411,16 @@ func (manager *Manager) ensureRegistrations(
 	ctx context.Context,
 	repositories []transport.Repository,
 	config ManagerConfig,
+	operationTimeout time.Duration,
 ) ([]Registration, error) {
 	results := make([]repositoryRegistrationResult, len(repositories))
 	total := len(repositories)
 	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
 		Stage: "configure_repositories", Outcome: "started", Total: total})
-	waitErr := manager.ensureRepositoriesConcurrently(ctx, repositories, config, results)
+	waitErr := manager.ensureRepositoriesConcurrently(ctx, repositories, config, operationTimeout, results)
 	records, resultErr := manager.collectRepositoryResults(results, total, waitErr)
 	if resultErr != nil {
-		return nil, resultErr
+		return records, resultErr
 	}
 	manager.report(ManagerActivity{Visibility: ActivityInfo, Operation: "source_reconciliation",
 		Stage: "configure_repositories", Outcome: "completed", Count: len(records), Total: total})
@@ -417,6 +431,7 @@ func (manager *Manager) ensureRepositoriesConcurrently(
 	ctx context.Context,
 	repositories []transport.Repository,
 	config ManagerConfig,
+	operationTimeout time.Duration,
 	results []repositoryRegistrationResult,
 ) error {
 	var group errgroup.Group
@@ -427,8 +442,8 @@ func (manager *Manager) ensureRepositoriesConcurrently(
 		results[index].repository = repository.URL
 		group.Go(func() error {
 			current := index + 1
-			results[index].records, results[index].err = manager.ensureRepositoryWithActivity(
-				ctx, repository, config, current, len(repositories),
+			results[index].records, results[index].err = manager.ensureRepositoryAfterAdmission(
+				ctx, repository, config, current, len(repositories), operationTimeout,
 			)
 			completionMutex.Lock()
 			completed++
@@ -438,6 +453,29 @@ func (manager *Manager) ensureRepositoriesConcurrently(
 		})
 	}
 	return errors.Join(group.Wait())
+}
+
+func (manager *Manager) ensureRepositoryAfterAdmission(
+	ctx context.Context,
+	repository transport.Repository,
+	config ManagerConfig,
+	current int,
+	total int,
+	operationTimeout time.Duration,
+) ([]Registration, error) {
+	releaseAppSlot, err := acquireRepositorySlot(ctx, manager.appRepositorySlots, "GitHub App")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseAppSlot()
+	releaseGlobalSlot, err := acquireRepositorySlot(ctx, manager.repositorySlots, "GitHub")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseGlobalSlot()
+	operationContext, cancelOperation := repositoryOperationContext(ctx, operationTimeout)
+	defer cancelOperation()
+	return manager.ensureRepositoryWithActivity(operationContext, repository, config, current, total)
 }
 
 func (manager *Manager) collectRepositoryResults(
@@ -458,7 +496,7 @@ func (manager *Manager) collectRepositoryResults(
 		records = append(records, result.records...)
 	}
 	if resultErr := errors.Join(joined, waitErr); resultErr != nil {
-		return nil, resultErr
+		return records, resultErr
 	}
 	return records, nil
 }
@@ -530,7 +568,7 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 	manager.reportRunnerPoolActivity(repository, runnerPool.RunnerPool, transport.Registration{},
 		current, total, "started", started, nil)
 	registration, err := client.EnsureRunnerPool(ctx, string(runnerPool.RunnerPool), runnerPool.RunnerGroup)
-	record := Registration{RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
+	record := Registration{GitHubAppID: manager.githubAppID(), RepositoryURL: repository.URL, RunnerPool: runnerPool.RunnerPool,
 		InstallationID: repository.InstallationID}
 	if err == nil {
 		record.RunnerGroupID = registration.RunnerGroupID
@@ -547,6 +585,13 @@ func (manager *Manager) ensureRunnerPoolRecord(ctx context.Context, client Manag
 		return Registration{}, fmt.Errorf("ensure Runner Pool %q for repository %q: %w", runnerPool.RunnerPool, repository.URL, err)
 	}
 	return record, nil
+}
+
+func (manager *Manager) githubAppID() AppID {
+	if scoped, ok := manager.registrations.(interface{ githubAppID() AppID }); ok {
+		return scoped.githubAppID()
+	}
+	return 0
 }
 
 func (manager *Manager) reportRunnerPoolActivity(repository transport.Repository, runnerPool core.RunnerPool,

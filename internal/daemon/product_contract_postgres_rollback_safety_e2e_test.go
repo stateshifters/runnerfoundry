@@ -18,10 +18,11 @@ func TestProductContractPostgresRollbackRefusesActiveLeaderLease(t *testing.T) {
 		return
 	}
 	fixture := e2ePostgresStart(t)
-	store, target := preparePostgresRollback(t, fixture)
+	services, target := preparePostgresRollback(t, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), e2eWaitLimit)
 	defer cancel()
-	lease, err := store.TryLeader(ctx)
+	elector := cluster.NewLeaderElector(services.connections)
+	lease, err := elector.TryAcquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire PostgreSQL leader lease: %v", err)
 	}
@@ -35,12 +36,12 @@ func TestProductContractPostgresRollbackRefusesActiveLeaderLease(t *testing.T) {
 			t.Errorf("release PostgreSQL leader lease during cleanup: %v", closeErr)
 		}
 	})
-	assertPostgresRollbackRefused(ctx, t, store, target, time.Now(), "leader lease is active")
+	assertPostgresRollbackRefused(ctx, t, services, target, time.Now(), "leader lease is active")
 	if err = lease.Close(ctx); err != nil {
 		t.Fatalf("release PostgreSQL leader lease: %v", err)
 	}
 	lease = nil
-	assertPostgresRollbackSucceeds(ctx, t, store, target, time.Now())
+	assertPostgresRollbackSucceeds(ctx, t, services, target, time.Now())
 }
 
 func TestProductContractPostgresRollbackRefusesLiveNonLeaderMember(t *testing.T) {
@@ -48,39 +49,39 @@ func TestProductContractPostgresRollbackRefusesLiveNonLeaderMember(t *testing.T)
 		return
 	}
 	fixture := e2ePostgresStart(t)
-	store, target := preparePostgresRollback(t, fixture)
+	services, target := preparePostgresRollback(t, fixture)
 	ctx, cancel := context.WithTimeout(context.Background(), e2eWaitLimit)
 	defer cancel()
 	heartbeatAt := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
-	publishPostgresMemberHeartbeat(ctx, t, store, heartbeatAt)
-	assertPostgresRollbackRefused(ctx, t, store, target, heartbeatAt, "cluster members are still live")
+	publishPostgresMemberHeartbeat(ctx, t, services.connections, heartbeatAt)
+	assertPostgresRollbackRefused(ctx, t, services, target, heartbeatAt, "cluster members are still live")
 	expiredAt := heartbeatAt.Add(runtimeMemberTTL + time.Second)
-	assertPostgresRollbackSucceeds(ctx, t, store, target, expiredAt)
+	assertPostgresRollbackSucceeds(ctx, t, services, target, expiredAt)
 }
 
-func preparePostgresRollback(t *testing.T, fixture *e2ePostgresFixture) (*cluster.Store, int32) {
+func preparePostgresRollback(t *testing.T, fixture *e2ePostgresFixture) (e2ePostgresMigrationServices, int32) {
 	t.Helper()
-	store := cluster.NewStore(fixture.Settings())
+	services := newE2EPostgresMigrationServices(t, fixture.Settings())
 	ctx, cancel := context.WithTimeout(context.Background(), e2eWaitLimit)
 	defer cancel()
-	if err := store.Migrate(ctx); err != nil {
+	if err := services.migrator.Up(ctx); err != nil {
 		t.Fatalf("migrate isolated PostgreSQL rollback database: %v", err)
 	}
-	status, err := store.MigrationStatus(ctx)
+	status, err := services.migrator.Status(ctx)
 	if err != nil || status.Current < 2 || status.Current != status.Target {
 		t.Fatalf("PostgreSQL rollback preparation status = %+v, error = %v", status, err)
 	}
-	return store, status.Current - 1
+	return services, status.Current - 1
 }
 
 func publishPostgresMemberHeartbeat(
 	ctx context.Context,
 	t *testing.T,
-	clusterStore *cluster.Store,
+	connections *cluster.Connections,
 	heartbeatAt time.Time,
 ) {
 	t.Helper()
-	pool, err := clusterStore.OpenPool(ctx)
+	pool, err := connections.OpenPool(ctx)
 	if err != nil {
 		t.Fatalf("open PostgreSQL state pool for member heartbeat: %v", err)
 	}
@@ -95,36 +96,36 @@ func publishPostgresMemberHeartbeat(
 func assertPostgresRollbackRefused(
 	ctx context.Context,
 	t *testing.T,
-	store *cluster.Store,
+	services e2ePostgresMigrationServices,
 	target int32,
 	now time.Time,
 	wantError string,
 ) {
 	t.Helper()
-	err := store.MigrateDown(ctx, target, now, runtimeMemberTTL)
+	err := services.migrator.RollbackTo(ctx, target, now.Add(-runtimeMemberTTL))
 	if err == nil || !strings.Contains(err.Error(), wantError) {
 		t.Fatalf("PostgreSQL rollback error = %v, want %q refusal", err, wantError)
 	}
-	assertPostgresMigrationVersion(ctx, t, store, target+1)
+	assertPostgresMigrationVersion(ctx, t, services.migrator, target+1)
 }
 
 func assertPostgresRollbackSucceeds(
 	ctx context.Context,
 	t *testing.T,
-	store *cluster.Store,
+	services e2ePostgresMigrationServices,
 	target int32,
 	now time.Time,
 ) {
 	t.Helper()
-	if err := store.MigrateDown(ctx, target, now, runtimeMemberTTL); err != nil {
+	if err := services.migrator.RollbackTo(ctx, target, now.Add(-runtimeMemberTTL)); err != nil {
 		t.Fatalf("roll back PostgreSQL after cluster evidence expires: %v", err)
 	}
-	assertPostgresMigrationVersion(ctx, t, store, target)
+	assertPostgresMigrationVersion(ctx, t, services.migrator, target)
 }
 
-func assertPostgresMigrationVersion(ctx context.Context, t *testing.T, store *cluster.Store, want int32) {
+func assertPostgresMigrationVersion(ctx context.Context, t *testing.T, migrator *cluster.Migrator, want int32) {
 	t.Helper()
-	status, err := store.MigrationStatus(ctx)
+	status, err := migrator.Status(ctx)
 	if err != nil || status.Current != want {
 		t.Fatalf("PostgreSQL migration version = %+v, error = %v, want %d", status, err, want)
 	}

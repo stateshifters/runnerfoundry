@@ -8,9 +8,18 @@ import (
 )
 
 func newGitHubManagerObserver(report func(error), currentTime func() time.Time) githubsource.ManagerObserver {
+	return newGitHubManagerObserverForApp(report, currentTime, 0)
+}
+
+func newGitHubManagerObserverForApp(
+	report func(error),
+	currentTime func() time.Time,
+	appID githubsource.AppID,
+) githubsource.ManagerObserver {
 	return githubsource.ManagerObserver{
 		CurrentTime: currentTime,
 		Report: func(activity githubsource.ManagerActivity) {
+			activity.GitHubAppID = appID
 			reportGitHubManagerActivity(report, activity)
 		},
 	}
@@ -32,7 +41,7 @@ func reportGitHubManagerActivity(report func(error), activity githubsource.Manag
 	}
 	reportProgress(report, level, event)
 	if activity.Stage == "reconciliation" && activity.Outcome == "completed" {
-		reportOperational(report, operationalEvent{operation: activity.Operation, outcome: "recovered"})
+		reportOperational(report, operationalEvent{operation: activity.Operation, outcome: "recovered", githubAppID: activity.GitHubAppID})
 	}
 }
 
@@ -48,6 +57,7 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 		sourceRequestIDSet: activity.SourceRequestIDSet,
 		jobID:              activity.JobID,
 		installationID:     activity.InstallationID,
+		githubAppID:        activity.GitHubAppID,
 		runnerGroupID:      activity.RunnerGroupID,
 		scaleSetID:         activity.ScaleSetID,
 		messageID:          activity.MessageID,
@@ -60,6 +70,7 @@ func githubActivityEvent(activity githubsource.ManagerActivity) operationalEvent
 		stateOperation:     activity.StateOperation,
 		sourcePC:           activity.OriginPC,
 		count:              activity.Count,
+		capacity:           activity.Capacity,
 		repositoryCount:    activity.RepositoryCount,
 		installationCount:  activity.InstallationCount,
 		current:            activity.Current,

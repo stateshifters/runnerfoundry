@@ -3,8 +3,6 @@
 When contributing to this repository, please first discuss the change you wish to make via issue,
 discussions, or any other method with the owners of this repository before making a change.
 
-Please note we have a code of conduct, please follow it in all your interactions with the project.
-
 ## Contributor terms
 
 A contribution is any code, documentation, design, or other material intentionally submitted for inclusion in RunnerFoundry.
@@ -56,6 +54,43 @@ source-specific operator instructions. GitHub runner scale-set terminology must 
 This project optimizes for long-term maintainability and predictable behavior. Prefer small, boring, readable changes over clever
 ones.
 
+## Set up a contributor workspace
+
+Clone the repository and work from its root. Install the Go version declared in [go.mod](go.mod), Git, and GNU Make.
+Make uses Bash on Unix systems and `pwsh.exe` (PowerShell 7) on Windows. Ensure those commands are on your path.
+Go downloads pinned module and tool dependencies when a command first needs them, so initial setup requires network access.
+The race gate also requires a race-supported Go platform and a working C compiler; see [Go's race detector requirements](https://go.dev/doc/articles/race_detector#Requirements).
+
+Start with `make test` for the ordinary hermetic suites. Use the [verification gates](#available-verification-gates) appropriate to the change.
+`make fmt-check` checks Go formatting; `make vet` checks suspicious Go constructs; `make lint` checks lint rules and complexity;
+`make coverage` checks statement coverage; and `make race` checks for data races.
+These gates do not require a running Git source or execution provider. E2E preparation is separate and described under [E2E tests](#e2e-tests).
+
+### Build and package
+
+The maintained build target produces a Linux AMD64 executable:
+
+```sh
+make build
+```
+
+The output is `build/linux/amd64/runnerfoundry`. Building an artifact does not verify application behaviour.
+
+To produce a Debian package, source-location notice, third-party license notices, and SBOM metadata:
+
+```sh
+make package-deb VERSION=<version>
+```
+
+Replace `<version>` with the intended package version. Packages are written under `dist/`.
+The packaging target uses pinned Go tools and downloads dependencies as needed.
+Release automation selects the release version and invokes `make prepare`, which packages the same artifacts.
+See [installation](docs/installation.md) for the operator workflow; do not execute a built or packaged daemon as contributor verification.
+
+Optional VM-image examples have their own build dependencies and maintained workflows.
+Their READMEs separate operator image preparation from launcher-maintenance checks:
+[Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md).
+
 ## Ways of working (contract)
 
 This is how we contribute quality code.
@@ -71,6 +106,11 @@ symbols, assert incidental file layout or implementation structure, or otherwise
 Checks that confirm an edit was completed are work verification, not software tests. Run searches, diff inspection, linters, and
 other appropriate commands as one-time verification evidence without adding them to the test suite.
 
+Choose work verification by deliverable. Documentation changes use content, link, and documentation-specific checks.
+Configuration changes use parser, schema, or tool-native static validation. Mechanical edits and removals use targeted searches,
+diff inspection, and applicable static checks. Analysis and plans use evidence reconciliation and internal-consistency review.
+Documentation, configuration, mechanical edits, removals, analysis, and plans MUST NOT use TDD or production software tests.
+
 - Write the test first.
   - If the behavior is user-facing, the test MUST be a snapshot test that captures the rendered user-visible output.
 - Verify the new test fails (prove the gap).
@@ -79,6 +119,18 @@ other appropriate commands as one-time verification evidence without adding them
 For a behavior change, completion means the tests prove the production behavior. A valid failing test fails because production
 code does not yet provide the required behavior, not merely because the requested edit has not been performed. Refactors,
 documentation changes, internal removals, and mechanical cleanups do not require new tests solely to prove that the work occurred.
+
+#### Coverage follows purpose
+
+V1 code MUST maintain 100% Go statement coverage using hermetic tests, as reported by `make coverage`. Always call this result
+"statement coverage". It records only whether each instrumented statement was executed at least once.
+
+Every maintained production path MUST serve a concrete product behavior, domain invariant, boundary guarantee, or failure
+policy, and that purpose MUST be protected by an automated test through a stable interface.
+
+Coverage-only tests are invalid. Uncovered code without a defensible purpose is a design problem, not a test gap. Passing the
+statement-coverage gate does not establish test adequacy or meaningful assertions; those remain separate acceptance conditions.
+Do not describe a change as fully or comprehensively tested solely because the statement-coverage gate reports 100%.
 
 #### E2E tests
 
@@ -132,6 +184,8 @@ We prefer descriptive names that stay clear outside Go-specific idioms.
 ## Verification
 
 PostgreSQL schema changes must also follow the authoritative [migration contribution guide](internal/cluster/migrations/CONTRIBUTING.md).
+Any inspection or application of migrations through an installed RunnerFoundry executable described there is an operator procedure,
+not contributor or CI verification.
 
 ### Test isolation
 
@@ -142,7 +196,9 @@ files in test-owned temporary directories. Production Go files MUST NOT use buil
 
 ### Available verification gates
 
-V1 code MUST maintain 100% Go test coverage using hermetic tests.
+RunnerFoundry behavior is proved by automated tests that exercise production code through the stable seams defined above. Contributor and CI verification MUST NOT execute a built RunnerFoundry executable, RunnerFoundry installed from a distribution package, a RunnerFoundry container, or a deployed RunnerFoundry instance to prove application behavior, startup, embedded build metadata, or toolchain output. The compiler, linker, packager, and deployment system are not RunnerFoundry software-test subjects.
+
+Building or packaging may produce a requested artifact, but executing that artifact is not a verification gate. The gates listed below are exhaustive unless the product and contribution contracts are explicitly changed. This restriction does not prevent operators from running RunnerFoundry for its intended purpose.
 
 ```sh
 make lint

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	"github.com/stateshifters/runnerfoundry/internal/execution"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
@@ -31,7 +30,7 @@ func TestSourceRoutesBootstrapByRepositoryAndRunnerPool(t *testing.T) {
 		t.Fatalf("bootstrap routes: first=%d second=%d registration=%#v runner=%q",
 			first.calls, second.calls, second.registration, second.runnerName)
 	}
-	if !reflect.DeepEqual(bootstrap, execution.NewBootstrap([]byte("opaque-jit"))) {
+	if !reflect.DeepEqual(bootstrap, core.NewBootstrap([]byte("opaque-jit"))) {
 		t.Fatalf("bootstrap = %#v, want wrapped opaque content", bootstrap)
 	}
 }
@@ -48,12 +47,12 @@ func TestSourceRoutesAggregateDemandThroughTheOrdinaryBootstrapPath(t *testing.T
 		t.Fatalf("identify aggregate demand: %v", err)
 	}
 	job := core.Job{ID: core.JobID{1}, Source: reference, RunnerPool: "linux"}
-	bootstrap, err := source.GenerateBootstrap(context.Background(), job, "runnerfoundry-job")
+	bootstrap, err := source.GenerateBootstrap(context.Background(), job, "external-runner")
 	if err != nil {
 		t.Fatalf("generate aggregate-demand bootstrap: %v", err)
 	}
-	if client.calls != 1 || client.runnerName != "runnerfoundry-job" ||
-		!reflect.DeepEqual(bootstrap, execution.NewBootstrap([]byte("opaque-jit"))) {
+	if client.calls != 1 || client.runnerName != "external-runner" ||
+		!reflect.DeepEqual(bootstrap, core.NewBootstrap([]byte("opaque-jit"))) {
 		t.Fatalf("aggregate bootstrap = %#v, calls %d, runner %q", bootstrap, client.calls, client.runnerName)
 	}
 }
@@ -157,6 +156,10 @@ func TestSourceCleansExactAttemptRegistration(t *testing.T) {
 		client.cleanedName != "runner-attempt" {
 		t.Fatalf("cleanup = %v, runner = %q", err, client.cleanedName)
 	}
+	if err := source.CleanupBootstrap(context.Background(), job, "runner-attempt"); err != nil ||
+		client.cleanupCalls != 2 {
+		t.Fatalf("replayed cleanup = %v, calls = %d", err, client.cleanupCalls)
+	}
 	client.cleanupErr = errors.New("cleanup failed")
 	if err := source.CleanupBootstrap(context.Background(), job, "runner-attempt"); !errors.Is(err, client.cleanupErr) {
 		t.Fatalf("cleanup error = %v", err)
@@ -231,6 +234,7 @@ type bootstrapClientFake struct {
 	registration transport.Registration
 	runnerName   core.RunnerName
 	cleanupErr   error
+	cleanupCalls int
 	cleanedName  core.RunnerName
 }
 
@@ -246,6 +250,7 @@ func (client *bootstrapClientFake) GenerateBootstrap(
 }
 
 func (client *bootstrapClientFake) CleanupRunner(_ context.Context, runnerName core.RunnerName) error {
+	client.cleanupCalls++
 	client.cleanedName = runnerName
 	return client.cleanupErr
 }

@@ -32,9 +32,12 @@ flowchart LR
     Execute -->|Provisioning succeeds| Accept["Runner accepts the job"]
     Accept --> Report["Runner reports the workflow result"]
     Report --> Terminal["Source terminalizes the job"]
-    Terminal --> Remove["Remove the internal job"]
-    Execute -->|Provisioning fails| Cleanup["Clean up the failed attempt"]
-    Cleanup --> Supported{"Source supports provisioning-failure reporting?"}
+    Terminal --> Resource{"Provider resource may remain?"}
+    Resource -->|No| Remove["Remove the internal job"]
+    Resource -->|Yes| TerminalCleanup["Clean up the runner resource"]
+    TerminalCleanup --> Remove
+    Execute -->|Provisioning fails| ProvisioningCleanup["Clean up the failed attempt"]
+    ProvisioningCleanup --> Supported{"Source supports provisioning-failure reporting?"}
     Supported -->|No| Queue
     Supported -->|Yes| Failure["Adapter reports provisioning failure"]
     Failure --> Terminal
@@ -49,14 +52,16 @@ The lifecycle has these rules:
 5. A provisioning failure is reported only when the source supports that operation. Otherwise, RunnerFoundry cleans up the failed provisioning attempt and moves the same job to the back of its Runner Pool queue.
 6. Provisioning retries continue without a retry count, delay, backoff, or timeout until a runner accepts the job or the source terminalizes it.
 7. Once a runner accepts the job, the runner reports the normal workflow outcome directly to the source. An execution failure after acceptance is never an internal provisioning retry.
-8. A terminal source signal ends the job lifecycle. RunnerFoundry cleans up the runner and removes the internal job after provider cleanup succeeds or absence is confirmed.
+8. A terminal source signal ends the job lifecycle. RunnerFoundry removes the internal job after cleanup reaches an accepted result. The resource must be removed, confirmed absent, or authoritatively reported by the provider as already being removed.
 9. A removed job is final. RunnerFoundry does not requeue it or invent replacement demand.
 
 ## Cleanup
 
-Cleanup is required before a failed provisioning attempt can return to the queue. RunnerFoundry must successfully remove the provider resource, or confirm its absence, before moving the same job to the queue tail. Cleanup failure retains the current processing ownership for another cleanup attempt.
+Cleanup is required before a failed provisioning attempt can return to the queue. RunnerFoundry accepts cleanup when the resource is removed or confirmed absent. It also accepts an authoritative provider report that removal of that exact resource is already in progress. RunnerFoundry then moves the same job to the queue tail. Cleanup failure retains the current processing ownership for another cleanup attempt.
 
-After runner acceptance, cleanup never returns the job to the queue. A terminal source signal removes queued demand immediately and retains any processing ownership only until the provider resource is absent or cleanup succeeds.
+An authoritative report means the provider has accepted removal of the exact resource and owns completing it. RunnerFoundry ends its cleanup ownership and does not retry that removal.
+
+After runner acceptance, cleanup never returns the job to the queue. A terminal source signal removes queued demand immediately. RunnerFoundry retains processing ownership until cleanup reaches an accepted result.
 
 ## Runner Pool capacity
 

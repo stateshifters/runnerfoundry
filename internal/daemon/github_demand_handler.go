@@ -28,33 +28,33 @@ func newGitHubDemandHandler(
 	return &githubDemandHandler{queue: queue, demand: demand, wake: wake, stateBackend: stateBackend}
 }
 
-func (handler *githubDemandHandler) Request(
+func (handler *githubDemandHandler) IngestDemand(
 	ctx context.Context,
 	request core.JobRequest,
 ) (core.EnqueueResult, error) {
-	result, err := handler.queue.Request(ctx, request)
+	result, err := handler.queue.IngestDemand(ctx, request)
 	if err != nil {
 		return result, fmt.Errorf("handle GitHub job request: %w", err)
 	}
 	return result, nil
 }
 
-func (handler *githubDemandHandler) RunnerStarted(
+func (handler *githubDemandHandler) ObserveRunnerAcceptance(
 	ctx context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {
-	result, err := handler.queue.RunnerStarted(ctx, observation)
+	result, err := handler.queue.ObserveRunnerAcceptance(ctx, observation)
 	if err != nil {
-		return result, fmt.Errorf("handle GitHub runner-start observation: %w", err)
+		return result, fmt.Errorf("handle GitHub runner-acceptance observation: %w", err)
 	}
 	return result, nil
 }
 
-func (handler *githubDemandHandler) Terminalize(
+func (handler *githubDemandHandler) ObserveTerminal(
 	ctx context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {
-	result, err := handler.queue.Terminalize(ctx, observation)
+	result, err := handler.queue.ObserveTerminal(ctx, observation)
 	if err != nil {
 		return result, fmt.Errorf("handle GitHub terminal observation: %w", err)
 	}
@@ -72,6 +72,17 @@ func (handler *githubDemandHandler) ReconcileAssignedDemand(
 	}
 	if result.JobsAdded > 0 && handler.wake != nil {
 		handler.wake(demand.RunnerPool)
+	}
+	return result, nil
+}
+
+func (handler *githubDemandHandler) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	result, err := handler.queue.ObserveTerminalIfUnaccepted(ctx, identity)
+	if err != nil {
+		return result, fmt.Errorf("handle GitHub conditional terminal observation: %w", err)
 	}
 	return result, nil
 }

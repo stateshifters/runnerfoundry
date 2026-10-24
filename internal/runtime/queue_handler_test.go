@@ -14,7 +14,7 @@ import (
 
 func TestQueueHandlerPersistsAssignment(t *testing.T) {
 	request := core.JobRequest{
-		Source:     core.SourceReference{Adapter: "github", ID: "request-1"},
+		Source:     core.SourceReference{Adapter: "test-source", ID: "request-1"},
 		RunnerPool: "linux", EnqueuedAt: time.Unix(1, 0),
 	}
 	store := &jobStoreFake{
@@ -26,8 +26,8 @@ func TestQueueHandlerPersistsAssignment(t *testing.T) {
 		},
 	}
 	handler := runtimeengine.NewQueueHandler(store)
-	if _, err := handler.Request(context.Background(), request); err != nil {
-		t.Fatalf("Request() error = %v", err)
+	if _, err := handler.IngestDemand(context.Background(), request); err != nil {
+		t.Fatalf("IngestDemand() error = %v", err)
 	}
 }
 
@@ -45,12 +45,12 @@ func TestDurableStateErrorPreservesCauseAndSafeContext(t *testing.T) {
 }
 
 func TestQueueHandlerPersistsLifecycleEventsBySource(t *testing.T) {
-	source := core.SourceReference{Adapter: "github", ID: "request-1"}
+	source := core.SourceReference{Adapter: "test-source", ID: "request-1"}
 	want := core.JobIdentity{Source: source}
-	var started, terminal core.JobIdentity
+	var accepted, terminal core.JobIdentity
 	store := &jobStoreFake{
-		started: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
-			started = actual
+		accepted: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
+			accepted = actual
 			return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 		},
 		terminalize: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
@@ -59,43 +59,103 @@ func TestQueueHandlerPersistsLifecycleEventsBySource(t *testing.T) {
 		},
 	}
 	handler := runtimeengine.NewQueueHandler(store)
-	if _, err := handler.RunnerStarted(context.Background(), core.RunnerObservation{Source: source}); err != nil {
-		t.Fatalf("RunnerStarted() error = %v", err)
+	if _, err := handler.ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{Source: source}); err != nil {
+		t.Fatalf("ObserveRunnerAcceptance() error = %v", err)
 	}
-	if _, err := handler.Terminalize(context.Background(), core.RunnerObservation{Source: source}); err != nil {
-		t.Fatalf("Terminalize() error = %v", err)
+	if _, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{Source: source}); err != nil {
+		t.Fatalf("ObserveTerminal() error = %v", err)
 	}
-	if started != want || terminal != want {
-		t.Fatalf("lifecycle identities: started=%#v terminal=%#v, want %#v", started, terminal, want)
+	if accepted != want || terminal != want {
+		t.Fatalf("lifecycle identities: accepted=%#v terminal=%#v, want %#v", accepted, terminal, want)
+	}
+}
+
+func TestQueueHandlerConditionallyTerminalizesExactUnacceptedJob(t *testing.T) {
+	want := core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate-request"},
+	}
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		_ context.Context,
+		actual core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		if actual != want {
+			t.Fatalf("conditional terminal identity = %#v, want %#v", actual, want)
+		}
+		return core.ConditionalTerminalResult{Outcome: core.ConditionalTerminalApplied}, nil
+	}}
+
+	result, err := runtimeengine.NewQueueHandler(store).ObserveTerminalIfUnaccepted(context.Background(), want)
+
+	if err != nil || result.Outcome != core.ConditionalTerminalApplied {
+		t.Fatalf("conditional terminal result = (%#v, %v)", result, err)
+	}
+}
+
+func TestQueueHandlerRejectsIncompleteConditionalTerminalIdentity(t *testing.T) {
+	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
+	for _, identity := range []core.JobIdentity{
+		{Source: core.SourceReference{Adapter: "github", ID: "aggregate"}},
+		{JobID: uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8")},
+		{JobID: uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+			Source: core.SourceReference{Adapter: "github"}},
+	} {
+		if _, err := handler.ObserveTerminalIfUnaccepted(context.Background(), identity); !errors.Is(
+			err, core.ErrInvalidJobIdentity,
+		) {
+			t.Fatalf("ObserveTerminalIfUnaccepted(%#v) error = %v", identity, err)
+		}
+	}
+}
+
+func TestQueueHandlerClassifiesConditionalTerminalBackendFailure(t *testing.T) {
+	wantErr := errors.New("driver detail")
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		context.Context,
+		core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		return core.ConditionalTerminalResult{}, wantErr
+	}}
+	handler := runtimeengine.NewQueueHandlerWithWakeAndBackend(store, nil, "postgresql")
+	_, err := handler.ObserveTerminalIfUnaccepted(context.Background(), core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "github", ID: "aggregate"},
+	})
+	var stateFailure interface {
+		StateBackend() string
+		StateOperation() string
+	}
+	if !errors.As(err, &stateFailure) || stateFailure.StateBackend() != "postgresql" ||
+		stateFailure.StateOperation() != "terminalize_unaccepted_job" || !errors.Is(err, wantErr) {
+		t.Fatalf("conditional terminal error = %v", err)
 	}
 }
 
 func TestQueueHandlerResolvesCanonicalRunnerNameToJobID(t *testing.T) {
 	jobID := uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8")
-	store := &jobStoreFake{started: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
-		if actual != (core.JobIdentity{JobID: jobID}) {
-			t.Fatalf("started identity = %#v", actual)
+	attemptID := core.AttemptID(uuid.MustParse("b73851b8-7df5-4d4c-bc8e-2381926746d8"))
+	store := &jobStoreFake{accepted: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
+		if actual != (core.JobIdentity{JobID: jobID, AttemptID: attemptID}) {
+			t.Fatalf("accepted identity = %#v", actual)
 		}
 		return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 	}}
 	handler := runtimeengine.NewQueueHandler(store)
 
-	for _, name := range []core.RunnerName{
-		core.RunnerName("runnerfoundry-" + jobID.String()),
-		core.AttemptRunnerName(jobID, uuid.New()),
-	} {
-		result, err := handler.RunnerStarted(context.Background(), core.RunnerObservation{RunnerName: name})
+	for _, name := range []core.RunnerName{core.AttemptRunnerName(jobID, attemptID)} {
+		result, err := handler.ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{RunnerName: name})
 		if err != nil || result.Outcome != core.ObservationApplied {
-			t.Fatalf("RunnerStarted(%q) = %#v, %v", name, result, err)
+			t.Fatalf("ObserveRunnerAcceptance(%q) = %#v, %v", name, result, err)
 		}
 	}
 }
 
 func TestQueueHandlerPreservesMatchingSourceAndRunnerName(t *testing.T) {
 	jobID := uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8")
-	source := core.SourceReference{Adapter: "github", ID: "request-1"}
+	attemptID := core.AttemptID(uuid.MustParse("b73851b8-7df5-4d4c-bc8e-2381926746d8"))
+	source := core.SourceReference{Adapter: "test-source", ID: "request-1"}
 	store := &jobStoreFake{terminalize: func(_ context.Context, actual core.JobIdentity) (core.ObservationResult, error) {
-		want := core.JobIdentity{Source: source, JobID: jobID}
+		want := core.JobIdentity{Source: source, JobID: jobID, AttemptID: attemptID}
 		if actual != want {
 			t.Fatalf("terminal identity = %#v, want %#v", actual, want)
 		}
@@ -103,70 +163,69 @@ func TestQueueHandlerPreservesMatchingSourceAndRunnerName(t *testing.T) {
 	}}
 	handler := runtimeengine.NewQueueHandler(store)
 
-	_, err := handler.Terminalize(context.Background(), core.RunnerObservation{
-		Source: source, RunnerName: core.RunnerName("runnerfoundry-" + jobID.String()),
+	_, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{
+		Source: source, RunnerName: core.AttemptRunnerName(jobID, attemptID),
 	})
 	if err != nil {
-		t.Fatalf("Terminalize() error = %v", err)
+		t.Fatalf("ObserveTerminal() error = %v", err)
 	}
 }
 
-func TestQueueHandlerAcknowledgesLegacyRunnerNameAsUnmatched(t *testing.T) {
+func TestQueueHandlerAcknowledgesUnownedRunnerNameAsUnmatched(t *testing.T) {
 	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
-	result, err := handler.Terminalize(context.Background(), core.RunnerObservation{RunnerName: "legacy-runner-name"})
+	result, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{RunnerName: "external-runner-name"})
 	if err != nil || result.Outcome != core.ObservationUnmatched {
-		t.Fatalf("Terminalize() = %#v, %v", result, err)
+		t.Fatalf("ObserveTerminal() = %#v, %v", result, err)
 	}
-	result, err = handler.RunnerStarted(context.Background(), core.RunnerObservation{RunnerName: "legacy-runner-name"})
+	result, err = handler.ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{RunnerName: "external-runner-name"})
 	if err != nil || result.Outcome != core.ObservationUnmatched {
-		t.Fatalf("RunnerStarted() = %#v, %v", result, err)
+		t.Fatalf("ObserveRunnerAcceptance() = %#v, %v", result, err)
 	}
 }
 
 func TestQueueHandlerRejectsMalformedCanonicalRunnerName(t *testing.T) {
 	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
 	for _, name := range []core.RunnerName{
-		"runnerfoundry-not-a-uuid",
 		"runnerfoundry-v2-short",
 		"runnerfoundry-v2-!!!!!!!!!!!!!!!!!!!!!!-AAAAAAAAAAAAAAAAAAAAAA",
 		"runnerfoundry-v2-AAAAAAAAAAAAAAAAAAAAAA-AAAAAAAAAAAAAAAAAAAAAA",
 		"runnerfoundry-v2-AAAAAAAAAAAAAAAAAAAAAQ-!!!!!!!!!!!!!!!!!!!!!!",
 	} {
-		_, err := handler.Terminalize(context.Background(), core.RunnerObservation{RunnerName: name})
-		if !errors.Is(err, core.ErrInvalidJobIdentity) {
-			t.Fatalf("Terminalize(%q) error = %v", name, err)
+		_, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{RunnerName: name})
+		if !errors.Is(err, core.ErrInvalidRunnerName) {
+			t.Fatalf("ObserveTerminal(%q) error = %v", name, err)
 		}
 	}
 }
 
 func TestQueueHandlerRejectsPartialSourceIdentity(t *testing.T) {
 	handler := runtimeengine.NewQueueHandler(&jobStoreFake{})
-	_, err := handler.Terminalize(context.Background(), core.RunnerObservation{
-		Source: core.SourceReference{Adapter: "github"},
+	_, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{
+		Source: core.SourceReference{Adapter: "test-source"},
 	})
 	if !errors.Is(err, core.ErrInvalidJobIdentity) {
-		t.Fatalf("Terminalize() error = %v", err)
+		t.Fatalf("ObserveTerminal() error = %v", err)
 	}
-	if _, err = handler.RunnerStarted(context.Background(), core.RunnerObservation{}); !errors.Is(
+	if _, err = handler.ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{}); !errors.Is(
 		err, core.ErrInvalidJobIdentity,
 	) {
-		t.Fatalf("RunnerStarted() error = %v", err)
+		t.Fatalf("ObserveRunnerAcceptance() error = %v", err)
 	}
 }
 
-func TestQueueHandlerUsesSourceWithLegacyRunnerName(t *testing.T) {
-	source := core.SourceReference{Adapter: "github", ID: "request-1"}
-	store := &jobStoreFake{started: func(_ context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
+func TestQueueHandlerUsesSourceWithUnownedRunnerName(t *testing.T) {
+	source := core.SourceReference{Adapter: "test-source", ID: "request-1"}
+	store := &jobStoreFake{accepted: func(_ context.Context, identity core.JobIdentity) (core.ObservationResult, error) {
 		if identity != (core.JobIdentity{Source: source}) {
 			t.Fatalf("job identity = %#v", identity)
 		}
 		return core.ObservationResult{Outcome: core.ObservationApplied}, nil
 	}}
-	result, err := runtimeengine.NewQueueHandler(store).RunnerStarted(context.Background(), core.RunnerObservation{
-		Source: source, RunnerName: "legacy-runner-name",
+	result, err := runtimeengine.NewQueueHandler(store).ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{
+		Source: source, RunnerName: "external-runner-name",
 	})
 	if err != nil || result.Outcome != core.ObservationApplied {
-		t.Fatalf("RunnerStarted() = %#v, %v", result, err)
+		t.Fatalf("ObserveRunnerAcceptance() = %#v, %v", result, err)
 	}
 }
 
@@ -177,9 +236,9 @@ func TestQueueHandlerWakesProcessingOnlyAfterDurableEnqueue(t *testing.T) {
 		return core.Job{}, true, queueErr
 	}}
 	handler := runtimeengine.NewQueueHandlerWithWake(store, func(runnerPool core.RunnerPool) { queued <- runnerPool })
-	request := core.JobRequest{Source: core.SourceReference{Adapter: "github", ID: "request-1"}, RunnerPool: "linux"}
+	request := core.JobRequest{Source: core.SourceReference{Adapter: "test-source", ID: "request-1"}, RunnerPool: "linux"}
 
-	if _, err := handler.Request(context.Background(), request); err != nil {
+	if _, err := handler.IngestDemand(context.Background(), request); err != nil {
 		t.Fatalf("queue request: %v", err)
 	}
 	select {
@@ -192,7 +251,7 @@ func TestQueueHandlerWakesProcessingOnlyAfterDurableEnqueue(t *testing.T) {
 	}
 
 	queueErr = errors.New("queue unavailable")
-	if _, err := handler.Request(context.Background(), request); err == nil {
+	if _, err := handler.IngestDemand(context.Background(), request); err == nil {
 		t.Fatal("failed enqueue unexpectedly succeeded")
 	}
 	select {
@@ -208,8 +267,8 @@ func TestQueueHandlerDoesNotWakeForDurableNonQueuedOutcome(t *testing.T) {
 		queueOutcomeStoreFake{outcome: core.QueueProcessing},
 		func(core.RunnerPool) { woken = true },
 	)
-	if _, err := handler.Request(context.Background(), core.JobRequest{RunnerPool: "linux"}); err != nil {
-		t.Fatalf("Request() error = %v", err)
+	if _, err := handler.IngestDemand(context.Background(), core.JobRequest{RunnerPool: "linux"}); err != nil {
+		t.Fatalf("IngestDemand() error = %v", err)
 	}
 	if woken {
 		t.Fatal("processing source outcome woke queued-job processing")
@@ -220,7 +279,7 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 	wantErr := errors.New("state unavailable")
 	store := &jobStoreFake{
 		enqueue: func(context.Context, core.JobRequest) (core.Job, bool, error) { return core.Job{}, false, wantErr },
-		started: func(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+		accepted: func(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 			return core.ObservationResult{}, wantErr
 		},
 		terminalize: func(context.Context, core.JobIdentity) (core.ObservationResult, error) {
@@ -228,18 +287,35 @@ func TestQueueHandlerReportsStoreFailures(t *testing.T) {
 		},
 	}
 	handler := runtimeengine.NewQueueHandler(store)
-	if _, err := handler.Request(context.Background(), core.JobRequest{}); !errors.Is(err, wantErr) {
-		t.Fatalf("Request() error = %v", err)
+	if _, err := handler.IngestDemand(context.Background(), core.JobRequest{}); !errors.Is(err, wantErr) {
+		t.Fatalf("IngestDemand() error = %v", err)
 	}
-	if _, err := handler.RunnerStarted(context.Background(), core.RunnerObservation{
-		Source: core.SourceReference{Adapter: "github", ID: "request-1"},
+	if _, err := handler.ObserveRunnerAcceptance(context.Background(), core.RunnerObservation{
+		Source: core.SourceReference{Adapter: "test-source", ID: "request-1"},
 	}); !errors.Is(err, wantErr) {
-		t.Fatalf("RunnerStarted() error = %v", err)
+		t.Fatalf("ObserveRunnerAcceptance() error = %v", err)
 	}
-	if _, err := handler.Terminalize(context.Background(), core.RunnerObservation{
-		Source: core.SourceReference{Adapter: "github", ID: "request-1"},
+	if _, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{
+		Source: core.SourceReference{Adapter: "test-source", ID: "request-1"},
 	}); !errors.Is(err, wantErr) {
-		t.Fatalf("Terminalize() error = %v", err)
+		t.Fatalf("ObserveTerminal() error = %v", err)
+	}
+}
+
+func TestQueueHandlerReportsConditionalTerminalStoreFailure(t *testing.T) {
+	wantErr := errors.New("state unavailable")
+	store := &jobStoreFake{terminalizeIfUnaccepted: func(
+		context.Context,
+		core.JobIdentity,
+	) (core.ConditionalTerminalResult, error) {
+		return core.ConditionalTerminalResult{}, wantErr
+	}}
+	handler := runtimeengine.NewQueueHandler(store)
+	if _, err := handler.ObserveTerminalIfUnaccepted(context.Background(), core.JobIdentity{
+		JobID:  uuid.MustParse("a73851b8-7df5-4d4c-bc8e-2381926746d8"),
+		Source: core.SourceReference{Adapter: "test-source", ID: "request-1"},
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("ObserveTerminalIfUnaccepted() error = %v", err)
 	}
 }
 
@@ -250,9 +326,9 @@ func TestQueueHandlerClassifiesBackendFailureWithoutExposingDriverDetail(t *test
 	}}
 	handler := runtimeengine.NewQueueHandlerWithWakeAndBackend(store, nil, "postgresql")
 
-	_, err := handler.Request(context.Background(), core.JobRequest{})
+	_, err := handler.IngestDemand(context.Background(), core.JobRequest{})
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("Request() error = %v", err)
+		t.Fatalf("IngestDemand() error = %v", err)
 	}
 	var stateFailure interface {
 		StateBackend() string
@@ -274,8 +350,8 @@ func TestQueueHandlerClassifiesLifecycleBackendFailure(t *testing.T) {
 	}}
 	handler := runtimeengine.NewQueueHandlerWithWakeAndBackend(store, nil, "sqlite")
 
-	_, err := handler.Terminalize(context.Background(), core.RunnerObservation{
-		Source: core.SourceReference{Adapter: "github", ID: "request-1"},
+	_, err := handler.ObserveTerminal(context.Background(), core.RunnerObservation{
+		Source: core.SourceReference{Adapter: "test-source", ID: "request-1"},
 	})
 	var stateFailure interface {
 		StateBackend() string
@@ -294,9 +370,12 @@ type queueOutcomeStoreFake struct {
 func (fake queueOutcomeStoreFake) Queue(context.Context, core.JobRequest) (core.EnqueueResult, error) {
 	return core.EnqueueResult{Outcome: fake.outcome}, nil
 }
-func (queueOutcomeStoreFake) MarkRunnerStarted(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+func (queueOutcomeStoreFake) ObserveRunnerAcceptance(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
 func (queueOutcomeStoreFake) Terminalize(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
+}
+func (queueOutcomeStoreFake) ObserveTerminalIfUnaccepted(context.Context, core.JobIdentity) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{}, nil
 }

@@ -13,12 +13,21 @@ func TestPollOnceValidatesDependenciesAndTransportResults(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]githubsource.Adapter{
-		"missing client":  {Handler: &recordingEventHandler{}},
-		"missing handler": {Client: &recordingClient{}},
-		"receive failure": {
-			Client: &recordingClient{receiveErr: errors.New("receive")}, Handler: &recordingEventHandler{},
+		"missing client": {
+			SourceEvents: &recordingEventHandler{}, AssignedDemand: &recordingEventHandler{},
 		},
-		"ambiguous nil": {Client: ambiguousNilClient{}, Handler: &recordingEventHandler{}},
+		"missing handler": {
+			Client: &recordingClient{}, AssignedDemand: &recordingEventHandler{},
+		},
+		"missing assigned demand": {Client: &recordingClient{}, SourceEvents: &recordingEventHandler{}},
+		"receive failure": {
+			Client: &recordingClient{receiveErr: errors.New("receive")}, SourceEvents: &recordingEventHandler{},
+			AssignedDemand: &recordingEventHandler{},
+		},
+		"ambiguous nil": {
+			Client: ambiguousNilClient{}, SourceEvents: &recordingEventHandler{},
+			AssignedDemand: &recordingEventHandler{},
+		},
 	}
 	for testName, adapter := range tests {
 		t.Run(testName, func(t *testing.T) {

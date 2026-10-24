@@ -11,7 +11,7 @@ import (
 
 func TestInventoryRefreshWaitsForActiveClaimsAndFailsClosed(t *testing.T) {
 	gate := newQueuedJobEligibilityGate()
-	markQueuedJobPoolsEligible(gate, "linux")
+	markQueuedJobPoolsEligible(t, gate, "linux")
 	claim := startBlockedEligibleClaim(gate)
 	awaitTestSignal(t, claim.started, "active claim")
 	refreshStarted := make(chan struct{})

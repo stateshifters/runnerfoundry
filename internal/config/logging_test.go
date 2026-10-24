@@ -11,9 +11,9 @@ import (
 func TestLogFileConfigurationParsesFromYAML(t *testing.T) {
 	configurationYAML := fmt.Sprintf(`
 github:
-  app:
-    app_id: 1
-    private_key_file: mocked.pem
+  apps:
+    - app_id: 1
+      private_key_file: mocked.pem
 log:
   format: json
   level: debug
@@ -97,7 +97,7 @@ func TestLogConfigurationWithoutFilePreservesStandardOutput(t *testing.T) {
 
 func validInMemoryConfiguration() Config {
 	return Config{
-		GitHub: GitHubConfig{App: GitHubAppConfig{AppID: 1, PrivateKeyFile: "private-key.pem"}},
+		GitHub: GitHubConfig{Apps: []GitHubAppConfig{{AppID: 1, PrivateKeyFile: "private-key.pem"}}},
 		Log:    LogConfig{Format: "text", Level: "info"},
 		State:  StateConfig{Path: "state.db"},
 		RunnerPools: []RunnerPoolConfig{{
