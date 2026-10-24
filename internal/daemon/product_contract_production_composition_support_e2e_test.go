@@ -23,14 +23,16 @@ import (
 	upstream "github.com/actions/scaleset"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/stateshifters/runnerfoundry/internal/config"
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 )
 
 type productionCompositionLogDestination struct {
-	mutex      sync.Mutex
-	content    bytes.Buffer
-	reconciled chan struct{}
+	mutex                    sync.Mutex
+	content                  bytes.Buffer
+	sessionActivations       uint64
+	sessionActivationChanged chan struct{}
 }
 
 func (destination *productionCompositionLogDestination) Open(config.LogConfig) (io.WriteCloser, error) {
@@ -40,21 +42,37 @@ func (destination *productionCompositionLogDestination) Open(config.LogConfig) (
 func (destination *productionCompositionLogDestination) Write(content []byte) (int, error) {
 	destination.mutex.Lock()
 	_, _ = destination.content.Write(content)
-	destination.mutex.Unlock()
-	if completedProductionCompositionReconciliation(content) {
-		destination.reconciled <- struct{}{}
+	if completedProductionCompositionSessionActivation(content) {
+		destination.sessionActivations++
+		close(destination.sessionActivationChanged)
+		destination.sessionActivationChanged = make(chan struct{})
 	}
+	destination.mutex.Unlock()
 	return len(content), nil
 }
 
-func completedProductionCompositionReconciliation(content []byte) bool {
-	textRecord := bytes.Contains(content, []byte("operation=source_reconciliation")) &&
-		bytes.Contains(content, []byte("stage=reconciliation")) &&
+func completedProductionCompositionSessionActivation(content []byte) bool {
+	textRecord := bytes.Contains(content, []byte("operation=source_sessions")) &&
+		bytes.Contains(content, []byte("stage=open_sessions")) &&
 		bytes.Contains(content, []byte("outcome=completed"))
-	jsonRecord := bytes.Contains(content, []byte(`"operation":"source_reconciliation"`)) &&
-		bytes.Contains(content, []byte(`"stage":"reconciliation"`)) &&
+	jsonRecord := bytes.Contains(content, []byte(`"operation":"source_sessions"`)) &&
+		bytes.Contains(content, []byte(`"stage":"open_sessions"`)) &&
 		bytes.Contains(content, []byte(`"outcome":"completed"`))
 	return textRecord || jsonRecord
+}
+
+func (destination *productionCompositionLogDestination) sessionActivationCheckpoint() uint64 {
+	destination.mutex.Lock()
+	defer destination.mutex.Unlock()
+	return destination.sessionActivations
+}
+
+func (destination *productionCompositionLogDestination) sessionActivationAfter(
+	checkpoint uint64,
+) (bool, <-chan struct{}) {
+	destination.mutex.Lock()
+	defer destination.mutex.Unlock()
+	return destination.sessionActivations > checkpoint, destination.sessionActivationChanged
 }
 
 func (*productionCompositionLogDestination) Close() error { return nil }
@@ -81,11 +99,14 @@ type productionCompositionGitHub struct {
 	mutex                 sync.Mutex
 	messages              map[string]*upstream.RunnerScaleSetMessage
 	unexpected            []string
-	registrations         chan string
-	sessions              chan string
 	acknowledged          chan string
 	scaleSetPools         map[string]string
+	registrations         map[string]uint64
+	sessions              map[string]uint64
+	polls                 map[string]uint64
+	observationChanged    chan struct{}
 	capacities            map[string]productionCompositionCapacity
+	capacityHistory       map[string][]productionCompositionCapacity
 	capacityTick          uint64
 	capacityChanged       chan struct{}
 	initialStatistics     map[string]*upstream.RunnerScaleSetStatistic
@@ -100,9 +121,11 @@ type productionCompositionCapacity struct {
 
 func newProductionCompositionGitHub() *productionCompositionGitHub {
 	return &productionCompositionGitHub{
-		messages:      make(map[string]*upstream.RunnerScaleSetMessage),
-		registrations: make(chan string, 16), sessions: make(chan string, 4), acknowledged: make(chan string, 16),
-		scaleSetPools: make(map[string]string), capacities: make(map[string]productionCompositionCapacity),
+		messages: make(map[string]*upstream.RunnerScaleSetMessage), acknowledged: make(chan string, 16),
+		scaleSetPools: make(map[string]string), registrations: make(map[string]uint64),
+		sessions: make(map[string]uint64), polls: make(map[string]uint64), observationChanged: make(chan struct{}),
+		capacities:            make(map[string]productionCompositionCapacity),
+		capacityHistory:       make(map[string][]productionCompositionCapacity),
 		capacityChanged:       make(chan struct{}),
 		initialStatistics:     make(map[string]*upstream.RunnerScaleSetStatistic),
 		omitInitialStatistics: make(map[string]bool),
@@ -242,6 +265,7 @@ func (host *productionCompositionGitHub) queueGetResponse(
 	host.mutex.Lock()
 	runnerPool := host.scaleSetPools[identifier]
 	guard := host.pollGuards[runnerPool]
+	host.recordRouteObservation(host.polls, runnerPool)
 	host.mutex.Unlock()
 	if guard != nil {
 		if err := guard(); err != nil {
@@ -264,11 +288,11 @@ func (host *productionCompositionGitHub) runnerScaleSetResponse(request *http.Re
 	if identifier == 0 || request.URL.Query().Get("runnerGroupId") != "11" {
 		return 0, "", fmt.Errorf("unexpected runner scale set query %q", request.URL.RawQuery)
 	}
-	host.registrations <- name
 	host.mutex.Lock()
 	host.scaleSetPools[fmt.Sprint(identifier)] = name
+	host.recordRouteObservation(host.registrations, name)
 	host.mutex.Unlock()
-	return http.StatusOK, fmt.Sprintf(`{"count":1,"value":[{"id":%d,"name":%q,"runnerGroupId":11}]}`, identifier, name), nil
+	return http.StatusOK, fmt.Sprintf(`{"count":1,"value":[{"id":%d,"name":%q,"runnerGroupId":11,"runnerSetting":{"disableUpdate":true}}]}`, identifier, name), nil
 }
 
 func (host *productionCompositionGitHub) recordCapacity(identifier, maximum string) error {
@@ -279,7 +303,9 @@ func (host *productionCompositionGitHub) recordCapacity(identifier, maximum stri
 		return fmt.Errorf("capacity observed for unknown production scale set %q", identifier)
 	}
 	host.capacityTick++
-	host.capacities[runnerPool] = productionCompositionCapacity{maximum: maximum, tick: host.capacityTick}
+	observation := productionCompositionCapacity{maximum: maximum, tick: host.capacityTick}
+	host.capacities[runnerPool] = observation
+	host.capacityHistory[runnerPool] = append(host.capacityHistory[runnerPool], observation)
 	close(host.capacityChanged)
 	host.capacityChanged = make(chan struct{})
 	return nil
@@ -297,9 +323,9 @@ func (host *productionCompositionGitHub) sessionResponse(path string) (int, stri
 }
 
 func (host *productionCompositionGitHub) sessionForIdentifier(identifier string) (int, string, error) {
-	host.sessions <- identifier
 	host.mutex.Lock()
 	runnerPool := host.scaleSetPools[identifier]
+	host.recordRouteObservation(host.sessions, runnerPool)
 	statistics := host.initialStatistics[runnerPool]
 	omitStatistics := host.omitInitialStatistics[runnerPool]
 	host.mutex.Unlock()
@@ -319,6 +345,39 @@ func (host *productionCompositionGitHub) sessionForIdentifier(identifier string)
 		return 0, "", fmt.Errorf("marshal scripted GitHub session: %w", err)
 	}
 	return http.StatusOK, string(encoded), nil
+}
+
+func (host *productionCompositionGitHub) recordRouteObservation(observations map[string]uint64, route string) {
+	observations[route]++
+	close(host.observationChanged)
+	host.observationChanged = make(chan struct{})
+}
+
+func (host *productionCompositionGitHub) routeObservation(
+	observations map[string]uint64,
+	route string,
+) (uint64, <-chan struct{}) {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	return observations[route], host.observationChanged
+}
+
+func (host *productionCompositionGitHub) registrationObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.registrations, route)
+}
+
+func (host *productionCompositionGitHub) sessionObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.sessions, route)
+}
+
+func (host *productionCompositionGitHub) pollObservation(route string) (uint64, <-chan struct{}) {
+	return host.routeObservation(host.polls, route)
+}
+
+func (host *productionCompositionGitHub) omitsInitialStatistics(route string) bool {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	return host.omitInitialStatistics[route]
 }
 
 func (host *productionCompositionGitHub) messageResponse(identifier string) (int, string, error) {
@@ -469,11 +528,18 @@ func productionCompositionPrivateKey(t *testing.T) []byte {
 
 type productionCompositionDockerCommands struct {
 	mutex          sync.Mutex
-	instances      map[string]dockerprovider.StartRequest
+	instances      map[string]execution.RunnerInstance
 	startBehaviors []productionCompositionDockerStartBehavior
 	contexts       chan productionCompositionCommandContext
-	starts         chan dockerprovider.StartRequest
+	starts         chan productionCompositionDockerStart
 	removals       chan string
+}
+
+type productionCompositionDockerStart struct {
+	execution.StartRequest
+	RunnerPoolName string
+	JITConfig      string
+	RunnerName     string
 }
 
 type productionCompositionCommandContext struct {
@@ -501,9 +567,9 @@ type productionCompositionDockerStartBehavior struct {
 
 func newProductionCompositionDockerCommands() *productionCompositionDockerCommands {
 	return &productionCompositionDockerCommands{
-		instances: make(map[string]dockerprovider.StartRequest),
+		instances: make(map[string]execution.RunnerInstance),
 		contexts:  make(chan productionCompositionCommandContext, 256),
-		starts:    make(chan dockerprovider.StartRequest, 8), removals: make(chan string, 8),
+		starts:    make(chan productionCompositionDockerStart, 8), removals: make(chan string, 8),
 	}
 }
 
@@ -517,22 +583,60 @@ func (commands *productionCompositionDockerCommands) blockNextStartWithPartial(e
 	return release
 }
 
-func (commands *productionCompositionDockerCommands) StartComposeRunner(
-	ctx context.Context, configured dockerprovider.ComposeConfig, request dockerprovider.StartRequest,
-) error {
-	recordProductionCompositionCommandContext(ctx, "start", commands.contexts)
-	if configured.ComposeFile != "compose.yaml" || configured.Service != "runner" {
-		return fmt.Errorf("unexpected Docker Compose config %+v", configured)
+func (commands *productionCompositionDockerCommands) newLauncher(
+	configured dockerprovider.ComposeConfig,
+	memberID core.MemberID,
+) productionCompositionDockerLauncher {
+	return productionCompositionDockerLauncher{
+		commands: commands, configured: configured, endpointID: productionCompositionDockerEndpoint(memberID),
 	}
-	commands.mutex.Lock()
-	commands.instances[productionCompositionDockerID(request.RunnerName)] = request
+}
+
+func (commands *productionCompositionDockerCommands) newInventory(
+	memberID core.MemberID,
+) productionCompositionDockerInventory {
+	return productionCompositionDockerInventory{commands: commands, endpointID: productionCompositionDockerEndpoint(memberID)}
+}
+
+type productionCompositionDockerLauncher struct {
+	commands   *productionCompositionDockerCommands
+	configured dockerprovider.ComposeConfig
+	endpointID execution.InventoryEndpointID
+}
+
+func (launcher productionCompositionDockerLauncher) EndpointID() execution.InventoryEndpointID {
+	return launcher.endpointID
+}
+
+func (launcher productionCompositionDockerLauncher) Validate(ctx context.Context) error {
+	recordProductionCompositionCommandContext(ctx, "validate", launcher.commands.contexts)
+	if launcher.configured.ComposeFile != "compose.yaml" || launcher.configured.Service != "runner" {
+		return fmt.Errorf("unexpected Docker Compose config %+v", launcher.configured)
+	}
+	return nil
+}
+
+func (launcher productionCompositionDockerLauncher) Start(ctx context.Context, request execution.StartRequest) error {
+	recordProductionCompositionCommandContext(ctx, "start", launcher.commands.contexts)
+	if request.EndpointID != launcher.endpointID {
+		return fmt.Errorf("Docker start endpoint = %q, want %q", request.EndpointID, launcher.endpointID)
+	}
+	identifier := productionCompositionDockerID(string(request.RunnerName))
+	launcher.commands.mutex.Lock()
+	launcher.commands.instances[identifier] = execution.RunnerInstance{
+		ID: identifier, RunnerName: request.RunnerName, RunnerPool: request.RunnerPool,
+		EndpointID: request.EndpointID, State: execution.RunnerStateRunning,
+	}
 	var behavior productionCompositionDockerStartBehavior
-	if len(commands.startBehaviors) != 0 {
-		behavior = commands.startBehaviors[0]
-		commands.startBehaviors = commands.startBehaviors[1:]
+	if len(launcher.commands.startBehaviors) != 0 {
+		behavior = launcher.commands.startBehaviors[0]
+		launcher.commands.startBehaviors = launcher.commands.startBehaviors[1:]
 	}
-	commands.mutex.Unlock()
-	commands.starts <- request
+	launcher.commands.mutex.Unlock()
+	launcher.commands.starts <- productionCompositionDockerStart{
+		StartRequest: request, RunnerPoolName: string(request.RunnerPool),
+		JITConfig: string(request.Bootstrap.Content()), RunnerName: string(request.RunnerName),
+	}
 	if behavior.release != nil {
 		select {
 		case <-behavior.release:
@@ -543,41 +647,66 @@ func (commands *productionCompositionDockerCommands) StartComposeRunner(
 	return behavior.err
 }
 
-func (commands *productionCompositionDockerCommands) ListComposeRunners(
-	ctx context.Context,
-	_ string,
-) (string, error) {
-	recordProductionCompositionCommandContext(ctx, "inventory", commands.contexts)
-	commands.mutex.Lock()
-	containers := make([]map[string]string, 0, len(commands.instances))
-	for identifier, request := range commands.instances {
-		containers = append(containers, map[string]string{
-			"ID": identifier, "Names": request.RunnerName, "State": "running",
-			"Labels": contract.OwnershipRunnerPool + "=" + request.RunnerPoolName + "," +
-				contract.OwnershipRunner + "=" + request.RunnerName,
-		})
-	}
-	commands.mutex.Unlock()
-	encoded, err := json.Marshal(containers)
-	if err != nil {
-		return "", fmt.Errorf("marshal scripted Docker inventory: %w", err)
-	}
-	return string(encoded), nil
+type productionCompositionDockerInventory struct {
+	commands   *productionCompositionDockerCommands
+	endpointID execution.InventoryEndpointID
 }
 
-func (commands *productionCompositionDockerCommands) RemoveComposeRunner(ctx context.Context, identifier string) error {
-	recordProductionCompositionCommandContext(ctx, "destroy", commands.contexts)
-	commands.mutex.Lock()
-	delete(commands.instances, identifier)
-	commands.mutex.Unlock()
-	commands.removals <- identifier
+func (inventory productionCompositionDockerInventory) EndpointID() execution.InventoryEndpointID {
+	return inventory.endpointID
+}
+
+func (inventory productionCompositionDockerInventory) Refresh(ctx context.Context) error {
+	_, err := inventory.Inspect(ctx)
+	return err
+}
+
+func (inventory productionCompositionDockerInventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	recordProductionCompositionCommandContext(ctx, "inventory", inventory.commands.contexts)
+	inventory.commands.mutex.Lock()
+	instances := make([]execution.RunnerInstance, 0, len(inventory.commands.instances))
+	for _, instance := range inventory.commands.instances {
+		instances = append(instances, instance)
+	}
+	inventory.commands.mutex.Unlock()
+	return instances, nil
+}
+
+func (inventory productionCompositionDockerInventory) InspectEndpoint(
+	ctx context.Context,
+	endpointID execution.InventoryEndpointID,
+) ([]execution.RunnerInstance, error) {
+	if !inventory.KnowsEndpoint(endpointID) {
+		return nil, fmt.Errorf("Docker endpoint %q is not configured", endpointID)
+	}
+	return inventory.Inspect(ctx)
+}
+
+func (inventory productionCompositionDockerInventory) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	return endpointID == inventory.endpointID
+}
+
+func (inventory productionCompositionDockerInventory) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	return endpointID == inventory.endpointID && endpointID == productionCompositionDockerEndpoint(memberID)
+}
+
+func (inventory productionCompositionDockerInventory) Destroy(
+	ctx context.Context,
+	instance execution.RunnerInstance,
+) error {
+	recordProductionCompositionCommandContext(ctx, "destroy", inventory.commands.contexts)
+	inventory.commands.mutex.Lock()
+	delete(inventory.commands.instances, instance.ID)
+	inventory.commands.mutex.Unlock()
+	inventory.commands.removals <- instance.ID
 	return nil
 }
-func (commands *productionCompositionDockerCommands) ListComposeServices(
-	ctx context.Context, _ dockerprovider.ComposeConfig,
-) (string, error) {
-	recordProductionCompositionCommandContext(ctx, "validate", commands.contexts)
-	return "runner\n", nil
+
+func productionCompositionDockerEndpoint(memberID core.MemberID) execution.InventoryEndpointID {
+	return dockerprovider.NewInventory(dockerprovider.NewExecCommandRunner(), memberID).EndpointID()
 }
 
 func productionCompositionDockerID(runnerName string) string { return "container-" + runnerName }

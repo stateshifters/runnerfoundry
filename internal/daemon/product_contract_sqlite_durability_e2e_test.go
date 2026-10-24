@@ -82,7 +82,7 @@ func assertUnknownProviderOwnershipRetained(
 	second.provider.setEndpointID("e2e:replacement-provider")
 	second.advanceClock(5*time.Minute + time.Second)
 	second.completeMaintenanceCycle(second.execution)
-	processing, err := second.runtime.state.store.ProcessingByMember(
+	processing, err := second.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), second.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != claimed.JobID ||
@@ -95,10 +95,10 @@ func assertUnknownProviderOwnershipRetained(
 
 func assertRestartedAcceptedProcessing(t *testing.T, harness *e2eHarness, wantJobID core.JobID) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != wantJobID || !processing[0].RunnerAccepted {
 		t.Fatalf("accepted processing after runtime restart = %s, error = %v", describeProcessing(processing), err)
 	}
 }
@@ -123,7 +123,7 @@ func completeRestartedLifecycle(
 	harness.completeMaintenanceCycle(harness.execution)
 	awaitRunnerInstance(t, "restarted lifecycle resource cleanup", harness.provider.destroys)
 	harness.completeMaintenanceCycle(harness.execution)
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 0 {

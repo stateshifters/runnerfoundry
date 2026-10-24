@@ -34,7 +34,7 @@ func TestPollOnceAcquiresAvailableWorkBeforePersistingBatchEffects(t *testing.T)
 	assertPersistedRequests(t, handler, []core.JobRequest{
 		jobRequest(t, 42, queueTime.Add(time.Second)),
 	})
-	assertStartedObservations(t, handler, []core.SourceReference{sourceReference(t, 44)})
+	assertAcceptedObservations(t, handler, []core.SourceReference{sourceReference(t, 44)})
 	assertTerminalObservations(t, handler, []core.SourceReference{sourceReference(t, 44), sourceReference(t, 45)})
 	assertEvents(t, client.events, batchEffectEvents(t))
 }
@@ -117,14 +117,14 @@ func assertPersistedRequests(t *testing.T, handler *recordingEventHandler, want 
 	}
 }
 
-func assertStartedObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
+func assertAcceptedObservations(t *testing.T, handler *recordingEventHandler, want []core.SourceReference) {
 	t.Helper()
-	got := make([]core.SourceReference, 0, len(handler.started))
-	for _, observation := range handler.started {
+	got := make([]core.SourceReference, 0, len(handler.accepted))
+	for _, observation := range handler.accepted {
 		got = append(got, observation.Source)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("started = %#v, want %#v", handler.started, want)
+		t.Fatalf("accepted = %#v, want %#v", handler.accepted, want)
 	}
 }
 
@@ -144,7 +144,7 @@ func batchEffectEvents(t *testing.T) []string {
 	return []string{
 		"acquire:41,42",
 		"request:" + string(sourceReference(t, 42).ID),
-		"started:" + string(sourceReference(t, 44).ID),
+		"accepted:" + string(sourceReference(t, 44).ID),
 		"completed:" + string(sourceReference(t, 44).ID),
 		"completed:" + string(sourceReference(t, 45).ID),
 		"ack:17",
@@ -246,7 +246,7 @@ func TestPollOnceAcknowledgesAssignedMessagesWithoutPersistingRequests(t *testin
 	}
 }
 
-func TestPollOnceLeavesMessageWhenStartedObservationCannotBePersisted(t *testing.T) {
+func TestPollOnceLeavesMessageWhenAcceptanceObservationCannotBePersisted(t *testing.T) {
 	t.Parallel()
 
 	message := &upstream.RunnerScaleSetMessage{MessageID: 21, JobStartedMessages: []*upstream.JobStarted{{
@@ -256,7 +256,7 @@ func TestPollOnceLeavesMessageWhenStartedObservationCannotBePersisted(t *testing
 		t,
 		message,
 		&recordingClient{},
-		&recordingEventHandler{startedErr: errors.New("started failed")},
+		&recordingEventHandler{acceptErr: errors.New("acceptance failed")},
 	)
 }
 
@@ -380,9 +380,9 @@ func TestPollOnceRedeliversDurableEffectsWhenAcknowledgementFails(t *testing.T) 
 func acknowledgementRedeliveryEvents(t *testing.T) []string {
 	t.Helper()
 	return []string{
-		"started:" + string(sourceReference(t, 71).ID),
+		"accepted:" + string(sourceReference(t, 71).ID),
 		"completed:" + string(sourceReference(t, 72).ID),
-		"started:" + string(sourceReference(t, 71).ID),
+		"accepted:" + string(sourceReference(t, 71).ID),
 		"completed:" + string(sourceReference(t, 72).ID),
 		"ack:30",
 	}
@@ -476,9 +476,15 @@ func availableMessage(messageID int, requestID int64) *upstream.RunnerScaleSetMe
 	}
 }
 
-func newAdapter(client githubsource.MessageClient, handler githubsource.EventHandler) *githubsource.Adapter {
+type adapterHandler interface {
+	core.SourceEventHandler
+	githubsource.AssignedDemandHandler
+}
+
+func newAdapter(client githubsource.MessageClient, handler adapterHandler) *githubsource.Adapter {
 	return &githubsource.Adapter{
-		Client: client, Handler: handler, Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
+		Client: client, SourceEvents: handler, AssignedDemand: handler,
+		Repository: "octo/repo", RunnerPool: core.RunnerPool("linux"),
 		Observer: githubsource.ManagerObserver{CurrentTime: func() time.Time {
 			return time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
 		}},

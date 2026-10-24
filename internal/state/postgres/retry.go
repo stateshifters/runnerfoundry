@@ -7,24 +7,29 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 )
 
-func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobID core.JobID) (core.RetryOutcome, error) {
-	processing, outcome, err := eligibleProcessingRetry(ctx, transaction, jobID)
+func retryUnstartedProcessing(
+	ctx context.Context,
+	transaction Transaction,
+	expected core.ProcessingJob,
+) (core.RetryOutcome, error) {
+	processing, outcome, err := eligibleProcessingRetry(ctx, transaction, expected)
 	if err != nil || outcome != "" {
 		return outcome, err
 	}
 	if serializationErr := serializeProcessingRetry(ctx, transaction, processing.Job.Source); serializationErr != nil {
 		return "", serializationErr
 	}
-	requeued, err := enqueueProcessingRetry(ctx, transaction, jobID)
+	requeued, err := enqueueProcessingRetry(ctx, transaction, expected)
 	if err != nil {
 		return "", err
 	}
 	if !requeued {
-		return classifyProcessingRetryFailure(ctx, transaction, jobID)
+		return classifyProcessingRetryFailure(ctx, transaction, expected)
 	}
-	if err = removeRetriedProcessingOwnership(ctx, transaction, jobID); err != nil {
+	if err = removeRetriedProcessingOwnership(ctx, transaction, expected); err != nil {
 		return "", err
 	}
 	return core.RetryRequeued, nil
@@ -33,29 +38,27 @@ func retryUnstartedProcessing(ctx context.Context, transaction Transaction, jobI
 func eligibleProcessingRetry(
 	ctx context.Context,
 	transaction Transaction,
-	jobID core.JobID,
+	expected core.ProcessingJob,
 ) (core.ProcessingJob, core.RetryOutcome, error) {
-	processing, found, err := loadProcessingRetryCandidate(ctx, transaction, jobID)
+	processing, found, err := loadProcessingRetryCandidate(ctx, transaction, expected.Job.ID)
 	if err != nil || !found {
 		return core.ProcessingJob{}, core.RetryMissing, err
 	}
-	if processing.SourceTerminal {
-		return core.ProcessingJob{}, core.RetrySourceTerminal, nil
-	}
-	if processing.RunnerStarted {
-		return core.ProcessingJob{}, core.RetryRunnerStarted, nil
+	if outcome := state.ClassifyProcessingRetry(processing, expected); outcome != "" {
+		return core.ProcessingJob{}, outcome, nil
 	}
 	return processing, "", nil
 }
 
-func removeRetriedProcessingOwnership(ctx context.Context, transaction Transaction, jobID core.JobID) error {
-	removal, removalErr := transaction.Execute(ctx, deleteRetriedProcessingSQL, jobID)
+func removeRetriedProcessingOwnership(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) error {
+	removed, removalErr := transaction.Execute(ctx, deleteRetriedProcessingSQL, processing.Job.ID,
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.RunnerName)
 	if removalErr != nil {
 		return fmt.Errorf("remove retried processing ownership: %w", removalErr)
-	}
-	removed, removalErr := removal.RowsAffected()
-	if removalErr != nil {
-		return fmt.Errorf("read retried processing removal count: %w", removalErr)
 	}
 	if removed != 1 {
 		return fmt.Errorf("remove retried processing ownership: expected one row, got %d", removed)
@@ -66,20 +69,17 @@ func removeRetriedProcessingOwnership(ctx context.Context, transaction Transacti
 func classifyProcessingRetryFailure(
 	ctx context.Context,
 	transaction Transaction,
-	jobID core.JobID,
+	expected core.ProcessingJob,
 ) (core.RetryOutcome, error) {
-	processing, found, err := loadProcessingRetryCandidate(ctx, transaction, jobID)
+	processing, found, err := loadProcessingRetryCandidate(ctx, transaction, expected.Job.ID)
 	if err != nil {
 		return "", err
 	}
 	if !found {
 		return core.RetryMissing, nil
 	}
-	if processing.SourceTerminal {
-		return core.RetrySourceTerminal, nil
-	}
-	if processing.RunnerStarted {
-		return core.RetryRunnerStarted, nil
+	if outcome := state.ClassifyProcessingRetry(processing, expected); outcome != "" {
+		return outcome, nil
 	}
 	return core.RetryClaimChanged, nil
 }
@@ -89,7 +89,7 @@ func loadProcessingRetryCandidate(
 	transaction Transaction,
 	jobID core.JobID,
 ) (core.ProcessingJob, bool, error) {
-	processing, err := scanProcessingJob(transaction.QueryRow(ctx, processingByIDSQL, jobID))
+	processing, err := readClaimedProcessingJob(ctx, transaction, processingByClaimIDSQL, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.ProcessingJob{}, false, nil
 	}
@@ -107,8 +107,13 @@ func serializeProcessingRetry(ctx context.Context, transaction Transaction, sour
 	return nil
 }
 
-func enqueueProcessingRetry(ctx context.Context, transaction Transaction, jobID core.JobID) (bool, error) {
-	_, err := scanQueuedJob(transaction.QueryRow(ctx, retryProcessingSQL, jobID))
+func enqueueProcessingRetry(
+	ctx context.Context,
+	transaction Transaction,
+	processing core.ProcessingJob,
+) (bool, error) {
+	_, err := readQueuedJob(ctx, transaction, retryProcessingSQL, processing.Job.ID,
+		processing.ClaimedAt, processing.InventoryEndpointID, processing.RunnerName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

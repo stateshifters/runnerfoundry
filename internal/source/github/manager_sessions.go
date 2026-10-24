@@ -8,6 +8,7 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/google/uuid"
+	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
@@ -20,7 +21,7 @@ type RegistrationSession struct {
 }
 
 // ErrRegistrationNotAdmitted marks a definitive rejection that callers should
-// detect with errors.Is. OpenRegistrationSession returns no session with this
+// detect with errors.Is. OpenSourceRegistrationSession returns no session with this
 // error after any required exact guarded cleanup succeeds; callers should stop
 // retrying that registration without reporting an operational failure.
 var ErrRegistrationNotAdmitted = errors.New("GitHub registration was not admitted")
@@ -39,19 +40,38 @@ func (session *RegistrationSession) Close(ctx context.Context) error {
 	return nil
 }
 
-// OpenRegistrationSession restores one durable registration directly from its
+// OpenSourceRegistrationSession restores one durable registration directly from its
 // committed identity. A terminal repository or scale-set absence deletes only
 // the exact guarded active and ownership state. Inconclusive failures retain
 // registration state for retry. On success, the caller owns the returned
 // session and must close it.
-func (manager *Manager) OpenRegistrationSession(
+func (manager *Manager) OpenSourceRegistrationSession(
 	ctx context.Context,
 	record Registration,
 	runnerPool RunnerPoolConfig,
 	owner string,
-	handler EventHandler,
+	sourceEvents core.SourceEventHandler,
+	assignedDemand AssignedDemandHandler,
 ) (*RegistrationSession, error) {
-	if err := validateRegistrationSessionRequest(record, owner, handler); err != nil {
+	return manager.restoreSourceRegistrationSession(ctx, record, runnerPool, owner, sourceSessionHandlers{
+		sourceEvents:   sourceEvents,
+		assignedDemand: assignedDemand,
+	})
+}
+
+type sourceSessionHandlers struct {
+	sourceEvents   core.SourceEventHandler
+	assignedDemand AssignedDemandHandler
+}
+
+func (manager *Manager) restoreSourceRegistrationSession(
+	ctx context.Context,
+	record Registration,
+	runnerPool RunnerPoolConfig,
+	owner string,
+	handlers sourceSessionHandlers,
+) (*RegistrationSession, error) {
+	if err := validateRegistrationSessionRequest(record, owner, handlers); err != nil {
 		return nil, err
 	}
 	client, err := manager.registrationSessionClient(ctx, record)
@@ -64,7 +84,7 @@ func (manager *Manager) OpenRegistrationSession(
 			return nil, matchErr
 		}
 	}
-	return manager.openAdmittedRegistration(ctx, client, record, owner, handler)
+	return manager.openAdmittedRegistration(ctx, client, record, owner, handlers)
 }
 
 func (manager *Manager) registrationSessionClient(ctx context.Context, record Registration) (ManagerClient, error) {
@@ -110,11 +130,11 @@ func (manager *Manager) openAdmittedRegistration(
 	client ManagerClient,
 	record Registration,
 	owner string,
-	handler EventHandler,
+	handlers sourceSessionHandlers,
 ) (*RegistrationSession, error) {
 	started := manager.observer.currentTime()
 	manager.reportSessionActivity(record, 1, 1, "started", started, nil)
-	opened, err := manager.openLeaderRecordWithClient(ctx, client, record, owner, handler)
+	opened, err := manager.openLeaderRecordWithClient(ctx, client, record, owner, handlers)
 	if err != nil {
 		resultErr := manager.registrationOpenFailure(ctx, record, err)
 		manager.reportSessionActivity(record, 1, 1, "failed", started, resultErr)
@@ -139,13 +159,14 @@ func (manager *Manager) registrationOpenFailure(ctx context.Context, record Regi
 func validateRegistrationSessionRequest(
 	record Registration,
 	owner string,
-	handler EventHandler,
+	handlers sourceSessionHandlers,
 ) error {
 	if record.RepositoryURL == "" || record.InstallationID == 0 || record.RunnerGroupID == 0 || record.ScaleSetID == 0 {
 		return errors.New("complete GitHub registration identity is required")
 	}
-	if record.RunnerPool == "" || owner == "" || handler == nil {
-		return errors.New("GitHub Runner Pool, leader owner, and event handler are required")
+	if record.RunnerPool == "" || owner == "" || !core.IsValidSourceEventHandler(handlers.sourceEvents) ||
+		!isValidAssignedDemandHandler(handlers.assignedDemand) {
+		return errors.New("GitHub Runner Pool, leader owner, source event handler, and assigned-demand handler are required")
 	}
 	return nil
 }
@@ -176,7 +197,7 @@ func (manager *Manager) openLeaderRecordWithClient(
 	client ManagerClient,
 	record Registration,
 	owner string,
-	handler EventHandler,
+	handlers sourceSessionHandlers,
 ) (openedLeader, error) {
 	session, err := client.OpenSession(ctx, transportRegistration(record), owner)
 	if err != nil {
@@ -186,7 +207,8 @@ func (manager *Manager) openLeaderRecordWithClient(
 		return openedLeader{}, errors.New("GitHub client returned nil message session")
 	}
 	sessionID, initialStatistics, initialStatisticsPending := managerSessionInitialObservation(session)
-	return openedLeader{session: session, adapter: &Adapter{Client: session, Handler: handler, Observer: manager.observer,
+	return openedLeader{session: session, adapter: &Adapter{Client: session, SourceEvents: handlers.sourceEvents,
+		AssignedDemand: handlers.assignedDemand, Observer: manager.observer,
 		Repository: record.RepositoryURL, RunnerPool: record.RunnerPool, InstallationID: int64(record.InstallationID),
 		RunnerGroupID: int64(record.RunnerGroupID), ScaleSetID: int64(record.ScaleSetID),
 		InitialSessionID: sessionID, InitialStatistics: initialStatistics,

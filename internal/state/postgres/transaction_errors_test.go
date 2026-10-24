@@ -14,23 +14,10 @@ func TestExecuteTransactionReportsEachProtocolFailure(t *testing.T) {
 	cases := transactionFailureExecutors(protocolErr, "heartbeat execute")
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			store := NewStore(testCase.executor)
+			store := newStore(testCase.executor)
 			if err := store.PublishMemberState(context.Background(), testMemberIDA, fixedTime(),
 				[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}}); err == nil {
 				t.Fatal("expected protocol error")
-			}
-		})
-	}
-}
-
-func TestRegistrationMutationReportsEachProtocolFailure(t *testing.T) {
-	t.Parallel()
-	protocolErr := errors.New("protocol")
-	tests := transactionFailureExecutors(protocolErr, "mutation")
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			if err := NewStore(testCase.executor).DeleteRegistration(context.Background(), "repo", "linux"); err == nil {
-				t.Fatal("expected registration mutation error")
 			}
 		})
 	}
@@ -42,7 +29,7 @@ func TestPublishMemberStateReportsCapacityReplacementFailures(t *testing.T) {
 	protocolErr := errors.New("protocol")
 	for name, failureCall := range map[string]int{"capacity withdrawal": 2, "capacity publication": 3} {
 		t.Run(name, func(t *testing.T) {
-			store := NewStore(Executor{begin: transactionBeginning(transactionFailingExecute(failureCall, protocolErr))})
+			store := newStore(executorStub{begin: transactionBeginning(transactionFailingExecute(failureCall, protocolErr))})
 			err := store.PublishMemberState(context.Background(), testMemberIDA, fixedTime(),
 				[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 2}})
 			if !errors.Is(err, protocolErr) {
@@ -57,21 +44,21 @@ func TestWithdrawMemberCapacityReportsEachProtocolFailure(t *testing.T) {
 	protocolErr := errors.New("protocol")
 	for _, testCase := range []struct {
 		name        string
-		transaction Transaction
+		transaction transactionStub
 	}{
 		{name: "first execute", transaction: transactionFailingExecute(1, protocolErr)},
-		{name: "commit", transaction: Transaction{execute: successfulExecute,
+		{name: "commit", transaction: transactionStub{execute: successfulExecute,
 			commit: failingCompletion(protocolErr), rollback: successfulCompletion}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			store := NewStore(Executor{begin: transactionBeginning(testCase.transaction)})
+			store := newStore(executorStub{begin: transactionBeginning(testCase.transaction)})
 			if err := store.WithdrawMemberCapacity(context.Background(), testMemberIDA); err == nil {
 				t.Fatal("expected withdrawal error")
 			}
 		})
 	}
-	store := NewStore(Executor{begin: func(context.Context) (Transaction, error) {
-		return Transaction{}, protocolErr
+	store := newStore(executorStub{begin: func(context.Context) (transactionStub, error) {
+		return transactionStub{}, protocolErr
 	}})
 	if err := store.WithdrawMemberCapacity(context.Background(), testMemberIDA); err == nil {
 		t.Fatal("expected begin error")
@@ -80,8 +67,8 @@ func TestWithdrawMemberCapacityReportsEachProtocolFailure(t *testing.T) {
 
 func TestScalarQueriesReportProtocolFailures(t *testing.T) {
 	t.Parallel()
-	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
-		return Row{scan: func(...any) error { return errors.New("protocol") }}
+	store := newStore(executorStub{queryRow: func(context.Context, string, ...any) rowStub {
+		return rowStub{scan: func(...any) error { return errors.New("protocol") }}
 	}})
 	if _, err := store.CountLiveMembers(context.Background(), fixedTime()); err == nil {
 		t.Fatal("expected count error")
@@ -91,14 +78,10 @@ func TestScalarQueriesReportProtocolFailures(t *testing.T) {
 	}
 }
 
-func TestJobAndRegistrationListsReportProtocolFailures(t *testing.T) {
+func TestJobListsReportProtocolFailures(t *testing.T) {
 	t.Parallel()
 	assertTransactionalListFailures(t, func(store *Store) error {
 		_, err := store.ProcessingByMember(context.Background(), testMemberIDA, "linux")
-		return err
-	})
-	assertTransactionalListFailures(t, func(store *Store) error {
-		_, err := store.Registrations(context.Background())
 		return err
 	})
 }
@@ -108,55 +91,55 @@ func assertTransactionalListFailures(t *testing.T, operation func(*Store) error)
 	protocolErr := errors.New("protocol")
 	for _, testCase := range namedFailingListTransactions(protocolErr) {
 		t.Run(testCase.name, func(t *testing.T) {
-			if err := operation(NewStore(Executor{begin: transactionBeginning(testCase.transaction)})); err == nil {
+			if err := operation(newStore(executorStub{begin: transactionBeginning(testCase.transaction)})); err == nil {
 				t.Fatal("expected list error")
 			}
 		})
 	}
-	if err := operation(NewStore(Executor{begin: func(context.Context) (Transaction, error) {
-		return Transaction{}, protocolErr
+	if err := operation(newStore(executorStub{begin: func(context.Context) (transactionStub, error) {
+		return transactionStub{}, protocolErr
 	}})); err == nil {
 		t.Fatal("expected begin error")
 	}
 }
 
-func failingListTransactions(protocolErr error) []Transaction {
-	return []Transaction{
-		{query: func(context.Context, string, ...any) (Rows, error) { return Rows{}, protocolErr }, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) {
+func failingListTransactions(protocolErr error) []transactionStub {
+	return []transactionStub{
+		{query: func(context.Context, string, ...any) (rowsStub, error) { return rowsStub{}, protocolErr }, rollback: successfulCompletion},
+		{query: func(context.Context, string, ...any) (rowsStub, error) {
 			return rowsWithFailure(protocolErr, nil, nil), nil
 		}, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) {
+		{query: func(context.Context, string, ...any) (rowsStub, error) {
 			return rowsWithFailure(nil, protocolErr, nil), nil
 		}, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) {
+		{query: func(context.Context, string, ...any) (rowsStub, error) {
 			return rowsWithFailure(nil, nil, protocolErr), nil
 		}, rollback: successfulCompletion},
-		{query: func(context.Context, string, ...any) (Rows, error) { return rowsFromValues(nil), nil },
+		{query: func(context.Context, string, ...any) (rowsStub, error) { return rowsFromValues(nil), nil },
 			commit: failingCompletion(protocolErr), rollback: successfulCompletion},
 	}
 }
 
 type namedTransaction struct {
 	name        string
-	transaction Transaction
+	transaction transactionStub
 }
 
 type namedExecutor struct {
 	name     string
-	executor Executor
+	executor executorStub
 }
 
 func transactionFailureExecutors(protocolErr error, executeName string) []namedExecutor {
 	return []namedExecutor{
-		{name: "begin", executor: Executor{begin: func(context.Context) (Transaction, error) { return Transaction{}, protocolErr }}},
-		{name: executeName, executor: Executor{begin: transactionBeginning(Transaction{
+		{name: "begin", executor: executorStub{begin: func(context.Context) (transactionStub, error) { return transactionStub{}, protocolErr }}},
+		{name: executeName, executor: executorStub{begin: transactionBeginning(transactionStub{
 			execute: failingExecute(protocolErr), rollback: successfulCompletion,
 		})}},
-		{name: "commit", executor: Executor{begin: transactionBeginning(Transaction{
+		{name: "commit", executor: executorStub{begin: transactionBeginning(transactionStub{
 			execute: successfulExecute, commit: failingCompletion(protocolErr), rollback: successfulCompletion,
 		})}},
-		{name: "rollback", executor: Executor{begin: transactionBeginning(Transaction{
+		{name: "rollback", executor: executorStub{begin: transactionBeginning(transactionStub{
 			execute: failingExecute(protocolErr), rollback: failingCompletion(protocolErr),
 		})}},
 	}
@@ -172,16 +155,16 @@ func namedFailingListTransactions(protocolErr error) []namedTransaction {
 	return result
 }
 
-func transactionBeginning(transaction Transaction) func(context.Context) (Transaction, error) {
-	return func(context.Context) (Transaction, error) { return transaction, nil }
+func transactionBeginning(transaction transactionStub) func(context.Context) (transactionStub, error) {
+	return func(context.Context) (transactionStub, error) { return transaction, nil }
 }
 
-func successfulExecute(context.Context, string, ...any) (Result, error) {
-	return Result{rowsAffected: func() (int64, error) { return 1, nil }}, nil
+func successfulExecute(context.Context, string, ...any) (resultStub, error) {
+	return resultStub{rowsAffected: func() (int64, error) { return 1, nil }}, nil
 }
 
-func failingExecute(protocolErr error) func(context.Context, string, ...any) (Result, error) {
-	return func(context.Context, string, ...any) (Result, error) { return Result{}, protocolErr }
+func failingExecute(protocolErr error) func(context.Context, string, ...any) (resultStub, error) {
+	return func(context.Context, string, ...any) (resultStub, error) { return resultStub{}, protocolErr }
 }
 
 func successfulCompletion(context.Context) error { return nil }
@@ -190,20 +173,20 @@ func failingCompletion(protocolErr error) func(context.Context) error {
 	return func(context.Context) error { return protocolErr }
 }
 
-func transactionFailingExecute(failureCall int, protocolErr error) Transaction {
+func transactionFailingExecute(failureCall int, protocolErr error) transactionStub {
 	calls := 0
-	return Transaction{execute: func(ctx context.Context, _ string, _ ...any) (Result, error) {
+	return transactionStub{execute: func(ctx context.Context, _ string, _ ...any) (resultStub, error) {
 		calls++
 		if calls == failureCall {
-			return Result{}, protocolErr
+			return resultStub{}, protocolErr
 		}
 		return successfulExecute(ctx, "")
 	}, commit: successfulCompletion, rollback: successfulCompletion}
 }
 
-func rowsWithFailure(scanErr, iterationErr, closeErr error) Rows {
+func rowsWithFailure(scanErr, iterationErr, closeErr error) rowsStub {
 	advanced := false
-	return Rows{close: func() error { return closeErr }, err: func() error { return iterationErr },
+	return rowsStub{close: func() error { return closeErr }, err: func() error { return iterationErr },
 		next: func() bool {
 			if scanErr != nil && !advanced {
 				advanced = true

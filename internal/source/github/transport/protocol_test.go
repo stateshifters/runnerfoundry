@@ -14,9 +14,11 @@ type protocolResponse struct {
 type protocolTransport struct {
 	responses map[string]protocolResponse
 	err       error
+	requests  []*http.Request
 }
 
 func (transport *protocolTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.requests = append(transport.requests, request)
 	if transport.err != nil {
 		return nil, transport.err
 	}

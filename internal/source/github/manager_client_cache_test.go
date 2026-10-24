@@ -114,10 +114,11 @@ func TestManagerReusesRepositoryClientAcrossBootstrapAndSessionPaths(t *testing.
 	if err := manager.RefreshMembers(context.Background(), managerConfigForTests()); err != nil {
 		t.Fatalf("RefreshMembers() error = %v", err)
 	}
-	session, err := manager.OpenRegistrationSession(context.Background(), record,
-		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool}, "member", &recordingEventHandler{})
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+		githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool}, "member",
+		&recordingEventHandler{}, &recordingEventHandler{})
 	if err != nil {
-		t.Fatalf("OpenRegistrationSession() error = %v", err)
+		t.Fatalf("OpenSourceRegistrationSession() error = %v", err)
 	}
 	t.Cleanup(func() {
 		if closeErr := session.Close(context.Background()); closeErr != nil {
@@ -181,7 +182,7 @@ func TestManagerLoadsDifferentRepositoryClientsIndependently(t *testing.T) {
 	select {
 	case err := <-independentResult:
 		if err != nil {
-			t.Fatalf("independent OpenRegistrationSession() error = %v", err)
+			t.Fatalf("independent OpenSourceRegistrationSession() error = %v", err)
 		}
 	case <-time.After(time.Second):
 		close(releaseBlocked)
@@ -189,7 +190,7 @@ func TestManagerLoadsDifferentRepositoryClientsIndependently(t *testing.T) {
 	}
 	close(releaseBlocked)
 	if err := <-blockedResult; err != nil {
-		t.Fatalf("blocked OpenRegistrationSession() error = %v", err)
+		t.Fatalf("blocked OpenSourceRegistrationSession() error = %v", err)
 	}
 }
 
@@ -216,8 +217,9 @@ func openRegistrationAsync(
 ) <-chan error {
 	result := make(chan error, 1)
 	go func() {
-		session, err := manager.OpenRegistrationSession(context.Background(), record,
-			githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool}, "member", &recordingEventHandler{})
+		session, err := manager.OpenSourceRegistrationSession(context.Background(), record,
+			githubsource.RunnerPoolConfig{RunnerPool: record.RunnerPool}, "member",
+			&recordingEventHandler{}, &recordingEventHandler{})
 		if err == nil {
 			err = session.Close(context.Background())
 		}

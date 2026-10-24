@@ -33,6 +33,7 @@ type ManagerActivity struct {
 	IdentityReason     string
 	JobID              core.JobID
 	InstallationID     int64
+	GitHubAppID        AppID
 	RunnerGroupID      int64
 	ScaleSetID         int64
 	MessageID          int64
@@ -41,6 +42,7 @@ type ManagerActivity struct {
 	Current            int
 	Total              int
 	Count              int
+	Capacity           int
 	DesiredJobs        int
 	AvailableJobs      int
 	AcquiredJobs       int
@@ -66,6 +68,10 @@ type ManagerActivity struct {
 type ManagerObserver struct {
 	Report      func(ManagerActivity)
 	CurrentTime func() time.Time
+}
+
+func (observer ManagerObserver) ReportActivity(activity ManagerActivity) {
+	observer.report(activity)
 }
 
 func (observer ManagerObserver) report(activity ManagerActivity) {

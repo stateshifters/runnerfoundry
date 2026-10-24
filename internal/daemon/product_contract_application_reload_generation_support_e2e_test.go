@@ -147,21 +147,40 @@ func e2eStartReloadApplication(t *testing.T, application *e2eApplication) e2eApp
 	t.Helper()
 	running := e2eStartReloadApplicationWithoutSource(t, application)
 	source := e2eAwaitGitHubSourceRuntime(t, "initial source runtime", application.builtSources)
-	e2eEstablishReloadSource(t, application, source, application.provider, application.windows, application.host)
+	e2eEstablishReloadSource(t, application, source, application.provider, application.windows)
 	return running
 }
 
 type e2eGitHubSourceRuntimeResult struct {
-	source *githubSourceRuntime
-	err    error
+	generation          int
+	host                *e2eGitHost
+	registrations       *e2eRouteRecorder
+	sessions            *e2eRouteRecorder
+	pollSessions        map[string]*e2eObservedGitHubSession
+	registrationTargets map[string]uint64
+	sessionTargets      map[string]uint64
+	pollTargets         map[string]uint64
+	err                 error
 }
 
-func e2eGitHubSourceRuntime(maintenance *maintenanceGeneration) e2eGitHubSourceRuntimeResult {
-	source, err := githubSourceFromMaintenance(maintenance)
-	if err != nil {
-		return e2eGitHubSourceRuntimeResult{err: err}
+func e2eGitHubSourceRuntime(generation int, host *e2eGitHost) e2eGitHubSourceRuntimeResult {
+	runnerPools := []string{"linux", "windows"}
+	source := e2eGitHubSourceRuntimeResult{
+		generation: generation, host: host,
+		registrations: newE2ERouteRecorder(), sessions: newE2ERouteRecorder(),
+		pollSessions: make(map[string]*e2eObservedGitHubSession, len(runnerPools)),
 	}
-	return e2eGitHubSourceRuntimeResult{source: source}
+	for _, runnerPool := range runnerPools {
+		source.pollSessions[runnerPool] = newE2EObservedGitHubSession(host.sessions[runnerPool])
+	}
+	source.registrationTargets = e2eRouteTargets(runnerPools, source.registrations.observation)
+	source.sessionTargets = e2eRouteTargets(runnerPools, source.sessions.observation)
+	source.pollTargets = make(map[string]uint64, len(runnerPools))
+	for _, runnerPool := range runnerPools {
+		sequence, _ := source.pollSessions[runnerPool].pollObservation()
+		source.pollTargets[runnerPool] = sequence + 1
+	}
+	return source
 }
 
 func e2eStartReloadApplicationWithoutSource(t *testing.T, application *e2eApplication) e2eApplicationRun {
@@ -300,13 +319,13 @@ func e2eAssertReloadPolicyOutcome(
 	wantDestroys int,
 ) {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "windows")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "windows")
 	if destroys := application.windows.destroyCount(); destroys != wantDestroys {
 		instances, inspectErr := application.windows.Inspect(context.Background())
 		t.Fatalf("%s reload destroys = %d, want %d; processing=%+v processing_error=%v instances=%+v inspect_error=%v",
 			policy, destroys, wantDestroys, processing, err, instances, inspectErr)
 	}
-	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID || !processing[0].RunnerAccepted {
 		t.Fatalf("%s reload processing = %+v, error = %v", policy, processing, err)
 	}
 }
@@ -361,7 +380,7 @@ func e2eAssertApplicationUnstartedProcessing(
 ) {
 	t.Helper()
 	processing := e2eLoadSingleApplicationProcessing(t, application, jobID)
-	if processing.RunnerStarted {
+	if processing.RunnerAccepted {
 		t.Fatalf("reload processing unexpectedly records runner started: %+v", processing)
 	}
 }
@@ -373,7 +392,7 @@ func e2eAssertApplicationStartedProcessing(
 ) {
 	t.Helper()
 	processing := e2eLoadSingleApplicationProcessing(t, application, jobID)
-	if !processing.RunnerStarted {
+	if !processing.RunnerAccepted {
 		t.Fatalf("reload processing does not record runner started: %+v", processing)
 	}
 }
@@ -384,7 +403,7 @@ func e2eLoadSingleApplicationProcessing(
 	jobID core.JobID,
 ) core.ProcessingJob {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != jobID {
 		t.Fatalf("reload processing = %+v, error = %v", processing, err)
 	}

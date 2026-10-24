@@ -29,15 +29,6 @@ func newQueuedJobEligibilityGate() *queuedJobEligibilityGate {
 	return &queuedJobEligibilityGate{pools: make(map[core.RunnerPool]*queuedJobPoolGate)}
 }
 
-// Maintain preserves the all-pool maintenance helper used by focused tests.
-// Production execution uses RefreshInventory followed by MaintainPool.
-func (gate *queuedJobEligibilityGate) Maintain(work func(*queuedJobMaintenance)) {
-	gate.inventoryBarrier.Lock()
-	defer gate.inventoryBarrier.Unlock()
-	gate.markAllIneligible()
-	work(&queuedJobMaintenance{gate: gate})
-}
-
 func (gate *queuedJobEligibilityGate) RefreshInventory(work func() error) error {
 	gate.inventoryBarrier.Lock()
 	defer gate.inventoryBarrier.Unlock()
@@ -82,27 +73,6 @@ func (gate *queuedJobEligibilityGate) pool(runnerPool core.RunnerPool) *queuedJo
 	return pool
 }
 
-func (gate *queuedJobEligibilityGate) runnerPools() []core.RunnerPool {
-	gate.poolsMutex.Lock()
-	defer gate.poolsMutex.Unlock()
-	runnerPools := make([]core.RunnerPool, 0, len(gate.pools))
-	for runnerPool := range gate.pools {
-		runnerPools = append(runnerPools, runnerPool)
-	}
-	return runnerPools
-}
-
-type queuedJobMaintenance struct {
-	gate *queuedJobEligibilityGate
-}
-
-func (maintenance *queuedJobMaintenance) MarkEligible(runnerPool core.RunnerPool) {
-	pool := maintenance.gate.pool(runnerPool)
-	pool.mutex.Lock()
-	pool.eligible = true
-	pool.mutex.Unlock()
-}
-
 func (gate *queuedJobEligibilityGate) requestIfEligible(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
@@ -139,14 +109,6 @@ type queuedJobPoolWorker struct {
 	wake       chan struct{}
 	done       chan struct{}
 	failed     bool
-}
-
-func newQueuedJobProcessor(
-	requester queuedJobRequester,
-	gate *queuedJobEligibilityGate,
-	report func(error),
-) *queuedJobProcessor {
-	return newQueuedJobProcessorForPools(requester, gate, report, gate.runnerPools())
 }
 
 func newQueuedJobProcessorForPools(
@@ -278,6 +240,7 @@ func (processor *queuedJobProcessor) reportProcessingFailure(
 
 func shouldContinueQueuedJobPass(result runtimeengine.ProcessResult) bool {
 	return result.Outcome == runtimeengine.ProcessRunnerStarted ||
+		result.Outcome == runtimeengine.ProcessProvisioningFailureReported ||
 		(result.Outcome == runtimeengine.ProcessRetry && result.RetryOutcome == core.RetryRequeued)
 }
 

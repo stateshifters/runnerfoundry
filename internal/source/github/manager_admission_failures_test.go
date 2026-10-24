@@ -35,7 +35,7 @@ func TestRegistrationSessionCloseTreatsAlreadyAbsentSessionAsClosed(t *testing.T
 	}
 }
 
-func TestOpenRegistrationSessionRejectsInvalidRequestsBeforeGitHub(t *testing.T) {
+func TestOpenSourceRegistrationSessionRejectsInvalidRequestsBeforeGitHub(t *testing.T) {
 	t.Parallel()
 
 	valid := managerRecord("https://github.com/octo/repo", 11)
@@ -54,15 +54,15 @@ func TestOpenRegistrationSessionRejectsInvalidRequestsBeforeGitHub(t *testing.T)
 		t.Run(testCase.name, func(t *testing.T) {
 			manager := newManagerFixture(t, &managerDiscovererFake{}, failOnManagerFactoryCall(t),
 				&registrationRepositoryFake{})
-			if _, err := manager.OpenRegistrationSession(context.Background(), testCase.record, testCase.config,
-				testCase.owner, &recordingEventHandler{}); err == nil {
-				t.Fatal("OpenRegistrationSession() accepted an invalid request")
+			if _, err := manager.OpenSourceRegistrationSession(context.Background(), testCase.record, testCase.config,
+				testCase.owner, &recordingEventHandler{}, &recordingEventHandler{}); err == nil {
+				t.Fatal("OpenSourceRegistrationSession() accepted an invalid request")
 			}
 		})
 	}
 }
 
-func TestOpenRegistrationSessionRetainsStateAfterInconclusiveFailures(t *testing.T) {
+func TestOpenSourceRegistrationSessionRetainsStateAfterInconclusiveFailures(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("GitHub unavailable")
@@ -73,10 +73,10 @@ func TestOpenRegistrationSessionRetainsStateAfterInconclusiveFailures(t *testing
 				records: []githubsource.Registration{record}, owned: []githubsource.Registration{record},
 			}
 			manager := newManagerFixture(t, &managerDiscovererFake{}, testCase.factory, repository)
-			session, err := manager.OpenRegistrationSession(context.Background(), record, configuredRunnerPool(),
-				"member-1", &recordingEventHandler{})
+			session, err := manager.OpenSourceRegistrationSession(context.Background(), record, configuredRunnerPool(),
+				"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 			if err == nil || errors.Is(err, githubsource.ErrRegistrationNotAdmitted) || session != nil {
-				t.Fatalf("OpenRegistrationSession() = (%v, %v), want inconclusive failure", session, err)
+				t.Fatalf("OpenSourceRegistrationSession() = (%v, %v), want inconclusive failure", session, err)
 			}
 			assertExactRegistrationState(t, repository.records, repository.owned, record)
 		})
@@ -102,7 +102,7 @@ func inconclusiveSessionFactories(record githubsource.Registration, wantErr erro
 	}
 }
 
-func TestOpenRegistrationSessionReportsTerminalCleanupFailure(t *testing.T) {
+func TestOpenSourceRegistrationSessionReportsTerminalCleanupFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("delete failed")
@@ -118,14 +118,14 @@ func TestOpenRegistrationSessionReportsTerminalCleanupFailure(t *testing.T) {
 			records: []githubsource.Registration{record}, owned: []githubsource.Registration{record}, deleteErr: wantErr,
 		}
 		manager := newManagerFixture(t, &managerDiscovererFake{}, factory, repository)
-		if _, err := manager.OpenRegistrationSession(context.Background(), record, configuredRunnerPool(),
-			"member-1", &recordingEventHandler{}); !errors.Is(err, wantErr) {
-			t.Fatalf("OpenRegistrationSession() error = %v, want %v", err, wantErr)
+		if _, err := manager.OpenSourceRegistrationSession(context.Background(), record, configuredRunnerPool(),
+			"member-1", &recordingEventHandler{}, &recordingEventHandler{}); !errors.Is(err, wantErr) {
+			t.Fatalf("OpenSourceRegistrationSession() error = %v, want %v", err, wantErr)
 		}
 	}
 }
 
-func TestOpenRegistrationSessionForgetsTerminallyMissingRepository(t *testing.T) {
+func TestOpenSourceRegistrationSessionForgetsTerminallyMissingRepository(t *testing.T) {
 	t.Parallel()
 
 	record := managerRecord("https://github.com/octo/repo", 11)
@@ -138,15 +138,15 @@ func TestOpenRegistrationSessionForgetsTerminallyMissingRepository(t *testing.T)
 		return githubsource.ManagerClient{}, upstream.NotFoundError
 	}, repository)
 
-	session, err := manager.OpenRegistrationSession(context.Background(), record, configuredRunnerPool(),
-		"member-1", &recordingEventHandler{})
+	session, err := manager.OpenSourceRegistrationSession(context.Background(), record, configuredRunnerPool(),
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{})
 	assertRegistrationNotAdmitted(t, session, err)
 	if len(repository.records) != 0 || len(repository.owned) != 0 {
 		t.Fatalf("registration state = active %#v owned %#v, want empty", repository.records, repository.owned)
 	}
 }
 
-func TestOpenRegistrationSessionReportsStaleActiveDeletionFailure(t *testing.T) {
+func TestOpenSourceRegistrationSessionReportsStaleActiveDeletionFailure(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("delete failed")
@@ -159,9 +159,9 @@ func TestOpenRegistrationSessionReportsStaleActiveDeletionFailure(t *testing.T) 
 	}}
 	manager := newManagerFixture(t, &managerDiscovererFake{}, fixedManagerClientFactory(client), repository)
 
-	if _, err := manager.OpenRegistrationSession(context.Background(), record, configuredRunnerPool(),
-		"member-1", &recordingEventHandler{}); !errors.Is(err, wantErr) {
-		t.Fatalf("OpenRegistrationSession() error = %v, want %v", err, wantErr)
+	if _, err := manager.OpenSourceRegistrationSession(context.Background(), record, configuredRunnerPool(),
+		"member-1", &recordingEventHandler{}, &recordingEventHandler{}); !errors.Is(err, wantErr) {
+		t.Fatalf("OpenSourceRegistrationSession() error = %v, want %v", err, wantErr)
 	}
 }
 

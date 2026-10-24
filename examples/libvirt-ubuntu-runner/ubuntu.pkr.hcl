@@ -16,8 +16,8 @@ variable "ssh_private_key_file" {
 }
 
 locals {
-  github_runner_version = "2.336.0"
-  github_runner_sha256  = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+  github_runner_version = "2.338.0"
+  github_runner_sha256  = "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32"
   ubuntu_image_url      = "https://cloud-images.ubuntu.com/releases/26.04/release-20260720/ubuntu-26.04-server-cloudimg-amd64.img"
   ubuntu_image_sha256   = "117816726abbdefc5ef3e38902e81a76f1c76c3610e709999d0885f9d5d9b477"
 }

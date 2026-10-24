@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
@@ -127,28 +126,28 @@ func (source *Source) GenerateBootstrap(
 	ctx context.Context,
 	job core.Job,
 	runnerName core.RunnerName,
-) (execution.Bootstrap, error) {
+) (core.Bootstrap, error) {
 	key, err := sourceIdentityForJob(job)
 	if err != nil {
-		return execution.Bootstrap{}, err
+		return core.Bootstrap{}, err
 	}
 	source.routesMu.RLock()
 	route, found := source.routes[key]
 	source.routesMu.RUnlock()
 	if !found {
-		return execution.Bootstrap{}, fmt.Errorf(
+		return core.Bootstrap{}, fmt.Errorf(
 			"GitHub member route for repository %q and Runner Pool %q was not found", key.repository, key.runnerPool,
 		)
 	}
 	content, err := route.client.GenerateBootstrap(ctx, route.registration, runnerName)
 	if err != nil {
-		return execution.Bootstrap{}, bootstrapDiagnosticError{cause: fmt.Errorf(
+		return core.Bootstrap{}, bootstrapDiagnosticError{cause: fmt.Errorf(
 			"generate GitHub bootstrap for repository %q and Runner Pool %q: %w", key.repository, key.runnerPool, err)}
 	}
 	if len(content) == 0 {
-		return execution.Bootstrap{}, errors.New("GitHub bootstrap content is empty")
+		return core.Bootstrap{}, errors.New("GitHub bootstrap content is empty")
 	}
-	return execution.NewBootstrap(content), nil
+	return core.NewBootstrap(content), nil
 }
 
 func sourceIdentityForJob(job core.Job) (routeKey, error) {

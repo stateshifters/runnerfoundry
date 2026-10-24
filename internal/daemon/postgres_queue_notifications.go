@@ -10,7 +10,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 )
 
-const queueNotificationAcquireTimeout = time.Second
+const queueNotificationConnectionTimeout = time.Second
 const queueNotificationKeepaliveInterval = time.Minute
 const queueNotificationPingTimeout = 5 * time.Second
 const queueNotificationRetryDelay = time.Second
@@ -57,16 +57,26 @@ func newPostgreSQLQueueNotificationListener(pool queueNotificationPool) *postgre
 	}
 }
 
-func (listener *postgreSQLQueueNotificationListener) Start(ctx context.Context) {
+func (listener *postgreSQLQueueNotificationListener) Start(startupContext, runtimeContext context.Context) error {
 	listener.mutex.Lock()
 	defer listener.mutex.Unlock()
 	if listener.done != nil {
-		return
+		return nil
 	}
-	runContext, cancel := context.WithCancel(ctx)
+	if listener.pool.maxConnections < 2 || listener.pool.acquire == nil {
+		return nil
+	}
+	runContext, cancel := context.WithCancel(runtimeContext)
+	connection, err := listener.openConnection(startupContext)
+	if err != nil {
+		cancel()
+		return err
+	}
+	listener.reportRecovery()
 	listener.cancel = cancel
 	listener.done = make(chan struct{})
-	go listener.run(runContext, listener.done)
+	go listener.run(runContext, listener.done, connection)
+	return nil
 }
 
 func (listener *postgreSQLQueueNotificationListener) Stop(ctx context.Context) error {
@@ -89,13 +99,18 @@ func (listener *postgreSQLQueueNotificationListener) Stop(ctx context.Context) e
 	}
 }
 
-func (listener *postgreSQLQueueNotificationListener) run(ctx context.Context, done chan struct{}) {
+func (listener *postgreSQLQueueNotificationListener) run(
+	ctx context.Context,
+	done chan struct{},
+	connection queueNotificationConnection,
+) {
 	defer close(done)
-	if listener.pool.maxConnections < 2 || listener.pool.acquire == nil {
+	action := listener.receiveNotifications(ctx, connection)
+	if action == stopQueueNotifications || action == retryQueueNotifications && !listener.retry(ctx) {
 		return
 	}
 	for ctx.Err() == nil {
-		action := listener.listenOnce(ctx)
+		action = listener.listenOnce(ctx)
 		if action == stopQueueNotifications || action == retryQueueNotifications && !listener.retry(ctx) {
 			return
 		}
@@ -103,20 +118,29 @@ func (listener *postgreSQLQueueNotificationListener) run(ctx context.Context, do
 }
 
 func (listener *postgreSQLQueueNotificationListener) listenOnce(ctx context.Context) queueNotificationAction {
-	acquireContext, cancel := context.WithTimeout(ctx, queueNotificationAcquireTimeout)
-	connection, err := listener.pool.acquire(acquireContext)
-	cancel()
+	connection, err := listener.openConnection(ctx)
 	if err != nil {
-		listener.reportFailure(fmt.Errorf("acquire PostgreSQL queue notification connection: %w", err))
-		return retryQueueNotifications
-	}
-	if err = connection.listen(ctx); err != nil {
-		err = discardQueueNotificationConnection(ctx, connection, err)
-		listener.reportFailure(fmt.Errorf("listen for PostgreSQL queue notifications: %w", err))
+		listener.reportFailure(err)
 		return retryQueueNotifications
 	}
 	listener.reportRecovery()
 	return listener.receiveNotifications(ctx, connection)
+}
+
+func (listener *postgreSQLQueueNotificationListener) openConnection(
+	ctx context.Context,
+) (queueNotificationConnection, error) {
+	connectionContext, cancel := context.WithTimeout(ctx, queueNotificationConnectionTimeout)
+	defer cancel()
+	connection, err := listener.pool.acquire(connectionContext)
+	if err != nil {
+		return queueNotificationConnection{}, fmt.Errorf("acquire PostgreSQL queue notification connection: %w", err)
+	}
+	if err = connection.listen(connectionContext); err != nil {
+		err = discardQueueNotificationConnection(connectionContext, connection, err)
+		return queueNotificationConnection{}, fmt.Errorf("listen for PostgreSQL queue notifications: %w", err)
+	}
+	return connection, nil
 }
 
 func (listener *postgreSQLQueueNotificationListener) receiveNotifications(
@@ -177,7 +201,7 @@ func (listener *postgreSQLQueueNotificationListener) releaseHealthyConnection(
 	ctx context.Context,
 	connection queueNotificationConnection,
 ) {
-	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueNotificationAcquireTimeout)
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueNotificationConnectionTimeout)
 	defer cancel()
 	if err := connection.unlisten(cleanupContext); err != nil {
 		err = discardQueueNotificationConnection(cleanupContext, connection, err)
@@ -192,7 +216,9 @@ func discardQueueNotificationConnection(
 	connection queueNotificationConnection,
 	cause error,
 ) error {
-	if err := connection.discard(context.WithoutCancel(ctx)); err != nil {
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueNotificationConnectionTimeout)
+	defer cancel()
+	if err := connection.discard(cleanupContext); err != nil {
 		return errors.Join(cause, fmt.Errorf("discard PostgreSQL queue notification connection: %w", err))
 	}
 	return cause

@@ -221,7 +221,7 @@ func (runtime *productionRuntime) Close(ctx context.Context) error {
 }
 
 func (runtime *productionRuntime) withdrawMember(ctx context.Context) error {
-	if err := runtime.state.store.WithdrawMemberCapacity(ctx, runtime.state.member); err != nil {
+	if err := runtime.state.store.members.WithdrawMemberCapacity(ctx, runtime.state.member); err != nil {
 		return fmt.Errorf("withdraw member %q capacity: %w", runtime.state.member, err)
 	}
 	return nil

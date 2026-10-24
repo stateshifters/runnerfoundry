@@ -11,16 +11,18 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
-	"github.com/stateshifters/runnerfoundry/internal/state/sqlite"
+	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
 
 func TestProductContractRegistrationConvergenceSQLite(t *testing.T) {
 	if !e2eBackendEnabled("sqlite") {
 		return
 	}
-	store, err := sqlite.Open(context.Background(), ":memory:")
+	store, err := sqlitestate.Open(context.Background(), ":memory:", githubsqlite.Schema())
 	if err != nil {
 		t.Fatalf("open SQLite convergence state: %v", err)
 	}
@@ -29,7 +31,7 @@ func TestProductContractRegistrationConvergenceSQLite(t *testing.T) {
 			t.Errorf("close SQLite convergence state: %v", closeErr)
 		}
 	})
-	exerciseRegistrationConvergence(t, store)
+	exerciseRegistrationConvergence(t, store, githubsqlite.NewStore(store.AdapterExtension(), store))
 }
 
 func TestProductContractRegistrationConvergencePostgres(t *testing.T) {
@@ -52,11 +54,11 @@ func TestProductContractRegistrationConvergencePostgres(t *testing.T) {
 			t.Errorf("close PostgreSQL convergence state: %v", closeErr)
 		}
 	})
-	store, ok := state.store.(registrationConvergenceStore)
+	store, ok := state.registrationStore.(registrationConvergenceStore)
 	if !ok {
-		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store)
+		t.Fatalf("PostgreSQL source state %T does not expose declaration persistence", state.registrationStore)
 	}
-	exerciseRegistrationConvergence(t, store)
+	exerciseRegistrationConvergence(t, state.store.members, store)
 }
 
 func TestProductContractPostgresRunnerGroupConflictIsolatedToRunnerPool(t *testing.T) {
@@ -93,15 +95,15 @@ func establishRunnerGroupConflictFixture(
 	matching githubsource.ManagerConfig,
 ) *githubsource.Manager {
 	t.Helper()
-	store := openPostgresConvergenceStore(t, "e2e-runner-group-conflict")
+	stateStore, registrations := openPostgresConvergenceStore(t, "e2e-runner-group-conflict")
 	ctx := context.Background()
 	for _, memberID := range []core.MemberID{"conflict-member-a", "conflict-member-b"} {
-		if err := store.PublishMemberState(ctx, memberID, now, nil); err != nil {
+		if err := stateStore.PublishMemberState(ctx, memberID, now, nil); err != nil {
 			t.Fatalf("publish conflict member %q: %v", memberID, err)
 		}
 	}
 	host := newE2EGitHost()
-	manager, err := githubsource.NewManager(host, host.Client, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(host, host.Client, e2eAppRegistrations(t, registrations), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build conflict manager: %v", err)
 	}
@@ -135,7 +137,7 @@ func assertRunnerGroupConflict(
 func openPostgresConvergenceStore(
 	t *testing.T,
 	memberName string,
-) *postgresstate.Store {
+) (*postgresstate.Store, *githubpostgres.Store) {
 	t.Helper()
 	fixture := e2ePostgresStart(t)
 	ctx := context.Background()
@@ -154,22 +156,39 @@ func openPostgresConvergenceStore(
 			t.Errorf("close PostgreSQL convergence state: %v", closeErr)
 		}
 	})
-	store, valid := state.store.(*postgresstate.Store)
+	store, valid := state.store.members.(*postgresstate.Store)
 	if !valid {
-		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store)
+		t.Fatalf("PostgreSQL state %T does not expose declaration persistence", state.store.members)
 	}
-	return store
+	registrations, valid := state.registrationStore.(*githubpostgres.Store)
+	if !valid {
+		t.Fatalf("PostgreSQL source state %T does not expose declaration persistence", state.registrationStore)
+	}
+	return store, registrations
 }
 
 type registrationConvergenceStore interface {
-	unifiedStore
+	githubsource.RegistrationRepository
 	githubsource.RunnerPoolDeclarationRepository
 }
 
-func exerciseRegistrationConvergence(t *testing.T, store registrationConvergenceStore) {
+type convergenceMembershipStore interface {
+	PublishMemberState(
+		ctx context.Context,
+		memberID core.MemberID,
+		observedAt time.Time,
+		capacities []core.RunnerPoolCapacity,
+	) error
+}
+
+func exerciseRegistrationConvergence(
+	t *testing.T,
+	members convergenceMembershipStore,
+	store registrationConvergenceStore,
+) {
 	t.Helper()
 	ctx := context.Background()
-	fixture := newRegistrationConvergenceFixture(ctx, t, store)
+	fixture := newRegistrationConvergenceFixture(ctx, t, members, store)
 	fixture.establishInitialState(ctx, t)
 	fixture.convergeRemovedRunnerPool(ctx, t)
 }
@@ -184,6 +203,7 @@ type registrationConvergenceFixture struct {
 func newRegistrationConvergenceFixture(
 	ctx context.Context,
 	t *testing.T,
+	members convergenceMembershipStore,
 	store registrationConvergenceStore,
 ) registrationConvergenceFixture {
 	t.Helper()
@@ -191,10 +211,10 @@ func newRegistrationConvergenceFixture(
 		memberID: "e2e-convergence-member",
 		now:      time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC), host: newE2EGitHost(),
 	}
-	if err := store.PublishMemberState(ctx, fixture.memberID, fixture.now, nil); err != nil {
+	if err := members.PublishMemberState(ctx, fixture.memberID, fixture.now, nil); err != nil {
 		t.Fatalf("publish convergence member: %v", err)
 	}
-	manager, err := githubsource.NewManager(fixture.host, fixture.host.Client, store, githubsource.ManagerObserver{})
+	manager, err := githubsource.NewManager(fixture.host, fixture.host.Client, e2eAppRegistrations(t, store), githubsource.ManagerObserver{})
 	if err != nil {
 		t.Fatalf("build convergence manager: %v", err)
 	}

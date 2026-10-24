@@ -17,8 +17,13 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
+	githubpostgres "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/postgres"
+	githubsqlite "github.com/stateshifters/runnerfoundry/internal/source/github/persistence/sqlite"
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 	postgresstate "github.com/stateshifters/runnerfoundry/internal/state/postgres"
 	sqlitestate "github.com/stateshifters/runnerfoundry/internal/state/sqlite"
 )
@@ -43,50 +48,79 @@ func (closer contextCloserFunc) Close(ctx context.Context) error { return closer
 type productionDependencies struct {
 	readFile                 config.ReadFile
 	httpTransport            http.RoundTripper
+	scaleSetTransportFactory transport.TransportFactory
 	newDiscoverer            func(transport.Credentials, http.RoundTripper) (transport.Discoverer, error)
-	newClient                func(transport.Repository, transport.Credentials, http.RoundTripper) (*transport.Client, error)
+	newClient                func(transport.Repository, transport.Credentials, transport.TransportFactory, bool) (*transport.Client, error)
 	newManager               func(githubsource.RepositoryDiscoverer, githubsource.ManagerClientFactoryFunc, githubsource.RegistrationRepository, githubsource.ManagerObserver) (*githubsource.Manager, error)
-	dockerCommands           dockerprovider.CommandRunner
+	newDockerLauncher        func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
+	newDockerInventory       func(core.MemberID) execution.RunnerInventory
 	libvirtCommands          libvirtprovider.CommandRunner
 	newTicker                func(time.Duration) cycleTicker
 	currentTime              func() time.Time
 	maintenanceLaneCompleted func(laneName string, ticker cycleTicker)
-	openSQLite               func(context.Context, string) (*sqlitestate.Store, error)
+	openSQLite               func(context.Context, string, ...sqlitestate.SchemaExtension) (*sqlitestate.Store, error)
 	closeSQLite              func(*sqlitestate.Store) error
-	newClusterStore          func(postgresconfig.Settings) *cluster.Store
-	migrateCluster           func(*cluster.Store, context.Context) error
-	openClusterPool          func(*cluster.Store, context.Context) (*pgxpool.Pool, error)
-	newPGConnection          func(*pgxpool.Pool) postgresstate.Connection
-	newPGStore               func(postgresstate.Connection) *postgresstate.Store
+	newSQLiteGitHubStore     func(*sqlitestate.AdapterExtension, statecontract.MemberLivenessReader) *githubsqlite.Store
+	newConnections           func(postgresconfig.Settings) (*cluster.Connections, error)
+	newMigrationCatalog      func() (*cluster.Catalog, error)
+	newMigrator              func(*cluster.Connections, *cluster.Catalog) *cluster.Migrator
+	migratePostgreSQL        func(*cluster.Migrator, context.Context) error
+	openClusterPool          func(*cluster.Connections, context.Context) (*pgxpool.Pool, error)
+	newPGConnection          func(*pgxpool.Pool) *postgresstate.Connection
+	newPGStore               func(*postgresstate.Connection) *postgresstate.Store
+	newPGGitHubStore         func(*postgresstate.AdapterExtension, statecontract.MemberLivenessReader) *githubpostgres.Store
 	newQueueNotificationPool func(*pgxpool.Pool) queueNotificationPool
 	closePool                func(*pgxpool.Pool)
-	tryLeader                func(*cluster.Store, context.Context) (*cluster.LeaderLease, error)
-	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error)
+	newLeaderElector         func(*cluster.Connections) *cluster.LeaderElector
+	tryLeader                func(*cluster.LeaderElector, context.Context) (*cluster.LeaderLease, error)
+	buildProviderSet         func(context.Context, config.Config, core.MemberID, productionDependencies) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error)
 	readHostname             func() (string, error)
 	logDestinationFactory    logDestinationFactory
-	providerObserver         func(execution.ProviderActivity)
+	providerObserver         providerActivityObserver
 	openState                func(context.Context, config.Config, productionDependencies) (*productionState, error)
 	buildGeneration          func(context.Context, config.Config, *productionState, *localLeadershipGate, func(error), productionDependencies) (*maintenanceGeneration, error)
 }
 
 func newProductionDependencies() productionDependencies {
+	dockerLauncher, dockerInventory := newProductionDockerFactories()
 	return productionDependencies{
 		readFile: os.ReadFile, httpTransport: http.DefaultTransport,
 		newDiscoverer: transport.NewDiscoverer, newClient: transport.NewClient, newManager: githubsource.NewManager,
-		dockerCommands: dockerprovider.NewExecCommandRunner(), libvirtCommands: libvirtprovider.NewExecCommandRunner(),
+		newDockerLauncher: dockerLauncher, newDockerInventory: dockerInventory,
+		libvirtCommands: libvirtprovider.NewExecCommandRunner(),
 		newTicker: func(duration time.Duration) cycleTicker {
 			operatingSystemTicker := time.NewTicker(duration)
 			return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
 		}, currentTime: time.Now,
 		openSQLite: sqlitestate.Open, closeSQLite: (*sqlitestate.Store).Close,
-		newClusterStore: cluster.NewStore, migrateCluster: (*cluster.Store).Migrate,
-		openClusterPool: (*cluster.Store).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
-		newPGStore: postgresstate.NewConnectionStore, newQueueNotificationPool: newPGXQueueNotificationPool,
-		closePool: (*pgxpool.Pool).Close,
-		tryLeader: (*cluster.Store).TryLeader, buildProviderSet: buildProductionProvidersWithDependencies,
-		readHostname: os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
+		newSQLiteGitHubStore: func(extension *sqlitestate.AdapterExtension, members statecontract.MemberLivenessReader) *githubsqlite.Store {
+			return githubsqlite.NewStore(extension, members)
+		},
+		newConnections: cluster.NewConnections, newMigrationCatalog: newPostgreSQLMigrationCatalog,
+		newMigrator: cluster.NewMigrator, migratePostgreSQL: (*cluster.Migrator).Up,
+		openClusterPool: (*cluster.Connections).OpenPool, newPGConnection: postgresstate.NewPGXConnection,
+		newPGStore: postgresstate.NewConnectionStore, newPGGitHubStore: func(extension *postgresstate.AdapterExtension, members statecontract.MemberLivenessReader) *githubpostgres.Store {
+			return githubpostgres.NewStore(extension, members)
+		},
+		newQueueNotificationPool: newPGXQueueNotificationPool,
+		closePool:                (*pgxpool.Pool).Close,
+		newLeaderElector:         cluster.NewLeaderElector, tryLeader: (*cluster.LeaderElector).TryAcquire,
+		buildProviderSet: buildProductionProvidersWithDependencies,
+		readHostname:     os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
 		openState: openProductionStateWithDependencies, buildGeneration: buildProductionGenerationWithDependencies,
 	}
+}
+
+func newProductionDockerFactories() (
+	func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher,
+	func(core.MemberID) execution.RunnerInventory,
+) {
+	commands := dockerprovider.NewExecCommandRunner()
+	return func(config dockerprovider.ComposeConfig, member core.MemberID) execution.RunnerLauncher {
+			return dockerprovider.NewComposeLauncher(commands, config, member)
+		}, func(member core.MemberID) execution.RunnerInventory {
+			return dockerprovider.NewInventory(commands, member)
+		}
 }
 
 func buildProductionGenerationWithDependencies(
@@ -97,7 +131,7 @@ func buildProductionGenerationWithDependencies(
 	report func(error),
 	dependencies productionDependencies,
 ) (*maintenanceGeneration, error) {
-	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.store, report, dependencies)
+	manager, err := buildProductionGitHubManagerWithDependencies(configured, state.registrationStore, report, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -115,38 +149,69 @@ func buildProductionGenerationWithDependencies(
 
 func buildProductionGitHubManagerWithDependencies(
 	configured config.Config,
-	store unifiedStore,
+	store githubsource.RegistrationRepository,
 	report func(error),
 	dependencies productionDependencies,
-) (*githubsource.Manager, error) {
+) (*githubsource.MultiAppCoordinator, error) {
 	credentials, err := configured.GitHub.AppCredentials(dependencies.readFile)
 	if err != nil {
 		return nil, fmt.Errorf("load GitHub App credentials: %w", err)
 	}
-	transportCredentials := transport.Credentials{AppID: credentials.AppID, PrivateKey: credentials.PrivateKey}
-	discoverer, err := dependencies.newDiscoverer(transportCredentials, dependencies.httpTransport)
+	managers, err := buildGitHubAppManagers(credentials, configured.AutoUpdateRunners, store, report, dependencies)
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub discoverer: %w", err)
+		return nil, err
 	}
+	coordinator, err := githubsource.NewMultiAppCoordinator(store, managers...)
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App coordinator: %w", err)
+	}
+	return coordinator, nil
+}
 
-	manager, err := dependencies.newManager(
-		discoverer,
-		productionManagerClientFactory(transportCredentials, dependencies),
-		store,
-		newGitHubManagerObserver(report, dependencies.currentTime),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create GitHub lifecycle manager: %w", err)
+func buildGitHubAppManagers(
+	credentials []config.GitHubAppCredentials,
+	autoUpdateRunners bool,
+	store githubsource.RegistrationRepository,
+	report func(error),
+	dependencies productionDependencies,
+) ([]*githubsource.Manager, error) {
+	managers := make([]*githubsource.Manager, 0, len(credentials))
+	for _, appCredentials := range credentials {
+		transportCredentials := transport.Credentials{AppID: appCredentials.AppID, PrivateKey: appCredentials.PrivateKey}
+		discoverer, discoverErr := dependencies.newDiscoverer(transportCredentials, dependencies.httpTransport)
+		if discoverErr != nil {
+			return nil, fmt.Errorf("create GitHub discoverer for App %d: %w", appCredentials.AppID, discoverErr)
+		}
+		scopedStore, scopeErr := githubsource.ScopeRegistrationRepository(store, githubsource.AppID(appCredentials.AppID))
+		if scopeErr != nil {
+			return nil, fmt.Errorf("scope GitHub state for App %d: %w", appCredentials.AppID, scopeErr)
+		}
+		manager, managerErr := dependencies.newManager(
+			discoverer,
+			productionManagerClientFactory(transportCredentials, autoUpdateRunners, dependencies),
+			scopedStore,
+			newGitHubManagerObserverForApp(report, dependencies.currentTime, githubsource.AppID(appCredentials.AppID)),
+		)
+		if managerErr != nil {
+			return nil, fmt.Errorf("create GitHub lifecycle manager for App %d: %w", appCredentials.AppID, managerErr)
+		}
+		managers = append(managers, manager)
 	}
-	return manager, nil
+	return managers, nil
 }
 
 func productionManagerClientFactory(
 	credentials transport.Credentials,
+	autoUpdateRunners bool,
 	dependencies productionDependencies,
 ) githubsource.ManagerClientFactoryFunc {
 	return func(_ context.Context, repository transport.Repository) (githubsource.ManagerClient, error) {
-		client, err := dependencies.newClient(repository, credentials, dependencies.httpTransport)
+		client, err := dependencies.newClient(
+			repository,
+			credentials,
+			dependencies.scaleSetTransportFactory,
+			autoUpdateRunners,
+		)
 		if err != nil {
 			return githubsource.ManagerClient{}, fmt.Errorf("create scale-set client: %w", err)
 		}
@@ -155,8 +220,8 @@ func productionManagerClientFactory(
 }
 
 type productionGenerationComponents struct {
-	manager   *githubsource.Manager
-	providers map[core.RunnerPool]execution.ExecutionProvider
+	manager   githubManagerComposition
+	providers map[core.RunnerPool]execution.RunnerLauncher
 	inventory execution.RunnerInventory
 	member    core.MemberID
 }
@@ -171,10 +236,10 @@ func buildTimedProductionGeneration(
 ) (*maintenanceGeneration, error) {
 	tickers := newProductionMaintenanceLaneTickers(dependencies.newTicker)
 	generation, err := buildUnifiedGeneration(configured, unifiedBuilderDependencies{
-		store: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
+		state: state.store, demandStore: state.demandStore, manager: components.manager, member: components.member,
 		providers: components.providers, inventory: components.inventory,
 		leadership: state.newLeadership(), currentTime: dependencies.currentTime, memberTTL: runtimeMemberTTL,
-		tickers: &tickers, report: report,
+		tickers: tickers, report: report,
 		processGate: processGate, queueNotifications: state.queueNotifications,
 	})
 	if err != nil {
@@ -209,7 +274,8 @@ func closeRuntimeResources(ctx context.Context, closers []runtimeCloser) error {
 }
 
 type productionState struct {
-	store              unifiedStore
+	store              runtimeStatePorts
+	registrationStore  githubsource.RegistrationRepository
 	demandStore        githubsource.AssignedDemandRepository
 	member             core.MemberID
 	newLeadership      func() leadershipRuntime
@@ -259,14 +325,18 @@ func openProductionSQLiteStateWithDependencies(
 	path string,
 	dependencies productionDependencies,
 ) (*productionState, error) {
-	store, err := dependencies.openSQLite(ctx, path)
+	store, err := dependencies.openSQLite(ctx, path, githubsqlite.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite state: %w", err)
 	}
 	closer := contextCloserFunc(func(context.Context) error { return dependencies.closeSQLite(store) })
+	githubStore := dependencies.newSQLiteGitHubStore(store.AdapterExtension(), store)
 	return &productionState{
-		store: store, demandStore: store, newLeadership: func() leadershipRuntime { return permanentLeadership{} },
-		closers: []runtimeCloser{closer},
+		store: runtimeStatePorts{jobs: store, processing: store, transitions: store,
+			provisioningFailures: store, members: store, capacity: store},
+		registrationStore: githubStore, demandStore: githubpersistence.NewAssignedDemandStore(store),
+		newLeadership: func() leadershipRuntime { return permanentLeadership{} },
+		closers:       []runtimeCloser{closer},
 	}, nil
 }
 
@@ -275,27 +345,52 @@ func openProductionPostgreSQLStateWithDependencies(
 	configured postgresconfig.Settings,
 	dependencies productionDependencies,
 ) (*productionState, error) {
-	clusterStore := dependencies.newClusterStore(configured)
-	if err := dependencies.migrateCluster(clusterStore, ctx); err != nil {
-		return nil, fmt.Errorf("migrate PostgreSQL state: %w", err)
-	}
-	pool, err := dependencies.openClusterPool(clusterStore, ctx)
+	connections, pool, err := openProductionPostgreSQLPool(ctx, configured, dependencies)
 	if err != nil {
-		return nil, fmt.Errorf("open PostgreSQL state pool: %w", err)
+		return nil, err
 	}
-	store := dependencies.newPGStore(dependencies.newPGConnection(pool))
+	connection := dependencies.newPGConnection(pool)
+	store := dependencies.newPGStore(connection)
+	githubStore := dependencies.newPGGitHubStore(store.AdapterExtension(), store)
 	closer := contextCloserFunc(func(context.Context) error { dependencies.closePool(pool); return nil })
 	queueNotifications := dependencies.newQueueNotificationPool(pool)
+	elector := dependencies.newLeaderElector(connections)
 	return &productionState{
-		store: store, demandStore: store,
+		store: runtimeStatePorts{jobs: store, processing: store, transitions: store,
+			provisioningFailures: store, members: store, capacity: store},
+		registrationStore: githubStore, demandStore: githubpersistence.NewAssignedDemandStore(store),
 		queueNotifications: &queueNotifications,
 		newLeadership: func() leadershipRuntime {
 			return newExclusiveLeadership(cluster.ErrNotLeader, func(leaderContext context.Context) (leaderLease, error) {
-				return dependencies.tryLeader(clusterStore, leaderContext)
+				return dependencies.tryLeader(elector, leaderContext)
 			})
 		},
 		closers: []runtimeCloser{closer},
 	}, nil
+}
+
+func openProductionPostgreSQLPool(
+	ctx context.Context,
+	configured postgresconfig.Settings,
+	dependencies productionDependencies,
+) (*cluster.Connections, *pgxpool.Pool, error) {
+	connections, err := dependencies.newConnections(configured)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure PostgreSQL connections: %w", err)
+	}
+	catalog, err := dependencies.newMigrationCatalog()
+	if err != nil {
+		return nil, nil, fmt.Errorf("compose PostgreSQL migrations: %w", err)
+	}
+	migrator := dependencies.newMigrator(connections, catalog)
+	if err = dependencies.migratePostgreSQL(migrator, ctx); err != nil {
+		return nil, nil, fmt.Errorf("migrate PostgreSQL state: %w", err)
+	}
+	pool, err := dependencies.openClusterPool(connections, ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open PostgreSQL state pool: %w", err)
+	}
+	return connections, pool, nil
 }
 
 func buildProductionProvidersWithDependencies(
@@ -303,33 +398,62 @@ func buildProductionProvidersWithDependencies(
 	configured config.Config,
 	member core.MemberID,
 	dependencies productionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
 	hostname := strings.TrimSpace(string(member))
 	if len(configured.RunnerPools) != 0 && hostname == "" {
-		return nil, execution.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
+		return nil, runtimeservice.AggregateRunnerInventory{}, errors.New("provider member identity is empty")
 	}
-	return buildConfiguredProviders(ctx, configured, executionDependencies{
-		dockerCommands: dependencies.dockerCommands, libvirtCommands: dependencies.libvirtCommands,
-		readTemplate: dependencies.readFile, memberHostname: hostname,
+	return buildConfiguredProviders(ctx, configured, productionExecutionDependencies(
+		dependencies, core.MemberID(hostname),
+	))
+}
+
+func productionExecutionDependencies(
+	dependencies productionDependencies,
+	memberID core.MemberID,
+) executionDependencies {
+	return executionDependencies{
+		newDockerLauncher:  dependencies.newDockerLauncher,
+		newDockerInventory: dependencies.newDockerInventory,
+		libvirtCommands:    dependencies.libvirtCommands,
+		readTemplate:       dependencies.readFile, memberID: memberID,
 		providerObserver: dependencies.providerObserver,
-	})
+	}
 }
 
 func buildConfiguredProviders(
 	ctx context.Context,
 	configured config.Config,
 	dependencies executionDependencies,
-) (map[core.RunnerPool]execution.ExecutionProvider, execution.AggregateRunnerInventory, error) {
-	providers := make(map[core.RunnerPool]execution.ExecutionProvider, len(configured.RunnerPools))
+) (map[core.RunnerPool]execution.RunnerLauncher, runtimeservice.AggregateRunnerInventory, error) {
+	providers := make(map[core.RunnerPool]execution.RunnerLauncher, len(configured.RunnerPools))
 	inventories := make([]execution.RunnerInventory, 0, len(configured.RunnerPools))
+	if configurationUsesDocker(configured) {
+		dockerInventory, err := configuredDockerInventory(dependencies)
+		if err != nil {
+			return nil, runtimeservice.AggregateRunnerInventory{}, err
+		}
+		inventories = append(inventories, dockerInventory)
+	}
 	for _, runnerPoolConfig := range configured.RunnerPools {
 		provider, err := buildExecutionProvider(ctx, runnerPoolConfig, dependencies)
 		if err != nil {
-			return nil, execution.AggregateRunnerInventory{}, err
+			return nil, runtimeservice.AggregateRunnerInventory{}, err
 		}
-		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider
-		inventories = append(inventories, provider)
+		providers[core.RunnerPool(runnerPoolConfig.Name)] = provider.Launcher
+		if provider.Inventory != nil {
+			inventories = append(inventories, provider.Inventory)
+		}
 	}
-	inventory := execution.NewAggregateRunnerInventory(inventories...)
+	inventory := runtimeservice.NewAggregateRunnerInventory(inventories...)
 	return providers, inventory, nil
+}
+
+func configurationUsesDocker(configured config.Config) bool {
+	for _, runnerPool := range configured.RunnerPools {
+		if runnerPool.Docker != nil {
+			return true
+		}
+	}
+	return false
 }

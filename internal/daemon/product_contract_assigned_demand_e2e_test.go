@@ -12,7 +12,10 @@ import (
 
 	upstream "github.com/actions/scaleset"
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	runtimeengine "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
+	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
+	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 func TestProductContractAuthoritativeAssignedDemandSQLite(t *testing.T) {
@@ -27,6 +30,126 @@ func TestProductContractAuthoritativeAssignedDemandPostgres(t *testing.T) {
 		return
 	}
 	exerciseAuthoritativeAssignedDemand(t, newPostgresE2EHarness(t))
+}
+
+func TestProductContractWithdrawnAggregateProcessingDoesNotRetrySQLite(t *testing.T) {
+	if !e2eBackendEnabled("sqlite") {
+		return
+	}
+	exerciseWithdrawnAggregateProcessingDoesNotRetry(t, newSQLiteE2EHarness(t))
+}
+
+func TestProductContractWithdrawnAggregateProcessingDoesNotRetryPostgres(t *testing.T) {
+	if !e2eBackendEnabled("postgres") {
+		return
+	}
+	exerciseWithdrawnAggregateProcessingDoesNotRetry(t, newPostgresE2EHarness(t))
+}
+
+func TestProductContractPostgresQueuedSurplusClaimRaceDoesNotRetry(t *testing.T) {
+	if !e2eBackendEnabled("postgres") {
+		return
+	}
+	exercisePostgresQueuedSurplusClaimRaceDoesNotRetry(t)
+}
+
+func exercisePostgresQueuedSurplusClaimRaceDoesNotRetry(t *testing.T) {
+	t.Helper()
+	store := openPostgresStateConformanceStore(t)
+	memberID := core.MemberID("queued-surplus-race-member")
+	contract := postgresStateConformanceStore(store)
+	requireStateConformanceMember(t, contract, memberID, stateConformanceEpoch)
+	demand := githubsource.AssignedDemand{Repository: "owner/repo", RunnerPool: "linux",
+		ObservationID: "assigned", DesiredJobs: 1, ObservedAt: stateConformanceEpoch}
+	request, err := githubsource.AggregateDemandRequest(demand, 1)
+	if err != nil {
+		t.Fatalf("aggregate demand request: %v", err)
+	}
+	requireQueued(t, contract, request, core.QueueQueued)
+	processing := withdrawQueuedSurplusDuringClaim(t, contract, memberID, demand)
+	requireRetry(t, "claimed queued surplus does not retry", func() (core.RetryResult, error) {
+		return contract.RetryUnstarted(context.Background(), processing)
+	}, core.RetrySourceTerminal)
+}
+
+func withdrawQueuedSurplusDuringClaim(
+	t *testing.T,
+	contract stateConformanceStore,
+	memberID core.MemberID,
+	demand githubsource.AssignedDemand,
+) core.ProcessingJob {
+	t.Helper()
+	var processing core.ProcessingJob
+	interleaved := &claimAfterActiveJobsStore{DemandTransactionStore: contract.DemandTransactionStore, claim: func() {
+		processing = requireClaimed(t, contract, demand.RunnerPool,
+			stateConformanceClaim(memberID, stateConformanceEpoch.Add(2*time.Second)))
+	}}
+	handler := newGitHubDemandHandler(runtimeengine.NewQueueHandler(contract.JobQueueStore),
+		githubpersistence.NewAssignedDemandStore(interleaved), nil, "postgresql")
+	client := &singleAssignedDemandClient{message: &upstream.RunnerScaleSetMessage{
+		MessageID: 1, Statistics: &upstream.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
+	}}
+	adapter := &githubsource.Adapter{Client: client, SourceEvents: handler, AssignedDemand: handler,
+		Repository: demand.Repository, RunnerPool: demand.RunnerPool,
+		Observer: githubsource.ManagerObserver{CurrentTime: func() time.Time { return stateConformanceEpoch.Add(time.Second) }}}
+	result, err := adapter.Poll(context.Background(), 1)
+	if err != nil || !result.Acknowledged || !client.acknowledged {
+		t.Fatalf("queued-claim race poll = (%+v, %v), acknowledged %t", result, err, client.acknowledged)
+	}
+	return processing
+}
+
+type claimAfterActiveJobsStore struct {
+	statecontract.DemandTransactionStore
+	claim func()
+}
+
+func (store *claimAfterActiveJobsStore) WithDemandTransaction(
+	ctx context.Context,
+	key statecontract.DemandTransactionKey,
+	reconcile func(statecontract.DemandTransaction) error,
+) error {
+	err := store.DemandTransactionStore.WithDemandTransaction(ctx, key, func(transaction statecontract.DemandTransaction) error {
+		return reconcile(&claimAfterActiveJobsTransaction{DemandTransaction: transaction, claim: store.claim})
+	})
+	if err != nil {
+		return fmt.Errorf("interleave claim after active-jobs snapshot: %w", err)
+	}
+	return nil
+}
+
+type claimAfterActiveJobsTransaction struct {
+	statecontract.DemandTransaction
+	claim func()
+}
+
+func (transaction *claimAfterActiveJobsTransaction) ActiveJobs(
+	ctx context.Context,
+) ([]statecontract.ActiveJob, error) {
+	jobs, err := transaction.DemandTransaction.ActiveJobs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read active jobs before interleaved claim: %w", err)
+	}
+	transaction.claim()
+	return jobs, nil
+}
+
+type singleAssignedDemandClient struct {
+	message      *upstream.RunnerScaleSetMessage
+	acknowledged bool
+}
+
+func (client *singleAssignedDemandClient) GetMessage(context.Context, int, int) (*upstream.RunnerScaleSetMessage, error) {
+	return client.message, nil
+}
+
+func (*singleAssignedDemandClient) AcquireRequests(_ context.Context, requestIDs []int64) ([]int64, error) {
+	return requestIDs, nil
+}
+
+func (client *singleAssignedDemandClient) DeleteMessage(context.Context, int) error {
+	client.acknowledged = true
+	return nil
 }
 
 func TestProductContractMissingAssignedStatisticsRejectedSQLite(t *testing.T) {
@@ -75,6 +198,31 @@ func exerciseAuthoritativeAssignedDemand(t *testing.T, harness *e2eHarness) {
 	windowsGate.release <- struct{}{}
 }
 
+func exerciseWithdrawnAggregateProcessingDoesNotRetry(t *testing.T, harness *e2eHarness) {
+	t.Helper()
+	harness.establishSourceSession()
+	startGate := harness.provider.blockNextStart(errors.New("scripted withdrawn aggregate start failure"))
+	assigned := deliverAssignedDemand(t, harness, "linux", nil, nil, 1)
+	harness.await("withdrawn aggregate provider start", startGate.started)
+	attempt := awaitProviderStart(t, "withdrawn aggregate provider attempt", harness.provider.attempts)
+
+	withdrawn := deliverAssignedDemand(t, harness, "linux", nil, nil, 0)
+	assertAssignedDemandSnapshot(t, harness, assignedDemand(harness, "linux", withdrawn), 0, 0, 0)
+	processing, err := harness.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
+	if err != nil || len(processing) != 1 || processing[0].Job.ID != attempt.JobID || !processing[0].SourceTerminal {
+		t.Fatalf("withdrawn aggregate processing = %+v, error = %v", processing, err)
+	}
+
+	close(startGate.release)
+	awaitString(t, "withdrawn aggregate bootstrap cleanup", harness.host.cleanups)
+	harness.completeMaintenanceCycle(harness.execution)
+	harness.completeMaintenanceCycle(harness.execution)
+	if attempts := harness.provider.attemptCount(); attempts != 1 {
+		t.Fatalf("provider attempts after aggregate withdrawal = %d, want 1", attempts)
+	}
+	assertAggregateState(t, harness, assignedDemand(harness, "linux", assigned), 1, core.QueueSourceTerminal)
+}
+
 func exerciseMissingAssignedStatisticsRejected(t *testing.T, harness *e2eHarness) {
 	t.Helper()
 	harness.establishSourceSession()
@@ -83,11 +231,13 @@ func exerciseMissingAssignedStatisticsRejected(t *testing.T, harness *e2eHarness
 		JobAvailableMessages: []*upstream.JobAvailable{{JobMessageBase: upstream.JobMessageBase{
 			RunnerRequestID: 901, QueueTime: harness.currentTime.AddDate(-10, 0, 0),
 		}}}}
-	session.assignMessageID(message)
+	messageID := session.assignMessageID(message)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
-	result := awaitRunnerPoolPollResult(t, harness)
-	if result.err == nil || !strings.Contains(result.err.Error(), "missing statistics") {
-		t.Fatalf("missing-statistics poll error = %v", result.err)
+	runnerPool := core.RunnerPool(harness.configured.RunnerPools[0].Name)
+	pollErr := awaitRunnerPoolPollError(t, harness, session, runnerPool, messageID, checkpoint, "missing statistics")
+	if pollErr == nil || !strings.Contains(pollErr.Error(), "missing statistics") {
+		t.Fatalf("missing-statistics poll error = %v", pollErr)
 	}
 	assertNoInteger(t, "missing-statistics acknowledgement", session.ackAttempts)
 	assertAssignedDemandSnapshot(t, harness, githubsource.AssignedDemand{
@@ -161,7 +311,7 @@ func assertAggregateState(
 	if err != nil {
 		t.Fatalf("identify aggregate assigned demand: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), request)
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), request)
 	if err != nil || result.Outcome != want {
 		t.Fatalf("aggregate demand state = %+v, error = %v, want %s", result, err, want)
 	}
@@ -186,7 +336,7 @@ func assertProcessingSource(
 	want core.SourceIdentifier,
 ) {
 	t.Helper()
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, core.RunnerPool(runnerPool),
 	)
 	if err != nil {
@@ -217,7 +367,7 @@ func assertExactDemandStateForPool(
 	if err != nil {
 		t.Fatalf("encode exact GitHub demand scope: %v", err)
 	}
-	result, err := harness.runtime.state.store.Queue(context.Background(), core.JobRequest{
+	result, err := harness.runtime.state.store.jobs.Queue(context.Background(), core.JobRequest{
 		Source: core.SourceReference{Adapter: githubsource.AdapterName,
 			ID: exactSourceID(t, harness, runnerPool, requestID)},
 		Scope: scope, RunnerPool: core.RunnerPool(runnerPool), EnqueuedAt: harness.currentTime,
@@ -235,12 +385,15 @@ func assertAcknowledgementRedelivery(t *testing.T, harness *e2eHarness) {
 	messageID := session.assignMessageID(message)
 	wantErr := errors.New("scripted GitHub acknowledgement failure")
 	session.failNextAcknowledgement(wantErr)
+	checkpoint := runnerPoolPollFailureCheckpoint(harness, session)
 	session.messages <- message
 	if attempt := awaitInteger(t, "failed GitHub acknowledgement", session.ackAttempts); attempt != messageID {
 		t.Fatalf("failed acknowledgement message = %d, want %d", attempt, messageID)
 	}
-	if result := awaitRunnerPoolPollResult(t, harness); !errors.Is(result.err, wantErr) {
-		t.Fatalf("failed acknowledgement poll error = %v, want %v", result.err, wantErr)
+	if pollErr := awaitRunnerPoolPollError(
+		t, harness, session, "linux", messageID, checkpoint, wantErr.Error(),
+	); !errors.Is(pollErr, wantErr) {
+		t.Fatalf("failed acknowledgement poll error = %v, want %v", pollErr, wantErr)
 	}
 	harness.completeMaintenanceCycle(harness.source)
 	session.messages <- message
@@ -249,42 +402,41 @@ func assertAcknowledgementRedelivery(t *testing.T, harness *e2eHarness) {
 	assertAssignedDemandSnapshot(t, harness, assignedDemand(harness, "linux", message), 4, 3, 1)
 }
 
-func awaitRunnerPoolPollResult(t *testing.T, harness *e2eHarness) githubPollResult {
-	t.Helper()
-	attempt := runnerPoolPollAttempt(t, productionGitHubSource(t, harness), "linux")
-	timer := time.NewTimer(e2eWaitLimit)
-	defer timer.Stop()
-	select {
-	case result := <-attempt.result:
-		attempt.result <- result
-		return result
-	case <-timer.C:
-		t.Fatal("timed out waiting for linux GitHub poll result")
-		return githubPollResult{}
+type e2eRunnerPoolPollFailureCheckpoint struct {
+	activitySequence uint64
+	pollTarget       uint64
+}
+
+func runnerPoolPollFailureCheckpoint(
+	harness *e2eHarness,
+	session *e2eGitHubSession,
+) e2eRunnerPoolPollFailureCheckpoint {
+	pollSequence, _ := session.pollObservation()
+	return e2eRunnerPoolPollFailureCheckpoint{
+		activitySequence: harness.sourceActivities.checkpoint(),
+		pollTarget:       pollSequence + 1,
 	}
 }
 
-func productionGitHubSource(t *testing.T, harness *e2eHarness) *githubSourceRuntime {
-	t.Helper()
-	if harness.sourceRuntime == nil {
-		t.Fatal("production GitHub source was not captured during generation construction")
-	}
-	return harness.sourceRuntime
-}
-
-func runnerPoolPollAttempt(
+func awaitRunnerPoolPollError(
 	t *testing.T,
-	source *githubSourceRuntime,
+	harness *e2eHarness,
+	session *e2eGitHubSession,
 	runnerPool core.RunnerPool,
-) *githubPollAttempt {
+	messageID int,
+	checkpoint e2eRunnerPoolPollFailureCheckpoint,
+	description string,
+) error {
 	t.Helper()
-	for adapter, attempt := range source.polls {
-		if adapter.RunnerPool == runnerPool {
-			return attempt
-		}
-	}
-	t.Fatalf("active %s GitHub poll not found", runnerPool)
-	return nil
+	activity := harness.sourceActivities.awaitAfter(t, "GitHub poll failure: "+description,
+		checkpoint.activitySequence,
+		func(activity githubsource.ManagerActivity) bool {
+			return activity.RunnerPool == runnerPool && activity.MessageID == int64(messageID) && activity.Err != nil &&
+				strings.Contains(activity.Err.Error(), description)
+		})
+	e2eAwaitSessionPollWhileCycling(t, "GitHub failed poll harvest", session,
+		checkpoint.pollTarget, func() { harness.completeMaintenanceCycle(harness.source) })
+	return activity.Err
 }
 
 func awaitInteger(t *testing.T, description string, values <-chan int) int {

@@ -16,6 +16,11 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/source/github/transport"
 )
 
+func builderStatePorts(store *builderStoreFake) runtimeStatePorts {
+	return runtimeStatePorts{jobs: store, processing: store, transitions: store,
+		provisioningFailures: store, members: store, capacity: store}
+}
+
 func daemonTestID(seed byte) core.MemberID {
 	return core.MemberID(fmt.Sprintf("runner-host-%d", seed))
 }
@@ -25,13 +30,12 @@ func TestBuildUnifiedGenerationRunsConfiguredRuntime(t *testing.T) {
 
 	store := newBuilderStoreFake()
 	manager := newBuilderManager(t, store)
-	ticker := &manualCycleTicker{ticks: make(chan time.Time)}
 	generation, err := buildUnifiedGeneration(builderConfig(), unifiedBuilderDependencies{
-		store: store, demandStore: store, manager: manager, member: daemonTestID(1),
-		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		state: builderStatePorts(store), demandStore: store, manager: manager, member: daemonTestID(1),
+		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
-		ticker: ticker, processGate: &localLeadershipGate{},
+		tickers: newManualMaintenanceLaneTickers(), processGate: &localLeadershipGate{},
 	})
 	if err != nil {
 		t.Fatalf("build generation: %v", err)
@@ -62,6 +66,17 @@ func TestBuildUnifiedGenerationRejectsInvalidComposition(t *testing.T) {
 	assertBuildRejected(t, builderConfig(), invalidTTL)
 	assertBuildRejected(t, invalidDiscovery, valid)
 }
+
+func TestBuildUnifiedGenerationRejectsMissingSourceOperations(t *testing.T) {
+	t.Parallel()
+	dependencies := validBuilderDependencies(t)
+	dependencies.manager = sourceLessManager{githubManagerComposition: dependencies.manager}
+	assertBuildRejected(t, builderConfig(), dependencies)
+}
+
+type sourceLessManager struct{ githubManagerComposition }
+
+func (sourceLessManager) Source() *githubsource.Source { return nil }
 
 func TestBuildUnifiedGenerationAttachesPostgreSQLQueueNotifications(t *testing.T) {
 	configured := builderConfig()
@@ -102,11 +117,11 @@ func validBuilderDependencies(t *testing.T) unifiedBuilderDependencies {
 	t.Helper()
 	store := newBuilderStoreFake()
 	return unifiedBuilderDependencies{
-		store: store, demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
-		providers:  map[core.RunnerPool]execution.ExecutionProvider{"linux": builderProviderFake{}},
+		state: builderStatePorts(store), demandStore: store, manager: newBuilderManager(t, store), member: daemonTestID(1),
+		providers:  map[core.RunnerPool]execution.RunnerLauncher{"linux": builderProviderFake{}},
 		inventory:  builderProviderFake{},
 		leadership: permanentLeadership{}, currentTime: builderTime, memberTTL: time.Minute,
-		ticker: &manualCycleTicker{ticks: make(chan time.Time)}, processGate: &localLeadershipGate{},
+		tickers: newManualMaintenanceLaneTickers(), processGate: &localLeadershipGate{},
 	}
 }
 
@@ -124,7 +139,7 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	store.operationErr = wantErr
 	manager := newBuilderManager(t, store)
 	provider := builderProviderFake{}
-	orchestrator := newBuilderOrchestrator(store, manager, provider)
+	orchestrator := newBuilderOrchestrator(t, store, manager, provider)
 	assertPoolAdapterFailures(t, orchestrator, wantErr)
 	store.operationErr = nil
 	assertPoolAdapterSuccess(t, orchestrator)
@@ -136,8 +151,9 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 		t.Fatalf("clean up empty pool: %v", err)
 	}
 	store.operationErr = wantErr
-	if _, err := pool.Terminate(context.Background()); !errors.Is(err, wantErr) {
-		t.Fatalf("cleanup error = %v, want %v", err, wantErr)
+	if remaining, err := pool.Terminate(context.Background()); !errors.Is(err, wantErr) || remaining != 0 {
+		t.Fatalf("cleanup failure = remaining:%d error:%v, want no completion result and error %v",
+			remaining, err, wantErr)
 	}
 	closers := configuredClosers(unifiedBuilderDependencies{
 		leadership: newExclusiveLeadership(errors.New("not leader"), nil),
@@ -149,12 +165,20 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 }
 
 func newBuilderOrchestrator(
+	t *testing.T,
 	store *builderStoreFake,
 	manager *githubsource.Manager,
 	provider builderProviderFake,
 ) *runtimeengine.Orchestrator {
-	return runtimeengine.NewOrchestrator(
-		store, manager.Source(), provider, provider, daemonTestID(1), builderTime,
+	t.Helper()
+	resolver, err := newSourceOperationsResolver([]sourceOperationsRegistration{{
+		adapter: githubsource.AdapterName, operations: manager.Source(),
+	}})
+	if err != nil {
+		t.Fatalf("source operations resolver: %v", err)
+	}
+	return runtimeengine.NewOrchestratorWithSourceOperations(
+		store, store, store, resolver, provider, provider, runtimeengine.OrchestratorConfig{MemberID: daemonTestID(1), CurrentTime: builderTime, StopIfNotStartedWithin: 5 * time.Minute},
 	)
 }
 
@@ -331,8 +355,11 @@ func (store *builderStoreFake) ClaimOldest(_ context.Context, _ core.RunnerPool,
 func (*builderStoreFake) Terminalize(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
 }
-func (*builderStoreFake) MarkRunnerStarted(context.Context, core.JobIdentity) (core.ObservationResult, error) {
+func (*builderStoreFake) ObserveRunnerAcceptance(context.Context, core.JobIdentity) (core.ObservationResult, error) {
 	return core.ObservationResult{}, nil
+}
+func (*builderStoreFake) ObserveTerminalIfUnaccepted(context.Context, core.JobIdentity) (core.ConditionalTerminalResult, error) {
+	return core.ConditionalTerminalResult{}, nil
 }
 func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
@@ -340,13 +367,22 @@ func (store *builderStoreFake) ProcessingByMember(context.Context, core.MemberID
 func (store *builderStoreFake) ProcessingByPool(context.Context, core.RunnerPool) ([]core.ProcessingJob, error) {
 	return nil, store.operationErr
 }
-func (*builderStoreFake) RetryUnstarted(context.Context, core.JobID) (core.RetryResult, error) {
+func (*builderStoreFake) RetryUnstarted(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
 func (*builderStoreFake) RecoverUnstartedProcessing(context.Context, core.ProcessingJob) (core.RetryResult, error) {
 	return core.RetryResult{Outcome: core.RetryMissing}, nil
 }
 func (*builderStoreFake) RemoveTerminal(context.Context, core.JobID) (core.TerminalRemovalResult, error) {
+	return core.TerminalRemovalResult{Outcome: core.TerminalMissing}, nil
+}
+func (*builderStoreFake) ReserveProvisioningFailure(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryFailureReportingPending}, nil
+}
+func (*builderStoreFake) RecordProvisioningFailureReported(context.Context, core.ProcessingJob) (core.RetryResult, error) {
+	return core.RetryResult{Outcome: core.RetryFailureFinalizationPending}, nil
+}
+func (*builderStoreFake) FinalizeProvisioningFailure(context.Context, core.ProcessingJob) (core.TerminalRemovalResult, error) {
 	return core.TerminalRemovalResult{Outcome: core.TerminalMissing}, nil
 }
 

@@ -2,19 +2,16 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"testing"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 )
 
 func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
-	transaction := Transaction{execute: successfulExecute, commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction)})
+	transaction := transactionStub{execute: successfulExecute, commit: successfulCompletion, rollback: successfulCompletion}
+	store := newStore(executorStub{begin: transactionBeginning(transaction)})
 	if err := store.PublishMemberState(context.Background(), testMemberIDA, now,
 		[]core.RunnerPoolCapacity{{RunnerPool: "linux", Capacity: 30}, {RunnerPool: "disabled", Capacity: 0}}); err != nil {
 		t.Fatalf("publish: %v", err)
@@ -27,7 +24,7 @@ func TestPublishAndWithdrawMemberCapacity(t *testing.T) {
 func TestMemberQueries(t *testing.T) {
 	t.Parallel()
 	now := fixedTime()
-	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
+	store := newStore(executorStub{queryRow: func(context.Context, string, ...any) rowStub {
 		return rowFromValues([]any{1})
 	}})
 	if count, err := store.CountLiveMembers(context.Background(), now); err != nil || count != 1 {
@@ -37,76 +34,11 @@ func TestMemberQueries(t *testing.T) {
 
 func TestAvailableCapacity(t *testing.T) {
 	t.Parallel()
-	store := NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
+	store := newStore(executorStub{queryRow: func(context.Context, string, ...any) rowStub {
 		return rowFromValues([]any{30, 7, 5})
 	}})
 	now := fixedTime()
 	if capacity, err := store.AvailableRunnerPoolCapacity(context.Background(), "linux", now); err != nil || capacity != 18 {
 		t.Fatalf("capacity = %d, %v", capacity, err)
 	}
-}
-
-func TestRegistrationBehavior(t *testing.T) {
-	t.Parallel()
-	registration := githubsource.Registration{RepositoryURL: "https://example.test/repo", RunnerPool: "linux",
-		InstallationID: 1, RunnerGroupID: 2, ScaleSetID: 3}
-	values := []any{registration.RepositoryURL, string(registration.RunnerPool), int64(1), int64(2), int64(3)}
-	transaction := Transaction{execute: successfulExecute,
-		query:  func(context.Context, string, ...any) (Rows, error) { return rowsFromValues([][]any{values}), nil },
-		commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction),
-		queryRow: func(context.Context, string, ...any) Row { return rowFromValues(values) }})
-	if err := store.UpsertRegistration(context.Background(), registration); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	actual, found, err := store.Registration(context.Background(), registration.RepositoryURL, registration.RunnerPool)
-	if err != nil || !found || actual != registration {
-		t.Fatalf("registration = %#v, %t, %v", actual, found, err)
-	}
-	registrations, err := store.Registrations(context.Background())
-	if err != nil || len(registrations) != 1 || registrations[0] != registration {
-		t.Fatalf("registrations = %#v, %v", registrations, err)
-	}
-}
-
-func TestGitHubRunnerPoolDeclarationBehavior(t *testing.T) {
-	t.Parallel()
-	declarationValues := [][]any{{"serenity", "windows-latest", "default"}}
-	transaction := Transaction{execute: successfulExecute,
-		query:  func(context.Context, string, ...any) (Rows, error) { return rowsFromValues(declarationValues), nil },
-		commit: successfulCompletion, rollback: successfulCompletion}
-	store := NewStore(Executor{begin: transactionBeginning(transaction)})
-	declarations := []githubsource.RunnerPoolDeclaration{{RunnerPool: "windows-latest", RunnerGroup: "default"}}
-	if err := store.ReplaceGitHubRunnerPoolDeclarations(context.Background(), "serenity", declarations); err != nil {
-		t.Fatalf("replace declarations: %v", err)
-	}
-	actual, err := store.LiveGitHubRunnerPoolDeclarations(context.Background(), fixedTime())
-	if err != nil || len(actual) != 1 || actual[0].MemberID != "serenity" ||
-		actual[0].RunnerPool != "windows-latest" || actual[0].RunnerGroup != "default" {
-		t.Fatalf("declarations = %#v, %v", actual, err)
-	}
-}
-
-func TestRegistrationLookupHandlesMissingRow(t *testing.T) {
-	t.Parallel()
-	store := registrationLookupErrorStore(sql.ErrNoRows)
-	_, found, err := store.Registration(context.Background(), "repo", "linux")
-	if err != nil || found {
-		t.Fatalf("found=%t error=%v", found, err)
-	}
-}
-
-func TestRegistrationLookupReportsBrokenRow(t *testing.T) {
-	t.Parallel()
-	store := registrationLookupErrorStore(errors.New("protocol"))
-	_, _, err := store.Registration(context.Background(), "repo", "linux")
-	if err == nil {
-		t.Fatal("expected lookup error")
-	}
-}
-
-func registrationLookupErrorStore(scanErr error) *Store {
-	return NewStore(Executor{queryRow: func(context.Context, string, ...any) Row {
-		return Row{scan: func(...any) error { return scanErr }}
-	}})
 }

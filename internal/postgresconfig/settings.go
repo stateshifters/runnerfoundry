@@ -1,4 +1,4 @@
-// Package postgresconfig owns PostgreSQL connection configuration and point-of-use resolution.
+// Package postgresconfig defines unresolved PostgreSQL settings and their structural invariants.
 package postgresconfig
 
 import (
@@ -34,19 +34,19 @@ func Validate(settings Settings) error {
 	if strings.TrimSpace(settings.Role) == "" {
 		return errors.New("state.postgres.role is required")
 	}
-	if strings.TrimSpace(settings.DSN) != "" && settings.hasStructuredValues() {
+	if settings.DSN != "" && settings.hasStructuredValues() {
 		return errors.New("state.postgres.dsn cannot be combined with structured PostgreSQL settings")
 	}
 	direct := Endpoint{}
 	if settings.Direct != nil {
 		direct = *settings.Direct
 	}
-	directHasDSN := strings.TrimSpace(direct.DSN) != ""
+	directHasDSN := direct.DSN != ""
 	directHasStructuredValues := direct.hasStructuredValues()
 	if directHasDSN && directHasStructuredValues {
 		return errors.New("state.postgres.direct.dsn cannot be combined with structured PostgreSQL settings")
 	}
-	if strings.TrimSpace(settings.DSN) != "" && directHasStructuredValues {
+	if settings.DSN != "" && directHasStructuredValues {
 		return errors.New("state.postgres.direct.dsn is required when overriding a primary DSN")
 	}
 	return nil

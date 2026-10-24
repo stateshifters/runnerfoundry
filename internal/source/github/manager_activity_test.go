@@ -42,6 +42,15 @@ func TestManagerReportsRunnerPoolFailureOnceWithRepositoryContext(t *testing.T) 
 	}
 }
 
+func TestManagerObserverReportsAdapterActivity(t *testing.T) {
+	var observed githubsource.ManagerActivity
+	observer := githubsource.ManagerObserver{Report: func(activity githubsource.ManagerActivity) { observed = activity }}
+	observer.ReportActivity(githubsource.ManagerActivity{Operation: "source_sessions"})
+	if observed.Operation != "source_sessions" || observed.OriginPC == 0 {
+		t.Fatalf("observed activity = %#v", observed)
+	}
+}
+
 func managerRepositories(count int) []transport.Repository {
 	repositories := make([]transport.Repository, count)
 	for index := range repositories {

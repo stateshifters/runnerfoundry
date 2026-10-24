@@ -12,12 +12,12 @@ import (
 func TestPollAcknowledgesAndReportsUnmatchedRunnerNameObservations(t *testing.T) {
 	t.Parallel()
 	message := &upstream.RunnerScaleSetMessage{MessageID: 214,
-		JobStartedMessages:   []*upstream.JobStarted{{RunnerName: "legacy-started-runner"}},
-		JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "legacy-completed-runner", Result: "succeeded"}},
+		JobStartedMessages:   []*upstream.JobStarted{{RunnerName: "external-accepted-runner"}},
+		JobCompletedMessages: []*upstream.JobCompleted{{RunnerName: "external-completed-runner", Result: "succeeded"}},
 	}
 	client := &recordingClient{messages: []*upstream.RunnerScaleSetMessage{message}}
 	handler := &recordingEventHandler{
-		startedOutcome: core.ObservationUnmatched, completedOutcome: core.ObservationUnmatched,
+		acceptedOutcome: core.ObservationUnmatched, completedOutcome: core.ObservationUnmatched,
 	}
 	activities := make([]githubsource.ManagerActivity, 0)
 	adapter := newAdapter(client, handler)
@@ -28,10 +28,10 @@ func TestPollAcknowledgesAndReportsUnmatchedRunnerNameObservations(t *testing.T)
 	if err != nil || !result.Acknowledged {
 		t.Fatalf("Poll() = (%#v, %v), want acknowledged success", result, err)
 	}
-	started := findManagerActivity(activities, "runner_started", "unmatched")
+	accepted := findManagerActivity(activities, "runner_accepted", "unmatched")
 	completed := findManagerActivity(activities, "terminalized", "unmatched")
-	assertUnmatchedActivity(t, started, "JobStarted", "legacy-started-runner")
-	assertUnmatchedActivity(t, completed, "JobCompleted", "legacy-completed-runner")
+	assertUnmatchedActivity(t, accepted, "JobStarted", "external-accepted-runner")
+	assertUnmatchedActivity(t, completed, "JobCompleted", "external-completed-runner")
 }
 
 func assertUnmatchedActivity(

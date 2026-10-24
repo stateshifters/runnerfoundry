@@ -104,7 +104,7 @@ func e2eStartStateReloadApplication(
 	application.tickers.awaitInitialGeneration(t)
 	source := e2eAwaitGitHubSourceRuntime(t, direction+" source runtime", application.builtSources)
 	e2eEstablishReloadSource(
-		t, application, source, application.provider, application.windows, application.host,
+		t, application, source, application.provider, application.windows,
 	)
 	opened := e2eAwaitOpenedState(t, openedStates)
 	if !reflect.DeepEqual(opened, state) {
@@ -211,11 +211,11 @@ func e2eApplicationRegistrationSnapshot(
 	application *e2eApplication,
 ) githubsource.RegistrationSnapshot {
 	t.Helper()
-	active, err := application.runtime.state.store.Registrations(context.Background())
+	active, err := application.runtime.state.registrationStore.Registrations(context.Background())
 	if err != nil {
 		t.Fatalf("load active application registrations: %v", err)
 	}
-	owned, err := application.runtime.state.store.OwnedRegistrations(context.Background())
+	owned, err := application.runtime.state.registrationStore.OwnedRegistrations(context.Background())
 	if err != nil {
 		t.Fatalf("load owned application registrations: %v", err)
 	}
@@ -235,7 +235,7 @@ func e2eAssertApplicationRegistrationSnapshot(
 
 func e2eAssertApplicationProcessing(t *testing.T, application *e2eApplication, jobID core.JobID) {
 	t.Helper()
-	processing, err := application.runtime.state.store.ProcessingByPool(context.Background(), "linux")
+	processing, err := application.runtime.state.store.processing.ProcessingByPool(context.Background(), "linux")
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != jobID {
 		t.Fatalf("application processing after rejected state reload = %+v, error = %v", processing, err)
 	}
@@ -243,7 +243,8 @@ func e2eAssertApplicationProcessing(t *testing.T, application *e2eApplication, j
 
 func e2ePostgresMigrationStatus(t *testing.T, settings postgresconfig.Settings) cluster.MigrationStatus {
 	t.Helper()
-	status, err := cluster.NewStore(settings).MigrationStatus(context.Background())
+	services := newE2EPostgresMigrationServices(t, settings)
+	status, err := services.migrator.Status(context.Background())
 	if err != nil {
 		t.Fatalf("inspect PostgreSQL reload target migration status: %v", err)
 	}

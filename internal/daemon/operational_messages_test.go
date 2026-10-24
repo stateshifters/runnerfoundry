@@ -94,14 +94,14 @@ func TestGitHubObservationMessagesNameRepositoryPoolAndIdentity(t *testing.T) {
 		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "validate_terminal",
 			repository: "repo", runnerPool: "linux", sourceRequestID: 42, err: failed},
 			"Failed to record terminal state for GitHub request 42"},
-		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_runner_started",
+		{operationalEvent{operation: "job_observation", outcome: "failed", stage: "persist_runner_accepted",
 			repository: "repo", runnerPool: "linux", sourceRequestID: 42,
-			runnerName:      "runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8",
+			runnerName:      "runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w",
 			githubEventType: "JobStarted", err: failed},
-			"GitHub request 42 and runner runnerfoundry-a73851b8-7df5-4d4c-bc8e-2381926746d8"},
+			"record runner acceptance for GitHub request 42 and runner runnerfoundry-v2-pzhRuH31TUy8jiOBkmdG2A-AY-7OD1OelimCPI-G3ZP_w"},
 		{operationalEvent{operation: "job_observation", outcome: string(core.ObservationUnmatched),
-			repository: "repo", runnerPool: "linux", runnerName: "legacy-runner", githubEventType: "JobCompleted"},
-			"Acknowledged unmatched GitHub JobCompleted event for runner legacy-runner"},
+			repository: "repo", runnerPool: "linux", runnerName: "external-runner", githubEventType: "JobCompleted"},
+			"Acknowledged unmatched GitHub JobCompleted event for runner external-runner"},
 	})
 }
 

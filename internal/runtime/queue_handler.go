@@ -5,12 +5,13 @@ import (
 	"fmt"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 // QueueHandler translates durable source assignments and cancellations into
 // the source-neutral queue without owning runner execution.
 type QueueHandler struct {
-	store        core.JobQueueStore
+	store        state.JobQueueStore
 	wakeUp       func(core.RunnerPool)
 	stateBackend string
 }
@@ -37,21 +38,27 @@ func (stateError DurableStateError) Unwrap() error          { return stateError.
 func (stateError DurableStateError) StateBackend() string   { return stateError.Backend }
 func (stateError DurableStateError) StateOperation() string { return stateError.Operation }
 
-func NewQueueHandler(store core.JobQueueStore) *QueueHandler { return &QueueHandler{store: store} }
+func NewQueueHandler(store state.JobQueueStore) *QueueHandler { return &QueueHandler{store: store} }
 
-func NewQueueHandlerWithWake(store core.JobQueueStore, wakeUp func(core.RunnerPool)) *QueueHandler {
+// NewQueueHandlerWithWake signals the affected Runner Pool after demand is
+// newly queued or replayed while already queued.
+func NewQueueHandlerWithWake(store state.JobQueueStore, wakeUp func(core.RunnerPool)) *QueueHandler {
 	return &QueueHandler{store: store, wakeUp: wakeUp}
 }
 
+// NewQueueHandlerWithWakeAndBackend adds a stable backend name to durable-state
+// failures while keeping the driver error available through errors.Unwrap.
 func NewQueueHandlerWithWakeAndBackend(
-	store core.JobQueueStore,
+	store state.JobQueueStore,
 	wakeUp func(core.RunnerPool),
 	stateBackend string,
 ) *QueueHandler {
 	return &QueueHandler{store: store, wakeUp: wakeUp, stateBackend: stateBackend}
 }
 
-func (handler *QueueHandler) Request(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
+// IngestDemand queues source demand idempotently and wakes its Runner Pool only
+// when the request remains eligible for processing.
+func (handler *QueueHandler) IngestDemand(ctx context.Context, request core.JobRequest) (core.EnqueueResult, error) {
 	result, err := handler.store.Queue(ctx, request)
 	if err != nil {
 		if handler.stateBackend != "" {
@@ -65,10 +72,9 @@ func (handler *QueueHandler) Request(ctx context.Context, request core.JobReques
 	return result, nil
 }
 
-// RunnerStarted durably records that the source assigned the job to a runner.
-// The store atomically resolves delayed start observations against queued work
+// ObserveRunnerAcceptance atomically resolves delayed acceptance observations
 // so callers can safely redeliver the same source event.
-func (handler *QueueHandler) RunnerStarted(
+func (handler *QueueHandler) ObserveRunnerAcceptance(
 	ctx context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -79,16 +85,16 @@ func (handler *QueueHandler) RunnerStarted(
 	if unmatched {
 		return core.ObservationResult{Outcome: core.ObservationUnmatched}, nil
 	}
-	result, err := handler.store.MarkRunnerStarted(ctx, identity)
+	result, err := handler.store.ObserveRunnerAcceptance(ctx, identity)
 	if err != nil {
-		return result, handler.lifecycleError("mark_runner_started", observation, err)
+		return result, handler.lifecycleError("mark_runner_accepted", observation, err)
 	}
 	return result, nil
 }
 
-// Terminalize durably ends source demand. Provider cleanup remains
+// ObserveTerminal durably ends source demand. Provider cleanup remains
 // owned by reconciliation, which retains processing until cleanup succeeds.
-func (handler *QueueHandler) Terminalize(
+func (handler *QueueHandler) ObserveTerminal(
 	ctx context.Context,
 	observation core.RunnerObservation,
 ) (core.ObservationResult, error) {
@@ -106,31 +112,56 @@ func (handler *QueueHandler) Terminalize(
 	return result, nil
 }
 
+func (handler *QueueHandler) ObserveTerminalIfUnaccepted(
+	ctx context.Context,
+	identity core.JobIdentity,
+) (core.ConditionalTerminalResult, error) {
+	if err := identity.Validate(); err != nil || identity.JobID == (core.JobID{}) || !identity.Source.IsValid() {
+		if err == nil {
+			err = core.ErrInvalidJobIdentity
+		}
+		return core.ConditionalTerminalResult{}, fmt.Errorf("validate conditional terminal job identity: %w", err)
+	}
+	result, err := handler.store.ObserveTerminalIfUnaccepted(ctx, identity)
+	if err != nil {
+		if handler.stateBackend != "" {
+			return result, DurableStateError{Backend: handler.stateBackend,
+				Operation: "terminalize_unaccepted_job", cause: err}
+		}
+		return result, fmt.Errorf("terminalize unaccepted source request %q: %w", identity.Source.ID, err)
+	}
+	return result, nil
+}
+
 func identityFromObservation(observation core.RunnerObservation) (core.JobIdentity, bool, error) {
 	identity := core.JobIdentity{Source: observation.Source}
 	if !observation.Source.IsEmpty() && !observation.Source.IsValid() {
 		return core.JobIdentity{}, false, core.ErrInvalidJobIdentity
 	}
-	jobID, legacy, err := observedJobID(observation.RunnerName)
+	runnerIdentity, unowned, err := observedRunnerIdentity(observation.RunnerName)
 	if err != nil {
 		return core.JobIdentity{}, false, err
 	}
-	if legacy && observation.Source.IsEmpty() {
+	if unowned && observation.Source.IsEmpty() {
 		return core.JobIdentity{}, true, nil
 	}
-	identity.JobID = jobID
+	identity.JobID = runnerIdentity.JobID
+	identity.AttemptID = runnerIdentity.AttemptID
 	if err := identity.Validate(); err != nil {
 		return core.JobIdentity{}, false, fmt.Errorf("validate lifecycle job identity: %w", err)
 	}
 	return identity, false, nil
 }
 
-func observedJobID(name core.RunnerName) (core.JobID, bool, error) {
+func observedRunnerIdentity(name core.RunnerName) (core.RunnerIdentity, bool, error) {
 	if name == "" {
-		return core.JobID{}, false, nil
+		return core.RunnerIdentity{}, false, nil
 	}
-	jobID, canonical, err := jobIDFromRunnerName(name)
-	return jobID, !canonical, err
+	identity, owned, err := core.ParseRunnerName(name)
+	if err != nil {
+		return core.RunnerIdentity{}, false, fmt.Errorf("parse observed runner identity: %w", err)
+	}
+	return identity, !owned, nil
 }
 
 func (handler *QueueHandler) lifecycleError(

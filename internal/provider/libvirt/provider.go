@@ -5,46 +5,26 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"os"
+	"net/url"
 	"os/exec"
 	"strings"
 
-	"github.com/stateshifters/runnerfoundry/internal/provider/contract"
+	"github.com/stateshifters/runnerfoundry/internal/core"
+	"github.com/stateshifters/runnerfoundry/internal/execution"
 	"github.com/stateshifters/runnerfoundry/internal/provider/libvirtxml"
 )
 
-// RunnerState is libvirt's normalized lifecycle observation.
-type RunnerState string
-
 const (
-	RunnerStateRunning   RunnerState = contract.RunnerStateRunning
-	RunnerStateCompleted RunnerState = contract.RunnerStateCompleted
-	RunnerStateUnknown   RunnerState = contract.RunnerStateUnknown
+	legacyRunnerPoolTag = "runnerfoundry.runner-pool"
+	legacyScaleSetTag   = "runnerfoundry.scale-set"
+	legacyRunnerTag     = "runnerfoundry.runner"
 )
 
-// RunnerInstance is one owned libvirt domain returned by List.
-type RunnerInstance struct {
-	ID             string
-	RunnerName     string
-	RunnerPoolName string
-	State          RunnerState
-}
-
-// StartRequest contains ownership metadata and opaque JIT configuration for one
-// ephemeral domain.
-type StartRequest struct {
-	RunnerPoolName string
-	RunnerName     string
-	JITConfig      string
-}
-
-// Config selects one libvirt connection and domain XML template path.
 type Config struct {
 	ConnectionURI     string
 	DomainXMLTemplate string
 }
 
-// CommandRunner combines the libvirt command capabilities required by Provider.
 type CommandRunner interface {
 	DomainCreator
 	DomainReader
@@ -52,36 +32,29 @@ type CommandRunner interface {
 	ConnectionReader
 }
 
-// DomainCreator creates a transient domain from rendered XML.
 type DomainCreator interface {
 	CreateDomain(ctx context.Context, connectionURI string, domainXML string) error
 }
 
-// DomainReader lists domains and obtains ownership and lifecycle evidence.
 type DomainReader interface {
 	ListDomains(ctx context.Context, connectionURI string) (string, error)
 	ReadDomainXML(ctx context.Context, connectionURI string, domainName string) (string, error)
 	ReadDomainState(ctx context.Context, connectionURI string, domainName string) (string, error)
 }
 
-// DomainDestroyer force-stops a transient domain by name.
 type DomainDestroyer interface {
 	DestroyDomain(ctx context.Context, connectionURI string, domainName string) error
 }
 
-// ConnectionReader verifies the configured libvirt connection.
 type ConnectionReader interface {
 	ReadConnectionURI(ctx context.Context, connectionURI string) (string, error)
 }
 
-// ExecCommandRunner invokes the local virsh CLI without retaining command state
-// between calls.
 type ExecCommandRunner struct {
 	newCommand     func(context.Context, string, ...string) *exec.Cmd
 	combinedOutput func(*exec.Cmd) ([]byte, error)
 }
 
-// NewExecCommandRunner constructs the production virsh command boundary.
 func NewExecCommandRunner() ExecCommandRunner {
 	return ExecCommandRunner{newCommand: exec.CommandContext, combinedOutput: (*exec.Cmd).CombinedOutput}
 }
@@ -131,142 +104,113 @@ func (runner ExecCommandRunner) runVirsh(
 	return string(outputBytes), nil
 }
 
-// Provider owns transient domains bearing RunnerFoundry metadata for Config.
-// Callers must Validate before Start.
 type Provider struct {
-	CommandRunner CommandRunner
-	Config        Config
-	readTemplate  func(string) ([]byte, error)
+	commandRunner  CommandRunner
+	config         Config
+	domainTemplate []byte
+	memberID       core.MemberID
 }
 
-// NewProvider constructs a provider that reads Config.DomainXMLTemplate from
-// the operating-system filesystem when validating or starting a runner.
-func NewProvider(commandRunner CommandRunner, config Config) Provider {
-	return NewProviderWithTemplateReader(commandRunner, config, os.ReadFile)
-}
+var _ execution.ExecutionProvider = Provider{}
 
-// NewProviderWithTemplateReader constructs a provider with an explicit template
-// input boundary. It performs no I/O until Validate or Start.
-func NewProviderWithTemplateReader(
+func NewProvider(
 	commandRunner CommandRunner,
 	config Config,
-	readTemplate func(string) ([]byte, error),
+	domainTemplate []byte,
+	memberID core.MemberID,
 ) Provider {
-	return Provider{CommandRunner: commandRunner, Config: config, readTemplate: readTemplate}
+	return Provider{
+		commandRunner:  commandRunner,
+		config:         config,
+		domainTemplate: append([]byte(nil), domainTemplate...),
+		memberID:       memberID,
+	}
 }
 
-// Start renders the configured template and creates one transient domain.
-func (provider Provider) Start(ctx context.Context, request StartRequest) error {
+func (provider Provider) EndpointID() execution.InventoryEndpointID {
+	return execution.InventoryEndpointID("libvirt:" + normalizedURI(provider.config.ConnectionURI))
+}
+
+func normalizedURI(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String()
+}
+
+func (provider Provider) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {
+	return provider.EndpointID() == endpointID
+}
+
+func (provider Provider) CanInspectEndpointForMember(
+	endpointID execution.InventoryEndpointID,
+	memberID core.MemberID,
+) bool {
+	if !provider.KnowsEndpoint(endpointID) {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(provider.config.ConnectionURI))
+	if err == nil && parsed.Host != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(string(provider.memberID)), strings.TrimSpace(string(memberID)))
+}
+
+func (provider Provider) Refresh(ctx context.Context) error {
+	_, err := provider.Inspect(ctx)
+	return err
+}
+
+func (provider Provider) InspectEndpoint(
+	ctx context.Context,
+	endpointID execution.InventoryEndpointID,
+) ([]execution.RunnerInstance, error) {
+	if !provider.KnowsEndpoint(endpointID) {
+		return nil, fmt.Errorf("libvirt endpoint %q is not configured", endpointID)
+	}
+	instances, err := provider.Inspect(ctx)
+	for index := range instances {
+		instances[index].EndpointID = endpointID
+	}
+	return instances, err
+}
+
+func (provider Provider) Validate(ctx context.Context) error {
+	if _, err := provider.renderDomainXML(execution.StartRequest{
+		RunnerPool: "validation",
+		RunnerName: "validation",
+	}); err != nil {
+		return fmt.Errorf("validate libvirt provider: %w", err)
+	}
+	if _, err := provider.commandRunner.ReadConnectionURI(ctx, provider.config.ConnectionURI); err != nil {
+		return fmt.Errorf("validate libvirt provider: validate libvirt connection: %w", err)
+	}
+	return nil
+}
+
+func (provider Provider) Start(ctx context.Context, request execution.StartRequest) error {
 	renderedXML, err := provider.renderDomainXML(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("start libvirt runner: %w", err)
 	}
-	if err := provider.CommandRunner.CreateDomain(ctx, provider.Config.ConnectionURI, renderedXML); err != nil {
-		return fmt.Errorf("create libvirt runner %q: %w", request.RunnerName, err)
-	}
-	return nil
-}
-
-// List returns all owned domains when requestedPools is empty, or filters by the
-// first requested Runner Pool. It reads XML and state for each owned domain and
-// fails without returning a partial result.
-func (provider Provider) List(ctx context.Context, requestedPools ...string) ([]RunnerInstance, error) {
-	output, err := provider.CommandRunner.ListDomains(ctx, provider.Config.ConnectionURI)
-	if err != nil {
-		return nil, fmt.Errorf("list libvirt domains: %w", err)
-	}
-	var instances []RunnerInstance
-	for _, domainName := range strings.Split(output, "\n") {
-		domainName = strings.TrimSpace(domainName)
-		if domainName == "" {
-			continue
-		}
-		instance, owned, err := provider.instanceForDomain(ctx, domainName, requestedPools...)
-		if err != nil {
-			return nil, err
-		}
-		if !owned {
-			continue
-		}
-		instances = append(instances, listedInstance(instance, requestedPools))
-	}
-	return instances, nil
-}
-
-func listedInstance(instance RunnerInstance, requestedPools []string) RunnerInstance {
-	if len(requestedPools) != 0 {
-		instance.RunnerPoolName = ""
-	}
-	return instance
-}
-
-func (provider Provider) instanceForDomain(
-	ctx context.Context,
-	domainName string,
-	requestedPools ...string,
-) (RunnerInstance, bool, error) {
-	domainXML, err := provider.CommandRunner.ReadDomainXML(ctx, provider.Config.ConnectionURI, domainName)
-	if err != nil {
-		return RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
-	}
-	runnerPoolName := runnerPoolMetadataValue(domainXML)
-	if runnerPoolName == "" {
-		return RunnerInstance{}, false, nil
-	}
-	if len(requestedPools) != 0 && runnerPoolName != requestedPools[0] {
-		return RunnerInstance{}, false, nil
-	}
-	domainState, err := provider.CommandRunner.ReadDomainState(ctx, provider.Config.ConnectionURI, domainName)
-	if err != nil {
-		return RunnerInstance{}, false, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
-	}
-	runnerName := metadataValue(domainXML, contract.OwnershipRunner)
-	if runnerName == "" {
-		runnerName = domainName
-	}
-	return RunnerInstance{
-		ID:             domainName,
-		RunnerName:     runnerName,
-		RunnerPoolName: runnerPoolName,
-		State:          libvirtState(domainState),
-	}, true, nil
-}
-
-// Destroy force-stops a non-completed domain. Completed instances are already
-// absent from the active lifecycle and are accepted as an idempotent no-op.
-func (provider Provider) Destroy(ctx context.Context, instance RunnerInstance) error {
-	if instance.State == RunnerStateCompleted {
-		return nil
-	}
-	if err := provider.CommandRunner.DestroyDomain(ctx, provider.Config.ConnectionURI, instance.ID); err != nil {
-		return fmt.Errorf("destroy libvirt runner %q: %w", instance.RunnerName, err)
+	if err := provider.commandRunner.CreateDomain(ctx, provider.config.ConnectionURI, renderedXML); err != nil {
+		return fmt.Errorf("start libvirt runner: create libvirt runner %q: %w", request.RunnerName, err)
 	}
 	return nil
 }
 
-// Validate reads and renders the template, then verifies the libvirt connection.
-func (provider Provider) Validate(ctx context.Context) error {
-	if _, err := provider.renderDomainXML(StartRequest{RunnerPoolName: "validation", RunnerName: "validation"}); err != nil {
-		return err
+func (provider Provider) renderDomainXML(request execution.StartRequest) (string, error) {
+	if provider.domainTemplate == nil {
+		return "", errors.New("libvirt XML template is required")
 	}
-	if _, err := provider.CommandRunner.ReadConnectionURI(ctx, provider.Config.ConnectionURI); err != nil {
-		return fmt.Errorf("validate libvirt connection: %w", err)
-	}
-	return nil
-}
-
-func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
-	if provider.readTemplate == nil {
-		return "", errors.New("libvirt XML template reader is required")
-	}
-	templateBytes, err := provider.readTemplate(provider.Config.DomainXMLTemplate)
-	if err != nil {
-		return "", fmt.Errorf("read libvirt XML template: %w", err)
-	}
-	renderedXML, err := libvirtxml.NewDomainTemplate(string(templateBytes)).Render(libvirtxml.RenderRequest{
-		RunnerPoolName: request.RunnerPoolName,
-		RunnerName:     request.RunnerName,
-		JITConfig:      request.JITConfig,
+	renderedXML, err := libvirtxml.NewDomainTemplate(string(provider.domainTemplate)).Render(libvirtxml.RenderRequest{
+		RunnerPoolName: string(request.RunnerPool),
+		RunnerName:     string(request.RunnerName),
+		JITConfig:      string(request.Bootstrap.Content()),
 	})
 	if err != nil {
 		return "", fmt.Errorf("render libvirt XML template: %w", err)
@@ -274,41 +218,98 @@ func (provider Provider) renderDomainXML(request StartRequest) (string, error) {
 	return renderedXML, nil
 }
 
-func metadataValue(domainXML string, key string) string {
-	namespacedValue := namespacedMetadataValue(domainXML, key)
-	if namespacedValue != "" {
-		return namespacedValue
+func (provider Provider) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	output, err := provider.commandRunner.ListDomains(ctx, provider.config.ConnectionURI)
+	if err != nil {
+		return nil, fmt.Errorf("inspect libvirt runners: list libvirt domains: %w", err)
 	}
-	return legacyMetadataValue(domainXML, key)
+	var instances []execution.RunnerInstance
+	for _, domainName := range strings.Split(output, "\n") {
+		domainName = strings.TrimSpace(domainName)
+		if domainName == "" {
+			continue
+		}
+		instance, owned, err := provider.instanceForDomain(ctx, domainName)
+		if err != nil {
+			return nil, fmt.Errorf("inspect libvirt runners: %w", err)
+		}
+		if owned {
+			instances = append(instances, instance)
+		}
+	}
+	return instances, nil
 }
 
-func runnerPoolMetadataValue(domainXML string) string {
-	if value := metadataValue(domainXML, contract.OwnershipRunnerPool); value != "" {
-		return value
+func (provider Provider) instanceForDomain(
+	ctx context.Context,
+	domainName string,
+) (execution.RunnerInstance, bool, error) {
+	domainXML, err := provider.commandRunner.ReadDomainXML(ctx, provider.config.ConnectionURI, domainName)
+	if err != nil {
+		return execution.RunnerInstance{}, false, fmt.Errorf("dump libvirt domain %q: %w", domainName, err)
 	}
-	return metadataValue(domainXML, contract.LegacyOwnershipScaleSet)
+	ownership := parseOwnershipMetadata(domainXML)
+	if ownership.runnerPool == "" {
+		return execution.RunnerInstance{}, false, nil
+	}
+	domainState, err := provider.commandRunner.ReadDomainState(ctx, provider.config.ConnectionURI, domainName)
+	if err != nil {
+		return execution.RunnerInstance{}, false, fmt.Errorf("read libvirt domain state %q: %w", domainName, err)
+	}
+	runnerName := ownership.runnerName
+	if runnerName == "" {
+		runnerName = domainName
+	}
+	return execution.RunnerInstance{
+		ID:         domainName,
+		RunnerName: core.RunnerName(runnerName),
+		RunnerPool: core.RunnerPool(ownership.runnerPool),
+		State:      libvirtState(domainState),
+	}, true, nil
 }
 
-func namespacedMetadataValue(domainXML string, key string) string {
+func (provider Provider) Destroy(ctx context.Context, instance execution.RunnerInstance) error {
+	if instance.State == execution.RunnerStateCompleted {
+		return nil
+	}
+	if err := provider.commandRunner.DestroyDomain(ctx, provider.config.ConnectionURI, instance.ID); err != nil {
+		return fmt.Errorf("destroy libvirt runner: destroy libvirt runner %q: %w", instance.RunnerName, err)
+	}
+	return nil
+}
+
+type ownershipMetadata struct {
+	runnerPool string
+	runnerName string
+}
+
+func parseOwnershipMetadata(domainXML string) ownershipMetadata {
 	var metadata domainMetadata
-	if err := xml.Unmarshal([]byte(domainXML), &metadata); err != nil {
-		return ""
+	ownership := ownershipMetadata{}
+	namespacedLegacyRunnerPool := ""
+	if err := xml.Unmarshal([]byte(domainXML), &metadata); err == nil {
+		ownership.runnerPool = metadata.Metadata.Runner.RunnerPool
+		namespacedLegacyRunnerPool = metadata.Metadata.Runner.LegacyScaleSet
+		ownership.runnerName = metadata.Metadata.Runner.Name
 	}
-	switch key {
-	case contract.OwnershipRunnerPool:
-		return metadata.Metadata.Runner.RunnerPool
-	case contract.LegacyOwnershipScaleSet:
-		return metadata.Metadata.Runner.LegacyScaleSet
-	case contract.OwnershipRunner:
-		return metadata.Metadata.Runner.Name
-	default:
-		return ""
+	if ownership.runnerPool == "" {
+		ownership.runnerPool = legacyMetadataValue(domainXML, legacyRunnerPoolTag)
 	}
+	if ownership.runnerPool == "" {
+		ownership.runnerPool = namespacedLegacyRunnerPool
+	}
+	if ownership.runnerPool == "" {
+		ownership.runnerPool = legacyMetadataValue(domainXML, legacyScaleSetTag)
+	}
+	if ownership.runnerName == "" {
+		ownership.runnerName = legacyMetadataValue(domainXML, legacyRunnerTag)
+	}
+	return ownership
 }
 
-func legacyMetadataValue(domainXML string, key string) string {
-	openTag := "<" + key + ">"
-	closeTag := "</" + key + ">"
+func legacyMetadataValue(domainXML string, tag string) string {
+	openTag := "<" + tag + ">"
+	closeTag := "</" + tag + ">"
 	start := strings.Index(domainXML, openTag)
 	if start < 0 {
 		return ""
@@ -322,26 +323,26 @@ func legacyMetadataValue(domainXML string, key string) string {
 }
 
 type domainMetadata struct {
-	Metadata scalerMetadata `xml:"metadata"`
+	Metadata runnerMetadata `xml:"metadata"`
 }
 
-type scalerMetadata struct {
-	Runner scalerRunnerMetadata `xml:"urn:runnerfoundry runner"`
+type runnerMetadata struct {
+	Runner runnerOwnershipMetadata `xml:"urn:runnerfoundry runner"`
 }
 
-type scalerRunnerMetadata struct {
+type runnerOwnershipMetadata struct {
 	RunnerPool     string `xml:"urn:runnerfoundry runner-pool"`
 	LegacyScaleSet string `xml:"urn:runnerfoundry scale-set"`
 	Name           string `xml:"urn:runnerfoundry name"`
 }
 
-func libvirtState(rawState string) RunnerState {
+func libvirtState(rawState string) execution.RunnerState {
 	switch strings.ToLower(strings.TrimSpace(rawState)) {
 	case "running":
-		return RunnerStateRunning
+		return execution.RunnerStateRunning
 	case "shut off":
-		return RunnerStateCompleted
+		return execution.RunnerStateCompleted
 	default:
-		return RunnerStateUnknown
+		return execution.RunnerStateUnknown
 	}
 }

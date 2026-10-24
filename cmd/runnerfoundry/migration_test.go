@@ -4,173 +4,89 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
-
-	"github.com/stateshifters/runnerfoundry/internal/cluster"
-	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 )
 
-func TestLoadMigrationConfigIgnoresUnrelatedDaemonConfiguration(t *testing.T) {
-	configText := "github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\nscale_sets: invalid\n"
-	configured, err := loadMigrationConfig([]byte(configText))
-	if err != nil {
-		t.Fatalf("load migration config: %v", err)
-	}
-	if configured.Role != "runnerfoundry" {
-		t.Fatalf("PostgreSQL role = %q", configured.Role)
-	}
-}
+func TestMigrationCommandDispatchesParsedRequestsToDaemonService(t *testing.T) {
+	service := &migrationServiceFake{status: migrationStatus{Current: 3, Target: 8}}
+	executor := migrationCommandExecutorForTest(service)
 
-func TestLoadMigrationConfigReportsInvalidContent(t *testing.T) {
-	if _, err := loadMigrationConfig([]byte("state: [")); err == nil {
-		t.Fatal("expected invalid config error")
+	requests := []migrationRequest{
+		{action: migrationStatusAction, configPath: "status.yaml"},
+		{action: migrationUpAction, configPath: "up.yaml"},
+		{action: migrationDownAction, configPath: "down.yaml", target: 3},
 	}
-}
-
-func TestExecuteMigrationUsesOnlyPostgreSQLConfiguration(t *testing.T) {
-	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
-	status, err := executeMigration(t.Context(), migrationRequest{
-		action: migrationStatusAction, configPath: "config.yaml",
-	}, migrationDependencies{
-		readConfigFile: func(path string) ([]byte, error) {
-			if path != "config.yaml" {
-				t.Fatalf("config path = %q", path)
-			}
-			return []byte("github: invalid\nstate:\n  postgres:\n    role: runnerfoundry\n"), nil
-		},
-		newStore: func(postgresConfig postgresconfig.Settings) migrationStore {
-			if postgresConfig.Role != "runnerfoundry" {
-				t.Fatalf("PostgreSQL config = %#v", postgresConfig)
-			}
-			return store
-		},
-		now: func() time.Time { return time.Unix(1, 0) },
-	})
-	if err != nil || status.Current != 1 {
-		t.Fatalf("migration status = %#v, %v", status, err)
-	}
-}
-
-func TestExecuteMigrationReportsInvalidConfiguration(t *testing.T) {
-	_, err := executeMigration(t.Context(), migrationRequest{
-		action: migrationStatusAction, configPath: "missing.yaml",
-	}, migrationDependencies{readConfigFile: func(string) ([]byte, error) { return nil, errors.New("missing") }})
-	if err == nil {
-		t.Fatal("expected invalid migration config")
-	}
-}
-
-func TestExecuteMigrationReportsInvalidConfigurationContent(t *testing.T) {
-	_, err := executeMigration(t.Context(), migrationRequest{configPath: "config.yaml"}, migrationDependencies{
-		readConfigFile: func(string) ([]byte, error) { return []byte("state: ["), nil },
-	})
-	if err == nil {
-		t.Fatal("expected invalid migration config content")
-	}
-}
-
-func TestExecuteMigrationUsesConfiguredStore(t *testing.T) {
-	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
-	dependencies := migrationDependencies{
-		readConfigFile: func(string) ([]byte, error) {
-			return []byte("state:\n  postgres:\n    role: runnerfoundry\n"), nil
-		},
-		newStore: func(postgresconfig.Settings) migrationStore { return store },
-		now:      func() time.Time { return time.Unix(1, 0) },
-	}
-	status, err := (migrationCommandExecutor{dependencies}).run(
-		t.Context(), migrationRequest{action: migrationStatusAction},
-	)
-	if err != nil || status.Current != 1 {
-		t.Fatalf("migration status = %#v, %v", status, err)
-	}
-}
-
-func TestProductionMigrationStoreFactoryConstructsWithoutConnecting(t *testing.T) {
-	if store := newProductionMigrationDependencies().newStore(postgresconfig.Settings{Role: "runnerfoundry"}); store == nil {
-		t.Fatal("expected migration store")
-	}
-}
-
-func TestExecuteStoreMigrationDispatchesTypedActions(t *testing.T) {
-	store := &fakeMigrationStore{status: migrationStatus{Current: 1, Target: 1}}
-	for _, request := range []migrationRequest{
-		{action: migrationStatusAction},
-		{action: migrationUpAction},
-		{action: migrationDownAction, target: 0},
-	} {
-		status, err := executeStoreMigration(t.Context(), store, request, time.Unix(1, 0))
-		if err != nil || status.Current != 1 {
-			t.Fatalf("execute %q = %#v, %v", request.action, status, err)
+	for _, request := range requests {
+		status, err := executor.run(t.Context(), request)
+		if err != nil || status != service.status {
+			t.Fatalf("execute %q = (%#v, %v)", request.action, status, err)
 		}
 	}
-	if store.migrateCalls != 1 || store.migrateDownCalls != 1 || store.statusCalls != 3 || store.target != 0 {
-		t.Fatalf("migration calls = %#v", store)
+	if service.statusPath != "status.yaml" || service.upPath != "up.yaml" ||
+		service.rollbackPath != "down.yaml" || service.rollbackTarget != 3 {
+		t.Fatalf("migration service calls = %#v", service)
 	}
 }
 
-func TestExecuteStoreMigrationReportsFailures(t *testing.T) {
+func TestMigrationCommandReportsDaemonServiceFailures(t *testing.T) {
 	failure := errors.New("failed")
-	for name, scenario := range map[string]struct {
-		store   *fakeMigrationStore
-		request migrationRequest
-	}{
-		"status":      {&fakeMigrationStore{statusErr: failure}, migrationRequest{action: migrationStatusAction}},
-		"up":          {&fakeMigrationStore{migrateErr: failure}, migrationRequest{action: migrationUpAction}},
-		"up status":   {&fakeMigrationStore{statusErr: failure}, migrationRequest{action: migrationUpAction}},
-		"down":        {&fakeMigrationStore{migrateDownErr: failure}, migrationRequest{action: migrationDownAction}},
-		"down status": {&fakeMigrationStore{statusErr: failure}, migrationRequest{action: migrationDownAction}},
+	for name, request := range map[string]migrationRequest{
+		"status": {action: migrationStatusAction},
+		"up":     {action: migrationUpAction},
+		"down":   {action: migrationDownAction},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := executeStoreMigration(t.Context(), scenario.store, scenario.request, time.Unix(1, 0)); err == nil {
-				t.Fatal("expected migration failure")
+			service := &migrationServiceFake{err: failure}
+			if _, err := migrationCommandExecutorForTest(service).run(t.Context(), request); !errors.Is(err, failure) {
+				t.Fatalf("migration error = %v", err)
 			}
 		})
 	}
 }
 
-func TestExecuteStoreMigrationRejectsUnsupportedAction(t *testing.T) {
-	if _, err := executeStoreMigration(t.Context(), nil, migrationRequest{action: "unsupported"}, time.Unix(1, 0)); err == nil {
+func TestMigrationCommandRejectsUnsupportedAction(t *testing.T) {
+	if _, err := (migrationCommandExecutor{}).run(t.Context(), migrationRequest{action: "unsupported"}); err == nil {
 		t.Fatal("expected unsupported migration action")
 	}
 }
 
-func TestMigrationStatusErrorPreservesNilAndWrapsFailure(t *testing.T) {
-	failure := errors.New("failed")
-	if err := migrationStatusError(nil); err != nil {
-		t.Fatalf("nil migration error = %v", err)
-	}
-	if err := migrationStatusError(failure); err == nil {
-		t.Fatal("expected wrapped migration error")
+func TestProductionMigrationCommandConstructsWithoutConnecting(t *testing.T) {
+	executor := newProductionMigrationCommandExecutor()
+	if executor.status == nil || executor.up == nil || executor.rollbackTo == nil {
+		t.Fatal("expected migration service")
 	}
 }
 
-type fakeMigrationStore struct {
-	status           migrationStatus
-	statusErr        error
-	migrateErr       error
-	migrateDownErr   error
-	statusCalls      int
-	migrateCalls     int
-	migrateDownCalls int
-	target           int32
-}
-
-func (store *fakeMigrationStore) MigrationStatus(context.Context) (cluster.MigrationStatus, error) {
-	store.statusCalls++
-	return store.status, store.statusErr
-}
-
-func (store *fakeMigrationStore) Migrate(context.Context) error {
-	store.migrateCalls++
-	return store.migrateErr
-}
-
-func (store *fakeMigrationStore) MigrateDown(_ context.Context, target int32, _ time.Time, liveFor time.Duration) error {
-	store.migrateDownCalls++
-	store.target = target
-	if liveFor != cluster.NodeLifetime {
-		return errors.New("unexpected node lifetime")
+func migrationCommandExecutorForTest(service *migrationServiceFake) migrationCommandExecutor {
+	return migrationCommandExecutor{
+		status: service.Status, up: service.Up, rollbackTo: service.RollbackTo,
 	}
-	return store.migrateDownErr
+}
+
+type migrationServiceFake struct {
+	status         migrationStatus
+	err            error
+	statusPath     string
+	upPath         string
+	rollbackPath   string
+	rollbackTarget int32
+}
+
+func (service *migrationServiceFake) Status(_ context.Context, configPath string) (migrationStatus, error) {
+	service.statusPath = configPath
+	return service.status, service.err
+}
+
+func (service *migrationServiceFake) Up(_ context.Context, configPath string) (migrationStatus, error) {
+	service.upPath = configPath
+	return service.status, service.err
+}
+
+func (service *migrationServiceFake) RollbackTo(
+	_ context.Context,
+	configPath string,
+	target int32,
+) (migrationStatus, error) {
+	service.rollbackPath = configPath
+	service.rollbackTarget = target
+	return service.status, service.err
 }

@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	upstream "github.com/actions/scaleset"
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
-	statecontract "github.com/stateshifters/runnerfoundry/internal/state"
 )
 
 func TestProductContractSQLiteCapacityReadFailurePublishesZero(t *testing.T) {
@@ -40,7 +38,7 @@ func exerciseCapacityReadFailure(t *testing.T, state config.StateConfig, memberN
 	harness.establishSourceSession()
 	session := harness.host.sessions["linux"]
 	drainIntegers(session.capacities)
-	harness.sourceRuntime.capacities = &failOnceCapacityStore{delegate: harness.runtime.state.store}
+	harness.sourceRuntime.capacityProvider = &failOnceCapacityProvider{delegate: harness.sourceRuntime.capacityProvider}
 
 	harness.deliver(&upstream.RunnerScaleSetMessage{Statistics: e2eMessageStatistics(0)})
 	assertPublishedCapacity(t, session, 0, "fail-closed capacity read")
@@ -48,24 +46,23 @@ func exerciseCapacityReadFailure(t *testing.T, state config.StateConfig, memberN
 	assertPublishedCapacity(t, session, 1, "capacity read recovery")
 }
 
-type failOnceCapacityStore struct {
-	delegate statecontract.RunnerPoolCapacityStore
+type failOnceCapacityProvider struct {
+	delegate core.CapacitySnapshotProvider
 	called   atomic.Bool
 }
 
-func (store *failOnceCapacityStore) AvailableRunnerPoolCapacity(
+func (provider *failOnceCapacityProvider) CapacitySnapshot(
 	ctx context.Context,
 	runnerPool core.RunnerPool,
-	cutoff time.Time,
-) (int, error) {
-	if store.called.CompareAndSwap(false, true) {
-		return 0, errors.New("scripted capacity read failure")
+) (core.CapacitySnapshot, error) {
+	if provider.called.CompareAndSwap(false, true) {
+		return core.CapacitySnapshot{}, errors.New("scripted capacity read failure")
 	}
-	capacity, err := store.delegate.AvailableRunnerPoolCapacity(ctx, runnerPool, cutoff)
+	snapshot, err := provider.delegate.CapacitySnapshot(ctx, runnerPool)
 	if err != nil {
-		return 0, fmt.Errorf("delegate capacity read: %w", err)
+		return core.CapacitySnapshot{}, fmt.Errorf("read delegated capacity snapshot: %w", err)
 	}
-	return capacity, nil
+	return snapshot, nil
 }
 
-var _ statecontract.RunnerPoolCapacityStore = (*failOnceCapacityStore)(nil)
+var _ core.CapacitySnapshotProvider = (*failOnceCapacityProvider)(nil)

@@ -28,7 +28,7 @@ func TestProductContractProviderBoundaryDeadlinesSQLite(t *testing.T) {
 	harness := newSQLiteE2EHarness(t)
 	assertProviderDeadline(t, awaitProviderContext(t, harness.provider, "validate"), 30*time.Second)
 	assertEarlierProviderDeadlinePreserved(t, harness)
-	if err := harness.providerBoundary.Refresh(context.Background()); err != nil {
+	if err := harness.providerInventory.Refresh(context.Background()); err != nil {
 		t.Fatalf("refresh scripted provider boundary: %v", err)
 	}
 	assertProviderDeadline(t, awaitProviderContext(t, harness.provider, "refresh"), 30*time.Second)
@@ -124,7 +124,7 @@ func queueAndAssertProviderStart(
 	if started.RunnerPool != core.RunnerPool("linux") || started.EndpointID != harness.provider.EndpointID() {
 		t.Fatalf("provider start = %+v", started)
 	}
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 1 || processing[0].Job.ID != started.JobID {
@@ -148,10 +148,10 @@ func markAndAssertRunnerAccepted(
 		}},
 	})
 	assertPublishedCapacity(t, harness.host.sessions["linux"], 0, "accepted processing demand")
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
-	if err != nil || len(processing) != 1 || !processing[0].RunnerStarted {
+	if err != nil || len(processing) != 1 || !processing[0].RunnerAccepted {
 		t.Fatalf("processing after runner acceptance = %s, error = %v", describeProcessing(processing), err)
 	}
 }
@@ -180,7 +180,7 @@ func completeAndAssertCleanup(
 	harness.await("terminal cleanup inventory inspection", harness.provider.inspected)
 	harness.execution.Tick(harness.currentTime)
 	harness.await("post-cleanup execution cycle", harness.provider.inspected)
-	processing, err := harness.runtime.state.store.ProcessingByMember(
+	processing, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil || len(processing) != 0 {
@@ -431,7 +431,7 @@ func terminalizeProvisioningRetry(t *testing.T, harness *e2eHarness) {
 
 func assertProcessingRequest(t *testing.T, harness *e2eHarness, jobID core.JobID, wantRequestID int64) {
 	t.Helper()
-	records, err := harness.runtime.state.store.ProcessingByMember(
+	records, err := harness.runtime.state.store.processing.ProcessingByMember(
 		context.Background(), harness.runtime.state.member, "linux",
 	)
 	if err != nil {
