@@ -3,8 +3,6 @@
 When contributing to this repository, please first discuss the change you wish to make via issue,
 discussions, or any other method with the owners of this repository before making a change.
 
-Please note we have a code of conduct, please follow it in all your interactions with the project.
-
 ## Contributor terms
 
 A contribution is any code, documentation, design, or other material intentionally submitted for inclusion in RunnerFoundry.
@@ -55,6 +53,43 @@ source-specific operator instructions. GitHub runner scale-set terminology must 
 
 This project optimizes for long-term maintainability and predictable behavior. Prefer small, boring, readable changes over clever
 ones.
+
+## Set up a contributor workspace
+
+Clone the repository and work from its root. Install the Go version declared in [go.mod](go.mod), Git, and GNU Make.
+Make uses Bash on Unix systems and `pwsh.exe` (PowerShell 7) on Windows. Ensure those commands are on your path.
+Go downloads pinned module and tool dependencies when a command first needs them, so initial setup requires network access.
+The race gate also requires a race-supported Go platform and a working C compiler; see [Go's race detector requirements](https://go.dev/doc/articles/race_detector#Requirements).
+
+Start with `make test` for the ordinary hermetic suites. Use the [verification gates](#available-verification-gates) appropriate to the change.
+`make fmt-check` checks Go formatting; `make vet` checks suspicious Go constructs; `make lint` checks lint rules and complexity;
+`make coverage` checks statement coverage; and `make race` checks for data races.
+These gates do not require a running Git source or execution provider. E2E preparation is separate and described under [E2E tests](#e2e-tests).
+
+### Build and package
+
+The maintained build target produces a Linux AMD64 executable:
+
+```sh
+make build
+```
+
+The output is `build/linux/amd64/runnerfoundry`. Building an artifact does not verify application behaviour.
+
+To produce a Debian package, source-location notice, third-party license notices, and SBOM metadata:
+
+```sh
+make package-deb VERSION=<version>
+```
+
+Replace `<version>` with the intended package version. Packages are written under `dist/`.
+The packaging target uses pinned Go tools and downloads dependencies as needed.
+Release automation selects the release version and invokes `make prepare`, which packages the same artifacts.
+See [installation](docs/installation.md) for the operator workflow; do not execute a built or packaged daemon as contributor verification.
+
+Optional VM-image examples have their own build dependencies and maintained workflows.
+Their READMEs separate operator image preparation from launcher-maintenance checks:
+[Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md).
 
 ## Ways of working (contract)
 

@@ -2,7 +2,7 @@
 
 The [product contract](PRD.md) defines RunnerFoundry's source-neutral behavior. The [architecture](architecture.md) defines the boundaries every source adapter must preserve. This document owns the GitHub-specific protocol and persistence rules inside those boundaries.
 
-GitHub Actions is the only supported Git source today. The adapter authenticates independently to an ordered list of private GitHub Apps and represents each configured Runner Pool as a repository-scoped GitHub runner scale set through every App. A Runner Pool name is also the `runs-on` value published to GitHub.
+GitHub Actions is the only supported Git source today. The adapter authenticates independently to an ordered list of private GitHub Apps and represents each configured Runner Pool as a repository-scoped GitHub runner scale set across the repositories they expose. Each repository and Runner Pool route has one owning App, selected by the precedence rules below. A Runner Pool name is also the `runs-on` value published to GitHub.
 
 For the upstream polling, messaging, demand, and assignment model, see
 [GitHub runner scale-set mechanics](references/github-scaleset-mechanics.md).
@@ -102,7 +102,7 @@ erDiagram
 
 The active-registration key is repository URL plus Runner Pool. The ownership key is repository URL plus scale-set ID. GitHub App ID is a required positive ownership attribute, not part of the job namespace. App-scoped reads and guarded mutations prevent one App from restoring, polling, or pruning with another App's credentials. Member declarations use member ID plus Runner Pool and are replaced transactionally from that member's local configuration. A successful ensure commits one active registration and its ownership together. Guarded deletions match the App ID and complete stored fingerprint so a stale restoration or pruning result cannot erase a newer replacement. Registration rows change only when an individual registration changes; there is no full-table delete and reinsert cycle during ordinary operation.
 
-Removing an App deletes only its active routes and closes its process-local sessions. Its ownership evidence and remote scale sets remain. Re-adding the App restores management from that evidence; another App never prunes it. Schema 108 for SQLite and PostgreSQL migration 006 intentionally discard pre-migration GitHub registration and ownership rows because those rows have no trustworthy App identity. Core queued, processing, tombstone, membership, and capacity data remain intact. Stop the cluster for the normal migration procedure; expect a brief route-recreation period while the first post-upgrade discovery pass republishes GitHub routes. PostgreSQL rollback restores the previous single-App table shape and its saved pre-upgrade adapter rows.
+Removing an App deletes only its active routes and closes its process-local sessions. Its ownership evidence and remote scale sets remain. Re-adding the App restores management from that evidence; another App never prunes it.
 
 ## Pruning safety
 
@@ -110,4 +110,5 @@ Pruning is disabled by default. When enabled, it considers stored ownership only
 
 Before deleting an absent scale set, the adapter requires pruning to be enabled and no live member to declare its Runner Pool. It then reads GitHub's current scale sets for the stored runner group and checks the scale-set ID, name, and runner-group ID against the ownership record. A matching scale set is deleted and its ownership removed. An already absent scale set loses its ownership record without another delete. A mismatched fingerprint remains owned for later verification and is not deleted. Labels and update settings are not ownership evidence. With pruning disabled, registrations and ownership survive absent declarations. A pruning failure likewise retains ownership and does not block activation of successfully reconciled routes.
 
-GitHub configuration, credentials, and operator procedures remain in the root [README](../README.md#github-adapter-settings).
+For GitHub settings and credentials, see the [configuration guide](configuration.md#github-configuration).
+For deployment procedures and diagnosis, see [operations](operations.md).
