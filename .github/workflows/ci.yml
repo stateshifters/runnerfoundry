@@ -59,9 +59,49 @@ jobs:
           node-version: 25
 
       - name: "🧵 Install semantic release"
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: npm i --location=global @meza/mezas-conventional-changelog semantic-release semantic-release-discord-notifier conventional-changelog-conventionalcommits @semantic-release/github @semantic-release/changelog @semantic-release/exec semantic-release-export-data semantic-release-discord
 
+      - name: Install macOS release tools
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v openssl > /dev/null
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/runnerfoundry-release-tools.XXXXXX")"
+          curl --fail --silent --show-error --location https://github.com/anchore/quill/releases/download/v0.7.1/quill_0.7.1_linux_amd64.tar.gz --output "$tool_dir/quill.tar.gz"
+          printf '%s  %s\n' e58c6f86378a22507c1123e24412afd4ee2d3bb32ebd94d6059827dc0c1b3fbf "$tool_dir/quill.tar.gz" | sha256sum --check -
+          tar -xzf "$tool_dir/quill.tar.gz" -C "$tool_dir" quill
+          curl --fail --silent --show-error --location https://github.com/deploymenttheory/go-macos-pkg/releases/download/v0.7.3/macospkg_0.7.3_linux_amd64.tar.gz --output "$tool_dir/macospkg.tar.gz"
+          printf '%s  %s\n' 23bcf8fafa3e6041e50cc3a96952d252dc65b721bc6d59faa5de9a9c77c91031 "$tool_dir/macospkg.tar.gz" | sha256sum --check -
+          tar -xzf "$tool_dir/macospkg.tar.gz" -C "$tool_dir" macospkg
+          printf '%s\n' "$tool_dir" >> "$GITHUB_PATH"
+
       - name: Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: npx semantic-release
+          QUILL_SIGN_P12: ${{ secrets.MACOS_APPLICATION_P12_BASE64 }}
+          QUILL_SIGN_PASSWORD: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
+          MACOS_INSTALLER_P12_BASE64: ${{ secrets.MACOS_INSTALLER_P12_BASE64 }}
+          MACOSPKG_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
+          MACOS_NOTARY_P8_BASE64: ${{ secrets.MACOS_NOTARY_P8_BASE64 }}
+          APPLE_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_dir="$(mktemp -d "$RUNNER_TEMP/runnerfoundry-signing.XXXXXX")"
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          export MACOS_INSTALLER_P12_PATH="$signing_dir/installer.p12"
+          export APPLE_PRIVATE_KEY_PATH="$signing_dir/notarization.p8"
+          printf '%s' "$QUILL_SIGN_P12" | base64 --decode > "$signing_dir/application-input.p12"
+          openssl pkcs12 -in "$signing_dir/application-input.p12" -clcerts -out "$signing_dir/application-leaf.pem" -passin env:QUILL_SIGN_PASSWORD -passout env:QUILL_SIGN_PASSWORD
+          openssl pkcs12 -export -in "$signing_dir/application-leaf.pem" -out "$signing_dir/application.p12" -passin env:QUILL_SIGN_PASSWORD -passout env:QUILL_SIGN_PASSWORD
+          export QUILL_SIGN_P12="$signing_dir/application.p12"
+          printf '%s' "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > "$MACOS_INSTALLER_P12_PATH"
+          printf '%s' "$MACOS_NOTARY_P8_BASE64" | base64 --decode > "$APPLE_PRIVATE_KEY_PATH"
+          unset MACOS_INSTALLER_P12_BASE64 MACOS_NOTARY_P8_BASE64
+          npx semantic-release

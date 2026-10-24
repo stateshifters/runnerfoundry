@@ -8,6 +8,11 @@ SBOM_FILE := $(METADATA_DIR)/runnerfoundry-sbom.json
 SOURCE_INFO_FILE := $(METADATA_DIR)/SOURCE.txt
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+QUILL ?= quill
+MACOSPKG ?= macospkg
+MACOS_PAYLOAD := $(BUILD_DIR)/macos/payload
+MACOS_COMPONENT := $(BUILD_DIR)/macos/runnerfoundry-component.pkg
+MACOS_PACKAGE := $(DIST_DIR)/runnerfoundry_$(VERSION)_darwin_arm64.pkg
 GOLANGCI_LINT_TOOLCHAIN = go$(shell go list -m -f '{{.GoVersion}}')
 E2E_POSTGRES_ROOT ?= $(abspath $(BUILD_DIR)/e2e/postgres)
 E2E_POSTGRES_VERSION ?=
@@ -32,7 +37,7 @@ MKDIR := mkdir -p
 REMOVE_DIR := rm -rf
 endif
 
-.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race e2e-tool prepare-e2e test-e2e build notices sbom sbom-license source-info package-deb prepare clean
+.PHONY: fmt-check lint lint-config lint-fix lint-no-nolint vet test coverage race e2e-tool prepare-e2e test-e2e build build-macos notices sbom sbom-license source-info package-deb package-macos prepare clean
 
 fmt-check:
 	gofmt -l . > gofmt.out
@@ -105,6 +110,13 @@ build:
 	@$(MKDIR) "$(BUILD_DIR)/linux/amd64" > /dev/null
 	go build -ldflags "-X github.com/stateshifters/runnerfoundry/internal/buildinfo.version=$(VERSION)" -o "$(BUILD_DIR)/linux/amd64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
 
+build-macos: export GOOS := darwin
+build-macos: export GOARCH := arm64
+build-macos: export CGO_ENABLED := 0
+build-macos:
+	@$(MKDIR) "$(BUILD_DIR)/darwin/arm64"
+	go build -ldflags "-X github.com/stateshifters/runnerfoundry/internal/buildinfo.version=$(VERSION)" -o "$(BUILD_DIR)/darwin/arm64/$(EXECUTABLE_NAME)" ./cmd/runnerfoundry
+
 notices:
 	@$(MKDIR) "$(METADATA_DIR)" > /dev/null
 	go run github.com/google/go-licenses@v1.6.0 report --ignore github.com/stateshifters/runnerfoundry ./... > "$(NOTICES_FILE)"
@@ -130,12 +142,34 @@ endif
 
 package-deb: export VERSION := $(VERSION)
 package-deb: build notices sbom-license source-info
-	@$(REMOVE_DIR) "$(DIST_DIR)"
 	@$(MKDIR) "$(DIST_DIR)" > /dev/null
 	$(NFPM) package --packager deb --config nfpm.yaml --target "$(DIST_DIR)"
 
+package-macos: build-macos notices sbom-license source-info
+ifeq ($(OSFAMILY),Windows)
+	@Write-Error 'Signed macOS packaging requires the Linux release environment'; exit 1
+else
+	@test -n "$${QUILL_SIGN_P12:?Application signing certificate is required}"
+	@test -n "$${QUILL_SIGN_PASSWORD:?Application signing password is required}"
+	@test -n "$${MACOS_INSTALLER_P12_PATH:?Installer signing certificate path is required}"
+	@test -n "$${MACOSPKG_P12_PASSWORD:?Installer signing password is required}"
+	@test -n "$${APPLE_KEY_ID:?Notarization key ID is required}"
+	@test -n "$${APPLE_ISSUER_ID:?Notarization issuer ID is required}"
+	@test -n "$${APPLE_PRIVATE_KEY_PATH:?Notarization private key path is required}"
+	@test -n "$${MACOS_TEAM_ID:?Apple team ID is required}"
+	@$(REMOVE_DIR) "$(BUILD_DIR)/macos"
+	install -d -m 0755 "$(MACOS_PAYLOAD)/usr" "$(MACOS_PAYLOAD)/usr/local" "$(MACOS_PAYLOAD)/usr/local/bin" "$(MACOS_PAYLOAD)/usr/local/share" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry" "$(DIST_DIR)"
+	install -m 0755 "$(BUILD_DIR)/darwin/arm64/$(EXECUTABLE_NAME)" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
+	install -m 0644 packaging/macos/config.example.yaml LICENSE COPYRIGHT "$(NOTICES_FILE)" "$(SBOM_FILE)" "$(SOURCE_INFO_FILE)" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry/"
+	$(QUILL) sign "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
+	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location /
+	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 12.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH" --notarize
+	$(MACOSPKG) verify "$(MACOS_PACKAGE)" --team-id "$$MACOS_TEAM_ID" --require-developer-id --require-stapled --online
+endif
+
 prepare:
-	$(MAKE) package-deb VERSION="$(VERSION)"
+	@$(REMOVE_DIR) "$(DIST_DIR)"
+	$(MAKE) package-deb package-macos VERSION="$(VERSION)"
 
 clean:
 	@$(REMOVE_DIR) "$(BUILD_DIR)"; $(REMOVE_DIR) "$(DIST_DIR)"; $(REMOVE_DIR) coverage; $(REMOVE_DIR) coverage.out

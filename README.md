@@ -43,6 +43,7 @@ The quick start below uses that integration to share capacity across personal-ac
 ## Quick start
 
 This path uses an Ubuntu 24.04 AMD64 host, a Debian package, SQLite, and Docker Compose.
+For Apple Silicon Macs, follow [macOS installation](docs/installation-macos.md).
 
 ### 1. Prepare your host and GitHub App
 
