@@ -8,3 +8,4 @@ hs_err_pid*.log
 examples/libvirt-ubuntu-runner/output/
 examples/libvirt-ubuntu-runner/packer-key*
 remediation-plan/
+docs/branding

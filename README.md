@@ -1,28 +1,44 @@
 # RunnerFoundry
 
-Shared, ephemeral GitHub Actions runners for personal accounts.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/runnerfoundry-lockup-horizontal-cyan-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/runnerfoundry-lockup-horizontal-cyan-light.png">
+  <img src="docs/images/runnerfoundry-lockup-horizontal-cyan-light.png" alt="RunnerFoundry" width="380" height="96">
+</picture>
 
-RunnerFoundry lets repositories under a personal GitHub account share runner capacity on your own infrastructure.
-Define a Runner Pool once, use its name in `runs-on`, and create disposable runners as work arrives.
-Docker Compose and libvirt virtual machines are supported. GitHub Actions is the only supported Git source.
+Your infrastructure. Dynamic, shared runner capacity for your personal repositories.
+
+RunnerFoundry is a shared control plane for self-hosted ephemeral CI runners.
+Pool capacity across repositories and hosts on infrastructure you manage. Define a Runner Pool once,
+and let RunnerFoundry create disposable runners as work arrives and clean them up afterwards.
 
 ## Who RunnerFoundry is for
 
 Use RunnerFoundry when you want several repositories to share self-hosted capacity and can maintain the machines and runner images.
 Start with one host and SQLite. Several hosts can share PostgreSQL and contribute different pools or capacity to the same pool.
-If GitHub-hosted runners meet your needs, you do not need to operate your own runner infrastructure.
+If hosted runners meet your needs, you do not need to operate your own runner infrastructure.
 
 Self-hosted runners execute repository code on your machines. Start with a trusted repository and read the
 [security guidance](docs/providers.md#security-and-diagnostic-logs) before accepting untrusted work.
 
 ## How it works
 
-A Runner Pool is a named group of capacity. Your workflow selects it with `runs-on: linux-docker`.
-RunnerFoundry creates a runner when work arrives. The runner executes one job and reports its result directly to GitHub.
+A Runner Pool is a named group of capacity. Jobs request a pool, and RunnerFoundry creates runners as work arrives.
+Each runner executes one job and reports its result directly to the Git source.
 RunnerFoundry cleans up the runner resource afterwards.
 
-Failed provisioning is retried after cleanup until a runner accepts the job or GitHub ends the demand.
+Provisioning failures are reported when the Git source supports it. Otherwise, RunnerFoundry retries after cleanup
+until a runner accepts the job or the Git source ends the demand.
 An execution failure after acceptance is a workflow result, not a provisioning retry.
+
+## Current integrations
+
+GitHub Actions is the first supported Git source and is currently the only available source adapter.
+The control plane separates Git source integrations from the shared runner lifecycle so additional sources can be added.
+Docker Compose and libvirt virtual machines are the supported execution providers.
+
+With the GitHub integration, your workflow selects a Runner Pool with `runs-on: linux-docker`.
+The quick start below uses that integration to share capacity across personal-account repositories.
 
 ## Quick start
 
