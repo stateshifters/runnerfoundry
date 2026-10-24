@@ -134,8 +134,9 @@ waits for Apple notarization acceptance, and staples the ticket. A final package
 the configured team, a stapled ticket and Apple's online notarization record. Any failure stops release preparation before publication.
 A notarization timeout does not establish rejection; check the submission in Apple's service before retrying.
 
-The installer places the command in `/usr/local/bin` and the example configuration and metadata in `/usr/local/share/runnerfoundry`.
-Operators configure and run it themselves; installation does not create a service account or register a background service.
+The installer places the command in `/usr/local/bin`, the example configuration and metadata in `/usr/local/share/runnerfoundry`,
+and a disabled system service in `/Library/LaunchDaemons`. It creates the `_runnerfoundry` service account and a starter
+configuration only when none exists. Operators prepare credentials and provider access before enabling and starting the service.
 See [macOS installation](docs/installation-macos.md) for the operator workflow.
 
 Optional VM-image examples have their own [libvirt image preparation requirements](docs/providers/libvirt.md#prepare-guest-images)

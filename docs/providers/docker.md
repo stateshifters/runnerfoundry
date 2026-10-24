@@ -1,6 +1,7 @@
 # Docker Compose runners
 
 Use Docker Compose for Linux jobs that fit a container. RunnerFoundry creates a new container from the configured service for each attempt.
+The macOS steps below use a login account and the [foreground process](../installation-macos.md#run-in-the-foreground-instead).
 
 ## Install and prepare the host
 
@@ -35,7 +36,7 @@ Your Compose service must contain an unregistered GitHub Actions runner that con
 RunnerFoundry supplies this environment value; do not put a JIT value in the Compose file or configure a permanent runner registration.
 
 On a Linux package host, save a Compose model such as this at `/etc/runnerfoundry/compose.yaml`.
-On macOS, save it as `compose.yaml` beside `config.yaml` in the [private working directory](../installation-macos.md#prepare-configuration-and-provider-access):
+On macOS, save it as `compose.yaml` beside `config.yaml` in the [private working directory](../installation-macos.md#run-in-the-foreground-instead):
 
 ```yaml
 services:
@@ -78,7 +79,7 @@ See [Docker settings](../configuration.md#docker-settings) for the configuration
 Compose validation confirms the named service exists; it does not establish runner registration, image availability, or tool suitability.
 For the Linux package, [start the daemon](../../README.md#3-start-runnerfoundry) for a new installation,
 or [reload the running service](../operations.md#reload-configuration).
-On macOS, [start the installed command](../installation-macos.md#start-runnerfoundry) from your working directory.
+On macOS, [start the installed command](../installation-macos.md#run-in-the-foreground-instead) from your working directory.
 
 ## How containers run and clean up
 

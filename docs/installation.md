@@ -46,7 +46,7 @@ use the provider's [access troubleshooting](providers/docker.md#troubleshoot-doc
 ## Install on macOS
 
 Use the [signed Apple Silicon installer](installation-macos.md) for macOS 13 or later.
-It installs `/usr/local/bin/runnerfoundry`; follow that guide to prepare your working configuration and choose a provider.
+It installs `/usr/local/bin/runnerfoundry` and a disabled system service. Follow that guide to configure the service account, choose a provider and start the service.
 Orchard macOS workers additionally require macOS 14 or later.
 
 ## Create the GitHub App
@@ -75,7 +75,7 @@ sudo -u runnerfoundry test -r /etc/runnerfoundry/github-app.pem
 ```
 
 Replace the first filename with your downloaded filename. The access check succeeds without output.
-For macOS, follow [private working-directory and key setup](installation-macos.md#prepare-configuration-and-provider-access).
+For macOS, follow [service configuration and key setup](installation-macos.md#prepare-configuration-and-provider-access).
 Keep the private key out of source control, workflow files, and logs.
 
 Choose Install App in GitHub and install it on your account. Start with Only select repositories and select a trusted test repository.

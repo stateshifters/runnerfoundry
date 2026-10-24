@@ -158,11 +158,12 @@ else
 	@test -n "$${APPLE_PRIVATE_KEY_PATH:?Notarization private key path is required}"
 	@test -n "$${MACOS_TEAM_ID:?Apple team ID is required}"
 	@$(REMOVE_DIR) "$(BUILD_DIR)/macos"
-	install -d -m 0755 "$(MACOS_PAYLOAD)/usr" "$(MACOS_PAYLOAD)/usr/local" "$(MACOS_PAYLOAD)/usr/local/bin" "$(MACOS_PAYLOAD)/usr/local/share" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry" "$(DIST_DIR)"
+	install -d -m 0755 "$(MACOS_PAYLOAD)/usr" "$(MACOS_PAYLOAD)/usr/local" "$(MACOS_PAYLOAD)/usr/local/bin" "$(MACOS_PAYLOAD)/usr/local/share" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry" "$(MACOS_PAYLOAD)/Library/LaunchDaemons" "$(DIST_DIR)"
 	install -m 0755 "$(BUILD_DIR)/darwin/arm64/$(EXECUTABLE_NAME)" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
 	install -m 0644 packaging/macos/config.example.yaml LICENSE COPYRIGHT "$(NOTICES_FILE)" "$(SBOM_FILE)" "$(SOURCE_INFO_FILE)" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry/"
+	install -m 0644 packaging/macos/com.stateshifterlabs.runnerfoundry.plist "$(MACOS_PAYLOAD)/Library/LaunchDaemons/"
 	$(QUILL) sign "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
-	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location /
+	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location / --scripts packaging/macos/scripts
 	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 13.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH" --notarize
 	$(MACOSPKG) verify "$(MACOS_PACKAGE)" --team-id "$$MACOS_TEAM_ID" --require-developer-id --require-stapled --online
 endif

@@ -1,6 +1,7 @@
 # libvirt runners
 
 Use libvirt for workflows needing a full Linux or Windows VM, VM-specific hardware, firmware, or isolation.
+The macOS steps below use a login account and the [foreground process](../installation-macos.md#run-in-the-foreground-instead).
 
 ## Install and prepare the host
 
@@ -88,7 +89,7 @@ RunnerFoundry replaces the domain name, ownership metadata, and bootstrap OEM va
 
 After saving a complete configuration, [start RunnerFoundry](../../README.md#3-start-runnerfoundry) for a new Linux package installation,
 or [reload the running service](../operations.md#reload-configuration).
-For macOS, [start the installed command](../installation-macos.md#start-runnerfoundry) from its working directory.
+For macOS, [start the installed command](../installation-macos.md#run-in-the-foreground-instead) from its working directory.
 Startup validation checks XML rendering and the connection; it does not boot the image or prove firmware, storage, network, or guest readiness.
 Follow the [first-job workflow](../../README.md#4-run-your-first-job) with your pool's `runs-on` value.
 Use `uname -a` for the Ubuntu image, or this job for the Windows example:

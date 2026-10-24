@@ -272,7 +272,7 @@ provide secrets through environment or standard input.
 
 ## Give the member Orchard credentials
 
-For the single-host Mac, use the authorized Orchard CLI context from the RunnerFoundry working directory
+For the single-host Mac, use the authorized Orchard CLI context from a private staging directory
 to save the member's token and copy the controller certificate:
 
 ```sh
@@ -284,8 +284,9 @@ chmod 0600 orchard-token
 
 For a remote member, generate `orchard-token` on the authorized operator host in a private staging directory.
 Obtain `controller.crt` from the controller operator, then transfer the token and certificate securely to the member host.
-Place them in the member's configuration directory: its private RunnerFoundry working directory on macOS,
-or `/etc/runnerfoundry` on Linux. Restrict the token to the account running RunnerFoundry and remove the staging copy after transfer.
+Place them in the member's configuration directory: `/usr/local/etc/runnerfoundry` for the macOS package service,
+the private working directory for a foreground macOS process, or `/etc/runnerfoundry` on Linux.
+Restrict the token to the account running RunnerFoundry and remove the staging copy after transfer.
 The member does not need an Orchard administrator CLI context.
 For a certificate trusted by the host's system roots, omit `trusted_certificate_file` instead.
 RunnerFoundry needs the service-account name, token file and certificate trust; it does not consume the Orchard CLI context.
@@ -325,9 +326,38 @@ Keep these files on the member host, not in the guest image. The VM JSON tells O
 `config.yaml` tells RunnerFoundry which controller and credentials to use. The member reads the token, certificate
 and VM JSON at startup and reload. All Orchard file paths in `config.yaml` must be absolute.
 
-### macOS member on the single-host Mac
+### macOS member as a packaged service
 
-On macOS, use the private working directory from [installation](../installation-macos.md#prepare-configuration-and-provider-access).
+Copy the example [vm.json](../../examples/orchard-macos-runner/vm.json) to the member host. Install it, the Orchard token and the controller certificate where the `_runnerfoundry` service account can read them:
+
+```sh
+sudo install -m 0640 -o root -g _runnerfoundry orchard-token /usr/local/etc/runnerfoundry/orchard-token
+sudo install -m 0644 -o root -g wheel orchard-ca.pem /usr/local/etc/runnerfoundry/orchard-ca.pem
+sudo install -m 0644 -o root -g wheel vm.json /usr/local/etc/runnerfoundry/macos-vm.json
+sudo -u _runnerfoundry test -r /usr/local/etc/runnerfoundry/orchard-token
+```
+
+Run these commands from the staging directory containing those files, then remove the token staging copy. The VM JSON is a native flat Orchard VM resource, with `image: macos-runner-base`, `imagePullPolicy: IfNotPresent`, and `restart_policy: Never`. Use the [Orchard settings reference](../configuration.md#orchard-settings) for other native VM options and validation.
+
+Edit `/usr/local/etc/runnerfoundry/config.yaml`, retaining the installed GitHub App key and state paths. Add this pool, using the controller address and certificate established during controller setup:
+
+```yaml
+scale_sets:
+  - name: macos-orchard
+    max_runners: 1
+    orchard:
+      controller_url: https://localhost:6120
+      service_account: runnerfoundry
+      token_file: /usr/local/etc/runnerfoundry/orchard-token
+      trusted_certificate_file: /usr/local/etc/runnerfoundry/orchard-ca.pem
+      vm_spec_file: /usr/local/etc/runnerfoundry/macos-vm.json
+```
+
+If the controller certificate is trusted by the host's system roots, omit `trusted_certificate_file`. The member does not need the Orchard CLI, Tart or a local VM image unless it is also an Orchard worker. Follow [macOS service startup](../installation-macos.md#start-and-check-the-service).
+
+### macOS member in the foreground
+
+Use the private working directory from [manual foreground setup](../installation-macos.md#run-in-the-foreground-instead).
 Copy the example [vm.json](../../examples/orchard-macos-runner/vm.json) into that directory as `macos-vm.json`.
 The file is a native flat Orchard VM resource, with `image: macos-runner-base`, `imagePullPolicy: IfNotPresent`,
 and `restart_policy: Never`.
@@ -422,7 +452,7 @@ before the VM has physically disappeared. Investigate prolonged deletion at the 
 
 ### Reload and stop the member
 
-After editing configuration, send `SIGHUP` to the member:
+For a foreground member, send `SIGHUP` after editing configuration:
 
 ```sh
 kill -HUP <daemon-pid>
@@ -431,7 +461,9 @@ kill -HUP <daemon-pid>
 Require `Runtime reload applied`; follow [reload diagnosis](../operations.md#reload-configuration) on rejection.
 Every state setting requires restart. Reload also rereads the Orchard token, certificate and VM JSON.
 Press Control-C for graceful shutdown of a foreground member. Check the [active runner policy](../operations.md#choose-active-runner-shutdown-behaviour)
-before stopping during work; the default leaves active runners running. Linux package service commands are in that guide.
+before stopping during work; the default leaves active runners running.
+For the macOS package service, follow [restart and stop commands](../installation-macos.md#stop-disable-or-restart-the-service).
+Linux package service commands are in the operations guide.
 
 ### Update images
 

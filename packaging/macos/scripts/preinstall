@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+service_name=_runnerfoundry
+service_home='/Library/Application Support/RunnerFoundry'
+config_dir=/usr/local/etc/runnerfoundry
+log_dir=/var/log/runnerfoundry
+
+free_id() {
+    records=$(dscl /Search -list "$1" "$2") || return 1
+    printf '%s\n' "$records" | awk '
+        $2 ~ /^[0-9]+$/ { used[$2] = 1 }
+        END {
+            for (candidate = 499; candidate >= 400; candidate--) {
+                if (!(candidate in used)) {
+                    print candidate
+                    exit
+                }
+            }
+            exit 1
+        }
+    '
+}
+
+id_is_unique() {
+    records=$(dscl /Search -list "$1" "$2") || return 1
+    matches=$(printf '%s\n' "$records" | awk -v id="$3" '$2 == id { print $1 }')
+    [ "$matches" = "$service_name" ]
+}
+
+if [ "${3:-}" != / ]; then
+    echo 'RunnerFoundry requires installation on the running startup volume.' >&2
+    exit 1
+fi
+
+if [ -L "$config_dir" ] || [ -L "$service_home" ] || [ -L "$log_dir" ] ||
+   [ -L "$config_dir/config.yaml" ]; then
+    echo 'RunnerFoundry service paths must not be symlinks.' >&2
+    exit 1
+fi
+
+group_exists=false
+if dscl . -read "/Groups/$service_name" >/dev/null 2>&1; then
+    group_exists=true
+    if ! dscl . -read "/Groups/$service_name" PrimaryGroupID | grep -Eq '^PrimaryGroupID: [0-9]+$' ||
+       [ "$(dscl . -read "/Groups/$service_name" RealName | cut -d ' ' -f 2-)" != 'RunnerFoundry service' ]; then
+        echo 'Existing RunnerFoundry group is invalid.' >&2
+        exit 1
+    fi
+    group_id=$(dscl . -read "/Groups/$service_name" PrimaryGroupID | awk 'NR == 1 { print $2 }')
+    if [ "$group_id" -lt 400 ] || [ "$group_id" -gt 499 ] ||
+       ! id_is_unique /Groups PrimaryGroupID "$group_id"; then
+        echo 'Existing RunnerFoundry group ID is outside the service range or is shared.' >&2
+        exit 1
+    fi
+elif dscl /Search -read "/Groups/$service_name" >/dev/null 2>&1; then
+    echo 'RunnerFoundry group name is already used outside the local directory.' >&2
+    exit 1
+else
+    group_id=$(free_id /Groups PrimaryGroupID)
+fi
+
+user_exists=false
+if dscl . -read "/Users/$service_name" >/dev/null 2>&1; then
+    user_exists=true
+    user_id=$(dscl . -read "/Users/$service_name" UniqueID | awk 'NR == 1 { print $2 }')
+    if [ "$group_exists" != true ] ||
+       ! dscl . -read "/Users/$service_name" UniqueID | grep -Eq '^UniqueID: [0-9]+$' ||
+       [ "$user_id" -lt 400 ] || [ "$user_id" -gt 499 ] ||
+       ! id_is_unique /Users UniqueID "$user_id" ||
+       [ "$(dscl . -read "/Users/$service_name" PrimaryGroupID | awk 'NR == 1 { print $2 }')" != "$group_id" ] ||
+       [ "$(dscl . -read "/Users/$service_name" RealName | cut -d ' ' -f 2-)" != 'RunnerFoundry service' ] ||
+       [ "$(dscl . -read "/Users/$service_name" UserShell | awk 'NR == 1 { print $2 }')" != /usr/bin/false ] ||
+       [ "$(dscl . -read "/Users/$service_name" NFSHomeDirectory | cut -d ' ' -f 2-)" != "$service_home" ] ||
+       [ "$(dscl . -read "/Users/$service_name" IsHidden | awk 'NR == 1 { print $2 }')" != 1 ]; then
+        echo 'Existing RunnerFoundry user does not match the service account.' >&2
+        exit 1
+    fi
+elif dscl /Search -read "/Users/$service_name" >/dev/null 2>&1; then
+    echo 'RunnerFoundry user name is already used outside the local directory.' >&2
+    exit 1
+else
+    user_id=$(free_id /Users UniqueID)
+fi
+
+if [ "$group_exists" != true ]; then
+    dscl . -create "/Groups/$service_name"
+    dscl . -create "/Groups/$service_name" PrimaryGroupID "$group_id"
+    dscl . -create "/Groups/$service_name" RealName 'RunnerFoundry service'
+fi
+
+if [ "$user_exists" != true ]; then
+    dscl . -create "/Users/$service_name"
+    dscl . -create "/Users/$service_name" UniqueID "$user_id"
+    dscl . -create "/Users/$service_name" PrimaryGroupID "$group_id"
+    dscl . -create "/Users/$service_name" RealName 'RunnerFoundry service'
+    dscl . -create "/Users/$service_name" UserShell /usr/bin/false
+    dscl . -create "/Users/$service_name" NFSHomeDirectory "$service_home"
+    dscl . -create "/Users/$service_name" IsHidden 1
+    dscl . -create "/Users/$service_name" Password '*'
+fi
+
+if [ ! -d "$config_dir" ]; then
+    install -d -m 0750 "$config_dir"
+    chown "root:$service_name" "$config_dir"
+fi
+
+if [ ! -d "$service_home" ]; then
+    install -d -m 0750 "$service_home"
+    chown "$service_name:$service_name" "$service_home"
+fi
+
+if [ ! -d "$log_dir" ]; then
+    install -d -m 0750 "$log_dir"
+    chown "$service_name:$service_name" "$log_dir"
+fi

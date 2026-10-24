@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+config_file=/usr/local/etc/runnerfoundry/config.yaml
+
+if [ "${3:-}" != / ]; then
+    echo 'RunnerFoundry requires installation on the running startup volume.' >&2
+    exit 1
+fi
+
+if [ ! -e "$config_file" ]; then
+    if [ -L "$config_file" ]; then
+        echo 'RunnerFoundry config path is a broken symlink.' >&2
+        exit 1
+    fi
+    install -m 0640 /usr/local/share/runnerfoundry/config.example.yaml "$config_file"
+    chown root:_runnerfoundry "$config_file"
+fi

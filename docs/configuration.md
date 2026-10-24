@@ -3,7 +3,8 @@
 Use this reference to choose values for an installed RunnerFoundry member. For a first setup, follow the
 [quick start](../README.md#quick-start); for shared state, follow [deployment](deployment.md).
 
-RunnerFoundry reads YAML from `--config`. The packaged service supplies `/etc/runnerfoundry/config.yaml`.
+RunnerFoundry reads YAML from `--config`. The Linux packaged service supplies `/etc/runnerfoundry/config.yaml`.
+The [macOS service](installation-macos.md#prepare-configuration-and-provider-access) uses `/usr/local/etc/runnerfoundry/config.yaml`.
 Unknown fields and invalid values reject startup or a replacement configuration. YAML keys are case-sensitive.
 Use absolute paths so file locations do not depend on the daemon's working directory.
 
