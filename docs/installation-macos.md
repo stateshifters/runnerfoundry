@@ -1,7 +1,8 @@
 # Install RunnerFoundry on macOS
 
-Use the Apple Silicon installer on an ARM64 Mac running macOS 12 or later. The package contains the RunnerFoundry control plane.
-Its current execution providers remain Docker Compose and libvirt; installing this package does not add a Tart provider.
+Use the Apple Silicon installer on an ARM64 Mac running macOS 13 or later. The package contains the RunnerFoundry control plane.
+Choose a runner provider after installation: Orchard for macOS jobs, Docker Compose for Linux containers, or an accessible libvirt connection.
+Provider tools have their own host requirements; Orchard macOS workers require macOS 14 or later.
 
 You need administrator access to install the package. Run RunnerFoundry afterwards as the user whose credentials and provider
 tools it should use. A background service and a dedicated service account are not installed automatically.
@@ -37,49 +38,20 @@ chmod 0600 config.yaml
 
 Copy the example only for a new installation; retain your existing `config.yaml` when upgrading.
 
-For GitHub, [register and install a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
-on your personal account. Disable webhooks, grant repository Administration read and write permission, and install it on your
-chosen repositories. Save its private key as `github-app.pem` in this working directory, restrict it with `chmod 0600 github-app.pem`,
+Follow [GitHub App setup](installation.md#create-the-github-app) to register and install your App.
+Save its private key as `github-app.pem` in this working directory, restrict it with `chmod 0600 github-app.pem`,
 and set its numeric App ID in `config.yaml`.
 
-The example uses `./github-app.pem` and `./state.db`, so keep this working directory when starting RunnerFoundry.
+The package's starter configuration uses `./github-app.pem` and `./state.db`, so keep this working directory when starting RunnerFoundry.
 Add at least one Runner Pool under `scale_sets` before starting. See [configuration](configuration.md) for exact settings.
 
-For Docker Compose capacity, install Docker Desktop or another Docker environment that supplies the Docker CLI and Compose plugin.
-Start that environment and check that `docker info` and `docker compose version` work as the same user who will run RunnerFoundry.
-Those containers run Linux jobs. The macOS package does not include Docker, libvirt, runner images or GitHub credentials.
+Prepare your provider and add its pool using the matching guide:
 
-Save this as `compose.yaml` in your working directory:
+- [Orchard](providers/orchard.md) for macOS guests on Apple Silicon workers running macOS 14 or later
+- [Docker Compose](providers/docker.md) for Linux container jobs, with the Docker CLI and Compose plugin available to your user
+- [libvirt](providers/libvirt.md) for a reachable libvirt connection and compatible guest images
 
-```yaml
-services:
-  runner:
-    image: ghcr.io/actions/actions-runner:latest
-    user: runner
-    working_dir: /home/runner
-    command: ["/home/runner/run.sh"]
-```
-
-Replace `scale_sets: []` in `config.yaml` with:
-
-```yaml
-scale_sets:
-  - name: linux-docker
-    max_runners: 2
-    docker:
-      compose_file: ./compose.yaml
-      service: runner
-```
-
-Check the Compose model as the user who will run RunnerFoundry:
-
-```sh
-docker compose -f ./compose.yaml config --services
-```
-
-It must list `runner`. The official image supports Linux ARM64, so Docker can use it natively on Apple Silicon.
-This is a minimal evaluation image; follow [runner-image maintenance](providers.md#update-runner-images) to add workflow tools
-and pin a reviewed image before maintained use. The [provider guide](providers.md) defines the image and bootstrap contracts.
+The package supplies the control plane. Install provider tools and prepare runner images separately, under the user who will run RunnerFoundry.
 
 ## Start RunnerFoundry
 
@@ -90,10 +62,10 @@ From the working directory containing your completed configuration:
 ```
 
 The process runs in the foreground and writes its text logs to the terminal with the example logging settings.
-Confirm GitHub discovery and Runner Pool registration in those logs before submitting work. A workflow can target this example
-pool with `runs-on: linux-docker`; it will execute inside a Linux container, not on the Mac host.
+Confirm GitHub discovery and Runner Pool registration in those logs before submitting work.
+Use the configured pool name as the workflow's `runs-on` value; the provider guide includes a first-job check.
 
-If startup fails, read the terminal error and check the App ID, private-key permissions, configuration paths and Docker access
+If startup fails, read the terminal error and check the App ID, private-key permissions, configuration paths and provider access
 from this same working directory. See [configuration](configuration.md) for the supported settings.
 Press Control-C to request shutdown, and keep the terminal open until the command returns.
 The default shutdown policy leaves accepted runners running. See the

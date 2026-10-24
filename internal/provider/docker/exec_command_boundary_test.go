@@ -87,7 +87,7 @@ func TestDockerInventoryDoesNotRefreshDockerOwnedRemoval(t *testing.T) {
 		output: []byte("Error response from daemon: removal of container " + containerID + " is already in progress"),
 		err:    errors.New("exit status 1"),
 	}
-	provider := Inventory{commandRunner: recording.runner()}
+	provider := NewInventory(recording.runner(), "")
 
 	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         containerID,

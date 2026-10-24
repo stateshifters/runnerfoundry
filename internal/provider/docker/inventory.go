@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
@@ -15,12 +17,20 @@ import (
 type Inventory struct {
 	commandRunner dockerInventoryCommands
 	memberID      core.MemberID
+	snapshot      *dockerInventorySnapshot
+}
+
+type dockerInventorySnapshot struct {
+	mutex     sync.RWMutex
+	ready     bool
+	instances []execution.RunnerInstance
+	err       error
 }
 
 var _ execution.RunnerInventory = Inventory{}
 
 func NewInventory(commandRunner dockerInventoryCommands, memberID core.MemberID) Inventory {
-	return Inventory{commandRunner: commandRunner, memberID: memberID}
+	return Inventory{commandRunner: commandRunner, memberID: memberID, snapshot: &dockerInventorySnapshot{}}
 }
 
 func (inventory Inventory) EndpointID() execution.InventoryEndpointID {
@@ -64,7 +74,12 @@ func (inventory Inventory) CanInspectEndpointForMember(
 }
 
 func (inventory Inventory) Refresh(ctx context.Context) error {
-	_, err := inventory.Inspect(ctx)
+	instances, err := inventory.observe(ctx)
+	inventory.snapshot.mutex.Lock()
+	defer inventory.snapshot.mutex.Unlock()
+	inventory.snapshot.instances = instances
+	inventory.snapshot.err = err
+	inventory.snapshot.ready = true
 	return err
 }
 
@@ -75,7 +90,7 @@ func (inventory Inventory) InspectEndpoint(
 	if !inventory.KnowsEndpoint(endpointID) {
 		return nil, fmt.Errorf("docker endpoint %q is not configured", endpointID)
 	}
-	instances, err := inventory.Inspect(ctx)
+	instances, err := inventory.observe(ctx)
 	for index := range instances {
 		instances[index].EndpointID = endpointID
 	}
@@ -83,6 +98,20 @@ func (inventory Inventory) InspectEndpoint(
 }
 
 func (inventory Inventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	inventory.snapshot.mutex.RLock()
+	ready := inventory.snapshot.ready
+	inventory.snapshot.mutex.RUnlock()
+	if !ready {
+		if err := inventory.Refresh(ctx); err != nil {
+			return nil, err
+		}
+	}
+	inventory.snapshot.mutex.RLock()
+	defer inventory.snapshot.mutex.RUnlock()
+	return slices.Clone(inventory.snapshot.instances), inventory.snapshot.err
+}
+
+func (inventory Inventory) observe(ctx context.Context) ([]execution.RunnerInstance, error) {
 	output, err := inventory.commandRunner.listComposeRunners(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Docker runners: list Docker runners: %w", err)
@@ -126,7 +155,7 @@ func (inventory Inventory) Destroy(ctx context.Context, instance execution.Runne
 		return nil
 	}
 	removalFailure := fmt.Errorf("destroy Docker runner: remove Docker runner %q: %w", instance.RunnerName, err)
-	instances, confirmationErr := inventory.Inspect(ctx)
+	instances, confirmationErr := inventory.observe(ctx)
 	if confirmationErr != nil {
 		return errors.Join(removalFailure, fmt.Errorf("confirm Docker runner %q removal: %w", instance.RunnerName, confirmationErr))
 	}

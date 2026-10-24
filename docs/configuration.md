@@ -215,8 +215,9 @@ scale_sets:
 | `scale_sets[].runner_group` | string | `default` | GitHub runner-group name; same-pool cluster declarations must agree |
 | `scale_sets[].max_runners` | integer | Required, positive | Capacity contributed by this member; live same-pool member capacities add together |
 | `scale_sets[].stop_if_not_started_within` | duration string | `5m`; positive, such as `10m` | Time from claim until runner acceptance before recovery becomes eligible |
-| `scale_sets[].docker` | mapping | Choose this or `libvirt`, never both | Docker Compose provider |
-| `scale_sets[].libvirt` | mapping | Choose this or `docker`, never both | libvirt provider |
+| `scale_sets[].docker` | mapping | Choose exactly one of `docker`, `libvirt`, and `orchard` | Docker Compose provider |
+| `scale_sets[].libvirt` | mapping | Choose exactly one of `docker`, `libvirt`, and `orchard` | libvirt provider |
+| `scale_sets[].orchard` | mapping | Choose exactly one of `docker`, `libvirt`, and `orchard` | Orchard macOS provider |
 
 The start timeout does not limit accepted workflow execution. On expiry, recovery needs an identifiable provider endpoint.
 RunnerFoundry cleans up the unaccepted attempt and requeues the same GitHub demand at the queue tail.
@@ -230,7 +231,7 @@ Reload applies a changed timeout.
 | `scale_sets[].docker.compose_file` | string | Required, non-empty Compose file path |
 | `scale_sets[].docker.service` | string | Required, non-empty service name present in that Compose model |
 
-RunnerFoundry checks the service before activating the pool. See the [container contract](providers.md#docker-compose).
+RunnerFoundry checks the service before activating the pool. See the [container contract](providers/docker.md#prepare-and-configure-a-service).
 
 ### libvirt settings
 
@@ -240,7 +241,51 @@ RunnerFoundry checks the service before activating the pool. See the [container 
 | `scale_sets[].libvirt.domain_xml_template` | string | Required, non-empty domain XML template path |
 
 The template must be readable and renderable, and the connection accessible before activation.
-See the [guest and domain contract](providers.md#libvirt-guest-contract).
+See the [guest and domain contract](providers/libvirt.md#libvirt-guest-contract).
+
+### Orchard settings
+
+```yaml
+scale_sets:
+  - name: macos-orchard
+    max_runners: 1
+    orchard:
+      controller_url: https://orchard.example.net:8443
+      service_account: runnerfoundry
+      token_file: /etc/runnerfoundry/orchard-token
+      trusted_certificate_file: /etc/runnerfoundry/orchard-ca.pem
+      vm_spec_file: /etc/runnerfoundry/macos-vm.json
+```
+
+| Key | Type | Requirement and effect |
+| --- | --- | --- |
+| `scale_sets[].orchard.controller_url` | string | Required HTTP or HTTPS controller URL; credentials, query strings and fragments are rejected |
+| `scale_sets[].orchard.service_account` | string | Required non-empty Orchard service-account name; grant `compute:read` and `compute:write` |
+| `scale_sets[].orchard.token_file` | string | Required readable file containing a non-empty service-account token |
+| `scale_sets[].orchard.trusted_certificate_file` | string | Optional readable file containing exactly one PEM certificate to trust for the controller; normal system trust applies when omitted |
+| `scale_sets[].orchard.vm_spec_file` | string | Required readable JSON file containing a native Orchard VM specification |
+
+All Orchard file paths must be absolute. YAML does not expand `~` or environment variables.
+RunnerFoundry reads the token, certificate and VM specification at startup or reload. Reload after replacing their contents.
+Pool activation checks controller authentication, inventory reads and the local VM specification.
+It does not test permission to create or delete VMs, connect to the guest agent, or establish guest readiness.
+The service account must have `compute:read` and `compute:write` before processing work.
+Use the [Orchard setup and guest checks](providers/orchard.md) before sending work.
+
+The VM file uses the flat Orchard 0.58.0 `v1.VM` JSON shape, not a wrapper containing `spec`.
+`image` is required. `runtime`, `os`, `arch` and `powerState` may be omitted or set to `tart`, `darwin`, `arm64` and `running`, respectively.
+Do not provide `name` or server-maintained fields such as `status`, `worker`, `generation` or `conditions`.
+RunnerFoundry assigns each attempt's name; other native editable settings, including resources, scheduling labels, host directories,
+endpoints and restart policy, retain their Orchard meaning. Unknown JSON fields are rejected.
+Use `restart_policy: Never` for the supplied one-job guest. See the [example VM file](../examples/orchard-macos-runner/vm.json).
+
+The normalized controller URL identifies the provider endpoint across RunnerFoundry members.
+An image or credential change applies to new attempts after reload without changing that endpoint.
+Changing the URL does not move VMs. Drain and clean up attempts before changing it.
+If the former endpoint is no longer configured, processing ownership remains retained for those attempts.
+Restore a pool configuration with the former controller URL and working credentials, then reload or restart;
+merely restoring credential or VM files does not restore management of that endpoint.
+See [endpoint recovery](providers/orchard.md#recover-after-changing-the-controller).
 
 ## Pruning
 

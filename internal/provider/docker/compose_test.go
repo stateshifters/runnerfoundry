@@ -52,9 +52,7 @@ func TestListRecognizesCurrentAndLegacyOwnershipMarkers(t *testing.T) {
 {"ID":"4","State":"dead","LegacyRunnerPool":"linux","RunnerName":"runner-4"}
 {"ID":"5","State":"running","LegacyRunnerPool":"other"}`,
 	}
-	provider := Inventory{
-		commandRunner: commandRunner,
-	}
+	provider := NewInventory(commandRunner, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -73,11 +71,9 @@ func TestListRecognizesCurrentAndLegacyOwnershipMarkers(t *testing.T) {
 }
 
 func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
-	provider := Inventory{
-		commandRunner: &recordingCommandRunner{
-			output: `{"ID":"1","State":"restarting","LegacyRunnerPool":"linux","RunnerName":"runner-1"}`,
-		},
-	}
+	provider := NewInventory(&recordingCommandRunner{
+		output: `{"ID":"1","State":"restarting","LegacyRunnerPool":"linux","RunnerName":"runner-1"}`,
+	}, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -89,12 +85,10 @@ func TestListClassifiesUnknownComposeContainerState(t *testing.T) {
 }
 
 func TestListIgnoresContainersWithoutRunnerFoundryOwnership(t *testing.T) {
-	provider := Inventory{
-		commandRunner: &recordingCommandRunner{
-			output: `{"ID":"unowned","State":"running"}
+	provider := NewInventory(&recordingCommandRunner{
+		output: `{"ID":"unowned","State":"running"}
 {"ID":"owned","State":"running","LegacyRunnerPool":"linux","RunnerName":"linux-1"}`,
-		},
-	}
+	}, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -112,9 +106,8 @@ func TestListIgnoresContainersWithoutRunnerFoundryOwnership(t *testing.T) {
 }
 
 func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
-	provider := Inventory{
-		commandRunner: &recordingCommandRunner{output: `{"ID":"1","State":"running","LegacyRunnerPool":"linux","RunnerName":"runner-1"}`},
-	}
+	provider := NewInventory(&recordingCommandRunner{output: `{"ID":"1","State":"running","LegacyRunnerPool":"linux","RunnerName":"runner-1"}`}, "")
+
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected line json success, got %v", err)
@@ -123,7 +116,7 @@ func TestListSupportsLineDelimitedJSONAndEmptyOutput(t *testing.T) {
 		t.Fatalf("expected one instance, got %#v", instances)
 	}
 
-	provider.commandRunner = &recordingCommandRunner{}
+	provider = NewInventory(&recordingCommandRunner{}, "")
 	instances, err = provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected empty output success, got %v", err)
@@ -141,21 +134,21 @@ func TestDockerProviderReportsStartCommandFailure(t *testing.T) {
 }
 
 func TestDockerProviderReportsListCommandFailure(t *testing.T) {
-	provider := Inventory{commandRunner: failingCommandRunner{}}
+	provider := NewInventory(failingCommandRunner{}, "")
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected list command error")
 	}
 }
 
 func TestDockerProviderRejectsMalformedLineDelimitedJSON(t *testing.T) {
-	provider := Inventory{commandRunner: &recordingCommandRunner{output: `{`}}
+	provider := NewInventory(&recordingCommandRunner{output: `{`}, "")
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected list json line error")
 	}
 }
 
 func TestDockerProviderReportsDestroyCommandFailure(t *testing.T) {
-	provider := Inventory{commandRunner: failingCommandRunner{}}
+	provider := NewInventory(failingCommandRunner{}, "")
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{State: execution.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy error")
 	}
@@ -210,9 +203,8 @@ func TestDockerInventoryRefreshesAndInspectsKnownEndpoint(t *testing.T) {
 
 func TestDestroyAndValidateSucceed(t *testing.T) {
 	commandRunner := &recordingCommandRunner{output: "runner\n"}
-	provider := Inventory{
-		commandRunner: commandRunner,
-	}
+	provider := NewInventory(commandRunner, "")
+
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{ID: "abc", RunnerName: "runner", State: execution.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
 	}
@@ -240,7 +232,7 @@ func assertActionableDockerStateIsForceRemoved(t *testing.T, state string) {
 		output: `{"ID":"runner-id","State":"` + state +
 			`","RunnerPool":"linux","RunnerName":"linux-1"}`,
 	}
-	provider := Inventory{commandRunner: commandRunner}
+	provider := NewInventory(commandRunner, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil || len(instances) != 1 {
@@ -257,7 +249,7 @@ func assertActionableDockerStateIsForceRemoved(t *testing.T, state string) {
 
 func TestDestroyConfirmsRemovalWhenContainerIsAbsentAfterCommandFailure(t *testing.T) {
 	commandRunner := &recordingCommandRunner{removeError: errors.New("removal already in progress")}
-	provider := Inventory{commandRunner: commandRunner}
+	provider := NewInventory(commandRunner, "")
 
 	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         "runner-id",
@@ -284,7 +276,7 @@ func TestDestroyRetainsRemovalFailureWhileContainerStillExists(t *testing.T) {
 				output: `{"ID":"runner-id","State":"` + dockerState +
 					`","RunnerPool":"linux","RunnerName":"linux-1"}`,
 			}
-			provider := Inventory{commandRunner: commandRunner}
+			provider := NewInventory(commandRunner, "")
 
 			err := provider.Destroy(context.Background(), execution.RunnerInstance{
 				ID:         "runner-id",
@@ -299,7 +291,7 @@ func TestDestroyRetainsRemovalFailureWhileContainerStillExists(t *testing.T) {
 }
 
 func TestInspectPreservesStructuredLabelValues(t *testing.T) {
-	provider := Inventory{commandRunner: &recordingCommandRunner{output: `{"ID":"runner-id","State":"running","RunnerPool":"linux, gpu=x ","LegacyRunnerPool":"","RunnerName":"runner-1","Endpoint":""}`}}
+	provider := NewInventory(&recordingCommandRunner{output: `{"ID":"runner-id","State":"running","RunnerPool":"linux, gpu=x ","LegacyRunnerPool":"","RunnerName":"runner-1","Endpoint":""}`}, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -326,9 +318,9 @@ func TestInspectRecognizesCurrentLegacyAndMatchingEndpointOwnership(t *testing.T
 }
 
 func TestInspectRejectsIncompleteDockerObservation(t *testing.T) {
-	provider := Inventory{commandRunner: &recordingCommandRunner{
+	provider := NewInventory(&recordingCommandRunner{
 		output: `{"ID":"runner-id","RunnerPool":"linux","RunnerName":"runner-1"}`,
-	}}
+	}, "")
 
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("incomplete Docker observation was accepted")
@@ -341,7 +333,7 @@ func TestDestroyRetainsRemovalFailureWhenContainerRemainsActionable(t *testing.T
 		removeError: removalFailure,
 		output:      `{"ID":"runner-id","State":"running","RunnerPool":"linux","RunnerName":"linux-1"}`,
 	}
-	provider := Inventory{commandRunner: commandRunner}
+	provider := NewInventory(commandRunner, "")
 
 	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         "runner-id",
@@ -356,10 +348,10 @@ func TestDestroyRetainsRemovalFailureWhenContainerRemainsActionable(t *testing.T
 func TestDestroyReportsRemovalAndConfirmationFailures(t *testing.T) {
 	removalFailure := errors.New("permission denied")
 	confirmationFailure := errors.New("docker unavailable")
-	provider := Inventory{commandRunner: &recordingCommandRunner{
+	provider := NewInventory(&recordingCommandRunner{
 		removeError: removalFailure,
 		listError:   confirmationFailure,
-	}}
+	}, "")
 
 	err := provider.Destroy(context.Background(), execution.RunnerInstance{
 		ID:         "runner-id",

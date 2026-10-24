@@ -230,10 +230,7 @@ func (inventory *runnerInventoryFake) CanInspectEndpointForMember(
 ) bool {
 	return inventory.KnowsEndpoint(endpointID)
 }
-func (inventory *runnerInventoryFake) Refresh(ctx context.Context) error {
-	_, err := inventory.Inspect(ctx)
-	return err
-}
+func (inventory *runnerInventoryFake) Refresh(context.Context) error { return nil }
 func (inventory *runnerInventoryFake) InspectEndpoint(ctx context.Context, endpointID execution.InventoryEndpointID) ([]execution.RunnerInstance, error) {
 	if !inventory.KnowsEndpoint(endpointID) {
 		return nil, errors.New("unknown endpoint")

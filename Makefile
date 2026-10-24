@@ -163,7 +163,7 @@ else
 	install -m 0644 packaging/macos/config.example.yaml LICENSE COPYRIGHT "$(NOTICES_FILE)" "$(SBOM_FILE)" "$(SOURCE_INFO_FILE)" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry/"
 	$(QUILL) sign "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
 	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location /
-	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 12.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH" --notarize
+	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 13.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH" --notarize
 	$(MACOSPKG) verify "$(MACOS_PACKAGE)" --team-id "$$MACOS_TEAM_ID" --require-developer-id --require-stapled --online
 endif
 

@@ -333,7 +333,7 @@ func retryProvisioningFailure(
 ) (provisioningFailureResolution, error) {
 	result, err := retry()
 	if err != nil {
-		return provisioningFailureResolution{outcome: result.Outcome},
+		return provisioningFailureResolution{},
 			fmt.Errorf("retry unstarted processing job %s: %w", jobID, err)
 	}
 	return provisioningFailureResolution{outcome: result.Outcome}, nil

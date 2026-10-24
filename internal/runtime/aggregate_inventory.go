@@ -85,9 +85,9 @@ func (inventory AggregateRunnerInventory) inspectBackends(ctx context.Context) (
 	var inspectionErrors []error
 	for _, route := range inventory.routes {
 		backend := route.inventory
-		backendInstances, err := backend.Inspect(ctx)
+		backendInstances, err := route.refresh(ctx)
 		if err != nil {
-			inspectionErrors = append(inspectionErrors, fmt.Errorf("inspect runner inventory: %w", err))
+			inspectionErrors = append(inspectionErrors, err)
 			continue
 		}
 		for _, instance := range backendInstances {
@@ -106,6 +106,17 @@ func (inventory AggregateRunnerInventory) inspectBackends(ctx context.Context) (
 	}
 	if err := errors.Join(inspectionErrors...); err != nil {
 		return nil, err
+	}
+	return instances, nil
+}
+
+func (route inventoryRoute) refresh(ctx context.Context) ([]execution.RunnerInstance, error) {
+	if err := route.inventory.Refresh(ctx); err != nil {
+		return nil, fmt.Errorf("refresh runner inventory: %w", err)
+	}
+	instances, err := route.inventory.Inspect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("inspect runner inventory: %w", err)
 	}
 	return instances, nil
 }
@@ -150,7 +161,7 @@ func (inventory AggregateRunnerInventory) InspectEndpoint(
 		if !backend.KnowsEndpoint(endpointID) {
 			continue
 		}
-		instances, err := backend.Inspect(ctx)
+		instances, err := backend.InspectEndpoint(ctx, endpointID)
 		if err != nil {
 			return nil, fmt.Errorf("inspect endpoint %q: %w", endpointID, err)
 		}

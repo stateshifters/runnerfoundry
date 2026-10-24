@@ -82,7 +82,7 @@ To cross-compile the Apple Silicon executable from a contributor host:
 make build-macos
 ```
 
-The output is `build/darwin/arm64/runnerfoundry` and requires macOS 12 or later. No Intel macOS executable is packaged.
+The output is `build/darwin/arm64/runnerfoundry` and requires macOS 13 or later. No Intel macOS executable is packaged.
 
 To produce a Debian package, source-location notice, third-party license notices, and SBOM metadata:
 
@@ -129,7 +129,7 @@ For a direct target invocation, `QUILL_SIGN_P12` must contain the private key an
 including the Apple root. Quill 0.7.1 mishandles partial CA chains. The workflow accepts the stored application bundle and prepares
 a suitable temporary bundle before invoking the target. Direct callers must supply a bundle already in one of these accepted forms.
 
-Quill signs the executable. macospkg assembles an ARM64-only distribution installer for macOS 12 or later, signs it,
+Quill signs the executable. macospkg assembles an ARM64-only distribution installer for macOS 13 or later, signs it,
 waits for Apple notarization acceptance, and staples the ticket. A final package check requires a Developer ID signature,
 the configured team, a stapled ticket and Apple's online notarization record. Any failure stops release preparation before publication.
 A notarization timeout does not establish rejection; check the submission in Apple's service before retrying.
@@ -138,9 +138,14 @@ The installer places the command in `/usr/local/bin` and the example configurati
 Operators configure and run it themselves; installation does not create a service account or register a background service.
 See [macOS installation](docs/installation-macos.md) for the operator workflow.
 
-Optional VM-image examples have their own build dependencies and maintained workflows.
-Their READMEs separate operator image preparation from launcher-maintenance checks:
-[Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md).
+Optional VM-image examples have their own [libvirt image preparation requirements](docs/providers/libvirt.md#prepare-guest-images)
+and example-specific [Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md) build commands.
+When changing those guest launchers, their hermetic checks run separately from image preparation, from the repository root:
+
+```sh
+bash examples/libvirt-ubuntu-runner/runnerfoundry-jit-launcher.test.sh
+pwsh -NoProfile -File examples/libvirt-windows-runner/runnerfoundry-jit-launcher.Tests.ps1
+```
 
 ## Ways of working (contract)
 

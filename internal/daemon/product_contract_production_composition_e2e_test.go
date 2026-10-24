@@ -249,7 +249,27 @@ func openProductionComposition(
 	host *productionCompositionGitHub,
 	dockerCommands *productionCompositionDockerCommands,
 	libvirtCommands *productionCompositionLibvirtCommands,
+	configure ...func(*productionDependencies),
 ) (*productionRuntime, *runtimeGeneration, productionCompositionTickers) {
+	t.Helper()
+	tickers := newProductionCompositionTickers(t, host)
+	dependencies := productionCompositionDependencies(t, host, dockerCommands, libvirtCommands, &tickers)
+	if configured.State.Postgres != nil {
+		configureProductionCompositionQueueNotificationReadiness(&dependencies, &tickers)
+	}
+	for _, customize := range configure {
+		customize(&dependencies)
+	}
+	ctx := context.Background()
+	runtime, err := openProductionRuntimeWithDependencies(ctx, configured, dependencies)
+	if err != nil {
+		t.Fatalf("open production-composition runtime: %v", err)
+	}
+	generation := buildProductionCompositionGeneration(ctx, t, runtime, configured, &tickers)
+	return runtime, generation, tickers
+}
+
+func newProductionCompositionTickers(t *testing.T, host *productionCompositionGitHub) productionCompositionTickers {
 	t.Helper()
 	tickers := productionCompositionTickers{
 		membership: newE2EManualTicker(), source: newE2EManualTicker(), execution: newE2EManualTicker(),
@@ -262,17 +282,7 @@ func openProductionComposition(
 		t.Helper()
 		awaitProductionCompositionPollHarvest(t, tickers, host, runnerPools)
 	}
-	dependencies := productionCompositionDependencies(t, host, dockerCommands, libvirtCommands, &tickers)
-	if configured.State.Postgres != nil {
-		configureProductionCompositionQueueNotificationReadiness(&dependencies, &tickers)
-	}
-	ctx := context.Background()
-	runtime, err := openProductionRuntimeWithDependencies(ctx, configured, dependencies)
-	if err != nil {
-		t.Fatalf("open production-composition runtime: %v", err)
-	}
-	generation := buildProductionCompositionGeneration(ctx, t, runtime, configured, &tickers)
-	return runtime, generation, tickers
+	return tickers
 }
 
 func productionCompositionDependencies(

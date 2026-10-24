@@ -4,20 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/stateshifters/runnerfoundry/internal/config"
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	orchardprovider "github.com/stateshifters/runnerfoundry/internal/provider/orchard"
 	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 )
 
 type executionDependencies struct {
+	newOrchardProvider func(orchardprovider.Config) (execution.ExecutionProvider, error)
 	newDockerLauncher  func(dockerprovider.ComposeConfig, core.MemberID) execution.RunnerLauncher
 	newDockerInventory func(core.MemberID) execution.RunnerInventory
 	libvirtCommands    libvirtprovider.CommandRunner
 	readTemplate       func(string) ([]byte, error)
+	readFile           config.ReadFile
 	memberID           core.MemberID
 	providerObserver   providerActivityObserver
 }
@@ -50,10 +54,16 @@ func configuredProvider(
 	if err != nil {
 		return configuredExecutionProvider{}, fmt.Errorf("runner pool %q: %w", configured.Name, err)
 	}
-	if kind == config.ProviderKindDocker {
-		return configuredDockerProvider(configured, dependencies)
+	var provider configuredExecutionProvider
+	switch kind {
+	case config.ProviderKindDocker:
+		provider, err = configuredDockerProvider(configured, dependencies)
+	case config.ProviderKindLibvirt:
+		provider, err = configuredLibvirtProvider(configured, dependencies)
+	case config.ProviderKindOrchard:
+		provider, err = configuredOrchardProvider(configured, dependencies)
 	}
-	return configuredLibvirtProvider(configured, dependencies)
+	return provider, err
 }
 
 func configuredDockerProvider(
@@ -112,5 +122,37 @@ func configuredLibvirtProvider(
 		provider, runtimeservice.ProviderName(config.ProviderKindLibvirt),
 		observeProviderActivity(dependencies.providerObserver, ""),
 	)
+	return configuredExecutionProvider{Launcher: wrapped, Inventory: wrapped}, nil
+}
+
+func configuredOrchardProvider(configured config.RunnerPoolConfig, dependencies executionDependencies) (configuredExecutionProvider, error) {
+	if dependencies.newOrchardProvider == nil {
+		return configuredExecutionProvider{}, errors.New("orchard provider factory is required")
+	}
+	if dependencies.readFile == nil {
+		return configuredExecutionProvider{}, errors.New("orchard file reader is required")
+	}
+	token, err := dependencies.readFile(configured.Orchard.TokenFile)
+	if err != nil {
+		return configuredExecutionProvider{}, errors.New("read Orchard token file")
+	}
+	spec, err := dependencies.readFile(configured.Orchard.VMSpecFile)
+	if err != nil {
+		return configuredExecutionProvider{}, errors.New("read Orchard VM specification file")
+	}
+	var certificate []byte
+	if configured.Orchard.TrustedCertificateFile != "" {
+		certificate, err = dependencies.readFile(configured.Orchard.TrustedCertificateFile)
+		if err != nil {
+			return configuredExecutionProvider{}, errors.New("read Orchard trusted certificate file")
+		}
+	}
+	provider, err := dependencies.newOrchardProvider(orchardprovider.Config{
+		ControllerURL: configured.Orchard.ControllerURL, ServiceAccount: configured.Orchard.ServiceAccount, Token: strings.TrimSpace(string(token)), VMSpec: spec, TrustedCertificate: certificate,
+	})
+	if err != nil {
+		return configuredExecutionProvider{}, fmt.Errorf("construct Orchard provider: %w", err)
+	}
+	wrapped := runtimeservice.WithOperationDeadlines(provider, runtimeservice.ProviderName(config.ProviderKindOrchard), observeProviderActivity(dependencies.providerObserver, ""))
 	return configuredExecutionProvider{Launcher: wrapped, Inventory: wrapped}, nil
 }

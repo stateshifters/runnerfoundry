@@ -35,7 +35,7 @@ An execution failure after acceptance is a workflow result, not a provisioning r
 
 GitHub Actions is the first supported Git source and is currently the only available source adapter.
 The control plane separates Git source integrations from the shared runner lifecycle so additional sources can be added.
-Docker Compose and libvirt virtual machines are the supported execution providers.
+Docker Compose, libvirt virtual machines, and Orchard-managed macOS virtual machines are the supported execution providers.
 
 With the GitHub integration, your workflow selects a Runner Pool with `runs-on: linux-docker`.
 The quick start below uses that integration to share capacity across personal-account repositories.
@@ -147,7 +147,8 @@ Several members share PostgreSQL. See [add cluster members](docs/deployment.md#c
 
 ## Runner providers
 
-See [Docker and libvirt contracts, examples, and image maintenance](docs/providers.md).
+See [provider contracts, examples, and image maintenance](docs/providers.md).
+For macOS jobs on Apple Silicon, follow the [Orchard setup](docs/providers/orchard.md).
 
 ## Configuration reference
 
