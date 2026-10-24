@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support and usage questions
+    url: "https://github.com/stateshifters/runnerfoundry/discussions"
+    about: Ask for installation, configuration, and usage help.
+  - name: Security vulnerability
+    url: "https://github.com/stateshifters/runnerfoundry/security/advisories/new"
+    about: Report vulnerabilities privately. Do not open a public issue.
