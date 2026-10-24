@@ -28,8 +28,8 @@ variable "virtio_iso_path" {
 }
 
 locals {
-  github_runner_version = "2.336.0"
-  github_runner_sha256  = "d59123a43003e357b0805b5d0f611d0bd2f65ab67d51bd070dd4e7a0f685c162"
+  github_runner_version = "2.338.0"
+  github_runner_sha256  = "f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f"
   output_directory      = abspath("${path.root}/output")
   virtio_iso_path       = abspath("${path.root}/${var.virtio_iso_path}")
   windows_iso_path      = abspath("${path.root}/${var.windows_iso_path}")

@@ -21,4 +21,6 @@ scale_sets:
       service: runner
 ```
 
-The mutable `latest` image keeps this example short. Pin a reviewed tag or digest before using it as a maintained runner environment, and add the tools, volumes, networks, and security controls required by the workflows it will execute. The [Docker capacity guide](../../README.md#prepare-docker-compose-capacity) explains the runtime contract and ownership boundary.
+The mutable `latest` image keeps this example short. Pin a reviewed tag or digest before using it as a maintained runner environment, and add the tools, volumes, networks, and security controls required by the workflows it will execute. The [Docker provider guide](../../docs/providers.md#docker-compose) explains the runtime contract and ownership boundary.
+
+Follow [image maintenance](../../docs/providers.md#update-runner-images) to find current runner releases, pin an image, and refresh cached capacity.

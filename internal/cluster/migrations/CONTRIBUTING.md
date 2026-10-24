@@ -56,20 +56,7 @@ Do not acquire or reuse RunnerFoundry's reserved advisory-lock keys.
 
 ## Operate migrations
 
-Inspect and apply migrations with the deployed executable:
-
-```sh
-runnerfoundry migrate status --config config.yaml
-runnerfoundry migrate up --config config.yaml
-```
-
-For Down, stop every RunnerFoundry member first and use the executable that contains the requested Down migration:
-
-```sh
-runnerfoundry migrate down --to <version> --config config.yaml
-```
-
-Do not modify tern's version table manually. Restore database backups only while every member is stopped, then run `migrate status` before restarting RunnerFoundry.
+For installed deployments, follow the [operator upgrade procedure](../../../docs/operations.md#upgrade-postgresql) and [schema transitions and rollback](../../../docs/migrations.md). These are operator tasks, not contributor verification.
 
 ## Verify a migration
 
