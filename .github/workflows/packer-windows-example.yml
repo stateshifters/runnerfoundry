@@ -7,10 +7,12 @@ on:
     paths:
       - examples/libvirt-windows-runner/**
       - .github/workflows/packer-windows-example.yml
+      - .github/scripts/install-windows-image-build-dependencies.sh
   pull_request:
     paths:
       - examples/libvirt-windows-runner/**
       - .github/workflows/packer-windows-example.yml
+      - .github/scripts/install-windows-image-build-dependencies.sh
   workflow_dispatch:
 
 permissions:
@@ -37,13 +39,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install image-build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes \
-            kmod \
-            ovmf \
-            qemu-system-x86 \
-            qemu-utils
+        run: bash ../../.github/scripts/install-windows-image-build-dependencies.sh
+
+      - name: Test JIT launcher
+        shell: pwsh
+        run: ./runnerfoundry-jit-launcher.Tests.ps1
 
       - name: Prepare nested KVM
         run: |
@@ -79,10 +79,6 @@ jobs:
           password="Aa1!$(openssl rand -hex 20)"
           echo "::add-mask::$password"
           echo "PKR_VAR_winrm_password=$password" >> "$GITHUB_ENV"
-
-      - name: Test JIT launcher
-        shell: pwsh
-        run: ./runnerfoundry-jit-launcher.Tests.ps1
 
       - name: Initialize Packer
         run: packer init .

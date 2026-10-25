@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,14 +89,9 @@ func establishProductionCompositionSessions(
 	t.Helper()
 	routes := []string{"docker-pool", "libvirt-pool"}
 	activationCheckpoint := tickers.logs.sessionActivationCheckpoint()
-	registrationTargets := productionCompositionRouteTargets(routes, host.registrationObservation)
 	sessionTargets := productionCompositionRouteTargets(routes, host.sessionObservation)
-	awaitProductionCompositionRoutes(t, "production GitHub registrations",
-		registrationTargets, host.registrationObservation, func() {
-			tickers.advanceClock(6 * time.Minute)
-			tickers.complete(t, tickers.membership)
-			tickers.complete(t, tickers.source)
-		})
+	e2eAwaitRouteTargets(t, "production GitHub registrations",
+		tickers.registrationTargets, host.registrationObservation)
 	awaitProductionCompositionRoutes(t, "production GitHub sessions",
 		sessionTargets, host.sessionObservation,
 		func() { tickers.complete(t, tickers.source) })
@@ -173,7 +167,8 @@ func markProductionCompositionJobsStarted(
 	host.queueStarted("29", 1101, 101, starts.dockerRunner)
 	host.queueStarted("30", 1102, 102, starts.libvirtRunner)
 	tickers.complete(t, tickers.source)
-	awaitProductionCompositionValues(t, "production started acknowledgements", host.acknowledged, 2)
+	awaitProductionCompositionAcknowledgementsWhileCycling(t, "production started acknowledgements",
+		host.acknowledged, tickers, 2)
 	tickers.complete(t, tickers.source)
 	assertProductionCompositionObservation(t, runtime, "docker-pool", productionCompositionObservation{runnerStarted: true})
 	assertProductionCompositionObservation(t, runtime, "libvirt-pool", productionCompositionObservation{runnerStarted: true})
@@ -191,7 +186,8 @@ func terminalizeProductionCompositionJobs(
 	host.queueCompleted("29", 2101, 101, starts.dockerRunner)
 	host.queueCompleted("30", 2102, 102, starts.libvirtRunner)
 	tickers.complete(t, tickers.source)
-	awaitProductionCompositionValues(t, "production completion acknowledgements", host.acknowledged, 2)
+	awaitProductionCompositionAcknowledgementsWhileCycling(t, "production completion acknowledgements",
+		host.acknowledged, tickers, 2)
 	tickers.complete(t, tickers.source)
 	wantTerminal := productionCompositionObservation{runnerStarted: true, sourceTerminal: true}
 	assertProductionCompositionObservation(t, runtime, "docker-pool", wantTerminal)
@@ -238,9 +234,9 @@ type productionCompositionTickers struct {
 	barriers            map[*e2eManualTicker]*e2eLaneBarrier
 	logs                *productionCompositionLogDestination
 	notificationReady   <-chan struct{}
-	advanceClock        func(time.Duration)
 	awaitPublishedPolls func(*testing.T, ...core.RunnerPool)
 	pollCheckpoints     map[core.RunnerPool]uint64
+	registrationTargets map[string]uint64
 }
 
 func openProductionComposition(
@@ -274,6 +270,9 @@ func newProductionCompositionTickers(t *testing.T, host *productionCompositionGi
 	tickers := productionCompositionTickers{
 		membership: newE2EManualTicker(), source: newE2EManualTicker(), execution: newE2EManualTicker(),
 		barriers: make(map[*e2eManualTicker]*e2eLaneBarrier), pollCheckpoints: make(map[core.RunnerPool]uint64),
+		registrationTargets: productionCompositionRouteTargets(
+			[]string{"docker-pool", "libvirt-pool"}, host.registrationObservation,
+		),
 	}
 	for _, ticker := range []*e2eManualTicker{tickers.membership, tickers.source, tickers.execution} {
 		tickers.barriers[ticker] = newE2ELaneBarrier()
@@ -320,9 +319,7 @@ func configureProductionCompositionClockAndLogging(
 	tickers *productionCompositionTickers,
 ) {
 	baseTime := time.Date(2020, time.August, 16, 12, 0, 0, 0, time.UTC)
-	var clockAdvance atomic.Int64
-	dependencies.currentTime = func() time.Time { return baseTime.Add(time.Duration(clockAdvance.Load())) }
-	tickers.advanceClock = func(duration time.Duration) { clockAdvance.Add(int64(duration)) }
+	dependencies.currentTime = func() time.Time { return baseTime }
 	logDestination := &productionCompositionLogDestination{sessionActivationChanged: make(chan struct{})}
 	dependencies.logDestinationFactory = logDestination
 	tickers.logs = logDestination

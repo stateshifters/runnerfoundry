@@ -164,6 +164,109 @@ func TestOrchestrationAdaptersPreserveRuntimeFailures(t *testing.T) {
 	}
 }
 
+func TestOrchestrationPoolDoesNotReportShutdownClaimCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		claimErr   error
+		contextErr error
+		wantEvents int
+	}{
+		{name: "shutdown cancellation", claimErr: context.Canceled, contextErr: context.Canceled},
+		{name: "joined shutdown cancellation", claimErr: errors.Join(context.Canceled, fmt.Errorf("claim interrupted: %w", context.Canceled)),
+			contextErr: context.Canceled},
+		{name: "independent cancellation", claimErr: context.Canceled, wantEvents: 1},
+		{name: "storage failure", claimErr: errors.New("storage unavailable"), wantEvents: 1},
+		{name: "storage failure during shutdown", claimErr: errors.New("storage unavailable"), contextErr: context.Canceled, wantEvents: 1},
+		{name: "cancellation with storage failure", claimErr: errors.Join(context.Canceled, errors.New("rollback failed")),
+			contextErr: context.Canceled, wantEvents: 1},
+		{name: "deadline with canceled claim", claimErr: context.Canceled, contextErr: context.DeadlineExceeded, wantEvents: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertOrchestrationClaimReporting(t, test.claimErr, test.contextErr, test.wantEvents)
+		})
+	}
+}
+
+func assertOrchestrationClaimReporting(t *testing.T, claimErr, contextErr error, wantEvents int) {
+	t.Helper()
+	store := newBuilderStoreFake()
+	store.operationErr = claimErr
+	orchestrator := newBuilderOrchestrator(t, store, newBuilderManager(t, store), builderProviderFake{})
+	reported := make([]operationalEvent, 0, 1)
+	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(orchestrator, "linux", 1),
+		runnerPool: "linux", stateBackend: "sqlite", report: collectBuilderPoolEvents(t, &reported)}
+	ctx, cancel := builderClaimContext(contextErr)
+	defer cancel()
+	if _, err := pool.RequestWork(ctx, "linux"); !errors.Is(err, claimErr) {
+		t.Fatalf("request error = %v, want %v", err, claimErr)
+	}
+	if len(reported) != wantEvents {
+		t.Fatalf("claim events = %+v, want %d", reported, wantEvents)
+	}
+	for _, event := range reported {
+		if event.operation != "claim" || event.stage != "claim_oldest" || event.outcome != "failed" ||
+			!errors.Is(event.err, claimErr) {
+			t.Fatalf("claim failure event = %+v", event)
+		}
+	}
+}
+
+func builderClaimContext(contextErr error) (context.Context, context.CancelFunc) {
+	if errors.Is(contextErr, context.DeadlineExceeded) {
+		return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if errors.Is(contextErr, context.Canceled) {
+		cancel()
+	}
+	return ctx, cancel
+}
+
+func collectBuilderPoolEvents(t *testing.T, reported *[]operationalEvent) func(error) {
+	t.Helper()
+	return func(err error) {
+		var envelope operationalEventEnvelope
+		if !errors.As(err, &envelope) {
+			t.Fatalf("report = %T, want operational event", err)
+		}
+		*reported = append(*reported, envelope.event)
+	}
+}
+
+func TestOrchestrationPoolReportsClaimedOutcomeDuringCancellation(t *testing.T) {
+	reported := make([]operationalEvent, 0, 2)
+	claimErr := fmt.Errorf("cancel claimed job: %w", context.Canceled)
+	jobID := core.JobID{1}
+	coordinator := builderProcessCoordinator{result: runtimeengine.ProcessResult{
+		Outcome: runtimeengine.ProcessClaimed, JobID: jobID, FailedStage: "generate_bootstrap",
+	}, err: claimErr}
+	pool := orchestrationPool{worker: runtimeengine.NewPoolWorker(coordinator, "linux", 1),
+		runnerPool: "linux", stateBackend: "sqlite", report: collectBuilderPoolEvents(t, &reported)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := pool.RequestWork(ctx, "linux"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("request error = %v, want cancellation", err)
+	}
+	if len(reported) != 2 || reported[0].operation != "claim" || reported[0].outcome != "claimed" ||
+		reported[1].operation != "job_processing" || reported[1].outcome != "failed" ||
+		!errors.Is(reported[1].err, context.Canceled) {
+		t.Fatalf("claimed job events = %+v", reported)
+	}
+}
+
+type builderProcessCoordinator struct {
+	result runtimeengine.ProcessResult
+	err    error
+}
+
+func (builderProcessCoordinator) OccupiedSlots(context.Context, core.RunnerPool) (int, error) {
+	return 0, nil
+}
+
+func (coordinator builderProcessCoordinator) Process(context.Context, core.RunnerPool) (runtimeengine.ProcessResult, error) {
+	return coordinator.result, coordinator.err
+}
+
 func newBuilderOrchestrator(
 	t *testing.T,
 	store *builderStoreFake,

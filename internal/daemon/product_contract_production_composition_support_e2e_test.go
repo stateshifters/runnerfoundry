@@ -479,6 +479,31 @@ func (host *productionCompositionGitHub) queue(identifier string, requestID int6
 	})
 }
 
+func awaitProductionCompositionAcknowledgementsWhileCycling(
+	t *testing.T,
+	description string,
+	acknowledgements <-chan string,
+	tickers productionCompositionTickers,
+	count int,
+) {
+	t.Helper()
+	for index := 0; index < count; index++ {
+		timer := time.NewTimer(e2eWaitLimit)
+	acknowledged:
+		for {
+			select {
+			case <-acknowledgements:
+				break acknowledged
+			case <-timer.C:
+				t.Fatalf("timed out waiting for %s", description)
+			default:
+				tickers.complete(t, tickers.source)
+			}
+		}
+		timer.Stop()
+	}
+}
+
 func (host *productionCompositionGitHub) assertExpected(t *testing.T) {
 	t.Helper()
 	host.mutex.Lock()

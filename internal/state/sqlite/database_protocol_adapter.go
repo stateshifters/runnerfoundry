@@ -21,6 +21,7 @@ func (executor databaseExecutor) WithinTransaction(ctx context.Context, operatio
 				resultErr = errors.Join(resultErr, fmt.Errorf("rollback SQLite transaction: %w", err))
 			}
 		}
+		resultErr = canceledTransactionResult(ctx, resultErr)
 	}()
 	if err := operation(transactionAdapter{transaction: transaction}); err != nil {
 		return err
@@ -30,6 +31,32 @@ func (executor databaseExecutor) WithinTransaction(ctx context.Context, operatio
 	}
 	committed = true
 	return nil
+}
+
+func canceledTransactionResult(ctx context.Context, err error) error {
+	if err == nil || !errors.Is(ctx.Err(), context.Canceled) || !onlyCanceledTransactionCauses(err) {
+		return err
+	}
+	return fmt.Errorf("SQLite transaction canceled: %w", ctx.Err())
+}
+
+func onlyCanceledTransactionCauses(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return allCanceledTransactionCauses(joined.Unwrap())
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return onlyCanceledTransactionCauses(cause)
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrTxDone)
+}
+
+func allCanceledTransactionCauses(causes []error) bool {
+	for _, cause := range causes {
+		if !onlyCanceledTransactionCauses(cause) {
+			return false
+		}
+	}
+	return len(causes) > 0
 }
 func (executor databaseExecutor) ReadRow(ctx context.Context, statement string, read func(Scanner) error, arguments ...any) error {
 	if err := read(executor.database.QueryRowContext(ctx, statement, arguments...)); err != nil {

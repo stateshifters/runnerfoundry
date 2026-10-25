@@ -238,6 +238,31 @@ func (processor *queuedJobProcessor) reportProcessingFailure(
 	}
 }
 
+func isShutdownClaimCancellation(ctx context.Context, result runtimeengine.ProcessResult, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) &&
+		result.Outcome == "" && result.JobID == (core.JobID{}) && result.Job.ID == (core.JobID{}) &&
+		onlyCancellationCauses(err)
+}
+
+func onlyCancellationCauses(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return allCancellationCauses(joined.Unwrap())
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return onlyCancellationCauses(cause)
+	}
+	return errors.Is(err, context.Canceled)
+}
+
+func allCancellationCauses(causes []error) bool {
+	for _, cause := range causes {
+		if !onlyCancellationCauses(cause) {
+			return false
+		}
+	}
+	return len(causes) > 0
+}
+
 func shouldContinueQueuedJobPass(result runtimeengine.ProcessResult) bool {
 	return result.Outcome == runtimeengine.ProcessRunnerStarted ||
 		result.Outcome == runtimeengine.ProcessProvisioningFailureReported ||
