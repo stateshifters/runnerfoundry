@@ -118,7 +118,9 @@ func (listener *postgreSQLQueueNotificationListener) run(
 }
 
 func (listener *postgreSQLQueueNotificationListener) listenOnce(ctx context.Context) queueNotificationAction {
-	connection, err := listener.openConnection(ctx)
+	connectionContext, cancel := context.WithTimeout(ctx, queueNotificationConnectionTimeout)
+	connection, err := listener.openConnection(connectionContext)
+	cancel()
 	if err != nil {
 		listener.reportFailure(err)
 		return retryQueueNotifications
@@ -130,14 +132,12 @@ func (listener *postgreSQLQueueNotificationListener) listenOnce(ctx context.Cont
 func (listener *postgreSQLQueueNotificationListener) openConnection(
 	ctx context.Context,
 ) (queueNotificationConnection, error) {
-	connectionContext, cancel := context.WithTimeout(ctx, queueNotificationConnectionTimeout)
-	defer cancel()
-	connection, err := listener.pool.acquire(connectionContext)
+	connection, err := listener.pool.acquire(ctx)
 	if err != nil {
 		return queueNotificationConnection{}, fmt.Errorf("acquire PostgreSQL queue notification connection: %w", err)
 	}
-	if err = connection.listen(connectionContext); err != nil {
-		err = discardQueueNotificationConnection(connectionContext, connection, err)
+	if err = connection.listen(ctx); err != nil {
+		err = discardQueueNotificationConnection(ctx, connection, err)
 		return queueNotificationConnection{}, fmt.Errorf("listen for PostgreSQL queue notifications: %w", err)
 	}
 	return connection, nil

@@ -1,4 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>stateshifters/renovate-common"]
+  "extends": ["github>stateshifters/renovate-common"],
+  "enabledManagers": [
+    "dockerfile",
+    "docker-compose",
+    "github-actions",
+    "gomod",
+    "gradle",
+    "gradle-wrapper",
+    "npm",
+    "custom.regex"
+  ]
 }
