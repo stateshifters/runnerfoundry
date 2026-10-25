@@ -65,17 +65,7 @@ jobs:
       - name: Install macOS release tools
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: bash
-        run: |
-          set -euo pipefail
-          command -v openssl > /dev/null
-          tool_dir="$(mktemp -d "$RUNNER_TEMP/runnerfoundry-release-tools.XXXXXX")"
-          curl --fail --silent --show-error --location https://github.com/anchore/quill/releases/download/v0.7.1/quill_0.7.1_linux_amd64.tar.gz --output "$tool_dir/quill.tar.gz"
-          printf '%s  %s\n' e58c6f86378a22507c1123e24412afd4ee2d3bb32ebd94d6059827dc0c1b3fbf "$tool_dir/quill.tar.gz" | sha256sum --check -
-          tar -xzf "$tool_dir/quill.tar.gz" -C "$tool_dir" quill
-          curl --fail --silent --show-error --location https://github.com/deploymenttheory/go-macos-pkg/releases/download/v0.7.3/macospkg_0.7.3_linux_amd64.tar.gz --output "$tool_dir/macospkg.tar.gz"
-          printf '%s  %s\n' 23bcf8fafa3e6041e50cc3a96952d252dc65b721bc6d59faa5de9a9c77c91031 "$tool_dir/macospkg.tar.gz" | sha256sum --check -
-          tar -xzf "$tool_dir/macospkg.tar.gz" -C "$tool_dir" macospkg
-          printf '%s\n' "$tool_dir" >> "$GITHUB_PATH"
+        run: bash .github/scripts/install-macos-release-tools.sh
 
       - name: Release
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

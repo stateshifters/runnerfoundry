@@ -99,7 +99,8 @@ See [installation](docs/installation.md) for the operator workflow; do not execu
 
 ### macOS release signing on Linux
 
-The release workflow downloads Quill 0.7.1 and macospkg 0.7.3 Linux AMD64 binaries and verifies their pinned SHA-256 checksums.
+The release workflow downloads Quill 0.7.1, macospkg 0.7.3 and rcodesign 0.29.0 Linux AMD64 binaries.
+It verifies their pinned SHA-256 checksums.
 These tools run independently of the project's Go toolchain. A macOS host is not needed to build, sign, notarize or staple the installer.
 The Linux release environment also needs OpenSSL, curl, tar, sha256sum, base64 and the standard GNU file utilities.
 
@@ -118,20 +119,24 @@ Release steps run only for `main` outside pull-request events. The GitHub Action
 
 The Release step creates private certificate and notarization-key files under `RUNNER_TEMP` and removes them on exit.
 Application signing requires a verified chain to an Apple root; preparation fails if Quill cannot complete that chain.
-Quill receives a temporary application bundle's path through its environment. Passwords remain in environment variables.
+Passwords remain in environment variables.
 Do not enable shell tracing, print these values or put credential files in build artifacts or caches.
 
 `make package-macos VERSION=<version>` runs in that Linux release environment after the tools and credentials are available.
 Its tool-facing environment is `QUILL_SIGN_P12`, `QUILL_SIGN_PASSWORD`, `MACOS_INSTALLER_P12_PATH`, `MACOSPKG_P12_PASSWORD`,
 `APPLE_KEY_ID`, `APPLE_ISSUER_ID`, `APPLE_PRIVATE_KEY_PATH` and `MACOS_TEAM_ID`; the workflow maps the repository secrets to them.
-`QUILL` and `MACOSPKG` can override the tool command paths.
+`QUILL`, `MACOSPKG` and `RCODESIGN` can override the tool command paths.
 For a direct target invocation, `QUILL_SIGN_P12` must contain the private key and either only the leaf certificate or a full chain
 including the Apple root. Quill 0.7.1 mishandles partial CA chains. The workflow accepts the stored application bundle and prepares
 a suitable temporary bundle before invoking the target. Direct callers must supply a bundle already in one of these accepted forms.
 
-Quill signs the executable. macospkg assembles an ARM64-only distribution installer for macOS 13 or later, signs it,
-waits for Apple notarization acceptance, and staples the ticket. A final package check requires a Developer ID signature,
-the configured team, a stapled ticket and Apple's online notarization record. Any failure stops release preparation before publication.
+The temporary JSON API key file used for notarization has private permissions and is removed automatically on success or failure.
+
+Quill signs the executable. macospkg assembles and signs an ARM64-only distribution installer for macOS 13 or later.
+rcodesign submits the signed installer to Apple, waits up to 30 minutes for acceptance, and staples the ticket.
+See [rcodesign notarization and stapling](https://gregoryszorc.com/docs/apple-codesign/0.29.0/apple_codesign_rcodesign_notarizing.html) for submission status and log commands.
+A final package check requires a Developer ID signature, the configured team, a stapled ticket and Apple's online notarization record.
+Any failure stops release preparation before publication.
 A notarization timeout does not establish rejection; check the submission in Apple's service before retrying.
 
 The installer places the command in `/usr/local/bin`, the example configuration and metadata in `/usr/local/share/runnerfoundry`,

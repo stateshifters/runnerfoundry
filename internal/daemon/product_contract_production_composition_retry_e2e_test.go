@@ -78,7 +78,7 @@ func exerciseProductionCompositionProvisioningRetry(
 	host.queue("29", 301, time.Date(2020, time.August, 16, 10, 0, 0, 0, time.UTC))
 	tickers.awaitPublishedPolls(t, "docker-pool")
 	tickers.complete(t, tickers.source)
-	awaitProductionCompositionValues(t, "failed-demand acknowledgement", host.acknowledged, 1)
+	awaitProductionCompositionValue(t, "failed-demand acknowledgement", host.acknowledged)
 	tickers.complete(t, tickers.source)
 	firstAttempt := awaitDockerCompositionStart(t, dockerCommands.starts)
 	firstJobID := assertProductionCompositionProcessing(t, runtime, "docker-pool").Job.ID

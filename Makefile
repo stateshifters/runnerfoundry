@@ -10,6 +10,7 @@ VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 QUILL ?= quill
 MACOSPKG ?= macospkg
+RCODESIGN ?= rcodesign
 MACOS_PAYLOAD := $(BUILD_DIR)/macos/payload
 MACOS_COMPONENT := $(BUILD_DIR)/macos/runnerfoundry-component.pkg
 MACOS_PACKAGE := $(DIST_DIR)/runnerfoundry_$(VERSION)_darwin_arm64.pkg
@@ -164,7 +165,12 @@ else
 	install -m 0644 packaging/macos/com.stateshifterlabs.runnerfoundry.plist "$(MACOS_PAYLOAD)/Library/LaunchDaemons/"
 	$(QUILL) sign "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
 	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location / --scripts packaging/macos/scripts
-	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 13.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH" --notarize
+	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 13.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH"
+	@set -eu; umask 077; \
+		notary_key_file=$$(mktemp); \
+		trap 'rm -f -- "$$notary_key_file"' EXIT; \
+		$(RCODESIGN) encode-app-store-connect-api-key -o "$$notary_key_file" "$$APPLE_ISSUER_ID" "$$APPLE_KEY_ID" "$$APPLE_PRIVATE_KEY_PATH"; \
+		$(RCODESIGN) notary-submit --api-key-file "$$notary_key_file" --staple --max-wait-seconds 1800 "$(MACOS_PACKAGE)"
 	$(MACOSPKG) verify "$(MACOS_PACKAGE)" --team-id "$$MACOS_TEAM_ID" --require-developer-id --require-stapled --online
 endif
 

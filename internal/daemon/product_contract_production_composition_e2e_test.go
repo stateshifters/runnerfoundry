@@ -69,7 +69,8 @@ func exerciseProductionCompositionLifecycle(
 	host.queue("29", 101, time.Date(2020, time.August, 16, 10, 0, 0, 0, time.UTC))
 	host.queue("30", 102, time.Date(2020, time.August, 16, 10, 1, 0, 0, time.UTC))
 	tickers.complete(t, tickers.source)
-	awaitProductionCompositionValues(t, "production GitHub acknowledgements", host.acknowledged, 2)
+	awaitProductionCompositionAcknowledgementsWhileCycling(t, "production GitHub acknowledgements",
+		host.acknowledged, tickers, 2)
 	tickers.complete(t, tickers.source)
 
 	starts := assertProductionCompositionStarts(t, dockerCommands, libvirtCommands)
@@ -626,13 +627,6 @@ func closeProductionComposition(
 	}
 	if err := runtime.Close(ctx); err != nil {
 		t.Errorf("close production-composition runtime: %v", err)
-	}
-}
-
-func awaitProductionCompositionValues(t *testing.T, description string, values <-chan string, count int) {
-	t.Helper()
-	for index := 0; index < count; index++ {
-		_ = awaitProductionCompositionValue(t, description, values)
 	}
 }
 

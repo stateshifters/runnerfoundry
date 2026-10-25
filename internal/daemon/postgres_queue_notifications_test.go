@@ -119,6 +119,8 @@ func TestPostgreSQLQueueNotificationsCancelAndJoinBlockedPing(t *testing.T) {
 
 func TestPostgreSQLQueueNotificationsRejectInitialFailureAndAllowDisabledPool(t *testing.T) {
 	wantErr := errors.New("notifications unavailable")
+	startupContext, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStartup()
 	listener := newPostgreSQLQueueNotificationListener(queueNotificationPool{
 		maxConnections: 2,
 		acquire: func(ctx context.Context) (queueNotificationConnection, error) {
@@ -128,7 +130,7 @@ func TestPostgreSQLQueueNotificationsRejectInitialFailureAndAllowDisabledPool(t 
 			return queueNotificationConnection{}, wantErr
 		},
 	})
-	if err := listener.Start(context.Background(), context.Background()); !errors.Is(err, wantErr) {
+	if err := listener.Start(startupContext, context.Background()); !errors.Is(err, wantErr) {
 		t.Fatalf("startup error = %v, want %v", err, wantErr)
 	}
 	if err := listener.Stop(context.Background()); err != nil {
