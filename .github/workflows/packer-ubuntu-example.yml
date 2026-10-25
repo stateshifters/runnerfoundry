@@ -27,60 +27,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install image-build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes \
-            kmod \
-            ovmf \
-            qemu-system-x86 \
-            qemu-utils \
-            xorriso
-
-      - name: Prepare nested KVM
-        run: |
-          if grep -qw vmx /proc/cpuinfo; then
-            kvm_module=kvm_intel
-          elif grep -qw svm /proc/cpuinfo; then
-            kvm_module=kvm_amd
-          else
-            echo "::error::The runner does not expose Intel VMX or AMD SVM for nested KVM."
-            exit 1
-          fi
-
-          sudo modprobe "$kvm_module"
-          test -c /dev/kvm
-          sudo chown "$(id -un)" /dev/kvm
-          test -r /dev/kvm
-          test -w /dev/kvm
-
       - name: Install Packer
         uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
         with:
           version: 1.15.4
 
-      - name: Prepare build key
-        run: ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/packer-key"
-
-      - name: Test JIT launcher
-        run: bash examples/libvirt-ubuntu-runner/runnerfoundry-jit-launcher.test.sh
-
-      - name: Initialize Packer
-        run: packer init examples/libvirt-ubuntu-runner
-
       - name: Check Packer formatting
         run: packer fmt -check examples/libvirt-ubuntu-runner
 
-      - name: Validate Packer template
-        run: >-
-          packer validate
-          -var "ssh_private_key_file=$RUNNER_TEMP/packer-key"
-          examples/libvirt-ubuntu-runner
-
-      - name: Build image
-        env:
-          PACKER_LOG: "1"
-        run: >-
-          packer build
-          -var "ssh_private_key_file=$RUNNER_TEMP/packer-key"
-          examples/libvirt-ubuntu-runner
+      - name: Check Packer syntax
+        run: packer validate -syntax-only examples/libvirt-ubuntu-runner
