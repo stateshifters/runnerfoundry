@@ -18,18 +18,24 @@ type ProviderKind string
 const (
 	ProviderKindDocker  ProviderKind = "docker"
 	ProviderKindLibvirt ProviderKind = "libvirt"
+	ProviderKindOrchard ProviderKind = "orchard"
 )
 
-// ProviderKind returns the configured backend or an error unless exactly one
-// of Docker and Libvirt is present.
 func (runnerPool RunnerPoolConfig) ProviderKind() (ProviderKind, error) {
-	if (runnerPool.Docker == nil) == (runnerPool.Libvirt == nil) {
-		return "", errors.New("exactly one of docker or libvirt is required")
-	}
+	kinds := make([]ProviderKind, 0, 3)
 	if runnerPool.Docker != nil {
-		return ProviderKindDocker, nil
+		kinds = append(kinds, ProviderKindDocker)
 	}
-	return ProviderKindLibvirt, nil
+	if runnerPool.Libvirt != nil {
+		kinds = append(kinds, ProviderKindLibvirt)
+	}
+	if runnerPool.Orchard != nil {
+		kinds = append(kinds, ProviderKindOrchard)
+	}
+	if len(kinds) != 1 {
+		return "", errors.New("exactly one of docker, libvirt or orchard is required")
+	}
+	return kinds[0], nil
 }
 
 // Validate mutates Config only to apply documented defaults, then rejects
@@ -198,19 +204,33 @@ func (runnerPool *RunnerPoolConfig) validateProvider() error {
 	if err != nil {
 		return err
 	}
-	if kind == ProviderKindDocker {
-		if runnerPool.Docker.ComposeFile == "" {
-			return errors.New("docker.compose_file is required")
-		}
-		if runnerPool.Docker.Service == "" {
-			return errors.New("docker.service is required")
-		}
-		return nil
+	var validationError error
+	switch kind {
+	case ProviderKindDocker:
+		validationError = runnerPool.Docker.validate()
+	case ProviderKindLibvirt:
+		validationError = runnerPool.Libvirt.validate()
+	case ProviderKindOrchard:
+		validationError = runnerPool.Orchard.validate()
 	}
-	if runnerPool.Libvirt.ConnectionURI == "" {
+	return validationError
+}
+
+func (configured DockerConfig) validate() error {
+	if configured.ComposeFile == "" {
+		return errors.New("docker.compose_file is required")
+	}
+	if configured.Service == "" {
+		return errors.New("docker.service is required")
+	}
+	return nil
+}
+
+func (configured LibvirtConfig) validate() error {
+	if configured.ConnectionURI == "" {
 		return errors.New("libvirt.connection_uri is required")
 	}
-	if runnerPool.Libvirt.DomainXMLTemplate == "" {
+	if configured.DomainXMLTemplate == "" {
 		return errors.New("libvirt.domain_xml_template is required")
 	}
 	return nil

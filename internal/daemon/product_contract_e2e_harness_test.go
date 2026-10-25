@@ -469,13 +469,9 @@ func (harness *e2eHarness) establishSourceSession() {
 
 func (harness *e2eHarness) reconcileSourceAfterMembership(registrationTargets map[string]uint64) {
 	harness.t.Helper()
-	discoveryInterval, err := harness.configured.GitHub.DiscoveryDuration()
-	if err != nil {
-		harness.t.Fatalf("read E2E GitHub discovery interval: %v", err)
-	}
-	e2eAwaitRouteTargetsWhileCycling(harness.t, "post-membership source reconciliation",
-		registrationTargets, harness.host.registrationObservation,
-		func() { harness.runSourceAtNextDiscovery(discoveryInterval) })
+	harness.completeMaintenanceCycle(harness.source)
+	e2eAwaitRouteTargets(harness.t, "post-membership source reconciliation",
+		registrationTargets, harness.host.registrationObservation)
 }
 
 func e2eRouteTargets(
@@ -511,6 +507,47 @@ func e2eAwaitRouteTargetsWhileCycling(
 		sequence, _ := observation(runnerPool)
 		return sequence
 	}, cycle)
+}
+
+func e2eAwaitRouteTargets(
+	t *testing.T,
+	description string,
+	targets map[string]uint64,
+	observation func(string) (uint64, <-chan struct{}),
+) {
+	t.Helper()
+	timer := time.NewTimer(e2eWaitLimit)
+	defer timer.Stop()
+	for {
+		pending, changed := e2ePendingRouteTargets(targets, observation)
+		if len(pending) == 0 {
+			return
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %s; pending Runner Pools %v", description, pending)
+		}
+	}
+}
+
+func e2ePendingRouteTargets(
+	targets map[string]uint64,
+	observation func(string) (uint64, <-chan struct{}),
+) ([]string, <-chan struct{}) {
+	pending := make([]string, 0, len(targets))
+	var changed <-chan struct{}
+	for runnerPool, target := range targets {
+		sequence, observedChange := observation(runnerPool)
+		if sequence >= target {
+			continue
+		}
+		pending = append(pending, runnerPool)
+		if changed == nil {
+			changed = observedChange
+		}
+	}
+	return pending, changed
 }
 
 func e2eAwaitSessionPollTargetsWhileCycling(
@@ -569,13 +606,6 @@ func e2ePendingTargets(
 		pending = append(pending, runnerPool)
 	}
 	return pending
-}
-
-func (harness *e2eHarness) runSourceAtNextDiscovery(discoveryInterval time.Duration) {
-	harness.t.Helper()
-	harness.advanceClock(discoveryInterval)
-	harness.completeMaintenanceCycle(harness.membership)
-	harness.completeMaintenanceCycle(harness.source)
 }
 
 func (harness *e2eHarness) completeMaintenanceCycle(ticker *e2eManualTicker) {

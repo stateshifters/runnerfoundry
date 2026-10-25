@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stateshifterlabs.runnerfoundry</string>
+    <key>Disabled</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>UserName</key>
+    <string>_runnerfoundry</string>
+    <key>GroupName</key>
+    <string>_runnerfoundry</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/runnerfoundry</string>
+        <string>--config</string>
+        <string>/usr/local/etc/runnerfoundry/config.yaml</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Library/Application Support/RunnerFoundry</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/runnerfoundry/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/runnerfoundry/stderr.log</string>
+</dict>
+</plist>

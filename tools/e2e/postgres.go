@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -56,7 +57,11 @@ func preparePostgres(postgresRoot string, version string, operatingSystem string
 	archivePath := filepath.Join(temporaryDirectory, "postgres.txz")
 
 	fmt.Printf("Preparing PostgreSQL %s binaries for %s/%s\n", version, operatingSystem, architecture)
-	if err = runCommand("", "curl", "--fail", "--location", "--silent", "--show-error", "--output", jarPath, downloadURL); err != nil {
+	download := exec.Command("curl", "--fail", "--location", "--silent", "--show-error", "--output", jarPath, downloadURL)
+	download.Stdout = os.Stdout
+	download.Stderr = os.Stderr
+	download.Stdin = os.Stdin
+	if err = download.Run(); err != nil {
 		return fmt.Errorf("download PostgreSQL %s: %w", version, err)
 	}
 	if err = extractPostgresArchive(jarPath, archivePath); err != nil {
@@ -65,7 +70,11 @@ func preparePostgres(postgresRoot string, version string, operatingSystem string
 	if err = os.MkdirAll(destination, 0o755); err != nil {
 		return fmt.Errorf("create PostgreSQL destination: %w", err)
 	}
-	if err = runCommand("", "tar", "-xJf", archivePath, "-C", destination); err != nil {
+	extract := exec.Command("tar", "-xJf", archivePath, "-C", destination)
+	extract.Stdout = os.Stdout
+	extract.Stderr = os.Stderr
+	extract.Stdin = os.Stdin
+	if err = extract.Run(); err != nil {
 		return fmt.Errorf("extract PostgreSQL %s: %w", version, err)
 	}
 	if operatingSystem == "windows" {

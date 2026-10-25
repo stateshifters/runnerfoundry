@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly template='/opt/actions-runner-template'
+readonly runtime='/Users/runner/actions-runner'
+readonly bootstrap_directory='/var/run/runnerfoundry'
+readonly bootstrap_fifo="$bootstrap_directory/bootstrap"
+
+finish() {
+  local status=$?
+  trap - EXIT
+  set +e
+  rm -rf -- "$runtime" "$bootstrap_directory"
+  /sbin/shutdown -h now
+  exit "$status"
+}
+trap finish EXIT
+
+rm -rf -- "$runtime"
+install -d -o runner -g runner -m 0700 "$runtime"
+cp -R "$template/." "$runtime/"
+chown -R runner:runner "$runtime"
+
+install -d -o root -g runner -m 0710 "$bootstrap_directory"
+rm -f -- "$bootstrap_fifo"
+mkfifo -m 0600 "$bootstrap_fifo"
+chown runner:runner "$bootstrap_fifo"
+
+jit="$(cat "$bootstrap_fifo")"
+rm -rf -- "$bootstrap_directory"
+ACTIONS_RUNNER_INPUT_JITCONFIG="$jit" sudo -E -H -u runner -- "$runtime/run.sh"

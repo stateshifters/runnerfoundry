@@ -5,7 +5,7 @@ The database changes where RunnerFoundry stores durable state. It does not chang
 
 Complete the [installation and GitHub App setup](installation.md) on each host first. The examples below use the packaged systemd service and protected credential files.
 
-Prepare a runner provider before starting RunnerFoundry. For the Docker examples, create and validate `/etc/runnerfoundry/compose.yaml` through [configure a runner and its pool](../README.md#2-configure-a-runner-and-its-pool). For a different Docker service or for libvirt, follow the matching [provider contract](providers.md).
+Prepare a runner provider before starting RunnerFoundry. For the Docker examples, create and validate `/etc/runnerfoundry/compose.yaml` through [configure a runner and its pool](../README.md#2-configure-a-runner-and-its-pool). For other runner environments, follow the matching [provider guide](providers.md).
 
 The standalone YAML examples below completely replace `/etc/runnerfoundry/config.yaml`. Substitute your numeric GitHub App ID for `123456` and confirm every referenced provider and credential file exists. Cluster snippets show the sections which must agree or differ between otherwise complete member configurations.
 

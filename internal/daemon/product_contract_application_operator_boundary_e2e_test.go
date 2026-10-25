@@ -3,6 +3,8 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -95,25 +97,90 @@ func assertApplicationShutdownOperatorSnapshot(
 ) {
 	t.Helper()
 	states := application.notifier.snapshot()
-	if len(states) != notificationCount {
-		t.Fatalf("shutdown emitted service notifications %q, want no notifications", states[notificationCount:])
-	}
 	records := application.logs.records(t)
 	if len(records) < logCount {
 		t.Fatalf("application log record count decreased from %d to %d", logCount, len(records))
 	}
 	shutdownRecords := records[logCount:]
+	assertApplicationNoShutdownNotifications(t, application, states, notificationCount, shutdownRecords)
 	want := []string{
 		"INFO|Runtime generation started|progress_event|runtime|generation|e2e-application-member|deactivation|started|",
 		"INFO|Runtime generation completed|progress_event|runtime|generation|e2e-application-member|deactivation|completed|",
 		"INFO|Runtime generation started|progress_event|runtime|generation|e2e-application-member|shutdown|started|",
 		"INFO|Runtime generation completed|progress_event|runtime|generation|e2e-application-member|shutdown|completed|",
 	}
-	if len(shutdownRecords) != len(want) {
-		t.Fatalf("shutdown structured log count = %d, want %d; records=%+v", len(shutdownRecords), len(want), shutdownRecords)
+	lifecycleRecords := applicationShutdownGenerationRecords(t, shutdownRecords)
+	if len(lifecycleRecords) != len(want) {
+		t.Fatalf("shutdown generation log count = %d, want %d; records=%+v", len(lifecycleRecords), len(want), shutdownRecords)
 	}
-	for index, record := range shutdownRecords {
+	for index, record := range lifecycleRecords {
 		assertApplicationLogSnapshot(t, record, want[index])
+	}
+	assertApplicationLogSnapshot(t, shutdownRecords[len(shutdownRecords)-1], want[len(want)-1])
+}
+
+func assertApplicationNoShutdownNotifications(
+	t *testing.T,
+	application *e2eApplication,
+	states []string,
+	notificationCount int,
+	shutdownRecords []e2eApplicationLogRecord,
+) {
+	t.Helper()
+	if len(states) != notificationCount {
+		application.runtime.reporter.mutex.Lock()
+		lastStatus := application.runtime.reporter.lastStatus
+		failures := make([]string, 0, len(application.runtime.reporter.failures))
+		for _, failure := range application.runtime.reporter.failures {
+			failures = append(failures, applicationFailureClassification(failure.event))
+		}
+		application.runtime.reporter.mutex.Unlock()
+		t.Fatalf("shutdown emitted service notifications %q, want no notifications; status=%+v failures=%v records=%+v",
+			states[notificationCount:], lastStatus, failures, shutdownRecords)
+	}
+}
+
+func applicationFailureClassification(event operationalEvent) string {
+	types := make([]string, 0, 4)
+	for cause := event.err; cause != nil; cause = errors.Unwrap(cause) {
+		types = append(types, fmt.Sprintf("%T", cause))
+	}
+	var sqliteCode interface{ Code() int }
+	code := -1
+	if errors.As(event.err, &sqliteCode) {
+		code = sqliteCode.Code()
+	}
+	return fmt.Sprintf("%s/%s/%s canceled=%t deadline=%t sqlite_code=%d types=%v",
+		event.operation, event.stage, event.outcome, errors.Is(event.err, context.Canceled),
+		errors.Is(event.err, context.DeadlineExceeded), code, types)
+}
+
+func applicationShutdownGenerationRecords(t *testing.T, records []e2eApplicationLogRecord) []e2eApplicationLogRecord {
+	t.Helper()
+	generationRecords := make([]e2eApplicationLogRecord, 0, len(records))
+	for _, record := range records {
+		if record.Component == "runtime" && record.Operation == "generation" {
+			generationRecords = append(generationRecords, record)
+			continue
+		}
+		if !applicationShutdownSourceProgress(record) {
+			t.Fatalf("unexpected shutdown log record: %+v", record)
+		}
+	}
+	return generationRecords
+}
+
+func applicationShutdownSourceProgress(record e2eApplicationLogRecord) bool {
+	if record.Level != "INFO" || record.Type != "progress_event" || record.Component != "github_registration" ||
+		record.Operation != "source_reconciliation" || record.Member != "e2e-application-member" ||
+		record.ErrorCategory != "" || record.RunnerPool != "" || record.MessageID != 0 {
+		return false
+	}
+	switch record.Stage {
+	case "discover_repositories", "configure_repositories", "reconciliation":
+		return record.Outcome == "started" || record.Outcome == "completed"
+	default:
+		return false
 	}
 }
 

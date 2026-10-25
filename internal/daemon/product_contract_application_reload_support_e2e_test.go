@@ -103,26 +103,11 @@ func e2eReconcileApplicationSourceAfterMembership(
 	if source.host == nil {
 		t.Fatal("application GitHub source observation has no host")
 	}
-	discoveryInterval, err := application.configured.GitHub.DiscoveryDuration()
-	if err != nil {
-		t.Fatalf("read application GitHub discovery interval: %v", err)
-	}
-	e2eAwaitRouteTargetsWhileCycling(t,
+	application.tickers.cycle(t, "source")
+	e2eAwaitRouteTargets(t,
 		fmt.Sprintf("generation %d post-membership application source reconciliation", source.generation),
 		source.registrationTargets, source.registrations.observation,
-		func() { e2eRunApplicationSourceAtNextDiscovery(t, application, discoveryInterval) },
 	)
-}
-
-func e2eRunApplicationSourceAtNextDiscovery(
-	t *testing.T,
-	application *e2eApplication,
-	discoveryInterval time.Duration,
-) {
-	t.Helper()
-	application.advanceClock(discoveryInterval)
-	application.tickers.cycle(t, "membership")
-	application.tickers.cycle(t, "source")
 }
 
 func e2eInstallPublishedApplicationSessions(

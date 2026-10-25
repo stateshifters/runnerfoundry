@@ -76,6 +76,14 @@ make build
 
 The output is `build/linux/amd64/runnerfoundry`. Building an artifact does not verify application behaviour.
 
+To cross-compile the Apple Silicon executable from a contributor host:
+
+```sh
+make build-macos
+```
+
+The output is `build/darwin/arm64/runnerfoundry` and requires macOS 13 or later. No Intel macOS executable is packaged.
+
 To produce a Debian package, source-location notice, third-party license notices, and SBOM metadata:
 
 ```sh
@@ -84,12 +92,61 @@ make package-deb VERSION=<version>
 
 Replace `<version>` with the intended package version. Packages are written under `dist/`.
 The packaging target uses pinned Go tools and downloads dependencies as needed.
-Release automation selects the release version and invokes `make prepare`, which packages the same artifacts.
+Release automation selects the release version and invokes `make prepare`, which clears `dist/` and produces both the Debian
+package and `dist/runnerfoundry_<version>_darwin_arm64.pkg`. The two packages include the same licence, source-location,
+third-party notice and SBOM metadata. Individual packaging targets retain other files in `dist/`.
 See [installation](docs/installation.md) for the operator workflow; do not execute a built or packaged daemon as contributor verification.
 
-Optional VM-image examples have their own build dependencies and maintained workflows.
-Their READMEs separate operator image preparation from launcher-maintenance checks:
-[Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md).
+### macOS release signing on Linux
+
+The release workflow downloads Quill 0.7.1 and macospkg 0.7.3 Linux AMD64 binaries and verifies their pinned SHA-256 checksums.
+These tools run independently of the project's Go toolchain. A macOS host is not needed to build, sign, notarize or staple the installer.
+The Linux release environment also needs OpenSSL, curl, tar, sha256sum, base64 and the standard GNU file utilities.
+
+Release steps run only for `main` outside pull-request events. The GitHub Actions repository must supply these secrets:
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_APPLICATION_P12_BASE64` | Base64 Developer ID Application certificate and private key in a password-protected PKCS12 bundle |
+| `MACOS_APPLICATION_P12_PASSWORD` | Password for that bundle |
+| `MACOS_INSTALLER_P12_BASE64` | Base64 Developer ID Installer certificate and private key in a password-protected PKCS12 bundle |
+| `MACOS_INSTALLER_P12_PASSWORD` | Password for that bundle |
+| `MACOS_NOTARY_P8_BASE64` | Base64 App Store Connect team API private key |
+| `MACOS_NOTARY_KEY_ID` | API key ID |
+| `MACOS_NOTARY_ISSUER_ID` | API issuer ID |
+| `MACOS_TEAM_ID` | Apple Developer team ID used to verify the signed installer |
+
+The Release step creates private certificate and notarization-key files under `RUNNER_TEMP` and removes them on exit.
+Application signing requires a verified chain to an Apple root; preparation fails if Quill cannot complete that chain.
+Quill receives a temporary application bundle's path through its environment. Passwords remain in environment variables.
+Do not enable shell tracing, print these values or put credential files in build artifacts or caches.
+
+`make package-macos VERSION=<version>` runs in that Linux release environment after the tools and credentials are available.
+Its tool-facing environment is `QUILL_SIGN_P12`, `QUILL_SIGN_PASSWORD`, `MACOS_INSTALLER_P12_PATH`, `MACOSPKG_P12_PASSWORD`,
+`APPLE_KEY_ID`, `APPLE_ISSUER_ID`, `APPLE_PRIVATE_KEY_PATH` and `MACOS_TEAM_ID`; the workflow maps the repository secrets to them.
+`QUILL` and `MACOSPKG` can override the tool command paths.
+For a direct target invocation, `QUILL_SIGN_P12` must contain the private key and either only the leaf certificate or a full chain
+including the Apple root. Quill 0.7.1 mishandles partial CA chains. The workflow accepts the stored application bundle and prepares
+a suitable temporary bundle before invoking the target. Direct callers must supply a bundle already in one of these accepted forms.
+
+Quill signs the executable. macospkg assembles an ARM64-only distribution installer for macOS 13 or later, signs it,
+waits for Apple notarization acceptance, and staples the ticket. A final package check requires a Developer ID signature,
+the configured team, a stapled ticket and Apple's online notarization record. Any failure stops release preparation before publication.
+A notarization timeout does not establish rejection; check the submission in Apple's service before retrying.
+
+The installer places the command in `/usr/local/bin`, the example configuration and metadata in `/usr/local/share/runnerfoundry`,
+and a disabled system service in `/Library/LaunchDaemons`. It creates the `_runnerfoundry` service account and a starter
+configuration only when none exists. Operators prepare credentials and provider access before enabling and starting the service.
+See [macOS installation](docs/installation-macos.md) for the operator workflow.
+
+Optional VM-image examples have their own [libvirt image preparation requirements](docs/providers/libvirt.md#prepare-guest-images)
+and example-specific [Ubuntu](examples/libvirt-ubuntu-runner/README.md) and [Windows](examples/libvirt-windows-runner/README.md) build commands.
+When changing those guest launchers, their hermetic checks run separately from image preparation, from the repository root:
+
+```sh
+bash examples/libvirt-ubuntu-runner/runnerfoundry-jit-launcher.test.sh
+pwsh -NoProfile -File examples/libvirt-windows-runner/runnerfoundry-jit-launcher.Tests.ps1
+```
 
 ## Ways of working (contract)
 

@@ -1,0 +1,5 @@
+{
+  "image": "macos-runner-base",
+  "imagePullPolicy": "IfNotPresent",
+  "restart_policy": "Never"
+}

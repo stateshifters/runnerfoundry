@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/stateshifters/runnerfoundry/internal/core"
 	"github.com/stateshifters/runnerfoundry/internal/execution"
@@ -109,6 +111,14 @@ type Provider struct {
 	config         Config
 	domainTemplate []byte
 	memberID       core.MemberID
+	snapshot       *libvirtInventorySnapshot
+}
+
+type libvirtInventorySnapshot struct {
+	mutex     sync.RWMutex
+	ready     bool
+	instances []execution.RunnerInstance
+	err       error
 }
 
 var _ execution.ExecutionProvider = Provider{}
@@ -124,6 +134,7 @@ func NewProvider(
 		config:         config,
 		domainTemplate: append([]byte(nil), domainTemplate...),
 		memberID:       memberID,
+		snapshot:       &libvirtInventorySnapshot{},
 	}
 }
 
@@ -161,7 +172,12 @@ func (provider Provider) CanInspectEndpointForMember(
 }
 
 func (provider Provider) Refresh(ctx context.Context) error {
-	_, err := provider.Inspect(ctx)
+	instances, err := provider.observe(ctx)
+	provider.snapshot.mutex.Lock()
+	defer provider.snapshot.mutex.Unlock()
+	provider.snapshot.instances = instances
+	provider.snapshot.err = err
+	provider.snapshot.ready = true
 	return err
 }
 
@@ -172,7 +188,7 @@ func (provider Provider) InspectEndpoint(
 	if !provider.KnowsEndpoint(endpointID) {
 		return nil, fmt.Errorf("libvirt endpoint %q is not configured", endpointID)
 	}
-	instances, err := provider.Inspect(ctx)
+	instances, err := provider.observe(ctx)
 	for index := range instances {
 		instances[index].EndpointID = endpointID
 	}
@@ -219,6 +235,20 @@ func (provider Provider) renderDomainXML(request execution.StartRequest) (string
 }
 
 func (provider Provider) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	provider.snapshot.mutex.RLock()
+	ready := provider.snapshot.ready
+	provider.snapshot.mutex.RUnlock()
+	if !ready {
+		if err := provider.Refresh(ctx); err != nil {
+			return nil, err
+		}
+	}
+	provider.snapshot.mutex.RLock()
+	defer provider.snapshot.mutex.RUnlock()
+	return slices.Clone(provider.snapshot.instances), provider.snapshot.err
+}
+
+func (provider Provider) observe(ctx context.Context) ([]execution.RunnerInstance, error) {
 	output, err := provider.commandRunner.ListDomains(ctx, provider.config.ConnectionURI)
 	if err != nil {
 		return nil, fmt.Errorf("inspect libvirt runners: list libvirt domains: %w", err)

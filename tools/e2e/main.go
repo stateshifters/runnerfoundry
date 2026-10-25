@@ -84,15 +84,6 @@ func environmentValue(name string, fallback string) string {
 	return value
 }
 
-func runCommand(directory string, name string, arguments ...string) error {
-	command := exec.Command(name, arguments...)
-	command.Dir = directory
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	command.Stdin = os.Stdin
-	return command.Run()
-}
-
 func errorExitCode(err error) int {
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {

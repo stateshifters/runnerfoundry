@@ -1,7 +1,8 @@
 # Install RunnerFoundry
 
-This guide prepares an Ubuntu 24.04 AMD64 host for the [first-job tutorial](../README.md#quick-start).
-You need administrator access to the host and permission to create and install a GitHub App on your personal account.
+Use the Linux package instructions below for the Ubuntu 24.04 AMD64 [first-job tutorial](../README.md#quick-start),
+or follow [native macOS installation](#install-on-macos) for the control plane.
+The Linux package requires administrator access to the host. You need permission to create and install a GitHub App on your personal account.
 
 ## Prepare the host
 
@@ -14,17 +15,12 @@ systemctl --version
 ```
 
 The architecture must be `x86_64`, and the second command must identify systemd 253 or newer.
-These requirements describe the packaged tutorial, not every source-build environment.
 
-Install Docker Engine and the Compose plugin using [Docker's Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/).
-Complete Docker's installation checks, then confirm these commands work:
+For the Docker tutorial, install Docker Engine and the Compose plugin using the
+[Docker provider setup](providers/docker.md#install-and-prepare-the-host). Docker hosts also need access to their container registry.
+For libvirt or Orchard, prepare the provider using its [provider guide](providers.md).
 
-```sh
-sudo docker info
-docker compose version
-```
-
-The host needs outbound HTTPS access to GitHub and the container registry. Runners also need access to workflow dependencies and services.
+The RunnerFoundry host needs outbound HTTPS access to GitHub. Runners need access to GitHub, workflow dependencies and services.
 RunnerFoundry polls GitHub; you do not need an inbound webhook server.
 
 ## Install the package
@@ -38,21 +34,20 @@ runnerfoundry --version
 ```
 
 Replace `<version>` with the release version. The version command prints `runnerfoundry` followed by the installed version.
-If no package is available, see [building from source](../CONTRIBUTING.md#build-and-package).
 
 The package creates a `runnerfoundry` service account, `/etc/runnerfoundry`, and `/var/lib/runnerfoundry`.
 Its starter configuration needs credentials and at least one Runner Pool before the service can run.
 Installation does not enable or start the service.
 
-The account joins existing `docker` and `libvirt` groups during installation. Check Docker access:
+The account joins existing `docker` and `libvirt` groups during installation.
+Confirm [Docker service-account access](providers/docker.md#install-and-prepare-the-host) before starting the Docker tutorial;
+use the provider's [access troubleshooting](providers/docker.md#troubleshoot-docker-access) if denied.
 
-```sh
-sudo -u runnerfoundry docker info
-```
+## Install on macOS
 
-If access is denied, follow [Docker service-account troubleshooting](operations.md#docker-access-is-denied).
-Docker group membership grants [root-level host privileges](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user).
-Do not give workflows the Docker socket unless they need it and you accept that access.
+Use the [signed Apple Silicon installer](installation-macos.md) for macOS 13 or later.
+It installs `/usr/local/bin/runnerfoundry` and a disabled system service. Follow that guide to configure the service account, choose a provider and start the service.
+Orchard macOS workers additionally require macOS 14 or later.
 
 ## Create the GitHub App
 
@@ -72,7 +67,7 @@ Leave those optional features unconfigured. Save the App and record the numeric 
 Use this App ID in RunnerFoundry configuration, not the Client ID or installation ID.
 
 Under Private keys, generate a key and download the PEM file. Transfer it securely to your host if you downloaded it elsewhere.
-From the directory containing the downloaded key on the host, install it:
+From the directory containing the downloaded key on a Linux package host, install it:
 
 ```sh
 sudo install -m 0640 -o root -g runnerfoundry github-app.pem /etc/runnerfoundry/github-app.pem
@@ -80,6 +75,7 @@ sudo -u runnerfoundry test -r /etc/runnerfoundry/github-app.pem
 ```
 
 Replace the first filename with your downloaded filename. The access check succeeds without output.
+For macOS, follow [service configuration and key setup](installation-macos.md#prepare-configuration-and-provider-access).
 Keep the private key out of source control, workflow files, and logs.
 
 Choose Install App in GitHub and install it on your account. Start with Only select repositories and select a trusted test repository.
@@ -88,5 +84,6 @@ Every configured Runner Pool is made available to each discovered repository.
 
 ## Continue with your first job
 
-Return to [configure a runner and its pool](../README.md#2-configure-a-runner-and-its-pool).
-For PostgreSQL or multiple hosts, use [deployment](deployment.md). For virtual machines, use [libvirt](providers.md#libvirt).
+For the Linux package, return to [configure a runner and its pool](../README.md#2-configure-a-runner-and-its-pool).
+For macOS, continue with [package configuration and provider selection](installation-macos.md#prepare-configuration-and-provider-access).
+For PostgreSQL or multiple hosts, use [deployment](deployment.md). For other virtual machines, use [libvirt](providers/libvirt.md).

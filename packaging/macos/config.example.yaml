@@ -1,0 +1,16 @@
+github:
+  apps:
+    - app_id: 0
+      private_key_file: /usr/local/etc/runnerfoundry/github-app.pem
+  discovery_interval: 5m
+
+log:
+  format: text
+  level: info
+
+state:
+  path: /Library/Application Support/RunnerFoundry/state.db
+
+prune: false
+
+scale_sets: []

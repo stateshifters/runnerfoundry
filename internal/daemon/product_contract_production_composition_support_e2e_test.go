@@ -479,6 +479,31 @@ func (host *productionCompositionGitHub) queue(identifier string, requestID int6
 	})
 }
 
+func awaitProductionCompositionAcknowledgementsWhileCycling(
+	t *testing.T,
+	description string,
+	acknowledgements <-chan string,
+	tickers productionCompositionTickers,
+	count int,
+) {
+	t.Helper()
+	for index := 0; index < count; index++ {
+		timer := time.NewTimer(e2eWaitLimit)
+	acknowledged:
+		for {
+			select {
+			case <-acknowledgements:
+				break acknowledged
+			case <-timer.C:
+				t.Fatalf("timed out waiting for %s", description)
+			default:
+				tickers.complete(t, tickers.source)
+			}
+		}
+		timer.Stop()
+	}
+}
+
 func (host *productionCompositionGitHub) assertExpected(t *testing.T) {
 	t.Helper()
 	host.mutex.Lock()
@@ -595,7 +620,10 @@ func (commands *productionCompositionDockerCommands) newLauncher(
 func (commands *productionCompositionDockerCommands) newInventory(
 	memberID core.MemberID,
 ) productionCompositionDockerInventory {
-	return productionCompositionDockerInventory{commands: commands, endpointID: productionCompositionDockerEndpoint(memberID)}
+	return productionCompositionDockerInventory{
+		commands: commands, endpointID: productionCompositionDockerEndpoint(memberID),
+		snapshot: &productionCompositionDockerInventorySnapshot{},
+	}
 }
 
 type productionCompositionDockerLauncher struct {
@@ -650,6 +678,13 @@ func (launcher productionCompositionDockerLauncher) Start(ctx context.Context, r
 type productionCompositionDockerInventory struct {
 	commands   *productionCompositionDockerCommands
 	endpointID execution.InventoryEndpointID
+	snapshot   *productionCompositionDockerInventorySnapshot
+}
+
+type productionCompositionDockerInventorySnapshot struct {
+	mutex     sync.Mutex
+	instances []execution.RunnerInstance
+	ready     bool
 }
 
 func (inventory productionCompositionDockerInventory) EndpointID() execution.InventoryEndpointID {
@@ -657,19 +692,32 @@ func (inventory productionCompositionDockerInventory) EndpointID() execution.Inv
 }
 
 func (inventory productionCompositionDockerInventory) Refresh(ctx context.Context) error {
-	_, err := inventory.Inspect(ctx)
-	return err
+	inventory.snapshot.mutex.Lock()
+	defer inventory.snapshot.mutex.Unlock()
+	inventory.snapshot.instances = inventory.observe(ctx)
+	inventory.snapshot.ready = true
+	return nil
 }
 
 func (inventory productionCompositionDockerInventory) Inspect(ctx context.Context) ([]execution.RunnerInstance, error) {
+	inventory.snapshot.mutex.Lock()
+	defer inventory.snapshot.mutex.Unlock()
+	if !inventory.snapshot.ready {
+		inventory.snapshot.instances = inventory.observe(ctx)
+		inventory.snapshot.ready = true
+	}
+	return append([]execution.RunnerInstance(nil), inventory.snapshot.instances...), nil
+}
+
+func (inventory productionCompositionDockerInventory) observe(ctx context.Context) []execution.RunnerInstance {
 	recordProductionCompositionCommandContext(ctx, "inventory", inventory.commands.contexts)
 	inventory.commands.mutex.Lock()
+	defer inventory.commands.mutex.Unlock()
 	instances := make([]execution.RunnerInstance, 0, len(inventory.commands.instances))
 	for _, instance := range inventory.commands.instances {
 		instances = append(instances, instance)
 	}
-	inventory.commands.mutex.Unlock()
-	return instances, nil
+	return instances
 }
 
 func (inventory productionCompositionDockerInventory) InspectEndpoint(
@@ -679,7 +727,7 @@ func (inventory productionCompositionDockerInventory) InspectEndpoint(
 	if !inventory.KnowsEndpoint(endpointID) {
 		return nil, fmt.Errorf("Docker endpoint %q is not configured", endpointID)
 	}
-	return inventory.Inspect(ctx)
+	return inventory.observe(ctx), nil
 }
 
 func (inventory productionCompositionDockerInventory) KnowsEndpoint(endpointID execution.InventoryEndpointID) bool {

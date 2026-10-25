@@ -79,8 +79,6 @@ type LogFileConfig struct {
 	MaxBackups *int   `yaml:"max_backups"`
 }
 
-// RunnerPoolConfig defines one source-neutral Runner Pool. Exactly one of
-// Docker or Libvirt is required, and an empty RunnerGroup defaults to default.
 type RunnerPoolConfig struct {
 	Name                   string         `yaml:"name"`
 	RunnerGroup            string         `yaml:"runner_group"`
@@ -88,6 +86,7 @@ type RunnerPoolConfig struct {
 	StopIfNotStartedWithin string         `yaml:"stop_if_not_started_within"`
 	Docker                 *DockerConfig  `yaml:"docker"`
 	Libvirt                *LibvirtConfig `yaml:"libvirt"`
+	Orchard                *OrchardConfig `yaml:"orchard"`
 }
 
 // DockerConfig selects one service from a Docker Compose project.
@@ -100,6 +99,14 @@ type DockerConfig struct {
 type LibvirtConfig struct {
 	ConnectionURI     string `yaml:"connection_uri"`
 	DomainXMLTemplate string `yaml:"domain_xml_template"`
+}
+
+type OrchardConfig struct {
+	ControllerURL          string `yaml:"controller_url"`
+	ServiceAccount         string `yaml:"service_account"`
+	TokenFile              string `yaml:"token_file"`
+	TrustedCertificateFile string `yaml:"trusted_certificate_file"`
+	VMSpecFile             string `yaml:"vm_spec_file"`
 }
 
 // Load decodes and validates one daemon configuration document.

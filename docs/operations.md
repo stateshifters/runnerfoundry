@@ -195,19 +195,14 @@ Restart the service and confirm it reports ready. If it still fails, collect the
 
 Confirm that the workflow's `runs-on` value exactly matches the Runner Pool name. Then check service health, available capacity and provider access.
 
-For Docker, list the configured service as the daemon account:
+Use the provider's diagnostic checks in the same account and endpoint context as the daemon:
 
-```sh
-sudo -u runnerfoundry docker compose -f /etc/runnerfoundry/compose.yaml config --services
-```
+- [Docker service and container checks](providers/docker.md#troubleshoot-queued-jobs-and-failed-attempts)
+- [libvirt connection and guest checks](providers/libvirt.md#troubleshoot-startup-and-cleanup)
+- [Orchard guest checks](providers/orchard.md#diagnose-a-queued-job)
 
-For libvirt, list domains through the configured connection:
-
-```sh
-sudo -u runnerfoundry virsh --connect qemu:///system list --all
-```
-
-The command must succeed and show the expected provider context. Logs should show discovery, capacity publication and reconciliation without a continuing failure. If capacity is available but work remains queued, collect the pool name, repository and redacted operational events for [support](#request-support).
+Logs should show discovery, capacity publication, and reconciliation without a continuing failure.
+If capacity is available but work stays queued, collect the pool name, repository, and redacted operational events for [support](#request-support).
 
 ### Runner Pool does not appear in GitHub
 
@@ -226,45 +221,18 @@ Compare the App settings with the [GitHub configuration](configuration.md#github
 
 RunnerFoundry returns an unaccepted job to the back of its Runner Pool after provider cleanup succeeds. This is expected when the provider repeatedly fails to start a runner. Once a runner accepts the job, later execution failures belong to the normal GitHub workflow lifecycle and are not provisioning retries.
 
-Inspect runner-start and cleanup events. Check the pool's [`stop_if_not_started_within` setting](configuration.md#runner-pool-configuration) and the provider environment. Docker pools must satisfy the [Docker Compose contract](providers.md#docker-compose). A libvirt image must satisfy the [guest contract](providers.md#libvirt-guest-contract). Use [provider diagnostic logs](providers.md#security-and-diagnostic-logs) without recording JIT configuration.
+Inspect runner-start and cleanup events. Check the pool's [`stop_if_not_started_within` setting](configuration.md#runner-pool-configuration) and the provider environment. Docker pools must satisfy the [Docker Compose contract](providers/docker.md#prepare-and-configure-a-service). A libvirt image must satisfy the [guest contract](providers/libvirt.md#libvirt-guest-contract). Use [provider diagnostic logs](providers.md#security-and-diagnostic-logs) without recording JIT configuration.
 
 Confirm that a test runner starts, accepts one job and is removed afterwards. If retries continue, collect the pool, provider, timeout setting and redacted daemon and runner diagnostics for [support](#request-support).
 
 ### Docker access is denied
 
-Check access as the service account:
-
-```sh
-sudo -u runnerfoundry docker info
-```
-
-If Docker was installed after RunnerFoundry, add the account to the existing Docker group and restart:
-
-```sh
-sudo usermod -aG docker runnerfoundry
-sudo systemctl restart runnerfoundry
-sudo -u runnerfoundry docker info
-```
-
-The final command must succeed. Docker group membership grants root-level host privileges, so grant it only on hosts where that access is acceptable. If access still fails, check the Docker socket ownership and your host security policy before requesting support.
+Use [Docker access troubleshooting](providers/docker.md#troubleshoot-docker-access) to check the daemon account, Docker endpoint, and host permissions.
 
 ### Libvirt access is denied
 
-Run the provider check as the service account:
-
-```sh
-sudo -u runnerfoundry virsh --connect qemu:///system list --all
-```
-
-If the `libvirt` group was created after RunnerFoundry was installed, add the account and restart:
-
-```sh
-sudo usermod -aG libvirt runnerfoundry
-sudo systemctl restart runnerfoundry
-sudo -u runnerfoundry virsh --connect qemu:///system list --all
-```
-
-The QEMU process also needs access to image files and their parent directories under filesystem permissions, access control lists, SELinux or AppArmor. Confirm the command and a test pool work before escalating.
+Use [libvirt access troubleshooting](providers/libvirt.md#troubleshoot-connection-access) to check the connection account and host policy.
+QEMU image and overlay access is separate from daemon access to libvirt.
 
 ### PostgreSQL does not connect
 

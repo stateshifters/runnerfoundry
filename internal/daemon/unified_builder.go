@@ -323,7 +323,9 @@ func (pool orchestrationPool) RequestWork(
 	_ core.RunnerPool,
 ) (runtimeengine.ProcessResult, error) {
 	result, err := pool.worker.RequestWork(ctx)
-	reportProcessOutcome(pool.report, pool.runnerPool, pool.provider, pool.endpoint, pool.stateBackend, result, err)
+	if !isShutdownClaimCancellation(ctx, result, err) {
+		reportProcessOutcome(pool.report, pool.runnerPool, pool.provider, pool.endpoint, pool.stateBackend, result, err)
+	}
 	if err != nil {
 		return result, markOperationallyReported(fmt.Errorf("request pool work: %w", err))
 	}

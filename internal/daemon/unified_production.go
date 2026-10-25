@@ -17,6 +17,7 @@ import (
 	"github.com/stateshifters/runnerfoundry/internal/postgresconfig"
 	dockerprovider "github.com/stateshifters/runnerfoundry/internal/provider/docker"
 	libvirtprovider "github.com/stateshifters/runnerfoundry/internal/provider/libvirt"
+	orchardprovider "github.com/stateshifters/runnerfoundry/internal/provider/orchard"
 	runtimeservice "github.com/stateshifters/runnerfoundry/internal/runtime"
 	githubsource "github.com/stateshifters/runnerfoundry/internal/source/github"
 	githubpersistence "github.com/stateshifters/runnerfoundry/internal/source/github/persistence"
@@ -46,6 +47,7 @@ type contextCloserFunc func(context.Context) error
 func (closer contextCloserFunc) Close(ctx context.Context) error { return closer(ctx) }
 
 type productionDependencies struct {
+	newOrchardProvider       func(orchardprovider.Config) (execution.ExecutionProvider, error)
 	readFile                 config.ReadFile
 	httpTransport            http.RoundTripper
 	scaleSetTransportFactory transport.TransportFactory
@@ -87,7 +89,8 @@ func newProductionDependencies() productionDependencies {
 		readFile: os.ReadFile, httpTransport: http.DefaultTransport,
 		newDiscoverer: transport.NewDiscoverer, newClient: transport.NewClient, newManager: githubsource.NewManager,
 		newDockerLauncher: dockerLauncher, newDockerInventory: dockerInventory,
-		libvirtCommands: libvirtprovider.NewExecCommandRunner(),
+		libvirtCommands:    libvirtprovider.NewExecCommandRunner(),
+		newOrchardProvider: newProductionOrchardFactory(),
 		newTicker: func(duration time.Duration) cycleTicker {
 			operatingSystemTicker := time.NewTicker(duration)
 			return productionCycleTicker{ticks: operatingSystemTicker.C, stop: operatingSystemTicker.Stop}
@@ -108,6 +111,16 @@ func newProductionDependencies() productionDependencies {
 		buildProviderSet: buildProductionProvidersWithDependencies,
 		readHostname:     os.Hostname, logDestinationFactory: newProductionLogDestinationFactory(),
 		openState: openProductionStateWithDependencies, buildGeneration: buildProductionGenerationWithDependencies,
+	}
+}
+
+func newProductionOrchardFactory() func(orchardprovider.Config) (execution.ExecutionProvider, error) {
+	return func(configured orchardprovider.Config) (execution.ExecutionProvider, error) {
+		api, guest, err := orchardprovider.NewClient(configured)
+		if err != nil {
+			return nil, fmt.Errorf("configure Orchard client: %w", err)
+		}
+		return orchardprovider.NewProvider(api, guest, configured)
 	}
 }
 
@@ -416,7 +429,8 @@ func productionExecutionDependencies(
 		newDockerLauncher:  dependencies.newDockerLauncher,
 		newDockerInventory: dependencies.newDockerInventory,
 		libvirtCommands:    dependencies.libvirtCommands,
-		readTemplate:       dependencies.readFile, memberID: memberID,
+		newOrchardProvider: dependencies.newOrchardProvider,
+		readTemplate:       dependencies.readFile, readFile: dependencies.readFile, memberID: memberID,
 		providerObserver: dependencies.providerObserver,
 	}
 }

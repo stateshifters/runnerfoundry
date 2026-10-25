@@ -58,7 +58,7 @@ func TestListRecognizesRunnerPoolMetadata(t *testing.T) {
 		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:runner-pool>linux</runnerfoundry:runner-pool><runnerfoundry:name>runner-1</runnerfoundry:name></runnerfoundry:runner></metadata></domain>`,
 		"running\n",
 	}}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -85,7 +85,7 @@ func TestInspectCombinesNamespacedAndRawLegacyOwnershipFields(t *testing.T) {
 		`<domain><metadata><runnerfoundry:runner xmlns:runnerfoundry="urn:runnerfoundry"><runnerfoundry:scale-set>legacy-pool</runnerfoundry:scale-set></runnerfoundry:runner><runnerfoundry.runner-pool>current-pool</runnerfoundry.runner-pool></metadata></domain>`,
 		"running\n",
 	}}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	instances, err := provider.Inspect(context.Background())
 	want := []execution.RunnerInstance{
@@ -125,10 +125,9 @@ func listOwnedDomainFixture(t *testing.T) ([]execution.RunnerInstance, []Command
 			`<domain><metadata><example>unowned</example></metadata></domain>`,
 		},
 	}
-	provider := Provider{
-		commandRunner: runner,
-		config:        Config{ConnectionURI: "qemu:///system"},
-	}
+	provider := NewProvider(runner,
+		Config{ConnectionURI: "qemu:///system"}, nil, "")
+
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
 		t.Fatalf("expected list success, got %v", err)
@@ -144,7 +143,7 @@ func TestListClassifiesUnknownDomainState(t *testing.T) {
 			"paused\n",
 		},
 	}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -163,7 +162,7 @@ func TestListUsesDomainNameWhenRunnerMetadataIsMissing(t *testing.T) {
 			"running\n",
 		},
 	}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -183,7 +182,7 @@ func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
 			"running\n",
 		},
 	}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	instances, err := provider.Inspect(context.Background())
 	if err != nil {
@@ -202,7 +201,7 @@ func TestListIgnoresDomainsWithoutRunnerFoundryOwnership(t *testing.T) {
 
 func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: execution.RunnerStateRunning}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
@@ -215,7 +214,7 @@ func TestDestroyForceStopsRunningTransientDomainWithoutRemovingStorage(t *testin
 
 func TestDestroyIgnoresCompletedTransientDomains(t *testing.T) {
 	commandRunner := &recordingCommandRunner{}
-	provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+	provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{ID: "vm-set-1", RunnerName: "vm-set-1", State: execution.RunnerStateCompleted}); err != nil {
 		t.Fatalf("expected destroy success, got %v", err)
@@ -229,7 +228,7 @@ func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 	for _, state := range []string{"paused", "pmsuspended"} {
 		t.Run(state, func(t *testing.T) {
 			commandRunner := &recordingCommandRunner{}
-			provider := Provider{commandRunner: commandRunner, config: Config{ConnectionURI: "qemu:///system"}}
+			provider := NewProvider(commandRunner, Config{ConnectionURI: "qemu:///system"}, nil, "")
 			if err := provider.Destroy(context.Background(), execution.RunnerInstance{
 				ID: "vm-set-1", RunnerName: "vm-set-1", State: libvirtState(state),
 			}); err != nil {
@@ -243,7 +242,7 @@ func TestDestroyForceStopsPausedOrSuspendedDomain(t *testing.T) {
 }
 
 func TestDestroyUnknownReportsCommandFailure(t *testing.T) {
-	provider := Provider{commandRunner: failingCommandRunner{}}
+	provider := NewProvider(failingCommandRunner{}, Config{}, nil, "")
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{State: execution.RunnerStateUnknown}); err == nil {
 		t.Fatal("expected unknown destroy failure")
 	}
@@ -264,7 +263,7 @@ func TestValidateParsesTemplateAndChecksConnection(t *testing.T) {
 }
 
 func TestStartRequiresTemplate(t *testing.T) {
-	provider := Provider{commandRunner: &recordingCommandRunner{}}
+	provider := NewProvider(&recordingCommandRunner{}, Config{}, nil, "")
 	if err := provider.Start(context.Background(), execution.StartRequest{}); err == nil {
 		t.Fatal("expected missing template error")
 	}
@@ -294,7 +293,7 @@ func TestStartReportsCreateCommandFailure(t *testing.T) {
 }
 
 func TestListReportsCommandFailure(t *testing.T) {
-	provider := Provider{commandRunner: failingCommandRunner{}}
+	provider := NewProvider(failingCommandRunner{}, Config{}, nil, "")
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected list command error")
 	}
@@ -302,7 +301,7 @@ func TestListReportsCommandFailure(t *testing.T) {
 
 func TestListReportsDomainInspectionFailure(t *testing.T) {
 	commandRunner := &recordingCommandRunner{outputs: []string{"runner\n"}, failOnCall: 2}
-	provider := Provider{commandRunner: commandRunner}
+	provider := NewProvider(commandRunner, Config{}, nil, "")
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected domain inspection error")
 	}
@@ -313,14 +312,14 @@ func TestListReportsDomainStateFailure(t *testing.T) {
 		outputs:    []string{"runner\n", `<domain><metadata><runnerfoundry.scale-set>set</runnerfoundry.scale-set></metadata></domain>`},
 		failOnCall: 3,
 	}
-	provider := Provider{commandRunner: commandRunner}
+	provider := NewProvider(commandRunner, Config{}, nil, "")
 	if _, err := provider.Inspect(context.Background()); err == nil {
 		t.Fatal("expected domain state error")
 	}
 }
 
 func TestDestroyReportsCommandFailure(t *testing.T) {
-	provider := Provider{commandRunner: failingCommandRunner{}}
+	provider := NewProvider(failingCommandRunner{}, Config{}, nil, "")
 	if err := provider.Destroy(context.Background(), execution.RunnerInstance{State: execution.RunnerStateRunning}); err == nil {
 		t.Fatal("expected destroy command error")
 	}
@@ -350,11 +349,7 @@ func TestLegacyMetadataValueHandlesMissingTags(t *testing.T) {
 }
 
 func providerWithTemplate(commandRunner CommandRunner, contents string) Provider {
-	return Provider{
-		commandRunner:  commandRunner,
-		config:         Config{DomainXMLTemplate: "domain.xml"},
-		domainTemplate: []byte(contents),
-	}
+	return NewProvider(commandRunner, Config{DomainXMLTemplate: "domain.xml"}, []byte(contents), "")
 }
 
 func containsAll(text string, needles []string) bool {

@@ -1,0 +1,3 @@
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "The affected golang.org/x/crypto/openpgp packages are absent from RunnerFoundry's dependency graphs, including Linux and Apple Silicon builds. The unsafe-openpgp depguard rule in .golangci.yml bans importing OpenPGP. Other golang.org/x/crypto advisories remain checked. Reassess this exception if the dependency graph or import restriction changes."

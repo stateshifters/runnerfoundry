@@ -49,6 +49,10 @@
           {
             "path": "dist/runnerfoundry_*_amd64.deb",
             "label": "RunnerFoundry v${nextRelease.version} Debian package"
+          },
+          {
+            "path": "dist/runnerfoundry_*_darwin_arm64.pkg",
+            "label": "RunnerFoundry v${nextRelease.version} macOS Apple Silicon installer"
           }
         ]
       }
