@@ -65,6 +65,13 @@ jobs:
       - name: Install macOS release tools
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: bash
+        env:
+          # renovate: datasource=github-releases depName=anchore/quill
+          QUILL_VERSION: '0.7.1'
+          # renovate: datasource=github-releases depName=deploymenttheory/go-macos-pkg
+          MACOSPKG_VERSION: '0.7.3'
+          # renovate: datasource=github-releases depName=indygreg/apple-platform-rs extractVersion=^apple-codesign/(?<version>\d+\.\d+\.\d+)$
+          RCODESIGN_VERSION: '0.29.0'
         run: bash .github/scripts/install-macos-release-tools.sh
 
       - name: Release

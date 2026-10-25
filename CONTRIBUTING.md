@@ -99,10 +99,11 @@ See [installation](docs/installation.md) for the operator workflow; do not execu
 
 ### macOS release signing on Linux
 
-The release workflow downloads Quill 0.7.1, macospkg 0.7.3 and rcodesign 0.29.0 Linux AMD64 binaries.
-It verifies their pinned SHA-256 checksums.
+The release workflow downloads prebuilt Linux AMD64 binaries for Quill, macospkg and rcodesign.
+Their versions are pinned by `QUILL_VERSION`, `MACOSPKG_VERSION` and `RCODESIGN_VERSION` in the
+[release workflow's Install macOS release tools step](.github/workflows/ci.yml).
 These tools run independently of the project's Go toolchain. A macOS host is not needed to build, sign, notarize or staple the installer.
-The Linux release environment also needs OpenSSL, curl, tar, sha256sum, base64 and the standard GNU file utilities.
+The Linux release environment also needs OpenSSL, curl, tar, base64 and the standard GNU file utilities.
 
 Release steps run only for `main` outside pull-request events. The GitHub Actions repository must supply these secrets:
 
