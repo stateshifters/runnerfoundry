@@ -100,7 +100,7 @@ See [installation](docs/installation.md) for the operator workflow; do not execu
 ### macOS release signing and notarization
 
 Release automation builds both packages, signs and notarizes the macOS installer, staples its ticket, and publishes from the `meza-macos` runner.
-It runs only for `main` outside pull-request events, after Linux verification succeeds.
+Publication runs only for `main` outside pull-request events, after Linux verification succeeds.
 The release host needs Go, GNU Make, OpenSSL and Xcode command-line tools, including `notarytool` and `stapler`.
 It also needs outbound access to Apple's notarization and ticket services, as described in [Apple's network requirements](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Ensure-your-build-server-has-network-access).
 
@@ -118,12 +118,14 @@ The GitHub Actions repository must supply these secrets:
 | `MACOS_TEAM_ID` | Apple Developer team ID used to verify the signatures |
 
 Each PKCS12 bundle must contain one leaf certificate and its private key.
-The workflow imports the signing identities into a temporary keychain and removes it after the job.
+The workflow imports the signing identities into a temporary keychain, then removes it after the job.
 Decoded certificate and notarization-key files are private and removed after the job, including on failure.
 Do not enable shell tracing, print secrets or put credential files in build artifacts or caches.
 
 `make package-macos VERSION=<version>` requires macOS and produces the signed, notarized and stapled installer under `dist/`.
 For a direct invocation, import both signing identities into an unlocked keychain with access configured for `codesign` and `productbuild`.
+That keychain must also contain the corresponding Developer ID intermediate certificates from [Apple PKI](https://www.apple.com/certificateauthority/).
+For each signing certificate, choose the intermediate matching its issuer common name and, if present, organizational unit.
 Set these environment variables; the release workflow supplies them automatically:
 
 | Variable | Value |
