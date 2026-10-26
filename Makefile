@@ -163,7 +163,7 @@ else
 	install -m 0644 packaging/macos/config.example.yaml LICENSE COPYRIGHT "$(NOTICES_FILE)" "$(SBOM_FILE)" "$(SOURCE_INFO_FILE)" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry/"
 	install -m 0644 packaging/macos/com.stateshifterlabs.runnerfoundry.plist "$(MACOS_PAYLOAD)/Library/LaunchDaemons/"
 	codesign --force --sign "$$MACOS_APPLICATION_IDENTITY" --keychain "$$MACOS_SIGNING_KEYCHAIN" --identifier com.stateshifterlabs.runnerfoundry --options runtime --timestamp "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
-	codesign --verify --strict -R "anchor apple generic and certificate leaf[subject.OU] = \"$$MACOS_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
+	codesign --verify --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"$$MACOS_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
 	pkgbuild --root "$(MACOS_PAYLOAD)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location / --scripts packaging/macos/scripts --ownership recommended "$(MACOS_COMPONENT)"
 	productbuild --package "$(MACOS_COMPONENT)" --product packaging/macos/requirements.plist --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --sign "$$MACOS_INSTALLER_IDENTITY" --keychain "$$MACOS_SIGNING_KEYCHAIN" --timestamp "$(MACOS_PACKAGE)"
 	xcrun notarytool submit "$(MACOS_PACKAGE)" --key "$$APPLE_PRIVATE_KEY_PATH" --key-id "$$APPLE_KEY_ID" --issuer "$$APPLE_ISSUER_ID" --wait --timeout 30m --output-format json > "$(BUILD_DIR)/macos/notarization.json"

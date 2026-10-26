@@ -118,6 +118,13 @@ jobs:
           p12-filepath: ${{ env.MACOS_SIGNING_DIR }}/installer.p12
           p12-password: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
 
+      - name: Check application signing identity and trust
+        shell: bash
+        run: |
+          launchctl managername
+          security find-identity -p codesigning "$MACOS_SIGNING_KEYCHAIN"
+          security find-identity -v -p codesigning "$MACOS_SIGNING_KEYCHAIN" | grep -F " $MACOS_APPLICATION_IDENTITY "
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
