@@ -97,15 +97,14 @@ package and `dist/runnerfoundry_<version>_darwin_arm64.pkg`. The two packages in
 third-party notice and SBOM metadata. Individual packaging targets retain other files in `dist/`.
 See [installation](docs/installation.md) for the operator workflow; do not execute a built or packaged daemon as contributor verification.
 
-### macOS release signing on Linux
+### macOS release signing and notarization
 
-The release workflow downloads prebuilt Linux AMD64 binaries for Quill, macospkg and rcodesign.
-Their versions are pinned by `QUILL_VERSION`, `MACOSPKG_VERSION` and `RCODESIGN_VERSION` in the
-[release workflow's Install macOS release tools step](.github/workflows/ci.yml).
-These tools run independently of the project's Go toolchain. A macOS host is not needed to build, sign, notarize or staple the installer.
-The Linux release environment also needs OpenSSL, curl, tar, base64 and the standard GNU file utilities.
+Release automation builds both packages, signs and notarizes the macOS installer, staples its ticket, and publishes from the `meza-macos` runner.
+It runs only for `main` outside pull-request events, after Linux verification succeeds.
+The release host needs Go, GNU Make, OpenSSL and Xcode command-line tools, including `notarytool` and `stapler`.
+It also needs outbound access to Apple's notarization and ticket services, as described in [Apple's network requirements](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Ensure-your-build-server-has-network-access).
 
-Release steps run only for `main` outside pull-request events. The GitHub Actions repository must supply these secrets:
+The GitHub Actions repository must supply these secrets:
 
 | Secret | Value |
 | --- | --- |
@@ -116,29 +115,34 @@ Release steps run only for `main` outside pull-request events. The GitHub Action
 | `MACOS_NOTARY_P8_BASE64` | Base64 App Store Connect team API private key |
 | `MACOS_NOTARY_KEY_ID` | API key ID |
 | `MACOS_NOTARY_ISSUER_ID` | API issuer ID |
-| `MACOS_TEAM_ID` | Apple Developer team ID used to verify the signed installer |
+| `MACOS_TEAM_ID` | Apple Developer team ID used to verify the signatures |
 
-The Release step creates private certificate and notarization-key files under `RUNNER_TEMP` and removes them on exit.
-Application signing requires a verified chain to an Apple root; preparation fails if Quill cannot complete that chain.
-Passwords remain in environment variables.
-Do not enable shell tracing, print these values or put credential files in build artifacts or caches.
+Each PKCS12 bundle must contain one leaf certificate and its private key.
+The workflow imports the signing identities into a temporary keychain and removes it after the job.
+Decoded certificate and notarization-key files are private and removed after the job, including on failure.
+Do not enable shell tracing, print secrets or put credential files in build artifacts or caches.
 
-`make package-macos VERSION=<version>` runs in that Linux release environment after the tools and credentials are available.
-Its tool-facing environment is `QUILL_SIGN_P12`, `QUILL_SIGN_PASSWORD`, `MACOS_INSTALLER_P12_PATH`, `MACOSPKG_P12_PASSWORD`,
-`APPLE_KEY_ID`, `APPLE_ISSUER_ID`, `APPLE_PRIVATE_KEY_PATH` and `MACOS_TEAM_ID`; the workflow maps the repository secrets to them.
-`QUILL`, `MACOSPKG` and `RCODESIGN` can override the tool command paths.
-For a direct target invocation, `QUILL_SIGN_P12` must contain the private key and either only the leaf certificate or a full chain
-including the Apple root. Quill 0.7.1 mishandles partial CA chains. The workflow accepts the stored application bundle and prepares
-a suitable temporary bundle before invoking the target. Direct callers must supply a bundle already in one of these accepted forms.
+`make package-macos VERSION=<version>` requires macOS and produces the signed, notarized and stapled installer under `dist/`.
+For a direct invocation, import both signing identities into an unlocked keychain with access configured for `codesign` and `productbuild`.
+Set these environment variables; the release workflow supplies them automatically:
 
-The temporary JSON API key file used for notarization has private permissions and is removed automatically on success or failure.
+| Variable | Value |
+| --- | --- |
+| `MACOS_APPLICATION_IDENTITY` | SHA-1 fingerprint without colons of the Developer ID Application certificate |
+| `MACOS_INSTALLER_IDENTITY` | Exact common name of the Developer ID Installer certificate |
+| `MACOS_SIGNING_KEYCHAIN` | Path to the unlocked keychain containing both certificates and their private keys |
+| `APPLE_KEY_ID` | App Store Connect API key ID |
+| `APPLE_ISSUER_ID` | API issuer ID |
+| `APPLE_PRIVATE_KEY_PATH` | Path to the App Store Connect API private key in `.p8` format |
+| `MACOS_TEAM_ID` | Apple Developer team ID that both signing identities must match |
 
-Quill signs the executable. macospkg assembles and signs an ARM64-only distribution installer for macOS 13 or later.
-rcodesign submits the signed installer to Apple, waits up to 30 minutes for acceptance, and staples the ticket.
-See [rcodesign notarization and stapling](https://gregoryszorc.com/docs/apple-codesign/0.29.0/apple_codesign_rcodesign_notarizing.html) for submission status and log commands.
-A final package check requires a Developer ID signature, the configured team, a stapled ticket and Apple's online notarization record.
-Any failure stops release preparation before publication.
-A notarization timeout does not establish rejection; check the submission in Apple's service before retrying.
+The target signs the executable with hardened runtime and a timestamp, then verifies its Developer ID Application signature and team.
+It assembles and signs an ARM64-only distribution installer for macOS 13 or later.
+Apple's `notarytool` submits the installer and waits up to 30 minutes for acceptance.
+After acceptance, `stapler` attaches and validates the ticket; `pkgutil` checks the installer signature; and `spctl` assesses it with Gatekeeper.
+Any failure stops preparation before publication. A successful release publishes the Debian package and finished macOS installer.
+A notarization timeout does not establish rejection.
+See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow) for its command-line overview and keychain-profile examples.
 
 The installer places the command in `/usr/local/bin`, the example configuration and metadata in `/usr/local/share/runnerfoundry`,
 and a disabled system service in `/Library/LaunchDaemons`. It creates the `_runnerfoundry` service account and a starter

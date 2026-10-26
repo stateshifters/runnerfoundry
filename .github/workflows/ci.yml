@@ -19,13 +19,12 @@ concurrency:
 
 
 jobs:
-  release:
+  verify:
     runs-on: meza-ubuntu-slim
     env:
       GOCACHE: /cache/go-build
       GOMODCACHE: /cache/go-mod
       RUNNERFOUNDRY_POSTGRES_CACHE: /cache/runnerfoundry/embedded-postgres
-      npm_config_cache: /cache/npm
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,52 +52,84 @@ jobs:
       - name: Race detection
         run: make race
 
+  release:
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: meza-macos
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+
       - name: Use Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 25
 
       - name: "🧵 Install semantic release"
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: npm i --location=global @meza/mezas-conventional-changelog semantic-release semantic-release-discord-notifier conventional-changelog-conventionalcommits @semantic-release/github @semantic-release/changelog @semantic-release/exec semantic-release-export-data semantic-release-discord
 
-      - name: Install macOS release tools
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      - name: Prepare signing credentials
         shell: bash
         env:
-          # renovate: datasource=github-releases depName=anchore/quill
-          QUILL_VERSION: '0.7.1'
-          # renovate: datasource=github-releases depName=deploymenttheory/go-macos-pkg
-          MACOSPKG_VERSION: '0.7.3'
-          # renovate: datasource=github-releases depName=indygreg/apple-platform-rs extractVersion=^apple-codesign/(?<version>\d+\.\d+\.\d+)$
-          RCODESIGN_VERSION: '0.29.0'
-        run: bash .github/scripts/install-macos-release-tools.sh
-
-      - name: Release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUILL_SIGN_P12: ${{ secrets.MACOS_APPLICATION_P12_BASE64 }}
-          QUILL_SIGN_PASSWORD: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
+          MACOS_SIGNING_DIR: ${{ runner.temp }}/runnerfoundry-signing-${{ github.run_id }}-${{ github.run_attempt }}
+          MACOS_SIGNING_KEYCHAIN: ${{ runner.temp }}/runnerfoundry-keychain-${{ github.run_id }}-${{ github.run_attempt }}.keychain
+          MACOS_APPLICATION_P12_BASE64: ${{ secrets.MACOS_APPLICATION_P12_BASE64 }}
+          MACOS_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
           MACOS_INSTALLER_P12_BASE64: ${{ secrets.MACOS_INSTALLER_P12_BASE64 }}
-          MACOSPKG_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
+          MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
           MACOS_NOTARY_P8_BASE64: ${{ secrets.MACOS_NOTARY_P8_BASE64 }}
-          APPLE_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          APPLE_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
         run: |
           set -euo pipefail
           umask 077
-          signing_dir="$(mktemp -d "$RUNNER_TEMP/runnerfoundry-signing.XXXXXX")"
-          trap 'rm -rf -- "$signing_dir"' EXIT
-          export MACOS_INSTALLER_P12_PATH="$signing_dir/installer.p12"
-          export APPLE_PRIVATE_KEY_PATH="$signing_dir/notarization.p8"
-          printf '%s' "$QUILL_SIGN_P12" | base64 --decode > "$signing_dir/application-input.p12"
-          openssl pkcs12 -in "$signing_dir/application-input.p12" -clcerts -out "$signing_dir/application-leaf.pem" -passin env:QUILL_SIGN_PASSWORD -passout env:QUILL_SIGN_PASSWORD
-          openssl pkcs12 -export -in "$signing_dir/application-leaf.pem" -out "$signing_dir/application.p12" -passin env:QUILL_SIGN_PASSWORD -passout env:QUILL_SIGN_PASSWORD
-          export QUILL_SIGN_P12="$signing_dir/application.p12"
-          printf '%s' "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > "$MACOS_INSTALLER_P12_PATH"
-          printf '%s' "$MACOS_NOTARY_P8_BASE64" | base64 --decode > "$APPLE_PRIVATE_KEY_PATH"
-          unset MACOS_INSTALLER_P12_BASE64 MACOS_NOTARY_P8_BASE64
-          npx semantic-release
+          printf 'MACOS_SIGNING_DIR=%s\nMACOS_SIGNING_KEYCHAIN=%s\n' "$MACOS_SIGNING_DIR" "$MACOS_SIGNING_KEYCHAIN" >> "$GITHUB_ENV"
+          mkdir -m 0700 "$MACOS_SIGNING_DIR"
+          printf '%s' "$MACOS_APPLICATION_P12_BASE64" | base64 --decode > "$MACOS_SIGNING_DIR/application.p12"
+          printf '%s' "$MACOS_INSTALLER_P12_BASE64" | base64 --decode > "$MACOS_SIGNING_DIR/installer.p12"
+          printf '%s' "$MACOS_NOTARY_P8_BASE64" | base64 --decode > "$MACOS_SIGNING_DIR/notarization.p8"
+          openssl pkcs12 -in "$MACOS_SIGNING_DIR/application.p12" -clcerts -nokeys -passin env:MACOS_APPLICATION_P12_PASSWORD -out "$MACOS_SIGNING_DIR/application.pem"
+          openssl pkcs12 -in "$MACOS_SIGNING_DIR/installer.p12" -clcerts -nokeys -passin env:MACOS_INSTALLER_P12_PASSWORD -out "$MACOS_SIGNING_DIR/installer.pem"
+          test "$(grep -c -- '-----BEGIN CERTIFICATE-----' "$MACOS_SIGNING_DIR/application.pem")" -eq 1
+          test "$(grep -c -- '-----BEGIN CERTIFICATE-----' "$MACOS_SIGNING_DIR/installer.pem")" -eq 1
+          application_identity="$(openssl x509 -in "$MACOS_SIGNING_DIR/application.pem" -sha1 -fingerprint -noout | cut -d= -f2 | tr -d ':')"
+          installer_identity="$(openssl x509 -in "$MACOS_SIGNING_DIR/installer.pem" -noout -subject -nameopt multiline | sed -n 's/^[[:space:]]*commonName[[:space:]]*=[[:space:]]*//p')"
+          printf 'MACOS_APPLICATION_IDENTITY=%s\nMACOS_INSTALLER_IDENTITY=%s\n' "$application_identity" "$installer_identity" >> "$GITHUB_ENV"
+
+      - name: Import application certificate
+        id: application-certificate
+        uses: apple-actions/import-codesign-certs@77ba2a2a8f5cfc8c405ebf3159f767c323e238f9 # v7.1.0
+        with:
+          keychain: ${{ runner.temp }}/runnerfoundry-keychain-${{ github.run_id }}-${{ github.run_attempt }}
+          p12-filepath: ${{ env.MACOS_SIGNING_DIR }}/application.p12
+          p12-password: ${{ secrets.MACOS_APPLICATION_P12_PASSWORD }}
+
+      - name: Import installer certificate
+        uses: apple-actions/import-codesign-certs@77ba2a2a8f5cfc8c405ebf3159f767c323e238f9 # v7.1.0
+        with:
+          keychain: ${{ runner.temp }}/runnerfoundry-keychain-${{ github.run_id }}-${{ github.run_attempt }}
+          create-keychain: 'false'
+          keychain-password: ${{ steps.application-certificate.outputs.keychain-password }}
+          p12-filepath: ${{ env.MACOS_SIGNING_DIR }}/installer.p12
+          p12-password: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPLE_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          APPLE_PRIVATE_KEY_PATH: ${{ env.MACOS_SIGNING_DIR }}/notarization.p8
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: npx semantic-release
+
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        env:
+          MACOS_SIGNING_DIR: ${{ runner.temp }}/runnerfoundry-signing-${{ github.run_id }}-${{ github.run_attempt }}
+        run: rm -rf -- "$MACOS_SIGNING_DIR"
