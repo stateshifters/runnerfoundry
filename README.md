@@ -31,6 +31,8 @@ Provisioning failures are reported when the Git source supports it. Otherwise, R
 until a runner accepts the job or the Git source ends the demand.
 An execution failure after acceptance is a workflow result, not a provisioning retry.
 
+![RunnerFoundry: shared self-hosted runner capacity for personal GitHub accounts](docs/images/runnerfoundry-social.jpg)
+
 ## Current integrations
 
 GitHub Actions is the first supported Git source and is currently the only available source adapter.
