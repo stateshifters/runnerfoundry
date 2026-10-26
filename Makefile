@@ -8,9 +8,6 @@ SBOM_FILE := $(METADATA_DIR)/runnerfoundry-sbom.json
 SOURCE_INFO_FILE := $(METADATA_DIR)/SOURCE.txt
 VERSION ?= dev
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-QUILL ?= quill
-MACOSPKG ?= macospkg
-RCODESIGN ?= rcodesign
 MACOS_PAYLOAD := $(BUILD_DIR)/macos/payload
 MACOS_COMPONENT := $(BUILD_DIR)/macos/runnerfoundry-component.pkg
 MACOS_PACKAGE := $(DIST_DIR)/runnerfoundry_$(VERSION)_darwin_arm64.pkg
@@ -148,30 +145,33 @@ package-deb: build notices sbom-license source-info
 
 package-macos: build-macos notices sbom-license source-info
 ifeq ($(OSFAMILY),Windows)
-	@Write-Error 'Signed macOS packaging requires the Linux release environment'; exit 1
+	@Write-Error 'Signed macOS packaging requires macOS'; exit 1
 else
-	@test -n "$${QUILL_SIGN_P12:?Application signing certificate is required}"
-	@test -n "$${QUILL_SIGN_PASSWORD:?Application signing password is required}"
-	@test -n "$${MACOS_INSTALLER_P12_PATH:?Installer signing certificate path is required}"
-	@test -n "$${MACOSPKG_P12_PASSWORD:?Installer signing password is required}"
+	@test "$$(uname -s)" = Darwin
+	@test -n "$${MACOS_APPLICATION_IDENTITY:?Application signing identity is required}"
+	@test -n "$${MACOS_INSTALLER_IDENTITY:?Installer signing identity is required}"
+	@test -n "$${MACOS_SIGNING_KEYCHAIN:?Signing keychain is required}"
 	@test -n "$${APPLE_KEY_ID:?Notarization key ID is required}"
 	@test -n "$${APPLE_ISSUER_ID:?Notarization issuer ID is required}"
 	@test -n "$${APPLE_PRIVATE_KEY_PATH:?Notarization private key path is required}"
 	@test -n "$${MACOS_TEAM_ID:?Apple team ID is required}"
+	@case "$$MACOS_INSTALLER_IDENTITY" in 'Developer ID Installer:'*) ;; *) echo 'A Developer ID Installer identity is required' >&2; exit 1 ;; esac
+	@set -o pipefail; security find-certificate -c "$$MACOS_INSTALLER_IDENTITY" -p "$$MACOS_SIGNING_KEYCHAIN" | openssl x509 -noout -subject -nameopt multiline | sed -n 's/^[[:space:]]*organizationalUnitName[[:space:]]*=[[:space:]]*//p' | grep -qFx "$$MACOS_TEAM_ID"
 	@$(REMOVE_DIR) "$(BUILD_DIR)/macos"
 	install -d -m 0755 "$(MACOS_PAYLOAD)/usr" "$(MACOS_PAYLOAD)/usr/local" "$(MACOS_PAYLOAD)/usr/local/bin" "$(MACOS_PAYLOAD)/usr/local/share" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry" "$(MACOS_PAYLOAD)/Library/LaunchDaemons" "$(DIST_DIR)"
 	install -m 0755 "$(BUILD_DIR)/darwin/arm64/$(EXECUTABLE_NAME)" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
 	install -m 0644 packaging/macos/config.example.yaml LICENSE COPYRIGHT "$(NOTICES_FILE)" "$(SBOM_FILE)" "$(SOURCE_INFO_FILE)" "$(MACOS_PAYLOAD)/usr/local/share/runnerfoundry/"
 	install -m 0644 packaging/macos/com.stateshifterlabs.runnerfoundry.plist "$(MACOS_PAYLOAD)/Library/LaunchDaemons/"
-	$(QUILL) sign "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
-	$(MACOSPKG) build "$(MACOS_PAYLOAD)" "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location / --scripts packaging/macos/scripts
-	$(MACOSPKG) product "$(MACOS_PACKAGE)" --package "$(MACOS_COMPONENT)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --host-architectures arm64 --min-os-version 13.0 --sign-p12 "$$MACOS_INSTALLER_P12_PATH"
-	@set -eu; umask 077; \
-		notary_key_file=$$(mktemp); \
-		trap 'rm -f -- "$$notary_key_file"' EXIT; \
-		$(RCODESIGN) encode-app-store-connect-api-key -o "$$notary_key_file" "$$APPLE_ISSUER_ID" "$$APPLE_KEY_ID" "$$APPLE_PRIVATE_KEY_PATH"; \
-		$(RCODESIGN) notary-submit --api-key-file "$$notary_key_file" --staple --max-wait-seconds 1800 "$(MACOS_PACKAGE)"
-	$(MACOSPKG) verify "$(MACOS_PACKAGE)" --team-id "$$MACOS_TEAM_ID" --require-developer-id --require-stapled --online
+	codesign --force --sign "$$MACOS_APPLICATION_IDENTITY" --keychain "$$MACOS_SIGNING_KEYCHAIN" --identifier com.stateshifterlabs.runnerfoundry --options runtime --timestamp "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
+	codesign --verify --strict -R "anchor apple generic and certificate leaf[subject.OU] = \"$$MACOS_TEAM_ID\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists" "$(MACOS_PAYLOAD)/usr/local/bin/$(EXECUTABLE_NAME)"
+	pkgbuild --root "$(MACOS_PAYLOAD)" --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --install-location / --scripts packaging/macos/scripts --ownership recommended "$(MACOS_COMPONENT)"
+	productbuild --package "$(MACOS_COMPONENT)" --product packaging/macos/requirements.plist --identifier com.stateshifterlabs.runnerfoundry --version "$(VERSION)" --sign "$$MACOS_INSTALLER_IDENTITY" --keychain "$$MACOS_SIGNING_KEYCHAIN" --timestamp "$(MACOS_PACKAGE)"
+	xcrun notarytool submit "$(MACOS_PACKAGE)" --key "$$APPLE_PRIVATE_KEY_PATH" --key-id "$$APPLE_KEY_ID" --issuer "$$APPLE_ISSUER_ID" --wait --timeout 30m --output-format json > "$(BUILD_DIR)/macos/notarization.json"
+	@test "$$(plutil -extract status raw -o - "$(BUILD_DIR)/macos/notarization.json")" = Accepted
+	xcrun stapler staple "$(MACOS_PACKAGE)"
+	xcrun stapler validate "$(MACOS_PACKAGE)"
+	pkgutil --check-signature "$(MACOS_PACKAGE)"
+	spctl --assess --type install --verbose=4 "$(MACOS_PACKAGE)"
 endif
 
 prepare:
