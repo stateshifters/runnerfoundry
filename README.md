@@ -162,6 +162,21 @@ The YAML key `scale_sets` configures Runner Pools; use the exact key shown in ex
 See [health, logs, reloads, backups, upgrades, and troubleshooting](docs/operations.md).
 Schema-specific upgrade and rollback constraints are in [migrations](docs/migrations.md).
 
+## Use RunnerFoundry with an AI agent
+
+The [RunnerFoundry skill](skills/runnerfoundry/SKILL.md) helps your agent find the maintained documentation for setup,
+configuration, operations and troubleshooting.
+
+With Node.js 22.20 or later installed, run this from the project where you want to use the skill:
+
+```sh
+npx skills add stateshifters/runnerfoundry --skill runnerfoundry
+```
+
+Choose your agent when prompted. The skill is installed for the current project by default.
+Add `--global` to make it available across projects. See the [Skills CLI reference](https://github.com/vercel-labs/skills/blob/main/docs/commands.md)
+for installation options.
+
 ## Contribute and understand the implementation
 
 For contributor and maintainer tasks:

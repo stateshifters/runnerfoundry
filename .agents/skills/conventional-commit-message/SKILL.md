@@ -11,12 +11,11 @@ surface, classify its release meaning, and write through the branch assigned to 
 ## Output contract
 
 When asked for the message itself, return only the final message text. Default to one line with
-exactly one Auditstage Jira key as scope:
+an optional scope:
 
-`<type>(AS-N): <description>`
+`<type>[optional scope]: <description>`
 
-Standard keys match `^AS-[1-9]\d*$`; `AS-0` is restricted by the exception in
-[scope.md](references/scope.md). Return a full message only for a breaking change whose impact
+Use [scope.md](references/scope.md) to decide whether a scope helps. Return a full message only for a breaking change whose impact
 cannot be stated responsibly in the subject. Do not return analysis, alternatives, or a walkthrough
 unless requested.
 
@@ -71,8 +70,8 @@ Do not change `type` or `branch` while wording the subject. Reopen classificatio
 
 ### 4. Settle the scope
 
-Read [scope.md](references/scope.md) completely. Set exactly one valid `scope` and preserve it in
-the subject. Do not replace repository metadata with a component name.
+Read [scope.md](references/scope.md) completely. Set `scope` to the chosen scope or omit it, and
+preserve that decision in the subject.
 
 ### 5. Decide whether the change is breaking
 
@@ -92,8 +91,8 @@ type-only, scope-only, or breaking-status answer.
 Before returning, verify all of the following:
 
 - `surface` is the requested surface and `type` reflects release meaning, not implementation effort.
-- The subject has `<type>(<scope>): <description>` or `<type>(<scope>)!: <description>` with the
-  exact settled type and one valid settled Auditstage scope.
+- The subject uses the exact settled type, includes the settled scope only when chosen, and
+  includes `!` only for a breaking change.
 - The writing branch still matches `type`; no wording pass changed either value.
 - External wording still derives from the settled effect sentence and passes every role, phrase,
   shape, and word check in the external-writing reference.

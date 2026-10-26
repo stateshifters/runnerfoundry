@@ -54,6 +54,6 @@ knowledge. If the subject and `effect_sentence` concern different nouns or actor
 answers what code changed rather than what differs after shipping, rewrite from `effect_sentence`
 instead of editing the failed subject.
 
-Keep the settled Jira `scope` unchanged while applying these checks to the description. Difficulty
+Keep the settled `scope`, when present, unchanged while applying these checks to the description. Difficulty
 finding plain wording is never permission to leave this branch or change `type`. When uncertain,
 prefer the version a release reader understands fastest without extra context.
